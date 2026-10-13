@@ -1,0 +1,23 @@
+[package]
+name = "equity"
+version = "0.1.0"
+description = "The money-chance type and the exact match-equity table (backward induction over match states)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# docs/M1-SPEC.md section 1: engine, bot, serde (derive) and serde_json only.
+[dependencies]
+engine = { path = "../engine" }
+bot = { path = "../bot" }
+bots = { path = "../bots" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[bin]]
+name = "equity"
+path = "src/main.rs"
+
+[lints]
+workspace = true

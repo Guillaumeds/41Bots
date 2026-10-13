@@ -138,6 +138,7 @@ name = "equity"
 version = "0.1.0"
 dependencies = [
  "bot",
+ "bots",
  "engine",
  "serde",
  "serde_json",

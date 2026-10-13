@@ -53,3 +53,9 @@ M1 adds the table manager, the arena (14-way duplicate block, generalised SPRT, 
 ## Log
 - 2026-10-13: Repo initialised from the approved plan. Rust 1.99.0 pinned; Rust 1.99.1 is due 2026-10-15 (x86-64 FFI fix). Bump the pin when it's out.
 - 2026-10-13: Plan reviewed (8 research sweeps, 5 lenses, 3 sceptics per change). Verdict: keep the recipe; re-scope the exact solver (cheap late only), make the match-equity table exact at M1, specify the learning pipeline precisely, add M3b. H3 tightened: no ace may ever be burned. Details in `docs/REVIEW-2026-10-13.md`.
+
+## M1 progress (2026-10-13 night)
+- Committed on `m1-tables`: `crates/tablemgr` (tables, records, protocol, leakage tests), `crates/bots` (random, rules-v1: 56% money vs random), engine block decks + serde feature, `crates/equity` (fixed-point MoneyChance, exact 810k-state match-equity sweep, ~7 s on 4 threads).
+- Match-equity table v0: built from 1M rules-v1 self-play hands (`data/equity/model-rules-v1-1M-seed1.json`); all checks pass (sums, rotation, monotone, flag rule, Monte Carlo |z| ≤ 2.60). The 26 MB `.npy` is rebuilt from the model by `equity build`; its sha256 is in `data/equity/`.
+- **Must fix before untrusted seats (M3b):** (1) the seat seed can be inverted to the match seed — derive it one-way or from a secret; (2) the `end` message carries the full record, revealing the other decks of a duplicate block — send records only after the block, or strip seeds/burns.
+- Next: arena (spec §5), run-ops (spec §7), first vast.ai smoke run, σ_b.
