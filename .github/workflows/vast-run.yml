@@ -1,0 +1,74 @@
+name: vast-run
+
+# Rents one ON-DEMAND vast.ai machine (never interruptible), runs one manifest chunk with the
+# prebuilt binaries of `bin_sha`, watches it through the vast API and the R2 heartbeat (no SSH),
+# destroys it, and uploads a cost report to R2 runs/<run_id>/report.json.
+# Set dry_run to only print the offer that would be chosen.
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest:
+        description: "Manifest JSON, or a path in the repo"
+        required: true
+        default: '{"run_id": "", "chunk": {"equity_sweep": {"bot": "rules-v1", "hands": 200000, "seed": 1}}}'
+      min_cores:
+        description: "Minimum effective CPU cores"
+        default: "16"
+      max_minutes:
+        description: "Hard time limit (minutes) before the machine is destroyed"
+        default: "30"
+      bin_sha:
+        description: "Commit whose release binaries to run (default: this commit)"
+        default: ""
+      image:
+        description: "Base image, e.g. ghcr.io/guillaumeds/41bots-base:20261013-abcdef123456"
+        required: true
+      dry_run:
+        description: "Only search and print the chosen offer; rent nothing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vast-run-${{ github.run_id }}
+
+jobs:
+  run:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      VAST_API_KEY: ${{ secrets.VAST_API_KEY }}
+      R2_ACCESS_KEY_ID: ${{ vars.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+      R2_S3_ENDPOINT: ${{ vars.R2_S3_ENDPOINT }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the vast.ai CLI
+        run: pip install --quiet "vastai==1.8.3"
+      - name: Launch, watch, destroy
+        shell: bash
+        env:
+          MANIFEST: ${{ inputs.manifest }}
+          MIN_CORES: ${{ inputs.min_cores }}
+          MAX_MINUTES: ${{ inputs.max_minutes }}
+          IMAGE: ${{ inputs.image }}
+          BIN_SHA: ${{ inputs.bin_sha || github.sha }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" = "true" ]; then
+            python3 python/launcher/launch.py plan --min-cores "$MIN_CORES"
+            exit 0
+          fi
+          # A blank run_id gets a timestamp from the launcher.
+          MANIFEST=$(python3 -c 'import json,os,sys; t=os.environ["MANIFEST"]; m=json.loads(t if t.lstrip().startswith("{") else open(t).read()); m["run_id"]=m.get("run_id") or "gh-${{ github.run_id }}"; print(json.dumps(m))')
+          python3 python/launcher/launch.py run --manifest "$MANIFEST" --min-cores "$MIN_CORES" \
+            --max-minutes "$MAX_MINUTES" --image "$IMAGE" --bin-sha "$BIN_SHA" --state-file instance-id.txt
+      - name: Safety net - destroy the instance if the job was cancelled or failed
+        if: always() && hashFiles('instance-id.txt') != ''
+        shell: bash
+        run: python3 python/launcher/launch.py destroy "$(cat instance-id.txt)" || true

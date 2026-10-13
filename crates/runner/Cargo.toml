@@ -1,0 +1,19 @@
+[package]
+name = "runner"
+version = "0.1.0"
+description = "Thin run-ops runner: executes one chunk from a run manifest, heartbeats, uploads to R2, self-destroys (docs/M1-SPEC.md section 7)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The runner drives the other release binaries as child processes; it links no game code.
+[dependencies]
+serde_json = "1"
+
+[[bin]]
+name = "runner"
+path = "src/main.rs"
+
+[lints]
+workspace = true

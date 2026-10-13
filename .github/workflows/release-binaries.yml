@@ -1,0 +1,78 @@
+name: release-binaries
+
+# Builds the run-ops binaries for x86-64-v2 and x86-64-v3 (never target-cpu=native) and uploads
+# them to R2 as bin/<git sha>/<build>.tar.zst plus bin/<git sha>/manifest.json, which records the
+# SHA-256 of every tarball and every file. The rented machine checks all of them before running.
+# Objects are immutable: an existing bin/<sha>/manifest.json is never overwritten.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*", "bin-*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      AWS_ACCESS_KEY_ID: ${{ vars.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      AWS_EC2_METADATA_DISABLED: "true"
+      R2_ENDPOINT: ${{ vars.R2_S3_ENDPOINT }}
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+      SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Skip if this commit is already released
+        id: exists
+        shell: bash
+        run: |
+          if aws s3 ls "s3://$R2_BUCKET/bin/$SHA/manifest.json" --endpoint-url "$R2_ENDPOINT" >/dev/null 2>&1; then
+            echo "bin/$SHA already in R2; nothing to do"; echo "skip=1" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build v2 and v3
+        if: steps.exists.outputs.skip != '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          BINS=(runner difftest equity)
+          # arena joins once its crate defines the binary.
+          if grep -qs '^name = "arena"' crates/arena/Cargo.toml && [ -f crates/arena/src/main.rs ]; then BINS+=(arena); fi
+          PKGS=(); for b in "${BINS[@]}"; do PKGS+=(-p "$b"); done
+          mkdir -p dist
+          for level in v2 v3; do
+            build="x86-64-$level"
+            RUSTFLAGS="-C target-cpu=$build" cargo build --release --locked "${PKGS[@]}" --target-dir "target/$build"
+            mkdir -p "stage/$build"
+            for b in "${BINS[@]}"; do cp "target/$build/release/$b" "stage/$build/"; done
+            tar --zstd -cf "dist/$build.tar.zst" -C "stage/$build" "${BINS[@]}"
+          done
+          python3 - "${BINS[@]}" <<'PY'
+          import hashlib, json, os, sys
+          h = lambda p: hashlib.sha256(open(p, "rb").read()).hexdigest()
+          builds = {}
+          for b in ("x86-64-v2", "x86-64-v3"):
+              builds[b] = {"tarball": f"{b}.tar.zst", "sha256": h(f"dist/{b}.tar.zst"),
+                           "files": {n: h(f"stage/{b}/{n}") for n in sys.argv[1:]}}
+          m = {"git_sha": os.environ["SHA"], "rustc": os.popen("rustc --version").read().strip(), "builds": builds}
+          json.dump(m, open("dist/manifest.json", "w"), indent=2)
+          print(json.dumps(m, indent=2))
+          PY
+      - name: Smoke-test the v2 build
+        if: steps.exists.outputs.skip != '1'
+        run: ./stage/x86-64-v2/difftest 200 1 && ./stage/x86-64-v2/runner hardware > /dev/null
+      - name: Upload to R2 (manifest last)
+        if: steps.exists.outputs.skip != '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in x86-64-v2.tar.zst x86-64-v3.tar.zst manifest.json; do
+            aws s3 cp "dist/$f" "s3://$R2_BUCKET/bin/$SHA/$f" --endpoint-url "$R2_ENDPOINT" --only-show-errors
+          done
+          echo "uploaded bin/$SHA/ ; use bin_sha=$SHA in vast-run" | tee -a "$GITHUB_STEP_SUMMARY"
