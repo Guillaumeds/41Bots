@@ -1,0 +1,92 @@
+title: A turned Joker, then an ordinary card robbed by another player at its turn: two burns in one hand
+story: Seat 0 deals and turns the Joker. The dealer takes it and burns at once (rule 24): legal are all six of its cards, as it holds no ace; it burns the 2 of spades and keeps the Joker.
+story: The next card, the 6 of diamonds, is turned: diamonds are trumps. It is not an ace and the dealer does not hold the ace of diamonds, so the 6 stays on the table and the dealer is known to lack the ace.
+story: Seat 3 holds the ace of diamonds. Seats 1 and 2 play to trick 1 first (each proving it lacks the ace); then seat 3 takes the 6 of diamonds and burns the 8 of clubs (aces excluded), and plays the ace of diamonds.
+story: This hand has two burns, one by the dealer and one by seat 3 (RULES "two takes in one hand"). The rest of the hand is ordinary play. Final scores of the hand: 15,0,0,16.
+dealer: 0
+# ---- Hand 1 of this file (hand index 0), dealer seat 0: the Joker turned, then the 6 of diamonds; seat 3 holds the ace of diamonds ----
+hand 0: KC 4D 7H 2S QS
+hand 1: 3C 9D 4H 8H 3S
+hand 2: QD 2H 5H KH AS
+hand 3: 8C AD 6H JH 5S
+hand 4: 5C 7C JD 10H 9S
+hand 5: 4C 10C JC 4S JS
+hand 6: 10D 3H 6S 7S KS
+hand 7: 6C QC 5D 7D 10S
+turned: JK
+second: 6D
+undealt: 9C AH 2C 2D 9H 8D 8S KD 3D QH AC
+
+# ======== Play ========
+= Turned card=JK
+= Took seat=0 card=JK
+phase: AwaitBurn 0
+legal: KC 4D 7H 2S QS JK
+> Burn 2S    # seat 0 burns
+= BurnDone seat=0
+= Turned card=6D
+= ProvedNoAce seat=0
+# The 6 of diamonds is turned: diamonds are trumps. It is not an ace and the dealer does not hold the ace of diamonds,
+# so it stays on the table and the dealer has proved it lacks the ace (H4). Seat 3 holds the ace and will rob at its own turn (H2).
+phase: AwaitPlay 1
+# Trick 1
+> Play 9D    # seat 1
+= ProvedNoAce seat=1
+> Play QD    # seat 2
+= ProvedNoAce seat=2
+= Took seat=3 card=6D
+phase: AwaitBurn 3
+legal: 8C 6D 6H JH 5S
+> Burn 8C    # seat 3 burns
+= BurnDone seat=3
+phase: AwaitPlay 3
+# Two burns in this hand: the dealer's and seat 3's, each hidden in its own place.
+> Play AD    # seat 3
+> Play 7C    # seat 4
+> Play JS    # seat 5
+> Play 10D    # seat 6
+> Play 7D    # seat 7
+> Play JK    # seat 0
+= TrickWon trick=1 seat=0 team=0 points=5
+scores: 5,0,0,0
+# The rest of the hand is any legal play.
+> Play QS    # seat 0
+> Play 3S    # seat 1
+> Play AS    # seat 2
+> Play 5S    # seat 3
+> Play 9S    # seat 4
+> Play 4S    # seat 5
+> Play 7S    # seat 6
+> Play 5D    # seat 7
+= TrickWon trick=2 seat=7 team=3 points=5
+= Bonus team=3 points=6 kind=immediate card=5D
+scores: 5,0,0,11
+# Trick 3
+> Play 6C    # seat 7
+> Play KC    # seat 0
+> Play 3C    # seat 1
+> Play 2H    # seat 2
+> Play 6D    # seat 3
+> Play 5C    # seat 4
+> Play 4C    # seat 5
+> Play KS    # seat 6
+# Trick 4
+> Play JH    # seat 3
+> Play JD    # seat 4
+> Play JC    # seat 5
+> Play 3H    # seat 6
+> Play QC    # seat 7
+> Play 7H    # seat 0
+> Play 4H    # seat 1
+> Play KH    # seat 2
+# Trick 5
+> Play 10H    # seat 4
+> Play 10C    # seat 5
+> Play 6S    # seat 6
+> Play 10S    # seat 7
+> Play 4D    # seat 0
+> Play 8H    # seat 1
+> Play 5H    # seat 2
+> Play 6H    # seat 3
+= HandEnd hand=0 aborted=false
+scores: 15,0,0,16

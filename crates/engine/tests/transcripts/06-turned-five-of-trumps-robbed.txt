@@ -1,0 +1,85 @@
+title: A turned 5 of trumps is robbed by the holder of the ace, who then plays it for the bonus at once
+story: Seat 6 deals and the 5 of diamonds is turned: diamonds are trumps. Seat 2 holds the ace of diamonds (and the ace of clubs).
+story: Seat 7 leads trick 1; seats 7, 0 and 1 play without robbing. When seat 2's turn comes it must rob (rule 20, H2): it takes the 5 of diamonds and burns one card face down.
+story: The burn may be any card except an ace (H3): the legal burns are the 3 of clubs, the 5 of diamonds itself, the 7 of hearts and the 9 of spades; seat 2 burns the 9 of spades.
+story: Seat 2 then plays the 5 of diamonds, which wins trick 1. Because the 5 of trumps was played, its trick is the best-trump trick and the bonus counts at once: team 2 (seats 2 and 6) has 11 after trick 1.
+story: The other tricks are ordinary; no bonus is awarded at the end of the hand. Final scores of the hand: 5,5,16,5.
+dealer: 6
+# ---- Hand 1 of this file (hand index 0), dealer seat 6: diamonds trumps, the 5 of diamonds turned ----
+hand 0: 5C 8D 3H 5H QH
+hand 1: JD AH 4H 10H JH
+hand 2: AC 3C AD 7H 9S
+hand 3: JC 4D 10D KH 8S
+hand 4: 6C 5S 6S 7S JK
+hand 5: 7C QC 9D 8H 3S
+hand 6: KC 7D QD 9H JS
+hand 7: 8C 9C 2D KD KS
+turned: 5D
+undealt: AS 10S QS 10C 3D 6D 4S 2H 2C 2S 6H 4C
+
+# ======== Play ========
+= Turned card=5D
+phase: AwaitPlay 7
+# Seat 7 leads trick 1. Seats 7, 0 and 1 play without robbing, so each proves they do not hold the ace of diamonds.
+> Play KS    # seat 7
+= ProvedNoAce seat=7
+= Played seat=7 card=KS
+> Play 8D    # seat 0
+> Play JH    # seat 1
+= ProvedNoAce seat=1
+= Took seat=2 card=5D
+# Seat 2 holds the ace of diamonds: at its first turn it takes the turned 5 of diamonds and must burn one card.
+# Aces may never be burned (H3): not the ace of diamonds, and not the ace of clubs either. The 5 just taken could be burned.
+phase: AwaitBurn 2
+legal: 3C 5D 7H 9S
+> Burn 9S    # seat 2 burns
+= BurnDone seat=2
+phase: AwaitPlay 2
+# Seat 2 plays the 5 of diamonds, the best trump.
+> Play 5D    # seat 2
+> Play 4D    # seat 3
+> Play 5S    # seat 4
+> Play 9D    # seat 5
+> Play QD    # seat 6
+# The 5 of trumps wins the trick and its bonus counts at once (rule 29): 5 + 6 = 11 for team 2.
+= TrickWon trick=1 seat=2 team=2 points=5
+= Bonus team=2 points=6 kind=immediate card=5D
+scores: 0,0,11,0
+# The rest of the hand is any legal play; there is no end-of-hand bonus, because the 5 of trumps was played.
+> Play AC    # seat 2
+> Play JC    # seat 3
+> Play 6C    # seat 4
+> Play QC    # seat 5
+> Play KC    # seat 6
+> Play KD    # seat 7
+> Play 5C    # seat 0
+> Play JD    # seat 1
+# Trick 3
+> Play 10H    # seat 1
+> Play AD    # seat 2
+> Play 10D    # seat 3
+> Play 7S    # seat 4
+> Play 8H    # seat 5
+> Play 7D    # seat 6
+> Play 2D    # seat 7
+> Play QH    # seat 0
+# Trick 4
+> Play 7H    # seat 2
+> Play KH    # seat 3
+> Play 6S    # seat 4
+> Play 7C    # seat 5
+> Play 9H    # seat 6
+> Play 9C    # seat 7
+> Play 3H    # seat 0
+> Play 4H    # seat 1
+# Trick 5
+> Play 8S    # seat 3
+> Play JK    # seat 4
+> Play 3S    # seat 5
+> Play JS    # seat 6
+> Play 8C    # seat 7
+> Play 5H    # seat 0
+> Play AH    # seat 1
+> Play 3C    # seat 2
+= HandEnd hand=0 aborted=false
+scores: 5,5,16,5

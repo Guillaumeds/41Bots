@@ -1,0 +1,86 @@
+title: A turned 5 of trumps with the ace undealt stays on the table; the bonus goes to the J at the end of the hand
+story: Seat 7 deals and the 5 of clubs is turned: clubs are trumps. The ace of clubs is in the undealt pack, so nobody can rob: the 5 stays face up on the table, out of play, for the whole hand (rule 23).
+story: In trick 1 every player plays without robbing, so each in turn proves they lack the ace; after the eighth card the ace is known to be undealt.
+story: Seat 3 wins trick 1 with the J of clubs, the best trump in play. The trick scores 5 only: because the 5 of trumps is never played, the bonus is decided at the end of the hand (rule 30).
+story: At the end of the hand the J of clubs is still the highest trump played, so team 3 (seats 3 and 7) gets +6. Final scores of the hand: 5,0,5,21.
+story: Compare with transcript 06, where the turned 5 is robbed and played and its bonus counts at once.
+dealer: 7
+# ---- Hand 1 of this file (hand index 0), dealer seat 7: clubs trumps, the 5 of clubs turned, the ace of clubs undealt ----
+hand 0: 4C 7D 2H 4H KS
+hand 1: 10D 3H 8H 9H 10H
+hand 2: QC 4D KD 2S 9S
+hand 3: 9C JC 9D KH 10S
+hand 4: 8D 7H 4S 6S 7S
+hand 5: 6C 7C KC QD JS
+hand 6: AD 2D 6D AH 5S
+hand 7: 8C JD QH 3S JK
+turned: 5C
+undealt: AC JH 10C QS 5H 2C 3D AS 5D 6H 3C 8S
+
+# ======== Play ========
+= Turned card=5C
+phase: AwaitPlay 0
+# Nobody holds the ace of clubs, so nobody robs: the 5 of clubs stays face up on the table for the whole hand and is never played (rule 23).
+# Each seat proves it lacks the ace when it plays its first card without robbing.
+> Play 7D    # seat 0
+= ProvedNoAce seat=0
+> Play 10D    # seat 1
+= ProvedNoAce seat=1
+> Play QC    # seat 2
+= ProvedNoAce seat=2
+# Seat 3 trumps with the J of clubs, the best trump in play.
+> Play JC    # seat 3
+= ProvedNoAce seat=3
+> Play 8D    # seat 4
+= ProvedNoAce seat=4
+> Play KC    # seat 5
+= ProvedNoAce seat=5
+> Play AD    # seat 6
+= ProvedNoAce seat=6
+> Play JD    # seat 7
+= ProvedNoAce seat=7
+# After all eight have played without robbing, the ace of clubs is known to be undealt.
+# The J wins the trick, but it scores only 5 now: the bonus waits for the end of the hand because the 5 was not played (rule 30).
+= TrickWon trick=1 seat=3 team=3 points=5
+= AceUndealt
+scores: 0,0,0,5
+# Tricks 2 to 5: any legal cards.
+> Play 9C    # seat 3
+> Play 7H    # seat 4
+> Play 7C    # seat 5
+> Play 6D    # seat 6
+> Play 8C    # seat 7
+> Play 4C    # seat 0
+> Play 3H    # seat 1
+> Play 4D    # seat 2
+# Trick 3
+> Play 2H    # seat 0
+> Play 9H    # seat 1
+> Play 9S    # seat 2
+> Play KH    # seat 3
+> Play 6S    # seat 4
+> Play QD    # seat 5
+> Play 5S    # seat 6
+> Play QH    # seat 7
+# Trick 4
+> Play 10S    # seat 3
+> Play 4S    # seat 4
+> Play 6C    # seat 5
+> Play AH    # seat 6
+> Play 3S    # seat 7
+> Play KS    # seat 0
+> Play 8H    # seat 1
+> Play 2S    # seat 2
+# Trick 5
+> Play 2D    # seat 6
+> Play JK    # seat 7
+> Play 4H    # seat 0
+> Play 10H    # seat 1
+> Play KD    # seat 2
+> Play 9D    # seat 3
+> Play 7S    # seat 4
+> Play JS    # seat 5
+# End of the hand: the highest trump played was the J of clubs (the 5 never left the table), so its trick gets the bonus: team 3, +6.
+= Bonus team=3 points=6 kind=end card=JC
+= HandEnd hand=0 aborted=false
+scores: 5,0,5,21

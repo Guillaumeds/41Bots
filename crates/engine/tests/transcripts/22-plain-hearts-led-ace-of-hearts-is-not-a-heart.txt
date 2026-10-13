@@ -1,0 +1,81 @@
+title: Plain hearts led: the A♥ is a trump, not a heart (rule 11)
+story: Seat 5 deals and turns the 9 of spades: spades are trumps. All other spades and the Joker are undealt (nobody robs), so the only trumps in play are the A♥ (seat 7) and the 4 of spades (seat 1).
+story: Seat 6 leads the 9 of hearts. Seat 7 holds the A♥ but no plain heart: the A♥ is always a trump and never a heart (rule 11), so seat 7 is void in hearts and may play any card. It plays the A♥.
+story: Seat 0, with the king and 2 of hearts and no trump, must follow with a heart; it plays the king. Seat 1 may follow with a heart or play its 4 of spades; it trumps with the 4.
+story: The A♥ is the highest trump in the trick and wins it; the king of hearts does not. At the end of the hand the A♥ is the best trump played, so team 3 also gets the +6.
+story: Final scores of the hand: 5,0,15,11.
+dealer: 5
+# ---- Hand 1 of this file (hand index 0), dealer seat 5: spades trumps; only the A♥ and the 4♠ are trumps in play ----
+hand 0: 4C QC 7D 2H KH
+hand 1: 4D 6D 8H QH 4S
+hand 2: 2C KC 9D 10D JH
+hand 3: 10C AD 3D 4H 6H
+hand 4: 5C 7C KD 7H 10H
+hand 5: AC 9C JC 3H 5H
+hand 6: 6C 2D 8D QD 9H
+hand 7: 3C 8C 5D JD AH
+turned: 9S
+undealt: 5S JS JK AS KS QS 2S 3S 6S 7S 8S 10S
+
+# ======== Play ========
+= Turned card=9S
+phase: AwaitPlay 6
+# Trick 1: seat 6 leads the 9 of hearts, a plain heart (spades are trumps).
+> Play 9H    # seat 6
+# Seat 7 holds the A♥ but no plain heart. The A♥ is always a trump and never a heart (rule 11),
+# so seat 7 has none of the suit led and may play any card (rule 15).
+legal: 3C 8C 5D JD AH
+> Play AH    # seat 7
+# Seat 0 holds the king and the 2 of hearts and no trump: it must follow with a heart (rule 14).
+legal: 2H KH
+> Play KH    # seat 0
+# Seat 1 holds hearts and the 4 of spades: it may follow with a heart or play the trump.
+legal: 8H QH 4S
+> Play 4S    # seat 1
+> Play JH    # seat 2
+> Play 4H    # seat 3
+> Play 10H    # seat 4
+> Play 3H    # seat 5
+# The A♥ is the highest trump in the trick: seat 7 wins, although the king of hearts was played.
+= TrickWon trick=1 seat=7 team=3 points=5
+= AceUndealt
+scores: 0,0,0,5
+# The rest of the hand is any legal play.
+> Play JD    # seat 7
+> Play 7D    # seat 0
+> Play 6D    # seat 1
+> Play 9D    # seat 2
+> Play AD    # seat 3
+> Play KD    # seat 4
+> Play AC    # seat 5
+> Play 8D    # seat 6
+# Trick 3
+> Play 5C    # seat 4
+> Play 9C    # seat 5
+> Play 6C    # seat 6
+> Play 3C    # seat 7
+> Play 4C    # seat 0
+> Play QH    # seat 1
+> Play KC    # seat 2
+> Play 10C    # seat 3
+# Trick 4
+> Play 10D    # seat 2
+> Play 3D    # seat 3
+> Play 7C    # seat 4
+> Play JC    # seat 5
+> Play QD    # seat 6
+> Play 5D    # seat 7
+> Play 2H    # seat 0
+> Play 4D    # seat 1
+# Trick 5
+> Play 2D    # seat 6
+> Play 8C    # seat 7
+> Play QC    # seat 0
+> Play 8H    # seat 1
+> Play 2C    # seat 2
+> Play 6H    # seat 3
+> Play 7H    # seat 4
+> Play 5H    # seat 5
+= Bonus team=3 points=6 kind=end card=AH
+= HandEnd hand=0 aborted=false
+scores: 5,0,15,11

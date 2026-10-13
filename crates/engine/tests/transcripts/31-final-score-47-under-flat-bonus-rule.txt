@@ -1,0 +1,166 @@
+title: Under the flat rule (every bonus +6) a team on 36 that takes the 5-of-trumps trick finishes on 47
+story: This transcript uses the rule switch bonus_later=6: every best-trump trick is worth 11, the first and every later one (the Irish rule). The house rule (+5 for later ones) is used everywhere else.
+story: Hand 1: team 0 (seats 0 and 4) takes four tricks and its first bonus: 26. Hand 2: two more tricks, no bonus: 36 (scores 36,10,16,0).
+story: Hand 3: seat 4 deals and turns the 9 of diamonds (the ace of diamonds undealt, so nobody robs). Seat 0 plays the 5 of diamonds in trick 1 and wins it: 36 + 5 = 41, and its bonus counts at once.
+story: It is team 0's second bonus of the game, but under the flat rule it is still +6, so team 0 finishes on 47 (under the house rule it would be 46, as in transcript 30). The trick alone reached 41, so the reason is "trick". Final scores: 47,10,16,0.
+rules: bonus_later=6
+dealer: 2
+# ---- Hand 1 of this file (hand index 0), dealer seat 2: hearts trumps ----
+hand 0: 4H 5H 9H QH JK
+hand 1: QC KC 6H AS 10S
+hand 2: 7C 3S 4S 7S JS
+hand 3: 3C 6C 10C 7D KD
+hand 4: 2D 8D JD 5S KS
+hand 5: AC 4D 2H 10H KH
+hand 6: 2C 8C 3H 6S 9S
+hand 7: AD 9D 10D QD 8S
+turned: 8H
+undealt: AH JH 4C 9C JC QS 7H 2S 3D 5D 5C 6D
+
+# ---- Hand 2 of this file (hand index 1), dealer seat 3: clubs trumps ----
+then hand 0: 9C 5D 9D 2H 10S
+then hand 1: 3C 6C 7C QC 7H
+then hand 2: 5C 4D 8D QH JS
+then hand 3: AD 7D KD 10H JH
+then hand 4: 2C JC 3H AS QS
+then hand 5: 10D AH 4H 5H 7S
+then hand 6: 4C KC 8H 4S 8S
+then hand 7: 2D 3D 6H 9H 3S
+then turned: 8C
+then undealt: AC 10C 6S 5S KS 9S JK 6D JD 2S QD KH
+
+# ---- Hand 3 of this file (hand index 2), dealer seat 4: diamonds trumps ----
+then hand 0: 3C 5D 2H 4H KS
+then hand 1: 6D 10D 3H 9H 10H
+then hand 2: 2D KD 8H 2S 9S
+then hand 3: 7C 9C 8D KH 10S
+then hand 4: 7D 7H 4S 6S 7S
+then hand 5: 4C 5C 10C QD JS
+then hand 6: JC QC 4D AH 5S
+then hand 7: 6C JD QH 3S JK
+then turned: 9D
+then undealt: AD JH 8C QS 5H AC KC AS 3D 6H 2C 8S
+
+# ======== Play ========
+# Hand 1 (seat 2 deals, hearts trumps; the A♥ undealt): team 0 (seats 0 and 4) takes four tricks and its first bonus: 26.
+> Play 10C    # seat 3
+> Play KS    # seat 4
+> Play AC    # seat 5
+> Play 8C    # seat 6
+> Play AD    # seat 7
+> Play 5H    # seat 0
+> Play QC    # seat 1
+> Play 7C    # seat 2
+= TrickWon trick=1 seat=0 team=0 points=5
+= Bonus team=0 points=6 kind=immediate card=5H
+scores: 11,0,0,0
+# Trick 2
+> Play JK    # seat 0
+> Play 6H    # seat 1
+> Play 7S    # seat 2
+> Play 6C    # seat 3
+> Play JD    # seat 4
+> Play 2H    # seat 5
+> Play 3H    # seat 6
+> Play 8S    # seat 7
+# Trick 3
+> Play QH    # seat 0
+> Play 10S    # seat 1
+> Play 4S    # seat 2
+> Play 7D    # seat 3
+> Play 8D    # seat 4
+> Play 10H    # seat 5
+> Play 9S    # seat 6
+> Play 9D    # seat 7
+# Trick 4
+> Play 9H    # seat 0
+> Play AS    # seat 1
+> Play 3S    # seat 2
+> Play 3C    # seat 3
+> Play 5S    # seat 4
+> Play KH    # seat 5
+> Play 6S    # seat 6
+> Play 10D    # seat 7
+# Trick 5
+> Play 4D    # seat 5
+> Play 2C    # seat 6
+> Play QD    # seat 7
+> Play 4H    # seat 0
+> Play KC    # seat 1
+> Play JS    # seat 2
+> Play KD    # seat 3
+> Play 2D    # seat 4
+= HandEnd hand=0 aborted=false
+scores: 26,5,0,0
+
+# Hand 2 (seat 3 deals, clubs trumps; the ace of clubs undealt): team 0 takes two more tricks and no bonus: 36.
+= HandStart hand=1 game=0 dealer=3
+# Trick 1
+> Play JC    # seat 4
+> Play AH    # seat 5
+> Play 4C    # seat 6
+> Play 2D    # seat 7
+> Play 9C    # seat 0
+> Play 7C    # seat 1
+> Play 4D    # seat 2
+> Play AD    # seat 3
+# Trick 2
+> Play 2C    # seat 4
+> Play 4H    # seat 5
+> Play KC    # seat 6
+> Play 3D    # seat 7
+> Play 9D    # seat 0
+> Play 6C    # seat 1
+> Play 8D    # seat 2
+> Play 7D    # seat 3
+# Trick 3
+> Play 8S    # seat 6
+> Play 3S    # seat 7
+> Play 10S    # seat 0
+> Play 7H    # seat 1
+> Play JS    # seat 2
+> Play 10H    # seat 3
+> Play QS    # seat 4
+> Play 7S    # seat 5
+# Trick 4
+> Play AS    # seat 4
+> Play 5H    # seat 5
+> Play 4S    # seat 6
+> Play 6H    # seat 7
+> Play 5D    # seat 0
+> Play 3C    # seat 1
+> Play QH    # seat 2
+> Play JH    # seat 3
+# Trick 5
+> Play QC    # seat 1
+> Play 5C    # seat 2
+> Play KD    # seat 3
+> Play 3H    # seat 4
+> Play 10D    # seat 5
+> Play 8H    # seat 6
+> Play 9H    # seat 7
+> Play 2H    # seat 0
+= TrickWon trick=5 seat=2 team=2 points=5
+= Bonus team=2 points=6 kind=immediate card=5C
+= HandEnd hand=1 aborted=false
+scores: 36,10,16,0
+
+# Hand 3 (seat 4 deals, diamonds trumps; the ace of diamonds undealt). Seat 0 holds the 5 of diamonds.
+= HandStart hand=2 game=0 dealer=4
+= Turned card=9D
+# Trick 1
+> Play 5C    # seat 5
+> Play QC    # seat 6
+> Play JD    # seat 7
+> Play 5D    # seat 0
+> Play 3H    # seat 1
+> Play 2S    # seat 2
+> Play 7C    # seat 3
+> Play 7D    # seat 4
+# Team 0 was on 36 and wins trick 1 with the 5 of diamonds: 41 with the trick, and under the flat rule its second bonus is +6 too: 47.
+= TrickWon trick=1 seat=0 team=0 points=5
+= Bonus team=0 points=6 kind=immediate card=5D
+= GameWon team=0 reason=trick scores=47,10,16,0
+= HandEnd hand=2 aborted=true
+result: game team=0 reason=trick
+scores: 0,0,0,0

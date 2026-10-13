@@ -1,0 +1,85 @@
+title: A turned Joker, and the dealer holds the ace of the new trump suit: it takes the second card at once
+story: Seat 7 deals and turns the Joker. The dealer takes it and burns at once (rule 24): it holds the ace of clubs and the A♥, which may not be burned (H3); it burns the 8 of spades.
+story: The next card, the 9 of clubs, is turned: clubs are trumps. The dealer holds the ace of clubs, the ace of trumps, so it must rob the 9 at once, before the first lead (rule 24, H4), and burn again; it burns the Joker.
+story: So the dealer burns twice, the 9 of clubs is taken into its hand, and nobody else robs. Seat 0 leads trick 1 as usual.
+story: The rest of the hand is ordinary play. Final scores of the hand: 5,0,5,21.
+dealer: 7
+# ---- Hand 1 of this file (hand index 0), dealer seat 7: the Joker turned, then the 9 of clubs; the dealer holds the ace of clubs ----
+hand 0: 4C 7D 4H 6H QH
+hand 1: 10D 2H 5H 10H JH
+hand 2: JC 4D 9D KH 9S
+hand 3: 5C 5S 6S 7S KS
+hand 4: 6C QC 8D 8H 3S
+hand 5: KC 6D JD 9H JS
+hand 6: 7C 8C AD KD AS
+hand 7: AC 3D QD AH 8S
+turned: JK
+second: 9C
+undealt: 10S QS 10C 2D 5D 4S 3H 2C 2S 7H 3C
+
+# ======== Play ========
+= Turned card=JK
+= Took seat=7 card=JK
+# The dealer takes the Joker at once and burns. No ace may be burned: not the ace of clubs, not the A♥.
+phase: AwaitBurn 7
+legal: 3D QD 8S JK
+> Burn 8S    # seat 7 burns
+= BurnDone seat=7
+= Turned card=9C
+= Took seat=7 card=9C
+# The 9 of clubs is turned: clubs are trumps. The dealer holds the ace of clubs, so it must rob this card at once,
+# before the first lead (rule 24, H4), and burn another card.
+phase: AwaitBurn 7
+legal: 9C 3D QD JK
+> Burn JK    # seat 7 burns
+= BurnDone seat=7
+phase: AwaitPlay 0
+# This time the dealer burns the Joker it took. Seat 0 leads trick 1; nobody else robs.
+> Play 7D    # seat 0
+> Play 10D    # seat 1
+> Play JC    # seat 2
+> Play 5C    # seat 3
+> Play QC    # seat 4
+> Play KC    # seat 5
+> Play AD    # seat 6
+> Play 3D    # seat 7
+= TrickWon trick=1 seat=3 team=3 points=5
+scores: 0,0,0,11
+# The rest of the hand is any legal play.
+> Play KS    # seat 3
+> Play 6C    # seat 4
+> Play JS    # seat 5
+> Play 7C    # seat 6
+> Play 9C    # seat 7
+> Play 4C    # seat 0
+> Play 10H    # seat 1
+> Play 9S    # seat 2
+# Trick 3
+> Play 6H    # seat 0
+> Play 5H    # seat 1
+> Play KH    # seat 2
+> Play 6S    # seat 3
+> Play 8H    # seat 4
+> Play 9H    # seat 5
+> Play AS    # seat 6
+> Play AC    # seat 7
+# Trick 4
+> Play AH    # seat 7
+> Play 4H    # seat 0
+> Play 2H    # seat 1
+> Play 4D    # seat 2
+> Play 7S    # seat 3
+> Play 8D    # seat 4
+> Play JD    # seat 5
+> Play 8C    # seat 6
+# Trick 5
+> Play QD    # seat 7
+> Play QH    # seat 0
+> Play JH    # seat 1
+> Play 9D    # seat 2
+> Play 5S    # seat 3
+> Play 3S    # seat 4
+> Play 6D    # seat 5
+> Play KD    # seat 6
+= HandEnd hand=0 aborted=false
+scores: 5,0,5,21

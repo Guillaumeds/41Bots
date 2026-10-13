@@ -1,0 +1,165 @@
+title: Rule 17: the Joker led forces out the A♥; the A♥ led forces out the ace of trumps (5, J and Joker may be held back)
+story: Two hands, one for each of the two remaining forcing cases of rule 17 (transcript 19 has the 5 and the J led).
+story: Hand 1: seat 3 deals, spades trumps (the ace of spades undealt, so nobody robs). Seat 4 leads the Joker. Seats 5 and 6 hold the 5 and the J of spades as their only trumps: both outrank the Joker, so they may be held back and those seats may play any card (rule 18). Seat 7's only trump is the A♥, which ranks below the Joker: it must be played. Seat 0 must play its 3 of spades. The Joker wins.
+story: Hand 2: seat 4 deals, clubs trumps. Seat 5 leads the A♥ (a trump lead even though hearts are not trumps). Seat 6 may hold back its Joker. Seat 7, holding the ace of clubs, robs at its turn, burns the 7 of clubs it has just taken, and must then play the ace of clubs: the A♥ led forces out the ace of trumps. Seat 0 may hold back both its 5 and J of clubs. The A♥ wins.
+story: The rest of each hand is ordinary play. Scores after hand 1: 5,16,10,0; after hand 2: 21,21,10,10.
+dealer: 3
+# ---- Hand 1 of this file (hand index 0), dealer seat 3: spades trumps; the Joker is led ----
+hand 0: 3C 4D QD 2H 3S
+hand 1: KD 5H 7H 8H 9H
+hand 2: 10C QC 3D 6D QH
+hand 3: 5C 7C 9D 3H 10H
+hand 4: 4C 9C 7D 8D JK
+hand 5: 2C JC 2D 6H 5S
+hand 6: 6C 8C KC 5D JS
+hand 7: JD AH 4H JH KH
+turned: 8S
+undealt: AS KS QS 2S 4S 6S 7S 9S 10S 10D AD AC
+
+# ---- Hand 2 of this file (hand index 1), dealer seat 4: clubs trumps; the A♥ is led ----
+then hand 0: 5C JC 3D KH 2S
+then hand 1: 5H AS 5S 7S 8S
+then hand 2: 10D QD 4H 9S QS
+then hand 3: 5D 7D 7H 3S 10S
+then hand 4: 4D 9D 8H 9H 10H
+then hand 5: 2D JD AH 3H 6S
+then hand 6: 6D 8D KD 6H JK
+then hand 7: AC QH 4S JS KS
+then turned: 7C
+then undealt: KC QC 2C 3C 4C 6C 8C 9C 10C JH 2H AD
+
+# ======== Play ========
+= Turned card=8S
+phase: AwaitPlay 4
+# Hand 1, trick 1: seat 4 leads the Joker, a trump lead. Only the 5 and the J of spades rank above it and may be held back.
+> Play JK    # seat 4
+# Seat 5's only trump is the 5 of spades: it may be held back, so seat 5 may play any card.
+legal: 2C JC 2D 6H 5S
+> Play 2C    # seat 5
+# Seat 6's only trump is the J of spades: it may be held back too.
+legal: 6C 8C KC 5D JS
+> Play 6C    # seat 6
+# Seat 7's only trump is the A♥, which ranks below the Joker: it is forced out.
+legal: AH
+> Play AH    # seat 7
+# Seat 0 must play its 3 of spades.
+legal: 3S
+> Play 3S    # seat 0
+> Play 5H    # seat 1
+> Play 3D    # seat 2
+> Play 3H    # seat 3
+= TrickWon trick=1 seat=4 team=0 points=5
+= AceUndealt
+scores: 5,0,0,0
+# The rest of hand 1 is any legal play.
+> Play 7D    # seat 4
+> Play 2D    # seat 5
+> Play 5D    # seat 6
+> Play JD    # seat 7
+> Play QD    # seat 0
+> Play KD    # seat 1
+> Play 6D    # seat 2
+> Play 9D    # seat 3
+# Trick 3
+> Play 8H    # seat 1
+> Play QH    # seat 2
+> Play 10H    # seat 3
+> Play 4C    # seat 4
+> Play 5S    # seat 5
+> Play JS    # seat 6
+> Play KH    # seat 7
+> Play 2H    # seat 0
+= TrickWon trick=3 seat=5 team=1 points=5
+= Bonus team=1 points=6 kind=immediate card=5S
+scores: 5,16,0,0
+# Trick 4
+> Play JC    # seat 5
+> Play KC    # seat 6
+> Play 4H    # seat 7
+> Play 3C    # seat 0
+> Play 9H    # seat 1
+> Play 10C    # seat 2
+> Play 5C    # seat 3
+> Play 9C    # seat 4
+# Trick 5
+> Play 8C    # seat 6
+> Play JH    # seat 7
+> Play 4D    # seat 0
+> Play 7H    # seat 1
+> Play QC    # seat 2
+> Play 7C    # seat 3
+> Play 8D    # seat 4
+> Play 6H    # seat 5
+= HandEnd hand=0 aborted=false
+scores: 5,16,10,0
+
+# Hand 2: seat 4 deals, clubs trumps (7 of clubs turned). Seat 7 holds the ace of clubs.
+= HandStart hand=1 game=0 dealer=4
+= Turned card=7C
+phase: AwaitPlay 5
+# Trick 1: seat 5 leads the A♥. Hearts are not trumps, but the A♥ is always a trump, so this is a trump lead.
+# The 5 and J of clubs and the Joker rank above it and may be held back; the ace of clubs and every lower trump may not.
+> Play AH    # seat 5
+# Seat 6's only trump is the Joker: it may be held back, so any card.
+legal: 6D 8D KD 6H JK
+> Play 6D    # seat 6
+= Took seat=7 card=7C
+# Seat 7 holds the ace of clubs and robs now: it takes the 7 of clubs and burns it straight back (the taken card may be burned).
+phase: AwaitBurn 7
+legal: 7C QH 4S JS KS
+> Burn 7C    # seat 7 burns
+= BurnDone seat=7
+# Seat 7's only trump is now the ace of clubs, which ranks below the A♥: it is forced out.
+legal: AC
+> Play AC    # seat 7
+# Seat 0 holds the 5 and the J of clubs and no other trump: both may be held back, so any card.
+legal: 5C JC 3D KH 2S
+> Play 3D    # seat 0
+> Play 5H    # seat 1
+> Play QD    # seat 2
+> Play 3S    # seat 3
+> Play 4D    # seat 4
+# The A♥ beats the ace of clubs: seat 5 wins.
+= TrickWon trick=1 seat=5 team=1 points=5
+scores: 5,21,10,0
+# The rest of hand 2 is any legal play.
+> Play 6S    # seat 5
+> Play 6H    # seat 6
+> Play 4S    # seat 7
+> Play 5C    # seat 0
+> Play 7S    # seat 1
+> Play QS    # seat 2
+> Play 10S    # seat 3
+> Play 9D    # seat 4
+= TrickWon trick=2 seat=0 team=0 points=5
+= Bonus team=0 points=6 kind=immediate card=5C
+scores: 16,21,10,0
+# Trick 3
+> Play JC    # seat 0
+> Play AS    # seat 1
+> Play 9S    # seat 2
+> Play 5D    # seat 3
+> Play 9H    # seat 4
+> Play JD    # seat 5
+> Play JK    # seat 6
+> Play QH    # seat 7
+# Trick 4
+> Play 2S    # seat 0
+> Play 5S    # seat 1
+> Play 10D    # seat 2
+> Play 7H    # seat 3
+> Play 10H    # seat 4
+> Play 3H    # seat 5
+> Play 8D    # seat 6
+> Play KS    # seat 7
+# Trick 5
+> Play JS    # seat 7
+> Play KH    # seat 0
+> Play 8S    # seat 1
+> Play 4H    # seat 2
+> Play 7D    # seat 3
+> Play 8H    # seat 4
+> Play 2D    # seat 5
+> Play KD    # seat 6
+= HandEnd hand=1 aborted=false
+scores: 21,21,10,10

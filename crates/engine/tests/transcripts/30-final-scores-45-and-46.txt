@@ -1,0 +1,326 @@
+title: Scores can pass 41: a team on 40 takes a trick (45); a team on 36 takes the 5-of-trumps trick (46)
+story: Six hands, two games, showing that a final score can go past 41 (the game is won on reaching 41 or more).
+story: Game 1: in hands 1 and 2 team 1 (seats 1 and 5) takes four tricks each time but never the best-trump trick, so it stands on 40 with no bonus (scores 0,40,0,21). In hand 3 it wins trick 1: 45, and wins game 1 at once (0,45,0,21).
+story: Game 2 starts from nought. In hand 4 team 3 (seats 3 and 7) takes four tricks and its first bonus (26), and in hand 5 two more tricks: 36 (scores 5,16,5,36).
+story: In hand 6 seat 7 plays the 5 of spades in trick 1 and wins it. The trick takes team 3 to 41, and the 5-of-trumps bonus counts with it at once: team 3's second bonus of the game, +5, so the final score is 46.
+story: Because the trick alone already made 41, the game-end reason is "trick" (not "immediate bonus"). Final scores of game 2: 5,16,5,46. Transcript 31 shows the 47 that the flat 11-every-time rule would give.
+dealer: 7
+# ---- Hand 1 of this file (hand index 0), dealer seat 7: game 1, diamonds trumps ----
+hand 0: 9C 9D 5H 7H QH
+hand 1: 3D JD AH 8H KS
+hand 2: 4C KC 2D KH 8S
+hand 3: 6C 8D 5S 6S 9S
+hand 4: 5C 6D 6H 2S JK
+hand 5: 10D KD JH 4S 7S
+hand 6: AC 2C QC AS QS
+hand 7: 5D QD 2H 4H 9H
+turned: 7D
+undealt: AD 3C JC 7C 10S 3S 10H JS 8C 3H 4D 10C
+
+# ---- Hand 2 of this file (hand index 1), dealer seat 0: game 1, spades trumps ----
+then hand 0: 3C 8C 7H 8H 6S
+then hand 1: KC 6D 10D KD QS
+then hand 2: 7C 10C 4D QH KH
+then hand 3: 5D 8D AH JH 3S
+then hand 4: AC JC QD 3H 2S
+then hand 5: 7D JD 6H 4S KS
+then hand 6: 4C 2D 9S 10S JK
+then hand 7: 2C 9D 2H 9H 5S
+then turned: 7S
+then undealt: AS 8S 4H JS 5C 9C QC 5H 3D AD 10H 6C
+
+# ---- Hand 3 of this file (hand index 2), dealer seat 1: game 1, team 1 takes trick 1 ----
+then hand 0: 3C 4D QD 2H KS
+then hand 1: 7D KD 8H 9H 10H
+then hand 2: 9C AD 10D 2S 9S
+then hand 3: 7C 6D 6H KH 10S
+then hand 4: 5C 5D 4S 6S 7S
+then hand 5: 4C 10C JC 9D JS
+then hand 6: QC 3D JD 3S 5S
+then hand 7: 6C 8D JH QH JK
+then turned: 7H
+then undealt: AH 5H 8C QS 3H AC KC AS 2D 4H 2C 8S
+
+# ---- Hand 4 of this file (hand index 3), dealer seat 2: game 2, clubs trumps ----
+then hand 0: KC 3H 4S 8S KS
+then hand 1: 3D 8D 7H 9H QS
+then hand 2: 2C AD 5D 10H 5S
+then hand 3: 7C QC KD 4H KH
+then hand 4: 10C QD AH 2H 5H
+then hand 5: 3C 9D 6H JH 7S
+then hand 6: 4D 7D AS 6S JK
+then hand 7: 5C 6C 8C QH 9S
+then turned: 4C
+then undealt: AC JD 10D 2D 2S 8H 3S 10S 6D 9C JC JS
+
+# ---- Hand 5 of this file (hand index 4), dealer seat 3: game 2, diamonds trumps ----
+then hand 0: 4C 6C JC KD KS
+then hand 1: 2D 5D 8D 2S 6S
+then hand 2: 3C 4H AS 9S 10S
+then hand 3: 6D 2H 5H 9H JS
+then hand 4: AC 2C QC JH KH
+then hand 5: KC 3D 4S 5S 7S
+then hand 6: 8C 10D 8H 8S QS
+then hand 7: 7D 7H 10H QH 3S
+then turned: 9D
+then undealt: AD 9C AH QD 3H JK 7C 5C JD 10C 6H 4D
+
+# ---- Hand 6 of this file (hand index 5), dealer seat 4: game 2, team 3 takes the 5 of spades trick ----
+then hand 0: 3C 4D QD AH KS
+then hand 1: 7D KD 5H 6H 7H
+then hand 2: 9C AD 10D QH 8S
+then hand 3: 7C 6D 4H 10H 9S
+then hand 4: 5C 5D 2S 4S 6S
+then hand 5: 4C 10C JC 9D JS
+then hand 6: QC 3D JD KH 3S
+then hand 7: 6C 8D 9H 5S JK
+then turned: 10S
+then undealt: AS 8H 8C QS 2H AC KC JH 2D 3H 2C 7S
+
+# ======== Play ========
+# Game 1, hand 1 (seat 7 deals, diamonds trumps): team 1 (seats 1 and 5) takes four tricks but not the best-trump trick: 20.
+> Play 9C    # seat 0
+> Play JD    # seat 1
+> Play 4C    # seat 2
+> Play 6C    # seat 3
+> Play 5C    # seat 4
+> Play KD    # seat 5
+> Play 2C    # seat 6
+> Play 2H    # seat 7
+# Trick 2
+> Play AH    # seat 1
+> Play 2D    # seat 2
+> Play 8D    # seat 3
+> Play 6D    # seat 4
+> Play 10D    # seat 5
+> Play AC    # seat 6
+> Play QD    # seat 7
+> Play 9D    # seat 0
+# Trick 3
+> Play 3D    # seat 1
+> Play 8S    # seat 2
+> Play 9S    # seat 3
+> Play 6H    # seat 4
+> Play JH    # seat 5
+> Play AS    # seat 6
+> Play 4H    # seat 7
+> Play 5H    # seat 0
+# Trick 4
+> Play KS    # seat 1
+> Play KC    # seat 2
+> Play 6S    # seat 3
+> Play 2S    # seat 4
+> Play 4S    # seat 5
+> Play QS    # seat 6
+> Play 9H    # seat 7
+> Play 7H    # seat 0
+# Trick 5
+> Play 8H    # seat 1
+> Play KH    # seat 2
+> Play 5S    # seat 3
+> Play JK    # seat 4
+> Play 7S    # seat 5
+> Play QC    # seat 6
+> Play 5D    # seat 7
+> Play QH    # seat 0
+= TrickWon trick=5 seat=7 team=3 points=5
+= Bonus team=3 points=6 kind=immediate card=5D
+= HandEnd hand=0 aborted=false
+scores: 0,20,0,11
+
+# Game 1, hand 2 (seat 0 deals, spades trumps): team 1 again takes four tricks and no bonus: 40.
+= HandStart hand=1 game=0 dealer=0
+# Trick 1
+> Play QS    # seat 1
+> Play 10C    # seat 2
+> Play 3S    # seat 3
+> Play 2S    # seat 4
+> Play KS    # seat 5
+> Play 10S    # seat 6
+> Play 2H    # seat 7
+> Play 6S    # seat 0
+# Trick 2
+> Play 4S    # seat 5
+> Play 9S    # seat 6
+> Play 2C    # seat 7
+> Play 8C    # seat 0
+> Play KC    # seat 1
+> Play 7C    # seat 2
+> Play 5D    # seat 3
+> Play 3H    # seat 4
+# Trick 3
+> Play JD    # seat 5
+> Play 2D    # seat 6
+> Play 9D    # seat 7
+> Play 7H    # seat 0
+> Play KD    # seat 1
+> Play 4D    # seat 2
+> Play 8D    # seat 3
+> Play QD    # seat 4
+# Trick 4
+> Play 10D    # seat 1
+> Play QH    # seat 2
+> Play JH    # seat 3
+> Play AC    # seat 4
+> Play 7D    # seat 5
+> Play 4C    # seat 6
+> Play 9H    # seat 7
+> Play 3C    # seat 0
+# Trick 5
+> Play 6D    # seat 1
+> Play KH    # seat 2
+> Play AH    # seat 3
+> Play JC    # seat 4
+> Play 6H    # seat 5
+> Play JK    # seat 6
+> Play 5S    # seat 7
+> Play 8H    # seat 0
+= TrickWon trick=5 seat=7 team=3 points=5
+= Bonus team=3 points=5 kind=immediate card=5S
+= HandEnd hand=1 aborted=false
+scores: 0,40,0,21
+
+# Game 1, hand 3 (seat 1 deals, hearts trumps; the A♥ and the 5 of hearts undealt).
+= HandStart hand=2 game=0 dealer=1
+= Turned card=7H
+# Trick 1
+> Play AD    # seat 2
+> Play 6D    # seat 3
+> Play 5D    # seat 4
+> Play 9D    # seat 5
+> Play 3D    # seat 6
+> Play 8D    # seat 7
+> Play 4D    # seat 0
+> Play 10H    # seat 1
+# Team 1 was on 40 and takes trick 1: 45. A game is won by reaching 41 or more (RULES default), so team 1 wins game 1 with 45.
+= TrickWon trick=1 seat=1 team=1 points=5
+= GameWon team=1 reason=trick scores=0,45,0,21
+= HandEnd hand=2 aborted=true
+result: game team=1 reason=trick
+scores: 0,0,0,0
+
+# Game 2, hand 4 (seat 2 deals, clubs trumps): team 3 (seats 3 and 7) takes four tricks and its first bonus: 26.
+= HandStart hand=3 game=1 dealer=2
+# Trick 1
+> Play QC    # seat 3
+> Play 10C    # seat 4
+> Play 3C    # seat 5
+> Play 4D    # seat 6
+> Play 5C    # seat 7
+> Play KC    # seat 0
+> Play 3D    # seat 1
+> Play 2C    # seat 2
+= TrickWon trick=1 seat=7 team=3 points=5
+= Bonus team=3 points=6 kind=immediate card=5C
+scores: 0,0,0,11
+# Trick 2
+> Play 6C    # seat 7
+> Play 3H    # seat 0
+> Play 7H    # seat 1
+> Play AD    # seat 2
+> Play 7C    # seat 3
+> Play 2H    # seat 4
+> Play 7S    # seat 5
+> Play 6S    # seat 6
+# Trick 3
+> Play 8C    # seat 7
+> Play 8S    # seat 0
+> Play 8D    # seat 1
+> Play 5D    # seat 2
+> Play KD    # seat 3
+> Play 5H    # seat 4
+> Play 6H    # seat 5
+> Play 7D    # seat 6
+# Trick 4
+> Play QH    # seat 7
+> Play 4S    # seat 0
+> Play 9H    # seat 1
+> Play 10H    # seat 2
+> Play KH    # seat 3
+> Play QD    # seat 4
+> Play JH    # seat 5
+> Play AS    # seat 6
+# Trick 5
+> Play 4H    # seat 3
+> Play AH    # seat 4
+> Play 9D    # seat 5
+> Play JK    # seat 6
+> Play 9S    # seat 7
+> Play KS    # seat 0
+> Play QS    # seat 1
+> Play 5S    # seat 2
+= HandEnd hand=3 aborted=false
+scores: 0,0,5,26
+
+# Game 2, hand 5 (seat 3 deals, diamonds trumps): team 3 takes two more tricks: 36.
+= HandStart hand=4 game=1 dealer=3
+# Trick 1
+> Play 2C    # seat 4
+> Play KC    # seat 5
+> Play 8C    # seat 6
+> Play 7D    # seat 7
+> Play 6C    # seat 0
+> Play 6S    # seat 1
+> Play 3C    # seat 2
+> Play 6D    # seat 3
+# Trick 2
+> Play QH    # seat 7
+> Play 4C    # seat 0
+> Play 2S    # seat 1
+> Play 4H    # seat 2
+> Play 9H    # seat 3
+> Play JH    # seat 4
+> Play 7S    # seat 5
+> Play 8H    # seat 6
+# Trick 3
+> Play 10H    # seat 7
+> Play JC    # seat 0
+> Play 2D    # seat 1
+> Play 10S    # seat 2
+> Play 5H    # seat 3
+> Play KH    # seat 4
+> Play 5S    # seat 5
+> Play 8S    # seat 6
+# Trick 4
+> Play 8D    # seat 1
+> Play 9S    # seat 2
+> Play JS    # seat 3
+> Play AC    # seat 4
+> Play 3D    # seat 5
+> Play 10D    # seat 6
+> Play 3S    # seat 7
+> Play KD    # seat 0
+# Trick 5
+> Play KS    # seat 0
+> Play 5D    # seat 1
+> Play AS    # seat 2
+> Play 2H    # seat 3
+> Play QC    # seat 4
+> Play 4S    # seat 5
+> Play QS    # seat 6
+> Play 7H    # seat 7
+= TrickWon trick=5 seat=1 team=1 points=5
+= Bonus team=1 points=6 kind=immediate card=5D
+= HandEnd hand=4 aborted=false
+scores: 5,16,5,36
+
+# Game 2, hand 6 (seat 4 deals, spades trumps; the ace of spades undealt). Seat 7 holds the 5 of spades.
+= HandStart hand=5 game=1 dealer=4
+= Turned card=10S
+# Trick 1
+> Play JC    # seat 5
+> Play 3S    # seat 6
+> Play 5S    # seat 7
+> Play 3C    # seat 0
+> Play 7H    # seat 1
+> Play 9C    # seat 2
+> Play 7C    # seat 3
+> Play 6S    # seat 4
+# Team 3 was on 36 and wins trick 1 with the 5 of spades: 5 for the trick makes 41, and the bonus counts at the same moment (rule 29).
+# It is team 3's second bonus of the game, so +5: 46. The game was already reached by the trick itself, so the reason is "trick".
+= TrickWon trick=1 seat=7 team=3 points=5
+= Bonus team=3 points=5 kind=immediate card=5S
+= GameWon team=3 reason=trick scores=5,16,5,46
+= HandEnd hand=5 aborted=true
+result: game team=3 reason=trick
+scores: 0,0,0,0

@@ -1,0 +1,83 @@
+title: A card of another suit never wins: the 3 of diamonds beats three kings
+story: Seat 7 deals and turns the 9 of clubs: clubs are trumps (the ace of clubs is undealt, so nobody robs).
+story: Seat 0 leads the 3 of diamonds. Seat 2 follows with the 2 of diamonds and seat 4 with the ace of diamonds; the others have no diamond and throw high cards of other suits: the king of spades, king of hearts, queen of spades, J of hearts and queen of hearts. Nobody trumps.
+story: With no trump in the trick, it goes to the highest card of the suit led (rule 19); a card of any other suit never wins, however high. In a red plain suit the ace is the lowest card (rule 9), so the 3 of diamonds beats the 2 and the ace: seat 0 wins.
+story: The rest of the hand is ordinary play. Final scores of the hand: 10,11,0,10.
+dealer: 7
+# ---- Hand 1 of this file (hand index 0), dealer seat 7: clubs trumps ----
+hand 0: 3D 10D JD QD KD
+hand 1: 3C JC 4S 6S KS
+hand 2: 2D 2H 5H 6H 5S
+hand 3: QC AH 8H KH 7S
+hand 4: 6C 8C AD 8S JK
+hand 5: 5C 7H AS JS QS
+hand 6: 4C 4H 9H JH 9S
+hand 7: 2C 7C 3H QH 10S
+turned: 9C
+undealt: AC 4D 5D 6D 7D 8D 9D KC 3S 2S 10H 10C
+
+# ======== Play ========
+= Turned card=9C
+phase: AwaitPlay 0
+# Trick 1: seat 0 leads the 3 of diamonds. The only diamonds held by the other players are the 2 (seat 2) and the ace (seat 4);
+# the rest of the diamonds are in seat 0's hand or undealt.
+> Play 3D    # seat 0
+# Seat 1 has no diamond: any card.
+legal: 3C JC 4S 6S KS
+> Play KS    # seat 1
+# Seat 2 must follow with its diamond; it holds no trump.
+legal: 2D
+> Play 2D    # seat 2
+> Play KH    # seat 3
+# Seat 4 must play its diamond (the ace) or a trump.
+legal: 6C 8C AD JK
+> Play AD    # seat 4
+> Play QS    # seat 5
+> Play JH    # seat 6
+> Play QH    # seat 7
+# No trump was played, so the highest diamond wins (rule 19). The kings and queens of other suits never win.
+# In a red plain suit the ace is the lowest card (rule 9), so the order here is 3, 2, ace: seat 0 wins.
+= TrickWon trick=1 seat=0 team=0 points=5
+= AceUndealt
+scores: 5,0,0,0
+# The rest of the hand is any legal play.
+> Play 10D    # seat 0
+> Play JC    # seat 1
+> Play 6H    # seat 2
+> Play 8H    # seat 3
+> Play 6C    # seat 4
+> Play 5C    # seat 5
+> Play 9S    # seat 6
+> Play 7C    # seat 7
+= TrickWon trick=2 seat=5 team=1 points=5
+= Bonus team=1 points=6 kind=immediate card=5C
+scores: 5,11,0,0
+# Trick 3
+> Play AS    # seat 5
+> Play 4H    # seat 6
+> Play 10S    # seat 7
+> Play JD    # seat 0
+> Play 4S    # seat 1
+> Play 5S    # seat 2
+> Play 7S    # seat 3
+> Play JK    # seat 4
+# Trick 4
+> Play 8C    # seat 4
+> Play 7H    # seat 5
+> Play 4C    # seat 6
+> Play 2C    # seat 7
+> Play QD    # seat 0
+> Play 3C    # seat 1
+> Play 5H    # seat 2
+> Play QC    # seat 3
+# Trick 5
+> Play AH    # seat 3
+> Play 8S    # seat 4
+> Play JS    # seat 5
+> Play 9H    # seat 6
+> Play 3H    # seat 7
+> Play KD    # seat 0
+> Play 6S    # seat 1
+> Play 2H    # seat 2
+= HandEnd hand=0 aborted=false
+scores: 10,11,0,10

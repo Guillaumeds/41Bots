@@ -1,0 +1,88 @@
+title: A turned Joker followed by a turned ace: the dealer takes both and burns twice
+story: Seat 6 deals and turns the Joker. The dealer must take it and burn a card at once (rule 24), before trumps are known. It holds the ace of diamonds, which may not be burned (H3); it burns the 2 of clubs.
+story: The next card, the ace of spades, is turned: spades are trumps. A turned ace must be robbed by the dealer at once (rule 24, H4), so the dealer takes it too and burns a second card: legal are the 4 of diamonds, 9 of hearts, J of spades and the Joker (never an ace). It burns the 9 of hearts.
+story: The dealer now holds the Joker and the ace of spades among its five cards. There are two burns, 11 cards stay undealt, and 13 cards are hidden in all.
+story: Trick 1 is then led by seat 7 and the hand is played out normally. Final scores of the hand: 0,0,15,16.
+dealer: 6
+# ---- Hand 1 of this file (hand index 0), dealer seat 6: the Joker turned, then the ace of spades ----
+hand 0: 4C 7D 2H 4H JH
+hand 1: 10D KD 3H 8H 10H
+hand 2: 10C 3D 9D QH 8S
+hand 3: 5C 5S 6S 7S KS
+hand 4: 6C JC 8D 6H 3S
+hand 5: QC 6D JD 7H 10S
+hand 6: 2C AD 4D 9H JS
+hand 7: 7C 8C KC QD KH
+turned: JK
+second: AS
+undealt: 9S QS 9C 2D 5D 4S AH AC 2S 5H 3C
+
+# ======== Play ========
+= Turned card=JK
+= Took seat=6 card=JK
+# The dealer takes the Joker at once and burns (rule 24). Trumps are not yet known; the ace of diamonds may not be burned (H3).
+phase: AwaitBurn 6
+legal: 2C 4D 9H JS JK
+> Burn 2C    # seat 6 burns
+= BurnDone seat=6
+= Turned card=AS
+= Took seat=6 card=AS
+# The next card turned is the ace of spades: spades are trumps, and a turned ace is robbed by the dealer at once (rule 24, H4).
+# The dealer burns again. Neither the ace of spades nor the ace of diamonds may be burned; the Joker could be.
+phase: AwaitBurn 6
+legal: 4D 9H JS JK
+> Burn 9H    # seat 6 burns
+= BurnDone seat=6
+phase: AwaitPlay 7
+# Two dealer burns: out of play and hidden are the 11 undealt cards plus the 2 burns, 13 in all.
+# Trick 1 is led by seat 7 as usual.
+> Play 8C    # seat 7
+> Play 4C    # seat 0
+> Play 10D    # seat 1
+> Play 10C    # seat 2
+> Play 6S    # seat 3
+> Play 6C    # seat 4
+> Play 10S    # seat 5
+> Play AS    # seat 6
+= TrickWon trick=1 seat=6 team=2 points=5
+scores: 0,0,5,0
+# The rest of the hand is any legal play.
+> Play 4D    # seat 6
+> Play QD    # seat 7
+> Play 7D    # seat 0
+> Play KD    # seat 1
+> Play 3D    # seat 2
+> Play KS    # seat 3
+> Play 8D    # seat 4
+> Play 6D    # seat 5
+# Trick 3
+> Play 5C    # seat 3
+> Play 3S    # seat 4
+> Play QC    # seat 5
+> Play JS    # seat 6
+> Play KC    # seat 7
+> Play 2H    # seat 0
+> Play 3H    # seat 1
+> Play QH    # seat 2
+# Trick 4
+> Play JK    # seat 6
+> Play 7C    # seat 7
+> Play 4H    # seat 0
+> Play 8H    # seat 1
+> Play 8S    # seat 2
+> Play 7S    # seat 3
+> Play 6H    # seat 4
+> Play JD    # seat 5
+# Trick 5
+> Play AD    # seat 6
+> Play KH    # seat 7
+> Play JH    # seat 0
+> Play 10H    # seat 1
+> Play 9D    # seat 2
+> Play 5S    # seat 3
+> Play JC    # seat 4
+> Play 7H    # seat 5
+= TrickWon trick=5 seat=3 team=3 points=5
+= Bonus team=3 points=6 kind=immediate card=5S
+= HandEnd hand=0 aborted=false
+scores: 0,0,15,16

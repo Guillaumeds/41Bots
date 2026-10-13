@@ -41,6 +41,7 @@ then undealt: AD JD 7H 8C KC 3D 2H QD AC 2S QH 2C
 > Play JK    # seat 6
 > Play 2D    # seat 7
 > Play 5D    # seat 0
+# Trick 2
 > Play 8C    # seat 2
 > Play 9S    # seat 3
 > Play 9C    # seat 4
@@ -49,6 +50,7 @@ then undealt: AD JD 7H 8C KC 3D 2H QD AC 2S QH 2C
 > Play 6C    # seat 7
 > Play 3C    # seat 0
 > Play 10C    # seat 1
+# Trick 3
 > Play KH    # seat 6
 > Play 6S    # seat 7
 > Play 5H    # seat 0
@@ -57,6 +59,7 @@ then undealt: AD JD 7H 8C KC 3D 2H QD AC 2S QH 2C
 > Play 4H    # seat 3
 > Play 10H    # seat 4
 > Play 8H    # seat 5
+# Trick 4
 > Play JH    # seat 6
 > Play 2S    # seat 7
 > Play 3S    # seat 0
@@ -65,6 +68,7 @@ then undealt: AD JD 7H 8C KC 3D 2H QD AC 2S QH 2C
 > Play AS    # seat 3
 > Play 4S    # seat 4
 > Play 9H    # seat 5
+# Trick 5
 > Play 9D    # seat 6
 > Play KS    # seat 7
 > Play JC    # seat 0

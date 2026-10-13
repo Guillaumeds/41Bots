@@ -7,14 +7,14 @@ story: Team 1 (seats 1 and 5) has taken all five tricks: a jink (rule 33), which
 story: The next game starts with all scores back to nought (rule 36).
 dealer: 0
 # ---- Hand 1 of this file (hand index 0), dealer seat 0 ----
-hand 0: KD 3H 3C 5D 9H
-hand 1: JS JK AH KS 2D
-hand 2: 2S 8H KC 6H 2H
-hand 3: 3S QH 10C 4D QC
-hand 4: 4S 7D 7C 10H 5C
-hand 5: QS 10S 8S 7S 6S
-hand 6: 4H 9D 4C 9C QD
-hand 7: 5H 2C KH AD JC
+hand 0: 3C 5D KD 3H 9H
+hand 1: 2D AH JS KS JK
+hand 2: KC 2H 6H 8H 2S
+hand 3: 10C QC 4D QH 3S
+hand 4: 5C 7C 7D 10H 4S
+hand 5: 6S 7S 8S 10S QS
+hand 6: 4C 9C 9D QD 4H
+hand 7: 2C JC AD 5H KH
 turned: 9S
 undealt: 5S AS 6C 8C 7H JH 6D JD 10D 3D 8D AC
 
