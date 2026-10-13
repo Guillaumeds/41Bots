@@ -54,7 +54,10 @@ jobs:
       - name: No unsafe outside crates/nn
         shell: bash
         run: |
-          if grep -rn --include='*.rs' -E '\bunsafe\b' crates | grep -v '^crates/nn/' | grep -v 'unsafe_code' ; then
+          # One exception: in crates/wasm a line that is exactly the attribute `#[unsafe(no_mangle)]`,
+          # which edition 2024 requires on a WebAssembly export (see crates/wasm/Cargo.toml).
+          if grep -rn --include='*.rs' -E '\bunsafe\b' crates | grep -v '^crates/nn/' | grep -v 'unsafe_code' \
+              | grep -v -E '^crates/wasm/[^:]+:[0-9]+:[[:space:]]*#\[unsafe\(no_mangle\)\][[:space:]]*$' ; then
             echo "unsafe found outside crates/nn: forbidden"; exit 1
           fi
 

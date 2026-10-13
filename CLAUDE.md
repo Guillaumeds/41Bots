@@ -34,7 +34,7 @@ You are building the strongest possible bots for the 8-player card game **41** (
   - Build release binaries for x86-64-v2 and v3, with runtime dispatch (`multiversion`) for hot kernels.
 - **Avoid:** `bincode` (discontinued, RUSTSEC-2025-0141), and Rust-only data formats for anything Python must read. Formats are fixed in PLAN §12.7.
 - **The reference implementation** (`crates/reference`) is written independently and naively, using different data structures. It must never import engine internals; it shares only the public action and seat types, if needed.
-- **`unsafe` is forbidden workspace-wide**; `crates/nn` is the only crate that may opt out, for one audited SIMD kernel module with a differential test against the plain reference.
+- **`unsafe` is forbidden workspace-wide**; `crates/nn` is the only crate that may opt out for code, for one audited SIMD kernel module with a differential test against the plain reference. The foreign-function boundary crates (`crates/wasm`, later `crates/pybind`) may carry the `#[unsafe(no_mangle)]` export attribute only, under a `deny` lint with a per-item allow; never an `unsafe` block or function. CI greps for both.
 - **Before every commit:**
   - `cargo fmt --all`
   - `cargo clippy --workspace --all-targets -- -D warnings`
