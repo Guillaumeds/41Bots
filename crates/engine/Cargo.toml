@@ -1,0 +1,13 @@
+[package]
+name = "engine"
+version = "0.1.0"
+description = "41 rules engine: cards, rules, hand/game/match flow, deterministic RNG"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,28 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Local data and run outputs (live in R2, never in git)
+/data/
+/runs/
+/models/
+*.npy
+*.zst
+*.safetensors
+*.onnx
+
+# Secrets
+.env
+*.env
+rclone.conf
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
