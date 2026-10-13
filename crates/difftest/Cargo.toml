@@ -1,0 +1,16 @@
+[package]
+name = "difftest"
+version = "0.1.0"
+description = "Differential test: drives the engine and the reference with the same decks and random legal actions, comparing them after every action"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The two implementations under comparison, and nothing else (docs/M0-SPEC.md section 6).
+[dependencies]
+engine = { path = "../engine" }
+reference = { path = "../reference" }
+
+[lints]
+workspace = true
