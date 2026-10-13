@@ -4,9 +4,22 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Nightly, 03:17 UTC: the full matrix plus a larger differential run.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      games:
+        description: "Differential games per shard (the M0 gate is 5 shards x 2,000,000)"
+        required: false
+        default: "2000000"
+      shards:
+        description: "Number of shards (seeds are derived from run id and shard)"
+        required: false
+        default: "5"
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 env:
@@ -15,6 +28,7 @@ env:
 jobs:
   test:
     name: test (${{ matrix.os }})
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -31,9 +45,25 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Reference crate must not depend on the engine
+        shell: bash
+        run: |
+          if cargo tree -p reference 2>/dev/null | grep -q '^.*engine v'; then
+            echo "crates/reference depends on engine: forbidden"; exit 1
+          fi
+      - name: No unsafe outside crates/nn
+        shell: bash
+        run: |
+          # One exception: in crates/wasm a line that is exactly the attribute `#[unsafe(no_mangle)]`,
+          # which edition 2024 requires on a WebAssembly export (see crates/wasm/Cargo.toml).
+          if grep -rn --include='*.rs' -E '\bunsafe\b' crates | grep -v '^crates/nn/' | grep -v 'unsafe_code' \
+              | grep -v -E '^crates/wasm/[^:]+:[0-9]+:[[:space:]]*#\[unsafe\(no_mangle\)\][[:space:]]*$' ; then
+            echo "unsafe found outside crates/nn: forbidden"; exit 1
+          fi
 
   wasm:
-    name: wasm32 build
+    name: wasm32 build and determinism
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -42,3 +72,48 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build engine for wasm32
         run: cargo build -p engine --target wasm32-unknown-unknown --release
+      - name: Native vs wasm result hash
+        if: hashFiles('tools/wasm_check.sh') != ''
+        run: bash tools/wasm_check.sh
+
+  differential:
+    name: differential (${{ matrix.shard }}/${{ github.event.inputs.shards || '2' }})
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Skip shards beyond the requested count
+        id: gate
+        shell: bash
+        run: |
+          SHARDS="${{ github.event.inputs.shards || '2' }}"
+          if [ "${{ matrix.shard }}" -ge "$SHARDS" ]; then echo "run=false" >> "$GITHUB_OUTPUT"; else echo "run=true" >> "$GITHUB_OUTPUT"; fi
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        if: steps.gate.outputs.run == 'true'
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        if: steps.gate.outputs.run == 'true'
+      - name: Build difftest
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: |
+          if [ ! -d crates/difftest ]; then echo "crates/difftest not on this ref; nothing to run"; echo "skip=true" >> "$GITHUB_ENV"; exit 0; fi
+          cargo build --release -p difftest
+      - name: Run shard
+        if: steps.gate.outputs.run == 'true' && env.skip != 'true'
+        shell: bash
+        run: |
+          GAMES="${{ github.event.inputs.games || '200000' }}"
+          SEED=$(( ${{ github.run_id }} * 16 + ${{ matrix.shard }} ))
+          mkdir -p out
+          ./target/release/difftest "$GAMES" "$SEED" | tee "out/shard-${{ matrix.shard }}.txt"
+      - uses: actions/upload-artifact@v4
+        if: steps.gate.outputs.run == 'true' && env.skip != 'true'
+        with:
+          name: differential-shard-${{ matrix.shard }}
+          path: out/
