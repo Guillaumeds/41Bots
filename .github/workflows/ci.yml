@@ -100,9 +100,12 @@ jobs:
         if: steps.gate.outputs.run == 'true'
       - name: Build difftest
         if: steps.gate.outputs.run == 'true'
-        run: cargo build --release -p difftest
+        shell: bash
+        run: |
+          if [ ! -d crates/difftest ]; then echo "crates/difftest not on this ref; nothing to run"; echo "skip=true" >> "$GITHUB_ENV"; exit 0; fi
+          cargo build --release -p difftest
       - name: Run shard
-        if: steps.gate.outputs.run == 'true'
+        if: steps.gate.outputs.run == 'true' && env.skip != 'true'
         shell: bash
         run: |
           GAMES="${{ github.event.inputs.games || '200000' }}"
@@ -110,7 +113,7 @@ jobs:
           mkdir -p out
           ./target/release/difftest "$GAMES" "$SEED" | tee "out/shard-${{ matrix.shard }}.txt"
       - uses: actions/upload-artifact@v4
-        if: steps.gate.outputs.run == 'true'
+        if: steps.gate.outputs.run == 'true' && env.skip != 'true'
         with:
           name: differential-shard-${{ matrix.shard }}
           path: out/
