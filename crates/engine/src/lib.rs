@@ -5,8 +5,10 @@
 //! deterministic RNG, so any game can be replayed exactly. See `docs/STATUS.md` for the M0 task list.
 
 pub mod cards;
+pub mod game;
 pub mod rng;
 pub mod rules;
+pub mod view;
 
 /// Number of cards in a 41 pack: 52 ordinary cards plus one Joker.
 pub const DECK_SIZE: usize = cards::DECK_SIZE;
