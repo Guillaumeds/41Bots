@@ -29,6 +29,7 @@ pub const QUEEN: u8 = 12;
 pub const KING: u8 = 13;
 
 /// The four suits.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum Suit {

@@ -18,6 +18,7 @@ use crate::rules::{
 };
 use crate::view::{PublicState, SeatView};
 use crate::{SEATS, TEAMS, team_of};
+use std::sync::Arc;
 
 /// Version of the rules this engine implements. Every game record carries it; it is bumped
 /// whenever an owner answer changes the engine (RULES.md, "Records").
@@ -41,7 +42,15 @@ pub const HAND_SIZE: u8 = 5;
 /// Deck position of the turned card.
 const TURNED_POS: usize = 40;
 
+/// Label of the per-hand deck streams of a duplicate block (docs/M1-SPEC.md §1): the deck for hand
+/// index `k` is the identity deck shuffled by `Rng::derive(block_seed, &[BLOCK_DECK_LABEL, k])`.
+pub const BLOCK_DECK_LABEL: u64 = 0xDEC;
+
+/// Label of a duplicate block's first-dealer draw (docs/M1-SPEC.md §1).
+pub const BLOCK_DEALER_LABEL: u64 = 0xDEA;
+
 /// Rule switches (docs/M0-SPEC.md §1).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rules {
     /// Bonus for a team's first best-trump trick in a game (rule 28: 6, so the trick is worth 11).
@@ -76,6 +85,7 @@ impl Default for Rules {
 }
 
 /// A decision by the seat to act. Robbing and taking are never actions: the engine does them.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Action {
     /// Burn this card face down (after taking a turned card).
@@ -94,6 +104,7 @@ impl Action {
 }
 
 /// What the match is waiting for.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     /// This seat must burn a card.
@@ -105,6 +116,7 @@ pub enum Phase {
 }
 
 /// Why a game ended.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GameEndReason {
     /// A trick's 5 points took the team to 41 or more.
@@ -130,6 +142,7 @@ impl GameEndReason {
 }
 
 /// When a best-trump bonus was awarded.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BonusKind {
     /// At once, for the trick holding the 5 of trumps (rule 29).
@@ -149,6 +162,7 @@ impl BonusKind {
 }
 
 /// Who may see an event.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Visibility {
     /// Every seat.
@@ -168,6 +182,7 @@ impl Visibility {
 }
 
 /// One step of the match, as recorded in the event log.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     /// The match begins with this dealer.
@@ -458,6 +473,42 @@ const fn identity_deck() -> [Card; DECK_SIZE] {
     d
 }
 
+/// The deck for hand index `k` (counted across the games of the match) of every match in the
+/// duplicate block with this seed: the cards 0..53 shuffled by
+/// `Rng::derive(block_seed, &[BLOCK_DECK_LABEL, k])` (docs/M1-SPEC.md §1). The standard deck
+/// closure for [`Match::new_block`]: `move |k| block_deck(block_seed, k)`.
+pub fn block_deck(block_seed: u64, k: u32) -> [Card; DECK_SIZE] {
+    let mut d = identity_deck();
+    Rng::derive(block_seed, &[BLOCK_DECK_LABEL, u64::from(k)]).shuffle(&mut d);
+    d
+}
+
+/// The first dealer of every match in the duplicate block with this seed:
+/// `Rng::derive(block_seed, &[BLOCK_DEALER_LABEL]).bounded(8)` (docs/M1-SPEC.md §1).
+pub fn block_first_dealer(block_seed: u64) -> u8 {
+    Rng::derive(block_seed, &[BLOCK_DEALER_LABEL]).bounded(SEATS as u64) as u8
+}
+
+/// The deck source of a [`Match::new_block`] match: the deck for each hand index, asked for when
+/// the hand starts. Two of them are equal only if they are the same closure (one match is a clone
+/// of the other), since closures cannot be compared.
+#[derive(Clone)]
+struct HandDecks(Arc<dyn Fn(u32) -> [Card; DECK_SIZE] + Send + Sync>);
+
+impl core::fmt::Debug for HandDecks {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("HandDecks(..)")
+    }
+}
+
+impl PartialEq for HandDecks {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for HandDecks {}
+
 /// Is the deck an ordering of all 53 cards?
 fn is_full_deck(deck: &[Card; DECK_SIZE]) -> bool {
     let mut seen: Bits = 0;
@@ -478,6 +529,7 @@ pub struct Match {
     rng: Rng,
     decks: Vec<[Card; DECK_SIZE]>,
     next_deck: usize,
+    hand_decks: Option<HandDecks>,
     dealer: u8,
     hand_index: u32,
     game_index: u8,
@@ -499,7 +551,7 @@ impl Match {
     pub fn new(seed: u64, rules: Rules) -> Match {
         let mut rng = Rng::new(seed);
         let first_dealer = rng.bounded(SEATS as u64) as u8;
-        Match::start(first_dealer, Vec::new(), rng, seed, rules)
+        Match::start(first_dealer, Vec::new(), None, rng, seed, rules)
     }
 
     /// A match with chosen decks (for tests, hand-made deals and the differential test): the
@@ -519,7 +571,36 @@ impl Match {
             decks.iter().all(is_full_deck),
             "every deck must hold each of the 53 cards exactly once"
         );
-        Match::start(first_dealer, decks, Rng::new(seed), seed, rules)
+        Match::start(first_dealer, decks, None, Rng::new(seed), seed, rules)
+    }
+
+    /// A match of a duplicate block (docs/M1-SPEC.md §1–2): like [`Match::with_decks`], but the
+    /// deck for hand index `k` (counted across the games of the match, from 0) is asked from
+    /// `hand_decks(k)` when that hand starts, for as many hands as the match lasts. The standard
+    /// closure is `move |k| block_deck(block_seed, k)`, with `block_first_dealer(block_seed)` as
+    /// the first dealer; then every match of the block deals the same cards in hand `k`.
+    /// [`Match::seed`] returns `block_seed`. The closure must be a pure function of `k` (it is
+    /// shared, not re-run, when the match is cloned) so the match replays exactly.
+    ///
+    /// # Panics
+    /// If `first_dealer` is not a seat; and, when a hand starts (so possibly inside
+    /// [`Match::apply`]), if the closure returns a deck that is not an ordering of all 53 cards.
+    pub fn new_block(
+        block_seed: u64,
+        hand_decks: impl Fn(u32) -> [Card; DECK_SIZE] + Send + Sync + 'static,
+        first_dealer: u8,
+        rules: Rules,
+    ) -> Match {
+        assert!(usize::from(first_dealer) < SEATS, "no such dealer seat");
+        let decks = Some(HandDecks(Arc::new(hand_decks)));
+        Match::start(
+            first_dealer,
+            Vec::new(),
+            decks,
+            Rng::new(block_seed),
+            block_seed,
+            rules,
+        )
     }
 
     /// Rebuild a match from its seed and recorded actions. Fails on the first illegal action.
@@ -534,6 +615,7 @@ impl Match {
     fn start(
         first_dealer: u8,
         decks: Vec<[Card; DECK_SIZE]>,
+        hand_decks: Option<HandDecks>,
         rng: Rng,
         seed: u64,
         rules: Rules,
@@ -544,6 +626,7 @@ impl Match {
             rng,
             decks,
             next_deck: 0,
+            hand_decks,
             dealer: first_dealer,
             hand_index: 0,
             game_index: 0,
@@ -574,7 +657,7 @@ impl Match {
         self.rules
     }
 
-    /// The seed the match was created with.
+    /// The seed the match was created with (the block seed for [`Match::new_block`]).
     pub fn seed(&self) -> u64 {
         self.seed
     }
@@ -802,6 +885,14 @@ impl Match {
         let deck = if let Some(d) = self.decks.get(self.next_deck) {
             self.next_deck += 1;
             *d
+        } else if let Some(HandDecks(f)) = &self.hand_decks {
+            let d = f(self.hand_index);
+            assert!(
+                is_full_deck(&d),
+                "the block's deck for hand {} must hold each of the 53 cards exactly once",
+                self.hand_index
+            );
+            d
         } else {
             let mut d = identity_deck();
             self.rng.shuffle(&mut d);

@@ -45,6 +45,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Build engine with serde
+        run: cargo build -p engine --features serde
       - name: Reference crate must not depend on the engine
         shell: bash
         run: |

@@ -11,6 +11,7 @@ use crate::cards::{Bits, Card, Suit};
 use crate::game::{Event, Phase};
 
 /// Everything every seat knows at this moment.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublicState {
     /// Who must act and how, or that the match is over.
@@ -69,6 +70,7 @@ pub struct PublicState {
 }
 
 /// One seat's view: the public state plus that seat's private knowledge.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SeatView {
     /// The seat this view belongs to.

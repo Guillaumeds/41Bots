@@ -1,0 +1,15 @@
+[package]
+name = "bots"
+version = "0.1.0"
+description = "Baseline 41 bots: a uniform random bot and the rules bot built from the published 25/45-family heuristics"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+engine = { path = "../engine" }
+bot = { path = "../bot" }
+
+[lints]
+workspace = true
