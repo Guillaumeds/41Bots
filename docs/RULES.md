@@ -67,7 +67,7 @@ This is the rules text as supplied by the project owner. The engine must impleme
 
 - **H1. Illegal plays are impossible.** The engine offers only legal actions, and all forced actions (robbing) happen automatically. So rules 25, 26, 34 and 37–41 can never trigger and are not implemented as gameplay; tests assert that illegal actions are rejected.
 - **H2. Robbing timing (rule 20).** The ace-of-trumps holder robs **at their own first turn in trick 1**, immediately before playing their first card. If they lead trick 1, they rob before leading. They choose the burn after seeing any trick-1 cards already played.
-- **H3. Burn choice.** Any card may be burned **except the ace of trumps**, including the card just taken (the turned card, or the Joker for the dealer).
+- **H3. Burn choice (tightened by the owner on 2026-10-13).** Any card may be burned **except an ace of any suit** (the ace of hearts included). This applies to every burn: the dealer's after taking a turned Joker (made before the next card is turned, so before trumps are known), the dealer's after robbing a turned ace, and the robber's. The card just taken (the turned card, or the Joker for the dealer) may be burned. A legal burn always exists: at most four aces can sit among the six cards held at a burn, so at least two cards are burnable. This is stricter than rules 21 and 24, which forbid only the ace of trumps.
 - **H4. Dealer robs at once (rules 22 and 24).** A turned ace is robbed by the dealer at once, before the first lead. With a turned Joker, the dealer takes it and burns at once, then the next card is turned. If that card is an ace, or if the dealer holds the ace of trumps, the dealer robs the new card **at once, always**, burning another card. Otherwise rule 20 / H2 applies to whoever holds the ace of trumps, or rule 23 if it is undealt.
 - **H5. Next dealer after a game ends mid-hand:** the deal **always moves one seat left**, exactly as after any hand.
 - **H6. The money.** A match is won by the first partnership to win 2 games. Each player of every losing partnership pays the agreed stake to the winning partnership. The pub stake is €5: each winner receives €15 and each loser pays €5. The stake is configurable.
@@ -92,7 +92,7 @@ This is the rules text as supplied by the project owner. The engine must impleme
   - If the hand holds any card of S, the legal cards are those cards plus every trump.
   - Otherwise any card is legal.
 - **Bonus bookkeeping.**
-  - Each team has a per-game flag recording whether it has already taken a best-trump bonus in this game. Its first bonus is +6; later bonuses are +5.
+  - Each team has a per-game flag recording whether it has already taken a best-trump bonus in this game. Its first bonus is +6; later bonuses are +5 (rule switch `bonus_later`, see below).
   - If the 5 of trumps is played, its trick gets the bonus immediately when won. Otherwise the bonus is assigned after trick 5 to the trick holding the highest trump played. There is no bonus if no trump was played.
 - **End checks after trick 5.**
   - Award the trick first, then check for 41.
@@ -102,4 +102,25 @@ This is the rules text as supplied by the project owner. The engine must impleme
 - **Card counts.**
   - 40 cards are dealt, 1 is turned, and 12 stay undealt.
   - With a turned Joker, 11 stay undealt plus the newly turned card.
-  - The dealer may burn up to 2 cards in one hand.
+  - The dealer may burn up to 2 cards in one hand; a non-dealer at most 1.
+  - Hidden, out-of-play cards during a hand are therefore **12 or 13**: the undealt pack (12, or 11 after a turned Joker) plus the burns (0, 1 or 2). An unrobbed turned card is known to all and out of play.
+  - A burned card is never an ace (H3), which is a hard fact for every bot's inference.
+
+## Owner-confirmed decisions and implementer defaults (2026-10-13)
+
+Each item is marked **owner** (confirmed by the owner) or **default** (the implementer's reading of the rules; raise with the owner if it ever matters).
+
+- **Reachable scores (default, follows from rules 27–32).** A team's first best-trump trick scores 11 and every later one 10, so a team's score is always `5k` or `5k+6` with `k ≥ 1` in the second case: the 15 values `{0, 5, 10, …, 40}` and `{11, 16, …, 36}`. A score of 6 is unreachable. **A team has taken its first bonus this game exactly when `score mod 5 == 1`**; the engine still keeps the flag explicitly and a test asserts the two agree.
+- **"Reach 41" means 41 or more (owner-confirmed by RULES 32):** a team on 40 taking a plain trick (45) or on 36 taking an 11-point trick (47) wins the game.
+- **Order of checks after tricks 1–4 (default):** award the 5 points for the trick → if the 5 of trumps was in it, award its bonus at once (rule 29) → check 41 → check whether the hand is over. After trick 5 the order in "End checks" above applies; the jink check comes before the end-of-hand bonus, so a jink and 41 in one hand count as one game.
+- **Pending bonus lost (default):** if a game ends at an earlier trick, a best-trump bonus that would have been awarded at the end of the hand is never awarded (rule 32: the rest of the hand is not played).
+- **Two teams at 41 after the last trick (default):** the trick's points are scored first, so the trick winner wins the game; a pending end-of-hand bonus for another team is lost.
+- **Dealer holding the ace of trumps with an ordinary turned card (owner, H2):** the dealer robs at their own first turn, as the eighth card of trick 1, after seeing the other seven. Only the turned-ace and turned-Joker cases are "at once" (H4).
+- **Burn then first card (owner):** nothing happens between the robber's burn and their first card, so a bot may choose them as one joint decision internally; they are always recorded and shown as two actions.
+- **Trump leads (default, rules 16–17):** the Joker led is a trump lead. The ace of hearts led when hearts are not trumps is a trump lead too: it forces the ace of trumps and every lower trump, while the 5, J and Joker may be held back.
+- **Two takes in one hand (default, rule 24):** when the dealer takes a turned Joker and the next turned card is an ordinary card, the holder of the ace of trumps (if dealt) still robs that card at their own first turn. There are then two burns in the hand, the dealer's and the robber's, each a separate hidden location.
+- **Ace-of-trumps facts become known incrementally (default):** the dealer holds it the moment they rob at once; every other player proves they lack it the moment they play their first card without robbing; only when all eight have played to trick 1 without a rob is it certain to be undealt.
+- **First dealer and deal order (default, rules 3–4):** the first dealer is drawn once per match from the seeded random-number generator and the deal then moves one seat left after every hand, across games and after a game that ends mid-hand (H5). The engine deals two cards then three, starting left of the dealer, from a freshly shuffled 53-card pack every hand; the next card is turned.
+- **Rule switch `bonus_later` (owner):** the house rule is `bonus_later = 5` (first bonus 6, later ones 5). The Irish 25 app and every other written source use a flat 6 every time; `bonus_later = 6` reproduces that. With the flat rule the "bonus flag ⟺ score mod 5 == 1" shortcut no longer holds, so the match-equity table must carry explicit flags under that setting (not built at M1).
+- **Table size (owner):** 8 players in 4 partnerships is the only configuration the bots are built for.
+- **Records (default):** every game record carries a `rules_version`, bumped whenever an owner answer changes the engine.
