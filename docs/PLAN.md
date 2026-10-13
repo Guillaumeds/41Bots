@@ -681,7 +681,8 @@ These address SPARTA's warning that partners searching independently can mislead
   - At first: `dph / cpu_cores_effective` [dph = dollars per hour].
   - Each run starts with a 30–60 second **micro-benchmark** [a quick speed test] and records "games per second per dollar" for that CPU model in R2.
   - The launcher learns which CPU models really give the best value.
-- **Default rental type:** on-demand. **Interruptible** [cheaper bid machines whose processes are killed when outbid; the disk is kept but resumption is not guaranteed] is only for long throughput runs with checkpoints at most 10 minutes apart. If one is stopped, the launcher rents a new machine that resumes from the last checkpoint, instead of waiting.
+  - **Owner's rule (2026-10-13):** choose by cost per unit of work, not by price per hour; but among offers whose cost per unit of work is within 20% of the cheapest, take the fastest (most work per hour), because finishing sooner is worth a small premium. The 20% margin is a launcher setting. On-demand only: no interruptible (bid) machines, which get killed when outbid.
+- **Rental type: on-demand only** (owner decision 2026-10-13). **Interruptible** [cheaper bid machines whose processes are killed when outbid; the disk is kept but resumption is not guaranteed] is not used. If a machine dies anyway, the launcher rents a new one that resumes from the last checkpoint, instead of waiting.
 
 ### 12.3 Inside the machine: start-up
 
