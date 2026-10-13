@@ -58,17 +58,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          vastai search offers 'reliability>0.98 num_gpus=1 gpu_frac=1 cpu_cores_effective>=16 cpu_ram>=32 compute_cap>=600 compute_cap<1000 cuda_vers>=12.6 rentable=true' --order 'dph_total' --limit 8 --raw > offers.json
+          for MIN in 16 48 96 160; do
+            vastai search offers "reliability>0.98 num_gpus>=1 gpu_frac=1 cpu_cores_effective>=$MIN cpu_ram>=32 compute_cap>=600 compute_cap<1000 cuda_vers>=12.6 rentable=true" --order 'dph_total' --limit 6 --raw > "offers-$MIN.json"
+          done
           python3 - <<'PY'
           import json
-          rows = json.load(open("offers.json"))
-          print(f"{len(rows)} offers (cheapest first)")
-          for o in rows:
-              print(
-                  f"id={o.get('id')} ${o.get('dph_total', 0):.3f}/h {o.get('gpu_name')} "
-                  f"cores_eff={o.get('cpu_cores_effective')} ram={o.get('cpu_ram')}MB cpu={o.get('cpu_name')} "
-                  f"rel={o.get('reliability2', 0):.3f} down=${o.get('inet_down_cost')}/GB up=${o.get('inet_up_cost')}/GB "
-                  f"disk={o.get('disk_space', 0):.0f}GB"
-              )
+          for mn in (16, 48, 96, 160):
+              rows = json.load(open(f"offers-{mn}.json"))
+              print(f"\n=== cheapest whole-machine offers with >= {mn} effective cores ({len(rows)} shown) ===")
+              for o in rows:
+                  cores = o.get("cpu_cores_effective") or 0
+                  dph = o.get("dph_total") or 0
+                  per_core = dph / cores if cores else 0
+                  print(
+                      f"id={o.get('id')} ${dph:.3f}/h  ${per_core*100:.2f} per 100 core-h  {o.get('num_gpus')}x {o.get('gpu_name')}  "
+                      f"cores_eff={cores:.0f} ram={o.get('cpu_ram')}MB cpu={o.get('cpu_name')}  rel={o.get('reliability2', 0):.3f}  "
+                      f"net down=${o.get('inet_down_cost')}/GB up=${o.get('inet_up_cost')}/GB  disk={o.get('disk_space', 0):.0f}GB"
+                  )
           PY
           echo "No instance was created."
