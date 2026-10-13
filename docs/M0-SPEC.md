@@ -36,6 +36,16 @@ Let `dealer` be the dealer seat, `D = dealer`.
 10. **Hand over, game continues:** emit `HandEnd{hand_index, aborted: false}`; `dealer = D + 1`; `hand_index += 1`; go to step 1.
 11. **Game end:** emit `GameWon{team, reason, scores}` ; `games_won[team] += 1`; emit `HandEnd{hand_index, aborted: hand not finished}`. If `games_won[team] == 2`: the match is over; compute money; emit `MatchWon{team, money}`; phase `MatchOver`. Else: `game_index += 1`; all four scores → 0; all four bonus flags → false; `dealer = D + 1` (H5); `hand_index += 1`; go to step 1.
 
+Pinned details (both implementations must agree; settled 2026-10-13 after the reference build):
+- **Event order.** `ProvedNoAce{seat}` is emitted immediately before that seat's `Played`. `Burned` (private) is emitted immediately before its public twin `BurnDone`. In step 2e the dealer's `ProvedNoAce` is emitted right after the second `Turned` and is not repeated when the dealer later plays.
+- **Second turned card.** During the dealer's first burn after a turned Joker, position 41 is still in the undealt pack: `undealt` has 12 cards (positions 41–52) and `hidden_count` is 12. Only after that burn is position 41 turned (`undealt` becomes positions 42–52, 11 cards).
+- **Trick number and leader.** `trick_no` is 0 during the dealer's at-once burns (steps 2–3) and 1 from step 5 onward, including during a leading robber's burn. `leader` is `dealer + 1` from the start of the hand. `trick_cards` is cleared the moment a trick's eighth card is played (also for trick 5 and for a game-ending trick); `leader` and `to_act` move to the winner only when a next trick starts.
+- **Robber.** `robber` is set by every `Took` except the dealer's take of the Joker: the dealer robbing a turned ace (step 3 or 2c) or taking the second card while holding the ace of trumps (2d) makes the dealer the robber. The turned-cards list records the Joker as taken by the dealer; `table_card` is the second card if it stays.
+- **HandEnd.aborted** is true exactly when fewer than 5 tricks were completed. A game ending on trick 5 is not aborted, even if another team's pending end-of-hand bonus is lost.
+- **After MatchOver** nothing is reset and the dealer does not move; `hand_index` and `game_index` start at 0 and `hand_index` counts across games. Between hands within a match the engine starts the next hand immediately; the reference waits for a deck.
+- **`Rules`** derives `Clone, Copy, Debug, PartialEq, Eq, Default` (6, 5, 5) in both crates.
+- **Rule 31 is unreachable with 8 players:** 40 cards are in play and at most 13 are out of play, but there are 14 or 15 trumps, so every completed hand has at least one trump played. The difftest reports the "no-trump hand" branch (always 0) and a property test asserts it.
+
 Notes. A turned card that nobody takes stays known and out of play. The dealer's pre-trump burn (step 2a) happens before the trump suit exists; aces of every suit are forbidden there too. Hidden cards at any time = undealt (12, or 11 after a Joker) + all burns (0–2): always 12 or 13. A seat's hand is 5 cards at every play of trick 1 after any take and burn.
 
 ## 3. Engine API (`crates/engine`)
@@ -169,3 +179,29 @@ For each match: `engine = engine::game::Match::new(seed_i, rules)`; `reference =
 - The named transcripts listed in `docs/STATUS.md` task 5, each built with `Match::with_decks` and asserted play by play (deal, turned card, actions, scores after every trick, result). Each transcript also renders to plain English (a helper `transcript(&Match) -> String`) for owner review.
 - Property tests (proptest, dev-dependency) over random seeds for the invariants listed in STATUS.md task 5.
 - Replay: every random match replays byte-identically from seed plus actions (event logs equal).
+
+## 8. Hand-made transcripts (owner-review material and test input)
+
+Each transcript is one UTF-8 text file under `crates/engine/tests/transcripts/<nn>-<slug>.txt`, written before the engine exists, straight from RULES.md. A later harness (`crates/engine/tests/transcripts.rs`) replays each file against the engine with `Match::with_decks` and asserts every expectation; disagreements are adjudicated against RULES.md by the reviewer (the transcript may be the one that is wrong). Format, one directive per line, `#` starts a comment:
+
+```
+title: <one line>
+story: <plain-English description of what the deal tests and why, may repeat on several story: lines>
+rules: bonus_later=5 stake=5          # optional; defaults 6/5/5 (bonus_first is never changed)
+dealer: 3                             # first dealer of the match (seat 0-7)
+hand 4: 5H JK AD 2C 9S                # five cards per seat, every seat 0-7, any order of lines
+...
+turned: 9D                            # the card at deck position 40
+second: AD                            # optional: the card at position 41 (required when turned is JK; must be undealt otherwise)
+undealt: 2D 3D ...                    # the remaining cards in pack order (position 41 or 42 onward); omit cards already placed; the harness verifies the 53-card permutation
+then hand 5: ...                      # optional: a second deal for the next hand, same directives prefixed by "then "; as many as needed
+> Burn 2C                             # an action by the seat to act (Burn or Play), applied in order
+= Took seat=3 card=JK                 # expected canonical event(s) produced by the preceding action, in order (public events only; section 5 format)
+= BurnDone seat=3
+scores: 5,0,0,0                       # expected scores after the preceding action
+phase: AwaitPlay 4                    # optional expected phase after the preceding action (AwaitBurn n | AwaitPlay n | MatchOver)
+legal: 2C 9S                          # optional: the exact legal cards for the seat to act, before the next action
+result: game team=2 reason=jink       # optional, after the action that ends a game; or "result: match team=1 money=30,-10,-10,-10"
+```
+Expectation lines (`=`, `scores:`, `phase:`, `legal:`, `result:`) always refer to the state right after the most recent `>` action (or right after the deal, if they appear before the first action). A transcript need not assert every event; it must assert every rule it exists to test. Seats that must rob or burn are chosen by the engine; the transcript's `>` lines must supply those burns in the right place.
+
