@@ -60,3 +60,13 @@ These 34 files in `crates/engine/tests/transcripts/` are deals written by hand f
 - **28.** After trick 5 the trick's points are counted first. The trick winner takes the game, and a bonus still waiting for another team is lost.
 - **29.** The same applies to a game that ends early: a bonus still waiting for the end of the hand is lost.
 - **05.** When hearts are not trumps, at least two trumps always reach the players, because only 13 cards are out of play. A hand with no trump at all can never happen at an eight-player table.
+
+## Running them, and reading a hand in plain English
+
+`cargo test -p engine --test transcripts` replays every file against the engine and fails on the first disagreement in any file (file and line named). To see what the engine itself says happened in one deal, in words:
+
+```
+TRANSCRIPT=15- cargo test -p engine --test transcripts transcript_render -- --ignored --nocapture
+```
+
+(`TRANSCRIPT` picks files by part of the name; `TRANSCRIPT_FULL=1` also shows the dealt and burned cards.) The first run of the harness on 13 October 2026 passed all 34 files, so the engine, the independent reference implementation and these hand-written expectations agree.
