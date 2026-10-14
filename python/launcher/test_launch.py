@@ -142,7 +142,7 @@ class World:
             inst = self.instances.get(int(args[2]))
             if not inst or not inst["alive"]:
                 return {"actual_status": "exited", "intended_status": "stopped"}
-            cpu = {"silentbusy": 95.0, "hiccup": 97.0, "silentidle": 0.02}.get(inst["script"].split(":")[0])
+            cpu = {"silentbusy": 95.0, "hiccup": 97.0, "silentidle": 2.0}.get(inst["script"].split(":")[0])
             if cpu is not None:
                 return {"actual_status": "running", "intended_status": "running", "cpu_util": cpu,
                         "cpu_cores_effective": 32, "status_msg": "success, running img:1"}
@@ -424,9 +424,9 @@ class LauncherTest(unittest.TestCase):
         c = launch.vast_cpu_pct
         self.assertIsNone(c({}))
         self.assertIsNone(c({"cpu_util": None}))
-        self.assertEqual(c({"cpu_util": 0.9}), 90.0)  # a fraction
-        self.assertEqual(c({"cpu_util": 75.0}), 75.0)  # a percentage
-        self.assertEqual(c({"cpu_util": 3000.0, "cpu_cores_effective": 32}), 93.75)  # summed over cores
+        self.assertEqual(c({"cpu_util": 0.9}), 0.9)  # a small percentage: an idle machine
+        self.assertEqual(c({"cpu_util": 75.0}), 75.0)
+        self.assertEqual(c({"cpu_util": 103.0}), 100.0)  # clamped
         st = launch.silent_state
         self.assertEqual(st(None, 50)[0], "gone")
         self.assertEqual(st({"actual_status": "exited", "cpu_util": 99}, 50)[0], "gone")

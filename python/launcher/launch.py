@@ -471,21 +471,17 @@ def container_start_error(info: dict | None) -> str | None:
 
 
 def vast_cpu_pct(info: dict | None) -> float | None:
-    """The instance's CPU use in percent from vast's `cpu_util`, or None when absent. vast does
-    not document the field's scale, so it is read defensively: up to 1 as a fraction, over 100 as
-    summed over cores (divided by the effective cores); the raw value is always logged too."""
+    """The instance's CPU use in percent from vast's `cpu_util`, or None when absent. Observed on
+    our rentals (2026-10-14) as a percentage of the whole container: 95.9 for a run whose own
+    heartbeat said 98%, 0 for an idle one; so a small value is a small percentage, never a
+    fraction. Values over 100 are clamped. The raw value is always logged too."""
     try:
         v = float((info or {}).get("cpu_util"))
     except (TypeError, ValueError):
         return None
     if v < 0:
         return None
-    if v <= 1.0:
-        return v * 100.0
-    if v > 100.0:
-        cores = float((info or {}).get("cpu_cores_effective") or 0)
-        return min(100.0, v / cores) if cores > 0 else 100.0
-    return v
+    return min(v, 100.0)
 
 
 def silent_state(info: dict | None, busy_pct: float) -> tuple[str, str]:

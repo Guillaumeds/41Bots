@@ -26,8 +26,8 @@
 //!    must have byte-identical values, or the chunk fails after writing them.
 //!
 //! **Self-protection.** During either window, from `ramp_s` (20 s) on: CPU over the last 30 s
-//! below `min_cpu_pct` (80) of the usable cores, or fewer than `T` solver threads searching for
-//! more than `busy_streak_s` (10 s) in a row, stops the bench at once (the window's own guard;
+//! below `min_cpu_pct` (80) of the usable cores, or fewer than `min_busy_pct` (95%) of the `T`
+//! solver threads searching for more than `busy_streak_s` (10 s) in a row, stops the bench at once (the window's own guard;
 //! the runner also measures the process tree's CPU over each 30-s heartbeat interval and asks the
 //! window to stop through its stop file). The results so far are written and the chunk ends
 //! FAILED with the reason, e.g. `low CPU: 41% in fill at 50 s`, so the normal end of the run
@@ -53,7 +53,7 @@ use crate::{Ctx, HEARTBEAT_EVERY, clk_tck, hardware, sibling, stop, tree_ticks};
 
 /// The settings a `t1bench` chunk takes (anything else is refused: the configuration sweep's
 /// settings were removed on 2026-10-14).
-const KEYS: [&str; 15] = [
+const KEYS: [&str; 16] = [
     "dph",
     "fill_s",
     "prod_s",
@@ -61,6 +61,7 @@ const KEYS: [&str; 15] = [
     "min_cpu_pct",
     "ramp_s",
     "busy_streak_s",
+    "min_busy_pct",
     "golden",
     "position_nodes",
     "schedule",
@@ -165,6 +166,7 @@ struct Win<'a> {
     min_cpu_pct: f64,
     ramp_s: f64,
     busy_streak_s: f64,
+    min_busy_pct: f64,
 }
 
 /// The heartbeat's progress during a window, from the window's progress file.
@@ -202,6 +204,7 @@ fn window(ctx: &mut Ctx, w: &Win, warnings: &[String]) -> Result<WindowRun, Stri
         .args(["--min-cpu-pct", &format!("{}", w.min_cpu_pct)])
         .args(["--ramp-s", &format!("{}", w.ramp_s)])
         .args(["--busy-streak-s", &format!("{}", w.busy_streak_s)])
+        .args(["--min-busy-pct", &format!("{}", w.min_busy_pct)])
         .args([
             "--cpu-interval-s",
             &format!("{}", HEARTBEAT_EVERY.as_secs()),
@@ -321,6 +324,7 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
     let min_cpu_pct = f(p, "min_cpu_pct", 80.0)?;
     let ramp_s = f(p, "ramp_s", 20.0)?;
     let busy_streak_s = f(p, "busy_streak_s", 10.0)?;
+    let min_busy_pct = f(p, "min_busy_pct", 95.0)?;
     let golden = match p.get("golden") {
         None | Some(Value::Null) => (128, 200),
         Some(g) => match (
@@ -383,6 +387,7 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         min_cpu_pct,
         ramp_s,
         busy_streak_s,
+        min_busy_pct,
     };
     // The windows: production only if the fill window ran to its end.
     let fill = window(
@@ -439,7 +444,7 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
     a["settings"] = json!({
         "fill_s": fill_s, "prod_s": prod_s, "fill_tt_mb_requested": p.get("fill_tt_mb"),
         "min_cpu_pct": min_cpu_pct, "ramp_s": ramp_s, "busy_streak_s": busy_streak_s,
-        "prod_worlds": prod_worlds, "count": count, "seed": seed, "schedule": p.get("schedule"),
+        "min_busy_pct": min_busy_pct, "prod_worlds": prod_worlds, "count": count, "seed": seed, "schedule": p.get("schedule"),
     });
     let text = summary_text(&a)
         + &format!(
