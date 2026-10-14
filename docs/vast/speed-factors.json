@@ -1,0 +1,4720 @@
+{
+ "format": "41bots-vast-speed-factors",
+ "version": 1,
+ "updated": "2026-10-14",
+ "about": [
+  "Speed of ONE hardware thread (a vast.ai 'effective core') of each CPU model while every thread of the machine is busy, relative to one thread of an AMD EPYC 7502 (our measured reference machine) = 1.00.",
+  "compute: jobs whose tables fit in cache or a few hundred MB (exact solves from trick 2 on, equity sweeps, rollouts, tournaments). tt: jobs dominated by huge transposition tables (exact trick-1 solves, tens of GB per deal).",
+  "estimate = from published SPECrate2017_int results or mapped from a similar chip, before we measure. measured = written by our own benchmarks (python/tools/vast_market.py record); it always wins over the estimate.",
+  "uncertainty: rough relative error of the estimate (0.15 = +-15%).",
+  "Models are matched by the 'match' regular expression against vast.ai's cpu_name, first match wins."
+ ],
+ "reference": {
+  "cpu": "AMD EPYC 7502 32-Core Processor",
+  "spec_per_copy": {
+   "deepsjeng": 3.08,
+   "leela": 3.03,
+   "mcf": 4.11,
+   "omnetpp": 1.56
+  },
+  "spec_result": "https://www.spec.org/cpu2017/results/res2019q4/cpu2017-20191111-19709.html"
+ },
+ "spec_basis": "SPECrate2017_int, speed of one copy with every hardware thread busy: compute = 531.deepsjeng_r (chess search with a hash table) and 541.leela_r (Go tree search); tt adds 505.mcf_r and 520.omnetpp_r (memory-latency heavy). Relative to EPYC 7502.",
+ "quota_ratio": 0.96,
+ "quota_note": "Every vast.ai container we have run got a CPU quota of 96% of the offer's effective cores (61.4/64, 76.8/80, 122.9/128, 368.6/384); one host gave only half (see machines).",
+ "default": {
+  "compute": 0.6,
+  "tt": 0.5,
+  "uncertainty": 0.5,
+  "basis": "unknown CPU: assumed slow until it is identified, so an unknown machine never tops a ranking by accident"
+ },
+ "models": [
+  {
+   "name": "AMD EPYC 7282",
+   "match": "EPYC 7282P?\\b",
+   "arch": "Zen 2 (Rome, 2019)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": 2.8,
+    "boost": 3.2
+   },
+   "l3_mb_per_socket": 64,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 0.97,
+    "tt": 1.03,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7282",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2020q4/cpu2017-20201012-24150.html",
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20210104-24743.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Memory bandwidth reduced on this low-cost part."
+  },
+  {
+   "name": "AMD EPYC 7302",
+   "match": "EPYC 7302P?\\b",
+   "arch": "Zen 2 (Rome, 2019)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": 3.0,
+    "boost": 3.3
+   },
+   "l3_mb_per_socket": 128,
+   "l3_mb_per_core": 8.0,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.02,
+    "tt": 1.14,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7302",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2019q3/cpu2017-20190902-17344.html",
+     "https://www.spec.org/cpu2017/results/res2019q4/cpu2017-20191028-19256.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7352",
+   "match": "EPYC 7352P?\\b",
+   "arch": "Zen 2 (Rome, 2019)",
+   "cores_per_socket": 24,
+   "clock_ghz": {
+    "base": 2.3,
+    "boost": 3.2
+   },
+   "l3_mb_per_socket": 128,
+   "l3_mb_per_core": 5.33,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 0.97,
+    "tt": 1.06,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7352",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q2/cpu2017-20210418-25648.html",
+     "https://www.spec.org/cpu2017/results/res2021q2/cpu2017-20210506-25966.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7402",
+   "match": "EPYC 7402P?\\b",
+   "arch": "Zen 2 (Rome, 2019)",
+   "cores_per_socket": 24,
+   "clock_ghz": {
+    "base": 2.8,
+    "boost": 3.35
+   },
+   "l3_mb_per_socket": 128,
+   "l3_mb_per_core": 5.33,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.01,
+    "tt": 1.08,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7402",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2020q1/cpu2017-20200204-20857.html",
+     "https://www.spec.org/cpu2017/results/res2019q4/cpu2017-20190916-17907.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7452",
+   "match": "EPYC 7452P?\\b",
+   "arch": "Zen 2 (Rome, 2019)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 2.35,
+    "boost": 3.35
+   },
+   "l3_mb_per_socket": 128,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 0.96,
+    "tt": 0.98,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7452",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2019q3/cpu2017-20190723-16414.html",
+     "https://www.spec.org/cpu2017/results/res2020q2/cpu2017-20200427-22132.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7502",
+   "match": "EPYC 7502P?\\b",
+   "arch": "Zen 2 (Rome, 2019)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 2.5,
+    "boost": 3.35
+   },
+   "l3_mb_per_socket": 128,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.0,
+    "tt": 1.0,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7502",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2019q4/cpu2017-20191111-19709.html",
+     "https://www.spec.org/cpu2017/results/res2020q2/cpu2017-20200427-22123.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Reference machine (measured on vast.ai, run m2-spike-epyc)."
+  },
+  {
+   "name": "AMD EPYC 7532",
+   "match": "EPYC 7532P?\\b",
+   "arch": "Zen 2 (Rome, 2019)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 2.4,
+    "boost": 3.3
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 8.0,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 0.98,
+    "tt": 1.04,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7532",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2019q4/cpu2017-20191208-20178.html",
+     "https://www.spec.org/cpu2017/results/res2019q4/cpu2017-20191208-20243.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7552",
+   "match": "EPYC 7552P?\\b",
+   "arch": "Zen 2 (Rome, 2019)",
+   "cores_per_socket": 48,
+   "clock_ghz": {
+    "base": 2.2,
+    "boost": 3.3
+   },
+   "l3_mb_per_socket": 192,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 0.89,
+    "tt": 0.84,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7552",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2020q1/cpu2017-20200119-20535.html",
+     "https://www.spec.org/cpu2017/results/res2020q2/cpu2017-20200331-21872.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7642",
+   "match": "EPYC 7642P?\\b",
+   "arch": "Zen 2 (Rome, 2019)",
+   "cores_per_socket": 48,
+   "clock_ghz": {
+    "base": 2.3,
+    "boost": 3.3
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 5.33,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 0.93,
+    "tt": 0.89,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7642",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q2/cpu2017-20210412-25554.html",
+     "https://www.spec.org/cpu2017/results/res2019q4/cpu2017-20191208-20250.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7662",
+   "match": "EPYC 7662P?\\b",
+   "arch": "Zen 2 (Rome, 2019)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.0,
+    "boost": 3.3
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 0.84,
+    "tt": 0.78,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7662",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2022q4/cpu2017-20221011-32568.html",
+     "https://www.spec.org/cpu2017/results/res2020q3/cpu2017-20200622-23005.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7702",
+   "match": "EPYC 7702P?\\b",
+   "arch": "Zen 2 (Rome, 2019)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.0,
+    "boost": 3.35
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 0.8,
+    "tt": 0.73,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7702",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2020q2/cpu2017-20200413-21924.html",
+     "https://www.spec.org/cpu2017/results/res2021q2/cpu2017-20210412-25555.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7742",
+   "match": "EPYC 7742P?\\b",
+   "arch": "Zen 2 (Rome, 2019)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.25,
+    "boost": 3.4
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 0.88,
+    "tt": 0.79,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7742",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2019q4/cpu2017-20191001-18923.html",
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20210302-25185.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7B12 (Google)",
+   "match": "EPYC 7B12\\b",
+   "arch": "Zen 2 (Rome, 2019)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.25,
+    "boost": 3.3
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 0.88,
+    "tt": 0.79,
+    "uncertainty": 0.2,
+    "basis": "SPEC EPYC 7742: Google cloud variant of the 64-core Rome part; vast reports 2.25 GHz, as the EPYC 7742.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2019q4/cpu2017-20191001-18923.html",
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20210302-25185.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part: no public spec sheet; treated as an EPYC 7742."
+  },
+  {
+   "name": "AMD EPYC 7V12 (Azure)",
+   "match": "EPYC 7V12\\b",
+   "arch": "Zen 2 (Rome, 2019)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.45,
+    "boost": 3.3
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 0.88,
+    "tt": 0.79,
+    "uncertainty": 0.2,
+    "basis": "SPEC EPYC 7742: Azure variant of the 64-core Rome part; treated as an EPYC 7742.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2019q4/cpu2017-20191001-18923.html",
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20210302-25185.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part: no public spec sheet."
+  },
+  {
+   "name": "AMD EPYC 7K62 (Tencent)",
+   "match": "EPYC 7K62\\b",
+   "arch": "Zen 2 (Rome, 2019)",
+   "cores_per_socket": 48,
+   "clock_ghz": {
+    "base": 2.6,
+    "boost": 3.3
+   },
+   "l3_mb_per_socket": 192,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 0.93,
+    "tt": 0.89,
+    "uncertainty": 0.25,
+    "basis": "SPEC EPYC 7642: 48-core Rome cloud variant; treated as an EPYC 7642 (48 cores).",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q2/cpu2017-20210412-25554.html",
+     "https://www.spec.org/cpu2017/results/res2019q4/cpu2017-20191208-20250.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part: no public spec sheet."
+  },
+  {
+   "name": "AMD EPYC 7R12 (AWS)",
+   "match": "EPYC 7R12\\b",
+   "arch": "Zen 2 (Rome, 2019)",
+   "cores_per_socket": 48,
+   "clock_ghz": {
+    "base": 2.6,
+    "boost": 3.3
+   },
+   "l3_mb_per_socket": 192,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 0.93,
+    "tt": 0.89,
+    "uncertainty": 0.25,
+    "basis": "SPEC EPYC 7642: 48-core Rome cloud variant; treated as an EPYC 7642.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q2/cpu2017-20210412-25554.html",
+     "https://www.spec.org/cpu2017/results/res2019q4/cpu2017-20191208-20250.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part: no public spec sheet."
+  },
+  {
+   "name": "AMD EPYC 7513",
+   "match": "EPYC 7513P?\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 2.6,
+    "boost": 3.65
+   },
+   "l3_mb_per_socket": 128,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.17,
+    "tt": 1.19,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7513",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q2/cpu2017-20210510-26266.html",
+     "https://www.spec.org/cpu2017/results/res2021q2/cpu2017-20210426-25678.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7543",
+   "match": "EPYC 7543P?\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 2.8,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 8.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.26,
+    "tt": 1.31,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7543",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q2/cpu2017-20210412-25583.html",
+     "https://www.spec.org/cpu2017/results/res2021q2/cpu2017-20210510-25974.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7643",
+   "match": "EPYC 7643P?\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 48,
+   "clock_ghz": {
+    "base": 2.3,
+    "boost": 3.6
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 5.33,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.04,
+    "tt": 1.06,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7643",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q2/cpu2017-20210510-25996.html",
+     "https://www.spec.org/cpu2017/results/res2021q2/cpu2017-20210510-26016.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7663",
+   "match": "EPYC 7663P?\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 56,
+   "clock_ghz": {
+    "base": 2.0,
+    "boost": 3.5
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 4.57,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 0.97,
+    "tt": 0.96,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7663",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q3/cpu2017-20210913-29290.html",
+     "https://www.spec.org/cpu2017/results/res2021q2/cpu2017-20210510-26017.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7713",
+   "match": "EPYC 7713P?\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.0,
+    "boost": 3.675
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 0.93,
+    "tt": 0.89,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7713",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q2/cpu2017-20210412-25594.html",
+     "https://www.spec.org/cpu2017/results/res2021q3/cpu2017-20210816-28809.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7763",
+   "match": "EPYC 7763P?\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.45,
+    "boost": 3.5
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.07,
+    "tt": 0.95,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7763",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20210301-25119.html",
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20210301-25120.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7443P",
+   "match": "EPYC 7443P?\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 24,
+   "clock_ghz": {
+    "base": 2.85,
+    "boost": 4.0
+   },
+   "l3_mb_per_socket": 128,
+   "l3_mb_per_core": 5.33,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.26,
+    "tt": 1.31,
+    "uncertainty": 0.2,
+    "basis": "SPEC EPYC 7543: 24-core Milan with high clocks; treated as an EPYC 7543.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q2/cpu2017-20210412-25583.html",
+     "https://www.spec.org/cpu2017/results/res2021q2/cpu2017-20210510-25974.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7773X",
+   "match": "EPYC 7773X\\b",
+   "arch": "Zen 3 + 3D V-Cache (Milan-X, 2022)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.2,
+    "boost": 3.5
+   },
+   "l3_mb_per_socket": 768,
+   "l3_mb_per_core": 12.0,
+   "l3_layout": "96 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.01,
+    "tt": 0.96,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7773X",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2022q1/cpu2017-20220314-31195.html",
+     "https://www.spec.org/cpu2017/results/res2022q1/cpu2017-20220228-31009.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7V73X (Azure Milan-X)",
+   "match": "EPYC 7V73X\\b",
+   "arch": "Zen 3 + 3D V-Cache (Milan-X, 2022)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.2,
+    "boost": 3.5
+   },
+   "l3_mb_per_socket": 768,
+   "l3_mb_per_core": 12.0,
+   "l3_layout": "96 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.01,
+    "tt": 0.96,
+    "uncertainty": 0.2,
+    "basis": "SPEC EPYC 7773X: Azure HBv3 variant of the 64-core Milan-X; treated as an EPYC 7773X.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2022q1/cpu2017-20220314-31195.html",
+     "https://www.spec.org/cpu2017/results/res2022q1/cpu2017-20220228-31009.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part."
+  },
+  {
+   "name": "AMD EPYC 7B13 (Google)",
+   "match": "EPYC 7B13\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.45,
+    "boost": 3.5
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.07,
+    "tt": 0.95,
+    "uncertainty": 0.2,
+    "basis": "SPEC EPYC 7763: Google variant of the 64-core Milan part; treated as an EPYC 7763.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20210301-25119.html",
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20210301-25120.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part: no public spec sheet; clocks may differ from the 7763."
+  },
+  {
+   "name": "AMD EPYC 7V13 (Azure)",
+   "match": "EPYC 7V13\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.45,
+    "boost": 3.5
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.07,
+    "tt": 0.95,
+    "uncertainty": 0.2,
+    "basis": "SPEC EPYC 7763: Azure variant of the 64-core Milan part; treated as an EPYC 7763.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20210301-25119.html",
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20210301-25120.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part: no public spec sheet; clocks may differ from the 7763."
+  },
+  {
+   "name": "AMD EPYC 7J13 (Oracle)",
+   "match": "EPYC 7J13\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.45,
+    "boost": 3.5
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.07,
+    "tt": 0.95,
+    "uncertainty": 0.2,
+    "basis": "SPEC EPYC 7763: Oracle variant of the 64-core Milan part; treated as an EPYC 7763.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20210301-25119.html",
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20210301-25120.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part: no public spec sheet; clocks may differ from the 7763."
+  },
+  {
+   "name": "AMD EPYC 7C13 (cloud)",
+   "match": "EPYC 7C13\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.45,
+    "boost": 3.5
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.07,
+    "tt": 0.95,
+    "uncertainty": 0.2,
+    "basis": "SPEC EPYC 7763: cloud variant of the 64-core Milan part; treated as an EPYC 7763.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20210301-25119.html",
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20210301-25120.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part: no public spec sheet; clocks may differ from the 7763."
+  },
+  {
+   "name": "AMD EPYC 7T83 (cloud)",
+   "match": "EPYC 7T83\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.45,
+    "boost": 3.5
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.07,
+    "tt": 0.95,
+    "uncertainty": 0.2,
+    "basis": "SPEC EPYC 7763: cloud variant of the 64-core Milan part; treated as an EPYC 7763.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20210301-25119.html",
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20210301-25120.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part: no public spec sheet; clocks may differ from the 7763."
+  },
+  {
+   "name": "AMD EPYC 7Q83 (cloud)",
+   "match": "EPYC 7Q83\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.45,
+    "boost": 3.5
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.07,
+    "tt": 0.95,
+    "uncertainty": 0.2,
+    "basis": "SPEC EPYC 7763: cloud variant of the 64-core Milan part; treated as an EPYC 7763.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20210301-25119.html",
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20210301-25120.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part: no public spec sheet; clocks may differ from the 7763."
+  },
+  {
+   "name": "AMD EPYC 7K83 (Tencent)",
+   "match": "EPYC 7K83\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.45,
+    "boost": 3.5
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.07,
+    "tt": 0.95,
+    "uncertainty": 0.2,
+    "basis": "SPEC EPYC 7763: Tencent variant of the 64-core Milan part; treated as an EPYC 7763.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20210301-25119.html",
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20210301-25120.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part: no public spec sheet; clocks may differ from the 7763."
+  },
+  {
+   "name": "AMD EPYC 7R13 (AWS)",
+   "match": "EPYC 7R13\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 48,
+   "clock_ghz": {
+    "base": 2.65,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 5.33,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.04,
+    "tt": 1.06,
+    "uncertainty": 0.2,
+    "basis": "SPEC EPYC 7643: 48-core Milan cloud variant; treated as an EPYC 7643.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q2/cpu2017-20210510-25996.html",
+     "https://www.spec.org/cpu2017/results/res2021q2/cpu2017-20210510-26016.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part."
+  },
+  {
+   "name": "AMD EPYC 9124",
+   "match": "EPYC 9124P?\\b",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": 3.0,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 64,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.46,
+    "tt": 1.68,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9124",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q1/cpu2017-20230113-33344.html",
+     "https://www.spec.org/cpu2017/results/res2023q1/cpu2017-20230213-34141.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9334",
+   "match": "EPYC 9334P?\\b",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 2.7,
+    "boost": 3.9
+   },
+   "l3_mb_per_socket": 128,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.53,
+    "tt": 1.71,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9334",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q4/cpu2017-20231204-40176.html",
+     "https://www.spec.org/cpu2017/results/res2024q1/cpu2017-20240116-40720.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9354",
+   "match": "EPYC 9354P?\\b",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 3.25,
+    "boost": 3.8
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 8.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.5,
+    "tt": 1.72,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9354",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q1/cpu2017-20230113-33339.html",
+     "https://www.spec.org/cpu2017/results/res2024q1/cpu2017-20231218-40317.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9454",
+   "match": "EPYC 9454P?\\b",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 48,
+   "clock_ghz": {
+    "base": 2.75,
+    "boost": 3.8
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 5.33,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.48,
+    "tt": 1.63,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9454",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q1/cpu2017-20231218-40410.html",
+     "https://www.spec.org/cpu2017/results/res2024q3/cpu2017-20240701-44015.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9474F",
+   "match": "EPYC 9474FP?\\b",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 48,
+   "clock_ghz": {
+    "base": 3.6,
+    "boost": 4.1
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 5.33,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.6,
+    "tt": 1.73,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9474F",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q1/cpu2017-20230213-34138.html",
+     "https://www.spec.org/cpu2017/results/res2023q1/cpu2017-20230213-34144.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9554",
+   "match": "EPYC 9554P?\\b",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 3.1,
+    "boost": 3.75
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.47,
+    "tt": 1.55,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9554",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q1/cpu2017-20240212-41484.html",
+     "https://www.spec.org/cpu2017/results/res2024q1/cpu2017-20240212-41490.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9634",
+   "match": "EPYC 9634P?\\b",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 84,
+   "clock_ghz": {
+    "base": 2.25,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 384,
+   "l3_mb_per_core": 4.57,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.13,
+    "tt": 1.25,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9634",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q1/cpu2017-20230130-33791.html",
+     "https://www.spec.org/cpu2017/results/res2024q2/cpu2017-20240520-43537.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9654",
+   "match": "EPYC 9654P?\\b",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 96,
+   "clock_ghz": {
+    "base": 2.4,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 384,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.28,
+    "tt": 1.33,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9654",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q2/cpu2017-20240326-42707.html",
+     "https://www.spec.org/cpu2017/results/res2024q1/cpu2017-20240226-41717.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9684X",
+   "match": "EPYC 9684X\\b",
+   "arch": "Zen 4 + 3D V-Cache (Genoa-X, 2023)",
+   "cores_per_socket": 96,
+   "clock_ghz": {
+    "base": 2.55,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 1152,
+   "l3_mb_per_core": 12.0,
+   "l3_layout": "96 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.28,
+    "tt": 1.37,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9684X",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q3/cpu2017-20240730-44359.html",
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230828-38893.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "The huge cache helps the trick-1 table only a little: tables of tens of GB are far bigger than any cache."
+  },
+  {
+   "name": "AMD EPYC 9J14 (Oracle)",
+   "match": "EPYC 9J14\\b",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 96,
+   "clock_ghz": {
+    "base": 2.4,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 384,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.28,
+    "tt": 1.33,
+    "uncertainty": 0.2,
+    "basis": "SPEC EPYC 9654: 96-core Genoa Oracle variant; treated as an EPYC 9654.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q2/cpu2017-20240326-42707.html",
+     "https://www.spec.org/cpu2017/results/res2024q1/cpu2017-20240226-41717.html",
+     "https://www.ebay.de/itm/387364030673"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part: no public spec sheet."
+  },
+  {
+   "name": "AMD EPYC 9B14 (cloud)",
+   "match": "EPYC 9B14\\b",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 96,
+   "clock_ghz": {
+    "base": 2.4,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 384,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.28,
+    "tt": 1.33,
+    "uncertainty": 0.2,
+    "basis": "SPEC EPYC 9654: 96-core Genoa cloud variant; treated as an EPYC 9654.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q2/cpu2017-20240326-42707.html",
+     "https://www.spec.org/cpu2017/results/res2024q1/cpu2017-20240226-41717.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part: no public spec sheet."
+  },
+  {
+   "name": "AMD EPYC 9K84 (Tencent)",
+   "match": "EPYC 9K84\\b",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 96,
+   "clock_ghz": {
+    "base": 2.4,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 384,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.28,
+    "tt": 1.33,
+    "uncertainty": 0.2,
+    "basis": "SPEC EPYC 9654: 96-core Genoa Tencent variant; treated as an EPYC 9654.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q2/cpu2017-20240326-42707.html",
+     "https://www.spec.org/cpu2017/results/res2024q1/cpu2017-20240226-41717.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part: no public spec sheet."
+  },
+  {
+   "name": "AMD EPYC 9R14 (AWS)",
+   "match": "EPYC 9R14\\b",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 96,
+   "clock_ghz": {
+    "base": 2.4,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 384,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.28,
+    "tt": 1.33,
+    "uncertainty": 0.2,
+    "basis": "SPEC EPYC 9654: 96-core Genoa AWS variant; treated as an EPYC 9654.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q2/cpu2017-20240326-42707.html",
+     "https://www.spec.org/cpu2017/results/res2024q1/cpu2017-20240226-41717.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part: no public spec sheet."
+  },
+  {
+   "name": "AMD EPYC 9V84 (Azure)",
+   "match": "EPYC 9V84\\b",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 96,
+   "clock_ghz": {
+    "base": 2.4,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 384,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.28,
+    "tt": 1.33,
+    "uncertainty": 0.2,
+    "basis": "SPEC EPYC 9654: 96-core Genoa Azure variant; treated as an EPYC 9654.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q2/cpu2017-20240326-42707.html",
+     "https://www.spec.org/cpu2017/results/res2024q1/cpu2017-20240226-41717.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part: no public spec sheet."
+  },
+  {
+   "name": "AMD EPYC 9V74 (Azure)",
+   "match": "EPYC 9V74\\b",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 80,
+   "clock_ghz": {
+    "base": 2.6,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 320,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.35,
+    "tt": 1.4,
+    "uncertainty": 0.25,
+    "basis": "estimate: 80-core Genoa variant (reported 2.6/3.7 GHz, 320 MB L3, 400 W): fewer cores and more power than the 9654, so a little faster per thread; placed between the EPYC 9654 and 9554.",
+    "sources": [
+     "https://serverflow.ru/catalog/komplektuyushchie/protsessory/amd-epyc-9v74/"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part: specs only from resellers."
+  },
+  {
+   "name": "AMD EPYC 9734",
+   "match": "EPYC 9734\\b",
+   "arch": "Zen 4c dense (Bergamo, 2023)",
+   "cores_per_socket": 112,
+   "clock_ghz": {
+    "base": 2.2,
+    "boost": 3.0
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 2.29,
+   "l3_layout": "16 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.18,
+    "tt": 1.2,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9734",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q3/cpu2017-20240813-44504.html",
+     "https://www.spec.org/cpu2017/results/res2023q4/cpu2017-20231023-39498.html",
+     "https://chipsandcheese.com/p/testing-amds-bergamo-zen-4c-spam",
+     "https://www.servethehome.com/amd-epyc-bergamo-epyc-9754-cloud-native-sp5/3/"
+    ]
+   },
+   "measured": null,
+   "caveats": "Dense cores: half the L3 per core of Genoa (2 MB). Running today's trick-1 measurement (448 threads, 1.5 TB)."
+  },
+  {
+   "name": "AMD EPYC 9754",
+   "match": "EPYC 9754\\b",
+   "arch": "Zen 4c dense (Bergamo, 2023)",
+   "cores_per_socket": 128,
+   "clock_ghz": {
+    "base": 2.25,
+    "boost": 3.1
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 2.0,
+   "l3_layout": "16 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.16,
+    "tt": 1.14,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9754",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q1/cpu2017-20240130-40906.html",
+     "https://www.spec.org/cpu2017/results/res2023q2/cpu2017-20230522-36701.html",
+     "https://chipsandcheese.com/p/testing-amds-bergamo-zen-4c-spam",
+     "https://www.servethehome.com/amd-epyc-bergamo-epyc-9754-cloud-native-sp5/3/",
+     "https://www.phoronix.com/review/amd-epyc-9754-bergamo"
+    ]
+   },
+   "measured": null,
+   "caveats": "Dense cores: half the L3 per core of Genoa (2 MB). 'Emb' variants on vast are treated the same."
+  },
+  {
+   "name": "AMD EPYC 9355",
+   "match": "EPYC 9355P?\\b",
+   "arch": "Zen 5 (Turin, 2024)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 3.55,
+    "boost": 4.4
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 8.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.83,
+    "tt": 2.12,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9355",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20241104-45232.html",
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20241104-45264.html",
+     "https://www.amd.com/content/dam/amd/en/documents/epyc-technical-docs/user-guides/58462_amd-epyc-9005-tg-architecture-overview.pdf"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9535",
+   "match": "EPYC 9535P?\\b",
+   "arch": "Zen 5 (Turin, 2024)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.4,
+    "boost": 4.3
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.44,
+    "tt": 1.63,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9535",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2025q1/cpu2017-20250126-46120.html",
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20241201-45677.html",
+     "https://www.amd.com/content/dam/amd/en/documents/epyc-technical-docs/user-guides/58462_amd-epyc-9005-tg-architecture-overview.pdf"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9555",
+   "match": "EPYC 9555P?\\b",
+   "arch": "Zen 5 (Turin, 2024)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 3.2,
+    "boost": 4.4
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.65,
+    "tt": 1.83,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9555",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20241104-45236.html",
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20241118-45527.html",
+     "https://www.amd.com/content/dam/amd/en/documents/epyc-technical-docs/user-guides/58462_amd-epyc-9005-tg-architecture-overview.pdf"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9575F",
+   "match": "EPYC 9575FP?\\b",
+   "arch": "Zen 5 (Turin, 2024)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 3.3,
+    "boost": 5.0
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.63,
+    "tt": 1.81,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9575F",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20241118-45517.html",
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20241118-45479.html",
+     "https://www.amd.com/content/dam/amd/en/documents/epyc-technical-docs/user-guides/58462_amd-epyc-9005-tg-architecture-overview.pdf",
+     "https://www.phoronix.com/review/amd-epyc-zen5-smt/6"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9655",
+   "match": "EPYC 9655P?\\b",
+   "arch": "Zen 5 (Turin, 2024)",
+   "cores_per_socket": 96,
+   "clock_ghz": {
+    "base": 2.6,
+    "boost": 4.5
+   },
+   "l3_mb_per_socket": 384,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.36,
+    "tt": 1.51,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9655",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20241104-45240.html",
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20240920-44763.html",
+     "https://www.amd.com/content/dam/amd/en/documents/epyc-technical-docs/user-guides/58462_amd-epyc-9005-tg-architecture-overview.pdf"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9755",
+   "match": "EPYC 9755P?\\b",
+   "arch": "Zen 5 (Turin, 2024)",
+   "cores_per_socket": 128,
+   "clock_ghz": {
+    "base": 2.7,
+    "boost": 4.1
+   },
+   "l3_mb_per_socket": 512,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.35,
+    "tt": 1.39,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9755",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20240920-44768.html",
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20240924-44944.html",
+     "https://www.amd.com/content/dam/amd/en/documents/epyc-technical-docs/user-guides/58462_amd-epyc-9005-tg-architecture-overview.pdf"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9645",
+   "match": "EPYC 9645P?\\b",
+   "arch": "Zen 5c dense (Turin Dense, 2024)",
+   "cores_per_socket": 96,
+   "clock_ghz": {
+    "base": 2.3,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 2.67,
+   "l3_layout": "32 MB per 16-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.42,
+    "tt": 1.52,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9645",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2025q1/cpu2017-20250113-46014.html",
+     "https://www.spec.org/cpu2017/results/res2025q1/cpu2017-20250126-46128.html",
+     "https://www.amd.com/content/dam/amd/en/documents/epyc-technical-docs/user-guides/58462_amd-epyc-9005-tg-architecture-overview.pdf"
+    ]
+   },
+   "measured": null,
+   "caveats": "Dense cores: 2 MB of L3 per core."
+  },
+  {
+   "name": "AMD EPYC 9845",
+   "match": "EPYC 9845P?\\b",
+   "arch": "Zen 5c dense (Turin Dense, 2024)",
+   "cores_per_socket": 160,
+   "clock_ghz": {
+    "base": 2.1,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 320,
+   "l3_mb_per_core": 2.0,
+   "l3_layout": "32 MB per 16-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.13,
+    "tt": 1.14,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9845",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20241104-45313.html",
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20241202-45693.html",
+     "https://www.amd.com/content/dam/amd/en/documents/epyc-technical-docs/user-guides/58462_amd-epyc-9005-tg-architecture-overview.pdf"
+    ]
+   },
+   "measured": null,
+   "caveats": "Dense cores: 2 MB of L3 per core."
+  },
+  {
+   "name": "AMD EPYC 9965",
+   "match": "EPYC 9965P?\\b",
+   "arch": "Zen 5c dense (Turin Dense, 2024)",
+   "cores_per_socket": 192,
+   "clock_ghz": {
+    "base": 2.25,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 384,
+   "l3_mb_per_core": 2.0,
+   "l3_layout": "32 MB per 16-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.24,
+    "tt": 1.09,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9965",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20240923-44837.html",
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20241118-45545.html",
+     "https://www.amd.com/content/dam/amd/en/documents/epyc-technical-docs/user-guides/58462_amd-epyc-9005-tg-architecture-overview.pdf"
+    ]
+   },
+   "measured": null,
+   "caveats": "Dense cores: 2 MB of L3 per core; 768 threads share 24 memory channels on a 2-socket box."
+  },
+  {
+   "name": "AMD EPYC 9B45 (cloud)",
+   "match": "EPYC 9B45\\b",
+   "arch": "Zen 5 (Turin, 2024)",
+   "cores_per_socket": 128,
+   "clock_ghz": {
+    "base": 2.7,
+    "boost": 4.1
+   },
+   "l3_mb_per_socket": 512,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.35,
+    "tt": 1.39,
+    "uncertainty": 0.35,
+    "basis": "SPEC EPYC 9755: Turin-generation cloud variant; core count not published; treated as an EPYC 9755.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20240920-44768.html",
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20240924-44944.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part: no public spec sheet."
+  },
+  {
+   "name": "AMD Eng Sample 100-000000894 (Genoa ES)",
+   "match": "100-000000894",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 96,
+   "clock_ghz": {
+    "base": null,
+    "boost": null
+   },
+   "l3_mb_per_socket": 384,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.15,
+    "tt": 1.2,
+    "uncertainty": 0.35,
+    "basis": "estimate: Our runs on this host show Zen 4 instructions (AVX-512 BF16) and 384 threads (2 x 96 cores): a Genoa EPYC 9654-class engineering sample; set 10% below the 9654 for pre-release clocks.",
+    "sources": []
+   },
+   "measured": null,
+   "caveats": "Engineering sample: a pre-release chip identified only by its part number; clocks and stability can differ from the retail part. The vast host we used (machine 137718) gave our container only 192 of its 384 threads and has 251 GB RAM (a trick-1 run with four 45 GB tables was killed for lack of memory)."
+  },
+  {
+   "name": "AMD Eng Sample 100-000000997",
+   "match": "100-000000997",
+   "arch": "unknown (engineering sample)",
+   "cores_per_socket": null,
+   "clock_ghz": {
+    "base": null,
+    "boost": null
+   },
+   "l3_mb_per_socket": null,
+   "l3_mb_per_core": null,
+   "l3_layout": "?",
+   "memory": "?",
+   "estimate": {
+    "compute": 1.1,
+    "tt": 1.1,
+    "uncertainty": 0.4,
+    "basis": "estimate: Unknown engineering sample (192 threads on the host); assumed Genoa-class.",
+    "sources": []
+   },
+   "measured": null,
+   "caveats": "Engineering sample: a pre-release chip identified only by its part number; clocks and stability can differ from the retail part."
+  },
+  {
+   "name": "AMD Eng Sample 100-000001535 (Turin ES?)",
+   "match": "100-000001535",
+   "arch": "Zen 5 (Turin, 2024)",
+   "cores_per_socket": 128,
+   "clock_ghz": {
+    "base": null,
+    "boost": 4.1
+   },
+   "l3_mb_per_socket": 512,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.2,
+    "tt": 1.25,
+    "uncertainty": 0.35,
+    "basis": "estimate: 512 threads on the host and 4.06 GHz reported: probably a 128-core Turin (EPYC 9755-class) sample; set 10% below the 9755.",
+    "sources": []
+   },
+   "measured": null,
+   "caveats": "Engineering sample: a pre-release chip identified only by its part number; clocks and stability can differ from the retail part."
+  },
+  {
+   "name": "AMD Threadripper PRO 3975WX",
+   "match": "3975WX",
+   "arch": "Zen 2 Threadripper (2020)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 3.5,
+    "boost": 4.2
+   },
+   "l3_mb_per_socket": 128,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "8 channels DDR4-3200 (workstation socket)",
+   "estimate": {
+    "compute": 1.12,
+    "tt": 1.0,
+    "uncertainty": 0.25,
+    "basis": "estimate: Zen 2 at workstation clocks (32 cores, 280 W): estimated from the 64-core 3995WX SPEC result (1.01) plus higher all-core clocks.",
+    "sources": [
+     "https://www.amd.com/en/products/processors/workstations/ryzen-threadripper.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD Threadripper PRO 3995WX",
+   "match": "3995WX",
+   "arch": "Zen 2 Threadripper (2020)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.7,
+    "boost": 4.2
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "8 channels DDR4-3200 (workstation socket)",
+   "estimate": {
+    "compute": 1.01,
+    "tt": 0.85,
+    "uncertainty": 0.2,
+    "basis": "SPEC TR PRO 3995WX",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q2/cpu2017-20210412-25614.html",
+     "https://www.amd.com/en/products/processors/workstations/ryzen-threadripper.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD Threadripper PRO 5975WX",
+   "match": "5975WX",
+   "arch": "Zen 3 Threadripper (2022)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 3.6,
+    "boost": 4.5
+   },
+   "l3_mb_per_socket": 128,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 (workstation socket)",
+   "estimate": {
+    "compute": 1.4,
+    "tt": 1.35,
+    "uncertainty": 0.25,
+    "basis": "estimate: Zen 3, 32 cores at 280 W (about 4 GHz on all cores): the EPYC 7543 (1.26, 32 cores, 225 W) plus ~12% clock.",
+    "sources": [
+     "https://www.amd.com/en/products/processors/workstations/ryzen-threadripper.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD Threadripper PRO 5995WX",
+   "match": "5995WX",
+   "arch": "Zen 3 Threadripper (2022)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.7,
+    "boost": 4.5
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 (workstation socket)",
+   "estimate": {
+    "compute": 1.15,
+    "tt": 1.0,
+    "uncertainty": 0.25,
+    "basis": "estimate: Zen 3, 64 cores at 280 W: the EPYC 7763 (1.07, 64 cores, 280 W) plus a little clock.",
+    "sources": [
+     "https://www.amd.com/en/products/processors/workstations/ryzen-threadripper.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD Threadripper PRO 7965WX",
+   "match": "7965WX",
+   "arch": "Zen 4 Threadripper (2023)",
+   "cores_per_socket": 24,
+   "clock_ghz": {
+    "base": 4.2,
+    "boost": 5.3
+   },
+   "l3_mb_per_socket": 128,
+   "l3_mb_per_core": 5.33,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR5-5200 (workstation socket)",
+   "estimate": {
+    "compute": 1.85,
+    "tt": 1.7,
+    "uncertainty": 0.25,
+    "basis": "estimate: Zen 4 workstation part, 350 W for 24 cores (near-maximum clocks on all cores).",
+    "sources": [
+     "https://www.amd.com/en/products/processors/workstations/ryzen-threadripper.html",
+     "https://www.techpowerup.com/314900/amd-ryzen-threadripper-7000-series-lineup-revealed"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD Threadripper 7970X",
+   "match": "7970X",
+   "arch": "Zen 4 Threadripper (2023)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 4.0,
+    "boost": 5.3
+   },
+   "l3_mb_per_socket": 128,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "4 channels DDR5-5200 (workstation socket)",
+   "estimate": {
+    "compute": 1.8,
+    "tt": 1.45,
+    "uncertainty": 0.25,
+    "basis": "estimate: Zen 4, 32 cores at 350 W (about 4.8 GHz on all cores, vs about 3.75 GHz for the EPYC 9554 at 1.47); only 4 memory channels (DDR5-5200), hence the lower tt figure.",
+    "sources": [
+     "https://www.amd.com/en/products/processors/workstations/ryzen-threadripper.html",
+     "https://www.techpowerup.com/314900/amd-ryzen-threadripper-7000-series-lineup-revealed"
+    ]
+   },
+   "measured": null,
+   "caveats": "Only 4 memory channels for 64 threads."
+  },
+  {
+   "name": "AMD Threadripper PRO 7975WX",
+   "match": "7975WX",
+   "arch": "Zen 4 Threadripper (2023)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 4.0,
+    "boost": 5.3
+   },
+   "l3_mb_per_socket": 128,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR5-5200 (workstation socket)",
+   "estimate": {
+    "compute": 1.8,
+    "tt": 1.65,
+    "uncertainty": 0.25,
+    "basis": "estimate: As the 7970X but with 8 memory channels (DDR5-5200).",
+    "sources": [
+     "https://www.amd.com/en/products/processors/workstations/ryzen-threadripper.html",
+     "https://www.techpowerup.com/314900/amd-ryzen-threadripper-7000-series-lineup-revealed"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD Threadripper PRO 7985WX",
+   "match": "7985WX",
+   "arch": "Zen 4 Threadripper (2023)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 3.2,
+    "boost": 5.1
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR5-5200 (workstation socket)",
+   "estimate": {
+    "compute": 1.5,
+    "tt": 1.35,
+    "uncertainty": 0.3,
+    "basis": "estimate: Zen 4, 64 cores at 350 W, 8 channels.",
+    "sources": [
+     "https://www.amd.com/en/products/processors/workstations/ryzen-threadripper.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD Threadripper PRO 7995WX",
+   "match": "7995WX",
+   "arch": "Zen 4 Threadripper (2023)",
+   "cores_per_socket": 96,
+   "clock_ghz": {
+    "base": 2.5,
+    "boost": 5.1
+   },
+   "l3_mb_per_socket": 384,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR5-5200 (workstation socket)",
+   "estimate": {
+    "compute": 1.3,
+    "tt": 1.15,
+    "uncertainty": 0.25,
+    "basis": "estimate: Zen 4, 96 cores at 350 W: about the same power per core as the EPYC 9654 (1.28), so similar all-core clocks; 8 memory channels instead of 12.",
+    "sources": [
+     "https://www.phoronix.com/review/amd-linux-threadripper-pro-7995wx"
+    ]
+   },
+   "measured": null,
+   "caveats": "8 memory channels for 192 threads."
+  },
+  {
+   "name": "AMD Threadripper 9970X",
+   "match": "9970X",
+   "arch": "Zen 5 Threadripper (2025)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 4.0,
+    "boost": 5.4
+   },
+   "l3_mb_per_socket": 128,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "4 channels DDR5-6400 (workstation socket)",
+   "estimate": {
+    "compute": 1.95,
+    "tt": 1.55,
+    "uncertainty": 0.25,
+    "basis": "estimate: Zen 5, 32 cores at 350 W (about 5 GHz on all cores): the EPYC 9555 (1.65 at about 4.4 GHz) scaled by clock; only 4 memory channels.",
+    "sources": [
+     "https://www.scan.co.uk/products/amd-ryzen-threadripper-9970x-tr5-zen-5-32-core-64-thread-40ghz-54ghz-128mb-cache-pcie-50-350w-cpu"
+    ]
+   },
+   "measured": null,
+   "caveats": "Only 4 memory channels for 64 threads."
+  },
+  {
+   "name": "AMD Threadripper PRO 9975WX",
+   "match": "9975WX",
+   "arch": "Zen 5 Threadripper (2025)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 4.0,
+    "boost": 5.4
+   },
+   "l3_mb_per_socket": 128,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR5-6400 (workstation socket)",
+   "estimate": {
+    "compute": 1.95,
+    "tt": 1.8,
+    "uncertainty": 0.25,
+    "basis": "estimate: As the 9970X with 8 memory channels.",
+    "sources": [
+     "https://www.amd.com/en/products/processors/workstations/ryzen-threadripper.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD Threadripper PRO 9995WX",
+   "match": "9995WX",
+   "arch": "Zen 5 Threadripper (2025)",
+   "cores_per_socket": 96,
+   "clock_ghz": {
+    "base": 2.5,
+    "boost": 5.4
+   },
+   "l3_mb_per_socket": 384,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR5-6400 (workstation socket)",
+   "estimate": {
+    "compute": 1.45,
+    "tt": 1.3,
+    "uncertainty": 0.3,
+    "basis": "estimate: Zen 5, 96 cores at 350 W, 8 channels.",
+    "sources": [
+     "https://www.amd.com/en/products/processors/workstations/ryzen-threadripper.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD Ryzen 9 9950X3D",
+   "match": "Ryzen 9 9950X3D\\b",
+   "arch": "Zen 5 (Turin, 2024)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": null,
+    "boost": null
+   },
+   "l3_mb_per_socket": null,
+   "l3_mb_per_core": null,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "2 channels DDR5 (DDR4 for Zen 2/3)",
+   "estimate": {
+    "compute": 1.95,
+    "tt": 1.5,
+    "uncertainty": 0.35,
+    "basis": "estimate: Desktop part, 16 cores at desktop clocks; rough estimate by clock from the EPYC of the same generation. 2 memory channels.",
+    "sources": []
+   },
+   "measured": null,
+   "caveats": "Desktop part: at most 32 threads, little RAM."
+  },
+  {
+   "name": "AMD Ryzen 9 9950X",
+   "match": "Ryzen 9 9950X\\b",
+   "arch": "Zen 5 (Turin, 2024)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": null,
+    "boost": null
+   },
+   "l3_mb_per_socket": null,
+   "l3_mb_per_core": null,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "2 channels DDR5 (DDR4 for Zen 2/3)",
+   "estimate": {
+    "compute": 1.95,
+    "tt": 1.4,
+    "uncertainty": 0.35,
+    "basis": "estimate: Desktop part, 16 cores at desktop clocks; rough estimate by clock from the EPYC of the same generation. 2 memory channels.",
+    "sources": []
+   },
+   "measured": null,
+   "caveats": "Desktop part: at most 32 threads, little RAM."
+  },
+  {
+   "name": "AMD Ryzen 9 7950X3D",
+   "match": "Ryzen 9 7950X3D\\b",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": null,
+    "boost": null
+   },
+   "l3_mb_per_socket": null,
+   "l3_mb_per_core": null,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "2 channels DDR5 (DDR4 for Zen 2/3)",
+   "estimate": {
+    "compute": 1.75,
+    "tt": 1.4,
+    "uncertainty": 0.35,
+    "basis": "estimate: Desktop part, 16 cores at desktop clocks; rough estimate by clock from the EPYC of the same generation. 2 memory channels.",
+    "sources": []
+   },
+   "measured": null,
+   "caveats": "Desktop part: at most 32 threads, little RAM."
+  },
+  {
+   "name": "AMD Ryzen 9 7950X",
+   "match": "Ryzen 9 7950X\\b",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": null,
+    "boost": null
+   },
+   "l3_mb_per_socket": null,
+   "l3_mb_per_core": null,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "2 channels DDR5 (DDR4 for Zen 2/3)",
+   "estimate": {
+    "compute": 1.8,
+    "tt": 1.3,
+    "uncertainty": 0.35,
+    "basis": "estimate: Desktop part, 16 cores at desktop clocks; rough estimate by clock from the EPYC of the same generation. 2 memory channels.",
+    "sources": []
+   },
+   "measured": null,
+   "caveats": "Desktop part: at most 32 threads, little RAM."
+  },
+  {
+   "name": "AMD Ryzen 9 7945HX",
+   "match": "Ryzen 9 7945HX\\b",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": null,
+    "boost": null
+   },
+   "l3_mb_per_socket": null,
+   "l3_mb_per_core": null,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "2 channels DDR5 (DDR4 for Zen 2/3)",
+   "estimate": {
+    "compute": 1.55,
+    "tt": 1.15,
+    "uncertainty": 0.35,
+    "basis": "estimate: Desktop part, 16 cores at desktop clocks; rough estimate by clock from the EPYC of the same generation. 2 memory channels.",
+    "sources": []
+   },
+   "measured": null,
+   "caveats": "Desktop part: at most 32 threads, little RAM."
+  },
+  {
+   "name": "AMD Ryzen 9 5950X",
+   "match": "Ryzen 9 5950X\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": null,
+    "boost": null
+   },
+   "l3_mb_per_socket": null,
+   "l3_mb_per_core": null,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "2 channels DDR5 (DDR4 for Zen 2/3)",
+   "estimate": {
+    "compute": 1.35,
+    "tt": 1.0,
+    "uncertainty": 0.35,
+    "basis": "estimate: Desktop part, 16 cores at desktop clocks; rough estimate by clock from the EPYC of the same generation. 2 memory channels.",
+    "sources": []
+   },
+   "measured": null,
+   "caveats": "Desktop part: at most 32 threads, little RAM."
+  },
+  {
+   "name": "AMD Ryzen 9 5900XT",
+   "match": "Ryzen 9 5900XT\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": null,
+    "boost": null
+   },
+   "l3_mb_per_socket": null,
+   "l3_mb_per_core": null,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "2 channels DDR5 (DDR4 for Zen 2/3)",
+   "estimate": {
+    "compute": 1.3,
+    "tt": 0.95,
+    "uncertainty": 0.35,
+    "basis": "estimate: Desktop part, 16 cores at desktop clocks; rough estimate by clock from the EPYC of the same generation. 2 memory channels.",
+    "sources": []
+   },
+   "measured": null,
+   "caveats": "Desktop part: at most 32 threads, little RAM."
+  },
+  {
+   "name": "AMD Ryzen 9 3950X",
+   "match": "Ryzen 9 3950X\\b",
+   "arch": "Zen 2 (Rome, 2019)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": null,
+    "boost": null
+   },
+   "l3_mb_per_socket": null,
+   "l3_mb_per_core": null,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "2 channels DDR5 (DDR4 for Zen 2/3)",
+   "estimate": {
+    "compute": 1.1,
+    "tt": 0.8,
+    "uncertainty": 0.35,
+    "basis": "estimate: Desktop part, 16 cores at desktop clocks; rough estimate by clock from the EPYC of the same generation. 2 memory channels.",
+    "sources": []
+   },
+   "measured": null,
+   "caveats": "Desktop part: at most 32 threads, little RAM."
+  },
+  {
+   "name": "Intel Xeon E5-2699A v4",
+   "match": "E5-2699A\\s?v4",
+   "arch": "Intel Broadwell (Xeon E5 v4, 2016)",
+   "cores_per_socket": 22,
+   "clock_ghz": {
+    "base": 2.4,
+    "boost": 3.6
+   },
+   "l3_mb_per_socket": 55,
+   "l3_mb_per_core": 2.5,
+   "l3_layout": "2.5 MB per core, shared ring",
+   "memory": "4 channels DDR4-2400 per socket",
+   "estimate": {
+    "compute": 0.71,
+    "tt": 0.58,
+    "uncertainty": 0.15,
+    "basis": "SPEC Xeon E5-2699A v4",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2017q2/cpu2017-20161026-00014.html",
+     "https://www.spec.org/cpu2017/results/res2017q3/cpu2017-20170828-00068.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon E5-2650 v4",
+   "match": "E5-2650\\s?v4",
+   "arch": "Intel Broadwell (Xeon E5 v4, 2016)",
+   "cores_per_socket": 12,
+   "clock_ghz": {
+    "base": 2.2,
+    "boost": 2.9
+   },
+   "l3_mb_per_socket": 30,
+   "l3_mb_per_core": 2.5,
+   "l3_layout": "2.5 MB per core, shared ring",
+   "memory": "4 channels DDR4-2400 per socket",
+   "estimate": {
+    "compute": 0.61,
+    "tt": 0.69,
+    "uncertainty": 0.15,
+    "basis": "SPEC Xeon E5-2650 v4",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2017q4/cpu2017-20171002-00075.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon E5 v4 (other)",
+   "match": "E5-26\\d\\dA? v4",
+   "arch": "Intel Broadwell (Xeon E5 v4, 2016)",
+   "cores_per_socket": 18,
+   "clock_ghz": {
+    "base": 2.3,
+    "boost": 3.3
+   },
+   "l3_mb_per_socket": 45,
+   "l3_mb_per_core": 2.5,
+   "l3_layout": "2.5 MB per core, shared ring",
+   "memory": "4 channels DDR4-2400 per socket",
+   "estimate": {
+    "compute": 0.68,
+    "tt": 0.62,
+    "uncertainty": 0.2,
+    "basis": "estimate: Broadwell E5 v4 (14-22 cores): between the SPEC results of the E5-2650 v4 (0.61) and E5-2699A v4 (0.71).",
+    "sources": []
+   },
+   "measured": null,
+   "caveats": "Old (2016): slow per thread, 4 memory channels per socket."
+  },
+  {
+   "name": "Intel Xeon E5 v3",
+   "match": "E5-26\\d\\dA? v3",
+   "arch": "Intel Haswell (Xeon E5 v3, 2014)",
+   "cores_per_socket": 18,
+   "clock_ghz": {
+    "base": 2.3,
+    "boost": 3.6
+   },
+   "l3_mb_per_socket": 45,
+   "l3_mb_per_core": 2.5,
+   "l3_layout": "2.5 MB per core, shared ring",
+   "memory": "4 channels DDR4-2133 per socket",
+   "estimate": {
+    "compute": 0.62,
+    "tt": 0.55,
+    "uncertainty": 0.25,
+    "basis": "estimate: Haswell: about 5% below Broadwell per clock.",
+    "sources": []
+   },
+   "measured": null,
+   "caveats": "Old (2014)."
+  },
+  {
+   "name": "Intel Xeon Gold 6133",
+   "match": "Gold 6133\\b",
+   "arch": "Intel Skylake-SP (Xeon Scalable 1st gen, 2017)",
+   "cores_per_socket": 20,
+   "clock_ghz": {
+    "base": 2.5,
+    "boost": 3.0
+   },
+   "l3_mb_per_socket": 27.5,
+   "l3_mb_per_core": 1.38,
+   "l3_layout": "1.375 MB per core + 1 MB L2 per core, mesh",
+   "memory": "6 channels DDR4-2666 per socket",
+   "estimate": {
+    "compute": 0.72,
+    "tt": 0.79,
+    "uncertainty": 0.25,
+    "basis": "SPEC Xeon Gold 6148: 20-core Skylake OEM part with a low turbo (3.0 GHz); treated as the Gold 6148 (20 cores).",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2018q2/cpu2017-20180515-05670.html",
+     "https://www.spec.org/cpu2017/results/res2018q2/cpu2017-20180531-06593.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "OEM part with no public SPEC result."
+  },
+  {
+   "name": "Intel Xeon Gold 6138",
+   "match": "Gold 6138\\b",
+   "arch": "Intel Skylake-SP (Xeon Scalable 1st gen, 2017)",
+   "cores_per_socket": 20,
+   "clock_ghz": {
+    "base": 2.0,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 27.5,
+   "l3_mb_per_core": 1.38,
+   "l3_layout": "1.375 MB per core + 1 MB L2 per core, mesh",
+   "memory": "6 channels DDR4-2666 per socket",
+   "estimate": {
+    "compute": 0.72,
+    "tt": 0.79,
+    "uncertainty": 0.2,
+    "basis": "SPEC Xeon Gold 6148: Treated as the Gold 6148 (same core count, slightly lower base clock).",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2018q2/cpu2017-20180515-05670.html",
+     "https://www.spec.org/cpu2017/results/res2018q2/cpu2017-20180531-06593.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Gold 6142",
+   "match": "Gold\\s6142\\b",
+   "arch": "Intel Skylake-SP (Xeon Scalable 1st gen, 2017)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": 2.6,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 22,
+   "l3_mb_per_core": 1.38,
+   "l3_layout": "1.375 MB per core + 1 MB L2 per core, mesh",
+   "memory": "6 channels DDR4-2666 per socket",
+   "estimate": {
+    "compute": 0.79,
+    "tt": 0.85,
+    "uncertainty": 0.15,
+    "basis": "SPEC Xeon Gold 6142",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2017q4/cpu2017-20171208-01386.html",
+     "https://www.spec.org/cpu2017/results/res2018q1/cpu2017-20180122-02789.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Gold 6148",
+   "match": "Gold\\s6148\\b",
+   "arch": "Intel Skylake-SP (Xeon Scalable 1st gen, 2017)",
+   "cores_per_socket": 20,
+   "clock_ghz": {
+    "base": 2.4,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 27.5,
+   "l3_mb_per_core": 1.38,
+   "l3_layout": "1.375 MB per core + 1 MB L2 per core, mesh",
+   "memory": "6 channels DDR4-2666 per socket",
+   "estimate": {
+    "compute": 0.72,
+    "tt": 0.79,
+    "uncertainty": 0.15,
+    "basis": "SPEC Xeon Gold 6148",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2018q2/cpu2017-20180515-05670.html",
+     "https://www.spec.org/cpu2017/results/res2018q2/cpu2017-20180531-06593.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Gold 6154",
+   "match": "Gold\\s6154\\b",
+   "arch": "Intel Skylake-SP (Xeon Scalable 1st gen, 2017)",
+   "cores_per_socket": 18,
+   "clock_ghz": {
+    "base": 3.0,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 24.75,
+   "l3_mb_per_core": 1.38,
+   "l3_layout": "1.375 MB per core + 1 MB L2 per core, mesh",
+   "memory": "6 channels DDR4-2666 per socket",
+   "estimate": {
+    "compute": 0.86,
+    "tt": 0.91,
+    "uncertainty": 0.15,
+    "basis": "SPEC Xeon Gold 6154",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2017q4/cpu2017-20171031-00458.html",
+     "https://www.spec.org/cpu2017/results/res2018q3/cpu2017-20180831-08738.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Platinum 8160",
+   "match": "Platinum\\s8160\\b",
+   "arch": "Intel Skylake-SP (Xeon Scalable 1st gen, 2017)",
+   "cores_per_socket": 24,
+   "clock_ghz": {
+    "base": 2.1,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 33,
+   "l3_mb_per_core": 1.38,
+   "l3_layout": "1.375 MB per core + 1 MB L2 per core, mesh",
+   "memory": "6 channels DDR4-2666 per socket",
+   "estimate": {
+    "compute": 0.66,
+    "tt": 0.73,
+    "uncertainty": 0.15,
+    "basis": "SPEC Xeon Plat 8160",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2018q2/cpu2017-20180606-06660.html",
+     "https://www.spec.org/cpu2017/results/res2018q2/cpu2017-20180529-06357.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Gold 6248",
+   "match": "Gold\\s6248\\b",
+   "arch": "Intel Cascade Lake (Xeon Scalable 2nd gen, 2019)",
+   "cores_per_socket": 20,
+   "clock_ghz": {
+    "base": 2.5,
+    "boost": 3.9
+   },
+   "l3_mb_per_socket": 27.5,
+   "l3_mb_per_core": 1.38,
+   "l3_layout": "1.375 MB per core + 1 MB L2 per core, mesh",
+   "memory": "6 channels DDR4-2933 per socket",
+   "estimate": {
+    "compute": 0.82,
+    "tt": 0.95,
+    "uncertainty": 0.15,
+    "basis": "SPEC Xeon Gold 6248",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2019q2/cpu2017-20190415-11907.html",
+     "https://www.spec.org/cpu2017/results/res2019q2/cpu2017-20190513-13918.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Platinum 8260",
+   "match": "Platinum\\s8260\\b",
+   "arch": "Intel Cascade Lake (Xeon Scalable 2nd gen, 2019)",
+   "cores_per_socket": 24,
+   "clock_ghz": {
+    "base": 2.4,
+    "boost": 3.9
+   },
+   "l3_mb_per_socket": 35.75,
+   "l3_mb_per_core": 1.49,
+   "l3_layout": "1.375 MB per core + 1 MB L2 per core, mesh",
+   "memory": "6 channels DDR4-2933 per socket",
+   "estimate": {
+    "compute": 0.77,
+    "tt": 0.93,
+    "uncertainty": 0.15,
+    "basis": "SPEC Xeon Plat 8260",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2019q4/cpu2017-20190915-17863.html",
+     "https://www.spec.org/cpu2017/results/res2022q1/cpu2017-20220220-30981.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Platinum 8268",
+   "match": "Platinum\\s8268\\b",
+   "arch": "Intel Cascade Lake (Xeon Scalable 2nd gen, 2019)",
+   "cores_per_socket": 24,
+   "clock_ghz": {
+    "base": 2.9,
+    "boost": 3.9
+   },
+   "l3_mb_per_socket": 35.75,
+   "l3_mb_per_core": 1.49,
+   "l3_layout": "1.375 MB per core + 1 MB L2 per core, mesh",
+   "memory": "6 channels DDR4-2933 per socket",
+   "estimate": {
+    "compute": 0.89,
+    "tt": 0.99,
+    "uncertainty": 0.15,
+    "basis": "SPEC Xeon Plat 8268",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2019q4/cpu2017-20191111-19676.html",
+     "https://www.spec.org/cpu2017/results/res2019q2/cpu2017-20190610-15001.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Platinum 8280",
+   "match": "Platinum\\s8280\\b",
+   "arch": "Intel Cascade Lake (Xeon Scalable 2nd gen, 2019)",
+   "cores_per_socket": 28,
+   "clock_ghz": {
+    "base": 2.7,
+    "boost": 4.0
+   },
+   "l3_mb_per_socket": 38.5,
+   "l3_mb_per_core": 1.38,
+   "l3_layout": "1.375 MB per core + 1 MB L2 per core, mesh",
+   "memory": "6 channels DDR4-2933 per socket",
+   "estimate": {
+    "compute": 0.85,
+    "tt": 0.93,
+    "uncertainty": 0.15,
+    "basis": "SPEC Xeon Plat 8280",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2019q2/cpu2017-20190319-11465.html",
+     "https://www.spec.org/cpu2017/results/res2019q2/cpu2017-20190429-12783.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Gold 6338",
+   "match": "Gold\\s6338\\b",
+   "arch": "Intel Ice Lake-SP (Xeon Scalable 3rd gen, 2021)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 2.0,
+    "boost": 3.2
+   },
+   "l3_mb_per_socket": 48,
+   "l3_mb_per_core": 1.5,
+   "l3_layout": "1.5 MB per core + 1.25 MB L2 per core, mesh",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 0.79,
+    "tt": 1.02,
+    "uncertainty": 0.15,
+    "basis": "SPEC Xeon Gold 6338",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q3/cpu2017-20210720-28373.html",
+     "https://www.spec.org/cpu2017/results/res2021q3/cpu2017-20210720-28402.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Platinum 8380",
+   "match": "Platinum\\s8380\\b",
+   "arch": "Intel Ice Lake-SP (Xeon Scalable 3rd gen, 2021)",
+   "cores_per_socket": 40,
+   "clock_ghz": {
+    "base": 2.3,
+    "boost": 3.4
+   },
+   "l3_mb_per_socket": 60,
+   "l3_mb_per_core": 1.5,
+   "l3_layout": "1.5 MB per core + 1.25 MB L2 per core, mesh",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 0.9,
+    "tt": 1.08,
+    "uncertainty": 0.15,
+    "basis": "SPEC Xeon Plat 8380",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2022q1/cpu2017-20211123-30268.html",
+     "https://www.spec.org/cpu2017/results/res2023q1/cpu2017-20230208-34088.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Gold 6430",
+   "match": "Gold\\s6430\\b",
+   "arch": "Intel Sapphire Rapids (Xeon Scalable 4th gen, 2023)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 2.1,
+    "boost": 3.4
+   },
+   "l3_mb_per_socket": 60,
+   "l3_mb_per_core": 1.88,
+   "l3_layout": "1.875 MB per core + 2 MB L2 per core, mesh",
+   "memory": "8 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 0.9,
+    "tt": 1.26,
+    "uncertainty": 0.15,
+    "basis": "SPEC Xeon Gold 6430",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q1/cpu2017-20230227-34366.html",
+     "https://www.spec.org/cpu2017/results/res2024q2/cpu2017-20240424-43179.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Gold 6438N",
+   "match": "Gold\\s6438N\\b",
+   "arch": "Intel Sapphire Rapids (Xeon Scalable 4th gen, 2023)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 2.0,
+    "boost": 3.6
+   },
+   "l3_mb_per_socket": 60,
+   "l3_mb_per_core": 1.88,
+   "l3_layout": "1.875 MB per core + 2 MB L2 per core, mesh",
+   "memory": "8 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 0.93,
+    "tt": 1.28,
+    "uncertainty": 0.15,
+    "basis": "SPEC Xeon Gold 6438N",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q2/cpu2017-20230409-35608.html",
+     "https://www.spec.org/cpu2017/results/res2023q2/cpu2017-20230508-36423.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Platinum 8480+",
+   "match": "Platinum\\s8480\\+",
+   "arch": "Intel Sapphire Rapids (Xeon Scalable 4th gen, 2023)",
+   "cores_per_socket": 56,
+   "clock_ghz": {
+    "base": 2.0,
+    "boost": 3.8
+   },
+   "l3_mb_per_socket": 105,
+   "l3_mb_per_core": 1.88,
+   "l3_layout": "1.875 MB per core + 2 MB L2 per core, mesh",
+   "memory": "8 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.0,
+    "tt": 1.22,
+    "uncertainty": 0.15,
+    "basis": "SPEC Xeon Plat 8480+",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230630-37555.html",
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230616-37239.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Gold 6530",
+   "match": "Gold\\s6530\\b",
+   "arch": "Intel Emerald Rapids (Xeon Scalable 5th gen, 2023)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 2.1,
+    "boost": 4.0
+   },
+   "l3_mb_per_socket": 160,
+   "l3_mb_per_core": 5.0,
+   "l3_layout": "up to 5 MB per core + 2 MB L2 per core, mesh",
+   "memory": "8 channels DDR5-5600 per socket",
+   "estimate": {
+    "compute": 0.95,
+    "tt": 1.33,
+    "uncertainty": 0.15,
+    "basis": "SPEC Xeon Gold 6530",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q1/cpu2017-20240226-41669.html",
+     "https://www.spec.org/cpu2017/results/res2024q3/cpu2017-20240909-44705.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Platinum 8558",
+   "match": "Platinum\\s8558\\b",
+   "arch": "Intel Emerald Rapids (Xeon Scalable 5th gen, 2023)",
+   "cores_per_socket": 48,
+   "clock_ghz": {
+    "base": 2.1,
+    "boost": 4.0
+   },
+   "l3_mb_per_socket": 260,
+   "l3_mb_per_core": 5.42,
+   "l3_layout": "up to 5 MB per core + 2 MB L2 per core, mesh",
+   "memory": "8 channels DDR5-5600 per socket",
+   "estimate": {
+    "compute": 1.04,
+    "tt": 1.34,
+    "uncertainty": 0.15,
+    "basis": "SPEC Xeon Plat 8558",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q2/cpu2017-20240601-43672.html",
+     "https://www.spec.org/cpu2017/results/res2024q2/cpu2017-20240325-42484.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Platinum 8570",
+   "match": "Platinum\\s8570\\b",
+   "arch": "Intel Emerald Rapids (Xeon Scalable 5th gen, 2023)",
+   "cores_per_socket": 56,
+   "clock_ghz": {
+    "base": 2.1,
+    "boost": 4.0
+   },
+   "l3_mb_per_socket": 300,
+   "l3_mb_per_core": 5.36,
+   "l3_layout": "up to 5 MB per core + 2 MB L2 per core, mesh",
+   "memory": "8 channels DDR5-5600 per socket",
+   "estimate": {
+    "compute": 1.06,
+    "tt": 1.34,
+    "uncertainty": 0.15,
+    "basis": "SPEC Xeon Plat 8570",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q1/cpu2017-20240226-41625.html",
+     "https://www.spec.org/cpu2017/results/res2024q1/cpu2017-20240311-41963.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Platinum 8592+",
+   "match": "Platinum\\s8592\\+",
+   "arch": "Intel Emerald Rapids (Xeon Scalable 5th gen, 2023)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 1.9,
+    "boost": 3.9
+   },
+   "l3_mb_per_socket": 320,
+   "l3_mb_per_core": 5.0,
+   "l3_layout": "up to 5 MB per core + 2 MB L2 per core, mesh",
+   "memory": "8 channels DDR5-5600 per socket",
+   "estimate": {
+    "compute": 1.02,
+    "tt": 1.25,
+    "uncertainty": 0.15,
+    "basis": "SPEC Xeon Plat 8592+",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q4/cpu2017-20231128-40081.html",
+     "https://www.spec.org/cpu2017/results/res2023q4/cpu2017-20231128-40086.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Gold 6226R",
+   "match": "Gold 6226R\\b",
+   "arch": "Intel Cascade Lake (Xeon Scalable 2nd gen, 2019)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": 2.9,
+    "boost": 3.9
+   },
+   "l3_mb_per_socket": 22,
+   "l3_mb_per_core": 1.38,
+   "l3_layout": "1.375 MB per core + 1 MB L2 per core, mesh",
+   "memory": "6 channels DDR4-2933 per socket",
+   "estimate": {
+    "compute": 0.89,
+    "tt": 0.99,
+    "uncertainty": 0.2,
+    "basis": "SPEC Xeon Plat 8268: 16-core Cascade Lake at 2.9 GHz; treated as the Platinum 8268 (2.9 GHz).",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2019q4/cpu2017-20191111-19676.html",
+     "https://www.spec.org/cpu2017/results/res2019q2/cpu2017-20190610-15001.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Platinum 8272CL (Azure)",
+   "match": "Platinum\\s8272",
+   "arch": "Intel Cascade Lake (Xeon Scalable 2nd gen, 2019)",
+   "cores_per_socket": 26,
+   "clock_ghz": {
+    "base": 2.6,
+    "boost": 3.4
+   },
+   "l3_mb_per_socket": 35.75,
+   "l3_mb_per_core": 1.38,
+   "l3_layout": "1.375 MB per core + 1 MB L2 per core, mesh",
+   "memory": "6 channels DDR4-2933 per socket",
+   "estimate": {
+    "compute": 0.85,
+    "tt": 0.93,
+    "uncertainty": 0.2,
+    "basis": "SPEC Xeon Plat 8280: Azure Cascade Lake variant (26 cores); treated as the Platinum 8280 (28 cores).",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2019q2/cpu2017-20190319-11465.html",
+     "https://www.spec.org/cpu2017/results/res2019q2/cpu2017-20190429-12783.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part."
+  },
+  {
+   "name": "Intel Xeon Silver 4314",
+   "match": "Silver 4314\\b",
+   "arch": "Intel Ice Lake-SP (Xeon Scalable 3rd gen, 2021)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": 2.4,
+    "boost": 3.4
+   },
+   "l3_mb_per_socket": 24,
+   "l3_mb_per_core": 1.5,
+   "l3_layout": "1.5 MB per core + 1.25 MB L2 per core, mesh",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 0.79,
+    "tt": 1.02,
+    "uncertainty": 0.25,
+    "basis": "SPEC Xeon Gold 6338: 16-core Ice Lake; treated as the Gold 6338.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q3/cpu2017-20210720-28373.html",
+     "https://www.spec.org/cpu2017/results/res2021q3/cpu2017-20210720-28402.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Platinum 8352V",
+   "match": "Platinum\\s8352",
+   "arch": "Intel Ice Lake-SP (Xeon Scalable 3rd gen, 2021)",
+   "cores_per_socket": 36,
+   "clock_ghz": {
+    "base": 2.1,
+    "boost": 3.5
+   },
+   "l3_mb_per_socket": 54,
+   "l3_mb_per_core": 1.5,
+   "l3_layout": "1.5 MB per core + 1.25 MB L2 per core, mesh",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 0.79,
+    "tt": 1.02,
+    "uncertainty": 0.2,
+    "basis": "SPEC Xeon Gold 6338: 36-core Ice Lake; treated as the Gold 6338.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q3/cpu2017-20210720-28373.html",
+     "https://www.spec.org/cpu2017/results/res2021q3/cpu2017-20210720-28402.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Gold 6448Y",
+   "match": "Gold\\s6448Y\\b",
+   "arch": "Intel Sapphire Rapids (Xeon Scalable 4th gen, 2023)",
+   "cores_per_socket": null,
+   "clock_ghz": {
+    "base": null,
+    "boost": null
+   },
+   "l3_mb_per_socket": null,
+   "l3_mb_per_core": null,
+   "l3_layout": "1.875 MB per core + 2 MB L2 per core, mesh",
+   "memory": "8 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.0,
+    "tt": 1.22,
+    "uncertainty": 0.2,
+    "basis": "SPEC Xeon Plat 8480+: Sapphire Rapids; treated as the Platinum 8480+.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230630-37555.html",
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230616-37239.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Gold 5418Y",
+   "match": "Gold\\s5418Y\\b",
+   "arch": "Intel Sapphire Rapids (Xeon Scalable 4th gen, 2023)",
+   "cores_per_socket": null,
+   "clock_ghz": {
+    "base": null,
+    "boost": null
+   },
+   "l3_mb_per_socket": null,
+   "l3_mb_per_core": null,
+   "l3_layout": "1.875 MB per core + 2 MB L2 per core, mesh",
+   "memory": "8 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.0,
+    "tt": 1.22,
+    "uncertainty": 0.2,
+    "basis": "SPEC Xeon Plat 8480+: Sapphire Rapids; treated as the Platinum 8480+.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230630-37555.html",
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230616-37239.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Gold 6442Y",
+   "match": "Gold\\s6442Y\\b",
+   "arch": "Intel Sapphire Rapids (Xeon Scalable 4th gen, 2023)",
+   "cores_per_socket": null,
+   "clock_ghz": {
+    "base": null,
+    "boost": null
+   },
+   "l3_mb_per_socket": null,
+   "l3_mb_per_core": null,
+   "l3_layout": "1.875 MB per core + 2 MB L2 per core, mesh",
+   "memory": "8 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.0,
+    "tt": 1.22,
+    "uncertainty": 0.2,
+    "basis": "SPEC Xeon Plat 8480+: Sapphire Rapids; treated as the Platinum 8480+.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230630-37555.html",
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230616-37239.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Platinum 8462Y",
+   "match": "Platinum\\s8462Y\\b",
+   "arch": "Intel Sapphire Rapids (Xeon Scalable 4th gen, 2023)",
+   "cores_per_socket": null,
+   "clock_ghz": {
+    "base": null,
+    "boost": null
+   },
+   "l3_mb_per_socket": null,
+   "l3_mb_per_core": null,
+   "l3_layout": "1.875 MB per core + 2 MB L2 per core, mesh",
+   "memory": "8 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.0,
+    "tt": 1.22,
+    "uncertainty": 0.2,
+    "basis": "SPEC Xeon Plat 8480+: Sapphire Rapids; treated as the Platinum 8480+.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230630-37555.html",
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230616-37239.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Platinum 8468",
+   "match": "Platinum\\s8468\\b",
+   "arch": "Intel Sapphire Rapids (Xeon Scalable 4th gen, 2023)",
+   "cores_per_socket": null,
+   "clock_ghz": {
+    "base": null,
+    "boost": null
+   },
+   "l3_mb_per_socket": null,
+   "l3_mb_per_core": null,
+   "l3_layout": "1.875 MB per core + 2 MB L2 per core, mesh",
+   "memory": "8 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.0,
+    "tt": 1.22,
+    "uncertainty": 0.2,
+    "basis": "SPEC Xeon Plat 8480+: Sapphire Rapids; treated as the Platinum 8480+.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230630-37555.html",
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230616-37239.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Platinum 8469C",
+   "match": "Platinum\\s8469C\\b",
+   "arch": "Intel Sapphire Rapids (Xeon Scalable 4th gen, 2023)",
+   "cores_per_socket": null,
+   "clock_ghz": {
+    "base": null,
+    "boost": null
+   },
+   "l3_mb_per_socket": null,
+   "l3_mb_per_core": null,
+   "l3_layout": "1.875 MB per core + 2 MB L2 per core, mesh",
+   "memory": "8 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.0,
+    "tt": 1.22,
+    "uncertainty": 0.2,
+    "basis": "SPEC Xeon Plat 8480+: Sapphire Rapids; treated as the Platinum 8480+.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230630-37555.html",
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230616-37239.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part."
+  },
+  {
+   "name": "Intel Xeon Platinum 8470",
+   "match": "Platinum\\s8470\\b",
+   "arch": "Intel Sapphire Rapids (Xeon Scalable 4th gen, 2023)",
+   "cores_per_socket": null,
+   "clock_ghz": {
+    "base": null,
+    "boost": null
+   },
+   "l3_mb_per_socket": null,
+   "l3_mb_per_core": null,
+   "l3_layout": "1.875 MB per core + 2 MB L2 per core, mesh",
+   "memory": "8 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.0,
+    "tt": 1.22,
+    "uncertainty": 0.2,
+    "basis": "SPEC Xeon Plat 8480+: Sapphire Rapids; treated as the Platinum 8480+.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230630-37555.html",
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230616-37239.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Platinum 8559C",
+   "match": "Platinum\\s8559C\\b",
+   "arch": "Intel Emerald Rapids (Xeon Scalable 5th gen, 2023)",
+   "cores_per_socket": null,
+   "clock_ghz": {
+    "base": null,
+    "boost": null
+   },
+   "l3_mb_per_socket": null,
+   "l3_mb_per_core": null,
+   "l3_layout": "up to 5 MB per core + 2 MB L2 per core, mesh",
+   "memory": "8 channels DDR5-5600 per socket",
+   "estimate": {
+    "compute": 1.04,
+    "tt": 1.34,
+    "uncertainty": 0.2,
+    "basis": "SPEC Xeon Plat 8558: Emerald Rapids; treated as the Platinum 8558 (48 cores).",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q2/cpu2017-20240601-43672.html",
+     "https://www.spec.org/cpu2017/results/res2024q2/cpu2017-20240325-42484.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part: no public spec sheet."
+  },
+  {
+   "name": "Intel Xeon Platinum 8563C",
+   "match": "Platinum\\s8563C\\b",
+   "arch": "Intel Emerald Rapids (Xeon Scalable 5th gen, 2023)",
+   "cores_per_socket": null,
+   "clock_ghz": {
+    "base": null,
+    "boost": null
+   },
+   "l3_mb_per_socket": null,
+   "l3_mb_per_core": null,
+   "l3_layout": "up to 5 MB per core + 2 MB L2 per core, mesh",
+   "memory": "8 channels DDR5-5600 per socket",
+   "estimate": {
+    "compute": 1.04,
+    "tt": 1.34,
+    "uncertainty": 0.2,
+    "basis": "SPEC Xeon Plat 8558: Emerald Rapids; treated as the Platinum 8558 (48 cores).",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q2/cpu2017-20240601-43672.html",
+     "https://www.spec.org/cpu2017/results/res2024q2/cpu2017-20240325-42484.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part: no public spec sheet."
+  },
+  {
+   "name": "Intel Xeon Platinum 8581C",
+   "match": "Platinum\\s8581C\\b",
+   "arch": "Intel Emerald Rapids (Xeon Scalable 5th gen, 2023)",
+   "cores_per_socket": null,
+   "clock_ghz": {
+    "base": null,
+    "boost": null
+   },
+   "l3_mb_per_socket": null,
+   "l3_mb_per_core": null,
+   "l3_layout": "up to 5 MB per core + 2 MB L2 per core, mesh",
+   "memory": "8 channels DDR5-5600 per socket",
+   "estimate": {
+    "compute": 1.04,
+    "tt": 1.34,
+    "uncertainty": 0.2,
+    "basis": "SPEC Xeon Plat 8558: Emerald Rapids; treated as the Platinum 8558 (48 cores).",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q2/cpu2017-20240601-43672.html",
+     "https://www.spec.org/cpu2017/results/res2024q2/cpu2017-20240325-42484.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part: no public spec sheet."
+  },
+  {
+   "name": "Intel Xeon Platinum 8568Y",
+   "match": "Platinum\\s8568Y\\b",
+   "arch": "Intel Emerald Rapids (Xeon Scalable 5th gen, 2023)",
+   "cores_per_socket": null,
+   "clock_ghz": {
+    "base": null,
+    "boost": null
+   },
+   "l3_mb_per_socket": null,
+   "l3_mb_per_core": null,
+   "l3_layout": "up to 5 MB per core + 2 MB L2 per core, mesh",
+   "memory": "8 channels DDR5-5600 per socket",
+   "estimate": {
+    "compute": 1.04,
+    "tt": 1.34,
+    "uncertainty": 0.2,
+    "basis": "SPEC Xeon Plat 8558: Emerald Rapids; treated as the Platinum 8558 (48 cores).",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q2/cpu2017-20240601-43672.html",
+     "https://www.spec.org/cpu2017/results/res2024q2/cpu2017-20240325-42484.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon 6980P",
+   "match": "Xeon\\S*\\s6980P\\b",
+   "arch": "Intel Granite Rapids (Xeon 6 P-core, 2024-25)",
+   "cores_per_socket": 128,
+   "clock_ghz": {
+    "base": 2.0,
+    "boost": 3.9
+   },
+   "l3_mb_per_socket": 504,
+   "l3_mb_per_core": 3.94,
+   "l3_layout": "5.25 MB per core + 2 MB L2 per core, mesh",
+   "memory": "12 channels DDR5-6400 per socket (6900P)",
+   "estimate": {
+    "compute": 1.23,
+    "tt": 1.44,
+    "uncertainty": 0.15,
+    "basis": "SPEC Xeon 6980P",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2025q1/cpu2017-20241230-45863.html",
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20241022-45100.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon 6767P",
+   "match": "Xeon\\S*\\s6767P\\b",
+   "arch": "Intel Granite Rapids (Xeon 6 P-core, 2024-25)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.4,
+    "boost": 3.9
+   },
+   "l3_mb_per_socket": 336,
+   "l3_mb_per_core": 5.25,
+   "l3_layout": "5.25 MB per core + 2 MB L2 per core, mesh",
+   "memory": "8 channels DDR5-6400 per socket (6700P)",
+   "estimate": {
+    "compute": 1.38,
+    "tt": 1.5,
+    "uncertainty": 0.25,
+    "basis": "estimate: Granite Rapids P-core, 64 cores, about 3.6 GHz on all cores: the Xeon 6980P SPEC result (1.23, about 3.2 GHz on all cores) scaled by clock.",
+    "sources": [
+     "https://www.neweggbusiness.com/intel-xeon-6767p-fclga-4710/p/9B-19-118-604"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon 6776P",
+   "match": "Xeon\\S*\\s6776P\\b",
+   "arch": "Intel Granite Rapids (Xeon 6 P-core, 2024-25)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.3,
+    "boost": 4.6
+   },
+   "l3_mb_per_socket": 336,
+   "l3_mb_per_core": 5.25,
+   "l3_layout": "5.25 MB per core + 2 MB L2 per core, mesh",
+   "memory": "8 channels DDR5-6400 per socket (6700P)",
+   "estimate": {
+    "compute": 1.38,
+    "tt": 1.5,
+    "uncertainty": 0.25,
+    "basis": "estimate: Granite Rapids P-core, 64 cores, about 3.6 GHz on all cores: the Xeon 6980P SPEC result (1.23, about 3.2 GHz on all cores) scaled by clock.",
+    "sources": [
+     "https://www.neweggbusiness.com/intel-xeon-6767p-fclga-4710/p/9B-19-118-604"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "Intel Xeon Phi 7250",
+   "match": "Xeon Phi",
+   "arch": "Intel Knights Landing many-core (2016)",
+   "cores_per_socket": 68,
+   "clock_ghz": {
+    "base": 1.4,
+    "boost": 1.6
+   },
+   "l3_mb_per_socket": null,
+   "l3_mb_per_core": null,
+   "l3_layout": "no L3; 1 MB L2 per 2 cores",
+   "memory": "6 channels DDR4 + 16 GB on-package MCDRAM",
+   "estimate": {
+    "compute": 0.15,
+    "tt": 0.12,
+    "uncertainty": 0.5,
+    "basis": "estimate: 68 small 1.4 GHz cores with 4 threads each (272 threads), built for wide vector maths; branchy integer code runs at a small fraction of a server core, shared by 4 threads.",
+    "sources": []
+   },
+   "measured": null,
+   "caveats": "Avoid for our jobs."
+  },
+  {
+   "name": "Intel Core i9-14900K",
+   "match": "i9-14900",
+   "arch": "Intel Raptor Lake desktop (2023)",
+   "cores_per_socket": 24,
+   "clock_ghz": {
+    "base": 3.2,
+    "boost": 6.0
+   },
+   "l3_mb_per_socket": 36,
+   "l3_mb_per_core": 1.5,
+   "l3_layout": "36 MB shared",
+   "memory": "2 channels DDR5",
+   "estimate": {
+    "compute": 1.5,
+    "tt": 1.2,
+    "uncertainty": 0.35,
+    "basis": "estimate: Desktop: 8 fast + 16 efficient cores, 32 threads.",
+    "sources": []
+   },
+   "measured": null,
+   "caveats": "Desktop part: at most 32 threads."
+  },
+  {
+   "name": "AMD EPYC 7203",
+   "match": "EPYC 7203P?\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 8,
+   "clock_ghz": {
+    "base": 2.8,
+    "boost": 3.4
+   },
+   "l3_mb_per_socket": 64.0,
+   "l3_mb_per_core": 8.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.21,
+    "tt": 1.37,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7203",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q4/cpu2017-20231120-39767.html",
+     "https://www.spec.org/cpu2017/results/res2023q4/cpu2017-20231120-39798.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7232",
+   "match": "EPYC 7232P?\\b",
+   "arch": "Zen 2 (Rome, 2019)",
+   "cores_per_socket": 8,
+   "clock_ghz": {
+    "base": 3.1,
+    "boost": 3.2
+   },
+   "l3_mb_per_socket": 32.0,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 0.99,
+    "tt": 1.11,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7232",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2020q1/cpu2017-20200316-21368.html",
+     "https://www.spec.org/cpu2017/results/res2020q1/cpu2017-20200119-20569.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7251",
+   "match": "EPYC 7251P?\\b",
+   "arch": "Zen 1 (Naples, 2017)",
+   "cores_per_socket": 8,
+   "clock_ghz": {
+    "base": 2.1,
+    "boost": null
+   },
+   "l3_mb_per_socket": 32.0,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "8 MB per 4-core cluster",
+   "memory": "8 channels DDR4-2666 per socket",
+   "estimate": {
+    "compute": 0.77,
+    "tt": 0.87,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7251",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2018q2/cpu2017-20180529-06181.html",
+     "https://www.spec.org/cpu2017/results/res2018q2/cpu2017-20180319-04047.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7252",
+   "match": "EPYC 7252P?\\b",
+   "arch": "Zen 2 (Rome, 2019)",
+   "cores_per_socket": 8,
+   "clock_ghz": {
+    "base": 3.1,
+    "boost": 3.2
+   },
+   "l3_mb_per_socket": 64.0,
+   "l3_mb_per_core": 8.0,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 0.99,
+    "tt": 1.15,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7252",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20201214-24568.html",
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20201216-24576.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7261",
+   "match": "EPYC 7261P?\\b",
+   "arch": "Zen 1 (Naples, 2017)",
+   "cores_per_socket": 8,
+   "clock_ghz": {
+    "base": 2.5,
+    "boost": null
+   },
+   "l3_mb_per_socket": 64.0,
+   "l3_mb_per_core": 8.0,
+   "l3_layout": "8 MB per 4-core cluster",
+   "memory": "8 channels DDR4-2666 per socket",
+   "estimate": {
+    "compute": 0.79,
+    "tt": 0.9,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7261",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2018q4/cpu2017-20181126-09826.html",
+     "https://www.spec.org/cpu2017/results/res2018q4/cpu2017-20181210-10149.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7262",
+   "match": "EPYC 7262P?\\b",
+   "arch": "Zen 2 (Rome, 2019)",
+   "cores_per_socket": 8,
+   "clock_ghz": {
+    "base": 3.2,
+    "boost": 3.4
+   },
+   "l3_mb_per_socket": 128.0,
+   "l3_mb_per_core": 16.0,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.04,
+    "tt": 1.26,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7262",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2019q4/cpu2017-20190924-18513.html",
+     "https://www.spec.org/cpu2017/results/res2019q4/cpu2017-20190927-18734.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7272",
+   "match": "EPYC 7272P?\\b",
+   "arch": "Zen 2 (Rome, 2019)",
+   "cores_per_socket": 12,
+   "clock_ghz": {
+    "base": 2.9,
+    "boost": 3.2
+   },
+   "l3_mb_per_socket": 64.0,
+   "l3_mb_per_core": 5.33,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 0.98,
+    "tt": 1.1,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7272",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2022q1/cpu2017-20220131-30840.html",
+     "https://www.spec.org/cpu2017/results/res2020q4/cpu2017-20201026-24250.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7281",
+   "match": "EPYC 7281P?\\b",
+   "arch": "Zen 1 (Naples, 2017)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": 2.1,
+    "boost": null
+   },
+   "l3_mb_per_socket": 32.0,
+   "l3_mb_per_core": 2.0,
+   "l3_layout": "8 MB per 4-core cluster",
+   "memory": "8 channels DDR4-2666 per socket",
+   "estimate": {
+    "compute": 0.72,
+    "tt": 0.78,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7281",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2018q4/cpu2017-20181029-09365.html",
+     "https://www.spec.org/cpu2017/results/res2018q4/cpu2017-20180918-08910.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7301",
+   "match": "EPYC 7301P?\\b",
+   "arch": "Zen 1 (Naples, 2017)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": 2.2,
+    "boost": null
+   },
+   "l3_mb_per_socket": 64.0,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "8 MB per 4-core cluster",
+   "memory": "8 channels DDR4-2666 per socket",
+   "estimate": {
+    "compute": 0.72,
+    "tt": 0.8,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7301",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2018q2/cpu2017-20180612-06872.html",
+     "https://www.spec.org/cpu2017/results/res2018q2/cpu2017-20180612-06876.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7303",
+   "match": "EPYC 7303P?\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": 2.4,
+    "boost": 3.4
+   },
+   "l3_mb_per_socket": 64.0,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.2,
+    "tt": 1.28,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7303",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q4/cpu2017-20231120-39787.html",
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230731-38289.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7313",
+   "match": "EPYC 7313P?\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": 3.0,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 128.0,
+   "l3_mb_per_core": 8.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.32,
+    "tt": 1.49,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7313",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q2/cpu2017-20210510-26198.html",
+     "https://www.spec.org/cpu2017/results/res2021q3/cpu2017-20210510-26288.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7343",
+   "match": "EPYC 7343P?\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": 3.2,
+    "boost": 3.9
+   },
+   "l3_mb_per_socket": 128.0,
+   "l3_mb_per_core": 8.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.4,
+    "tt": 1.54,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7343",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2022q2/cpu2017-20220607-32032.html",
+     "https://www.spec.org/cpu2017/results/res2021q2/cpu2017-20210510-26275.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7351",
+   "match": "EPYC 7351P?\\b",
+   "arch": "Zen 1 (Naples, 2017)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": 2.4,
+    "boost": null
+   },
+   "l3_mb_per_socket": 64.0,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "8 MB per 4-core cluster",
+   "memory": "8 channels DDR4-2666 per socket",
+   "estimate": {
+    "compute": 0.78,
+    "tt": 0.85,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7351",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2018q4/cpu2017-20181126-09830.html",
+     "https://www.spec.org/cpu2017/results/res2018q2/cpu2017-20180529-06184.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7371",
+   "match": "EPYC 7371P?\\b",
+   "arch": "Zen 1 (Naples, 2017)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": 3.1,
+    "boost": null
+   },
+   "l3_mb_per_socket": 64.0,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "8 MB per 4-core cluster",
+   "memory": "8 channels DDR4-2666 per socket",
+   "estimate": {
+    "compute": 0.95,
+    "tt": 0.99,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7371",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2018q4/cpu2017-20181127-09936.html",
+     "https://www.spec.org/cpu2017/results/res2019q1/cpu2017-20181224-10344.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7373X",
+   "match": "EPYC 7373XP?\\b",
+   "arch": "Zen 3 + 3D V-Cache (Milan-X, 2022)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": 3.05,
+    "boost": 3.8
+   },
+   "l3_mb_per_socket": 768.0,
+   "l3_mb_per_core": 48.0,
+   "l3_layout": "96 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.33,
+    "tt": 1.67,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7373X",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2022q4/cpu2017-20221010-32536.html",
+     "https://www.spec.org/cpu2017/results/res2022q4/cpu2017-20221010-32538.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7401",
+   "match": "EPYC 7401P?\\b",
+   "arch": "Zen 1 (Naples, 2017)",
+   "cores_per_socket": 24,
+   "clock_ghz": {
+    "base": 2.0,
+    "boost": null
+   },
+   "l3_mb_per_socket": 64.0,
+   "l3_mb_per_core": 2.67,
+   "l3_layout": "8 MB per 4-core cluster",
+   "memory": "8 channels DDR4-2666 per socket",
+   "estimate": {
+    "compute": 0.74,
+    "tt": 0.78,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7401",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2018q4/cpu2017-20181126-09832.html",
+     "https://www.spec.org/cpu2017/results/res2019q1/cpu2017-20190107-10517.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7413",
+   "match": "EPYC 7413P?\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 24,
+   "clock_ghz": {
+    "base": 2.65,
+    "boost": 3.6
+   },
+   "l3_mb_per_socket": 128.0,
+   "l3_mb_per_core": 5.33,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.27,
+    "tt": 1.32,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7413",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20210315-25290.html",
+     "https://www.spec.org/cpu2017/results/res2023q4/cpu2017-20230925-39107.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7451",
+   "match": "EPYC 7451P?\\b",
+   "arch": "Zen 1 (Naples, 2017)",
+   "cores_per_socket": 24,
+   "clock_ghz": {
+    "base": 2.3,
+    "boost": null
+   },
+   "l3_mb_per_socket": 64.0,
+   "l3_mb_per_core": 2.67,
+   "l3_layout": "8 MB per 4-core cluster",
+   "memory": "8 channels DDR4-2666 per socket",
+   "estimate": {
+    "compute": 0.78,
+    "tt": 0.8,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7451",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2018q2/cpu2017-20180319-04027.html",
+     "https://www.spec.org/cpu2017/results/res2018q2/cpu2017-20180319-04041.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7453",
+   "match": "EPYC 7453P?\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 28,
+   "clock_ghz": {
+    "base": 2.75,
+    "boost": 3.45
+   },
+   "l3_mb_per_socket": 64.0,
+   "l3_mb_per_core": 2.29,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.18,
+    "tt": 1.19,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7453",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q2/cpu2017-20210510-26279.html",
+     "https://www.spec.org/cpu2017/results/res2021q4/cpu2017-20211121-30139.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7473X",
+   "match": "EPYC 7473XP?\\b",
+   "arch": "Zen 3 + 3D V-Cache (Milan-X, 2022)",
+   "cores_per_socket": 24,
+   "clock_ghz": {
+    "base": 2.8,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 768.0,
+   "l3_mb_per_core": 32.0,
+   "l3_layout": "96 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.31,
+    "tt": 1.48,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7473X",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2022q1/cpu2017-20220228-30999.html",
+     "https://www.spec.org/cpu2017/results/res2022q1/cpu2017-20220228-31025.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7501",
+   "match": "EPYC 7501P?\\b",
+   "arch": "Zen 1 (Naples, 2017)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 2.0,
+    "boost": null
+   },
+   "l3_mb_per_socket": 64.0,
+   "l3_mb_per_core": 2.0,
+   "l3_layout": "8 MB per 4-core cluster",
+   "memory": "8 channels DDR4-2666 per socket",
+   "estimate": {
+    "compute": 0.69,
+    "tt": 0.71,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7501",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2018q2/cpu2017-20180319-04075.html",
+     "https://www.spec.org/cpu2017/results/res2018q2/cpu2017-20180319-04079.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7542",
+   "match": "EPYC 7542P?\\b",
+   "arch": "Zen 2 (Rome, 2019)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 2.9,
+    "boost": 3.4
+   },
+   "l3_mb_per_socket": 128.0,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "16 MB per 4-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.02,
+    "tt": 1.01,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7542",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2019q3/cpu2017-20190831-17279.html",
+     "https://www.spec.org/cpu2017/results/res2020q2/cpu2017-20200511-22263.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7551",
+   "match": "EPYC 7551P?\\b",
+   "arch": "Zen 1 (Naples, 2017)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 2.0,
+    "boost": null
+   },
+   "l3_mb_per_socket": 64.0,
+   "l3_mb_per_core": 2.0,
+   "l3_layout": "8 MB per 4-core cluster",
+   "memory": "8 channels DDR4-2666 per socket",
+   "estimate": {
+    "compute": 0.68,
+    "tt": 0.69,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7551",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2018q2/cpu2017-20180319-04035.html",
+     "https://www.spec.org/cpu2017/results/res2018q4/cpu2017-20181029-09376.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7573X",
+   "match": "EPYC 7573XP?\\b",
+   "arch": "Zen 3 + 3D V-Cache (Milan-X, 2022)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 2.8,
+    "boost": 3.6
+   },
+   "l3_mb_per_socket": 768.0,
+   "l3_mb_per_core": 24.0,
+   "l3_layout": "96 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.26,
+    "tt": 1.34,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7573X",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2022q1/cpu2017-20220228-31050.html",
+     "https://www.spec.org/cpu2017/results/res2022q1/cpu2017-20220311-31161.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 7601",
+   "match": "EPYC 7601P?\\b",
+   "arch": "Zen 1 (Naples, 2017)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 2.2,
+    "boost": null
+   },
+   "l3_mb_per_socket": 64.0,
+   "l3_mb_per_core": 2.0,
+   "l3_layout": "8 MB per 4-core cluster",
+   "memory": "8 channels DDR4-2666 per socket",
+   "estimate": {
+    "compute": 0.72,
+    "tt": 0.72,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7601",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2018q2/cpu2017-20180514-05502.html",
+     "https://www.spec.org/cpu2017/results/res2018q2/cpu2017-20180417-05028.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 8024",
+   "match": "EPYC 8024P?\\b",
+   "arch": "Zen 4c (Siena, 2023)",
+   "cores_per_socket": 8,
+   "clock_ghz": {
+    "base": 2.4,
+    "boost": 3.0
+   },
+   "l3_mb_per_socket": 32.0,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "16 MB per 8-core cluster",
+   "memory": "6 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.19,
+    "tt": 1.41,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 8024",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q4/cpu2017-20231023-39518.html",
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230828-38745.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 8124",
+   "match": "EPYC 8124P?\\b",
+   "arch": "Zen 4c (Siena, 2023)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": 2.45,
+    "boost": 3.0
+   },
+   "l3_mb_per_socket": 64.0,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "16 MB per 8-core cluster",
+   "memory": "6 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.19,
+    "tt": 1.39,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 8124",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q4/cpu2017-20231116-39735.html",
+     "https://www.spec.org/cpu2017/results/res2023q4/cpu2017-20231120-39913.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 8224",
+   "match": "EPYC 8224P?\\b",
+   "arch": "Zen 4c (Siena, 2023)",
+   "cores_per_socket": 24,
+   "clock_ghz": {
+    "base": 2.55,
+    "boost": 3.0
+   },
+   "l3_mb_per_socket": 64.0,
+   "l3_mb_per_core": 2.67,
+   "l3_layout": "16 MB per 8-core cluster",
+   "memory": "6 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.19,
+    "tt": 1.34,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 8224",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q4/cpu2017-20231116-39732.html",
+     "https://www.spec.org/cpu2017/results/res2023q4/cpu2017-20231023-39522.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 8324",
+   "match": "EPYC 8324P?\\b",
+   "arch": "Zen 4c (Siena, 2023)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 2.65,
+    "boost": 3.0
+   },
+   "l3_mb_per_socket": 128.0,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "16 MB per 8-core cluster",
+   "memory": "6 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.19,
+    "tt": 1.32,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 8324",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230825-38699.html",
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230828-38767.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 8434",
+   "match": "EPYC 8434P?\\b",
+   "arch": "Zen 4c (Siena, 2023)",
+   "cores_per_socket": 48,
+   "clock_ghz": {
+    "base": 2.5,
+    "boost": 3.1
+   },
+   "l3_mb_per_socket": 128.0,
+   "l3_mb_per_core": 2.67,
+   "l3_layout": "16 MB per 8-core cluster",
+   "memory": "6 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.22,
+    "tt": 1.27,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 8434",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q4/cpu2017-20231116-39739.html",
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230828-38750.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 8534",
+   "match": "EPYC 8534P?\\b",
+   "arch": "Zen 4c (Siena, 2023)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.3,
+    "boost": 3.1
+   },
+   "l3_mb_per_socket": 128.0,
+   "l3_mb_per_core": 2.0,
+   "l3_layout": "16 MB per 8-core cluster",
+   "memory": "6 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.21,
+    "tt": 1.16,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 8534",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230828-38888.html",
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230828-38752.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9015",
+   "match": "EPYC 9015P?\\b",
+   "arch": "Zen 5 (Turin, 2024)",
+   "cores_per_socket": 8,
+   "clock_ghz": {
+    "base": 3.6,
+    "boost": 4.1
+   },
+   "l3_mb_per_socket": 64.0,
+   "l3_mb_per_core": 8.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.76,
+    "tt": 2.08,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9015",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20241105-45373.html",
+     "https://www.spec.org/cpu2017/results/res2025q1/cpu2017-20250126-46133.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9115",
+   "match": "EPYC 9115P?\\b",
+   "arch": "Zen 5 (Turin, 2024)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": 2.6,
+    "boost": 4.1
+   },
+   "l3_mb_per_socket": 64.0,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.69,
+    "tt": 1.99,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9115",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2025q1/cpu2017-20250113-45973.html",
+     "https://www.spec.org/cpu2017/results/res2025q1/cpu2017-20241216-45774.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9135",
+   "match": "EPYC 9135P?\\b",
+   "arch": "Zen 5 (Turin, 2024)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": 3.65,
+    "boost": 4.3
+   },
+   "l3_mb_per_socket": 64.0,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.83,
+    "tt": 2.12,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9135",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20241104-45215.html",
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20241104-45218.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9174F",
+   "match": "EPYC 9174FP?\\b",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": 4.1,
+    "boost": 4.4
+   },
+   "l3_mb_per_socket": 256.0,
+   "l3_mb_per_core": 16.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.72,
+    "tt": 2.01,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9174F",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q1/cpu2017-20231218-40373.html",
+     "https://www.spec.org/cpu2017/results/res2024q1/cpu2017-20240212-41279.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9175F",
+   "match": "EPYC 9175FP?\\b",
+   "arch": "Zen 5 (Turin, 2024)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": 4.2,
+    "boost": 5.0
+   },
+   "l3_mb_per_socket": 512.0,
+   "l3_mb_per_core": 32.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 2.11,
+    "tt": 2.6,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9175F",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2025q1/cpu2017-20250113-46019.html",
+     "https://www.spec.org/cpu2017/results/res2025q1/cpu2017-20250113-46031.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9184X",
+   "match": "EPYC 9184XP?\\b",
+   "arch": "Zen 4 + 3D V-Cache (Genoa-X, 2023)",
+   "cores_per_socket": 16,
+   "clock_ghz": {
+    "base": 3.55,
+    "boost": 4.2
+   },
+   "l3_mb_per_socket": 768.0,
+   "l3_mb_per_core": 48.0,
+   "l3_layout": "96 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.63,
+    "tt": 2.11,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9184X",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q3/cpu2017-20240826-44610.html",
+     "https://www.spec.org/cpu2017/results/res2023q3/cpu2017-20230825-38710.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9224",
+   "match": "EPYC 9224P?\\b",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 24,
+   "clock_ghz": {
+    "base": 2.5,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 64.0,
+   "l3_mb_per_core": 2.67,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.46,
+    "tt": 1.64,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9224",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q1/cpu2017-20230113-33335.html",
+     "https://www.spec.org/cpu2017/results/res2023q1/cpu2017-20230213-34145.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9254",
+   "match": "EPYC 9254P?\\b",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 24,
+   "clock_ghz": {
+    "base": 2.9,
+    "boost": 4.15
+   },
+   "l3_mb_per_socket": 128.0,
+   "l3_mb_per_core": 5.33,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.62,
+    "tt": 1.82,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9254",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q2/cpu2017-20230421-35922.html",
+     "https://www.spec.org/cpu2017/results/res2023q4/cpu2017-20231204-40167.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9255",
+   "match": "EPYC 9255P?\\b",
+   "arch": "Zen 5 (Turin, 2024)",
+   "cores_per_socket": 24,
+   "clock_ghz": {
+    "base": 3.2,
+    "boost": 4.3
+   },
+   "l3_mb_per_socket": 128.0,
+   "l3_mb_per_core": 5.33,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.74,
+    "tt": 2.05,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9255",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2025q1/cpu2017-20241216-45777.html",
+     "https://www.spec.org/cpu2017/results/res2025q1/cpu2017-20250113-45981.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9274F",
+   "match": "EPYC 9274FP?\\b",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 24,
+   "clock_ghz": {
+    "base": 4.05,
+    "boost": 4.3
+   },
+   "l3_mb_per_socket": 256.0,
+   "l3_mb_per_core": 10.67,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.68,
+    "tt": 1.93,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9274F",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q3/cpu2017-20240813-44503.html",
+     "https://www.spec.org/cpu2017/results/res2023q2/cpu2017-20230421-35919.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9275F",
+   "match": "EPYC 9275FP?\\b",
+   "arch": "Zen 5 (Turin, 2024)",
+   "cores_per_socket": 24,
+   "clock_ghz": {
+    "base": 4.1,
+    "boost": 4.8
+   },
+   "l3_mb_per_socket": 256.0,
+   "l3_mb_per_core": 10.67,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.89,
+    "tt": 2.22,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9275F",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2025q1/cpu2017-20250113-46002.html",
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20241201-45585.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9335",
+   "match": "EPYC 9335P?\\b",
+   "arch": "Zen 5 (Turin, 2024)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 3.0,
+    "boost": 4.4
+   },
+   "l3_mb_per_socket": 128.0,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.66,
+    "tt": 1.94,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9335",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20241201-45630.html",
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20241201-45662.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9365",
+   "match": "EPYC 9365P?\\b",
+   "arch": "Zen 5 (Turin, 2024)",
+   "cores_per_socket": 36,
+   "clock_ghz": {
+    "base": 3.4,
+    "boost": 4.3
+   },
+   "l3_mb_per_socket": 192.0,
+   "l3_mb_per_core": 5.33,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.72,
+    "tt": 1.98,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9365",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20241201-45635.html",
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20241201-45670.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9374F",
+   "match": "EPYC 9374FP?\\b",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 3.85,
+    "boost": 4.3
+   },
+   "l3_mb_per_socket": 256.0,
+   "l3_mb_per_core": 8.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.68,
+    "tt": 1.88,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9374F",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q1/cpu2017-20230213-34156.html",
+     "https://www.spec.org/cpu2017/results/res2024q1/cpu2017-20231218-40336.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9375F",
+   "match": "EPYC 9375FP?\\b",
+   "arch": "Zen 5 (Turin, 2024)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 3.8,
+    "boost": 4.8
+   },
+   "l3_mb_per_socket": 256.0,
+   "l3_mb_per_core": 8.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.95,
+    "tt": 2.22,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9375F",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2025q1/cpu2017-20241216-45780.html",
+     "https://www.spec.org/cpu2017/results/res2025q1/cpu2017-20250127-46183.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9384X",
+   "match": "EPYC 9384XP?\\b",
+   "arch": "Zen 4 + 3D V-Cache (Genoa-X, 2023)",
+   "cores_per_socket": 32,
+   "clock_ghz": {
+    "base": 3.1,
+    "boost": 3.9
+   },
+   "l3_mb_per_socket": 768.0,
+   "l3_mb_per_core": 24.0,
+   "l3_layout": "96 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.53,
+    "tt": 1.84,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9384X",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2023q4/cpu2017-20230925-39153.html",
+     "https://www.spec.org/cpu2017/results/res2023q4/cpu2017-20230925-39171.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9455",
+   "match": "EPYC 9455P?\\b",
+   "arch": "Zen 5 (Turin, 2024)",
+   "cores_per_socket": 48,
+   "clock_ghz": {
+    "base": 3.15,
+    "boost": 4.4
+   },
+   "l3_mb_per_socket": 256.0,
+   "l3_mb_per_core": 5.33,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.62,
+    "tt": 1.85,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9455",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q4/cpu2017-20241201-45673.html",
+     "https://www.spec.org/cpu2017/results/res2025q1/cpu2017-20250127-46184.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9475F",
+   "match": "EPYC 9475FP?\\b",
+   "arch": "Zen 5 (Turin, 2024)",
+   "cores_per_socket": 48,
+   "clock_ghz": {
+    "base": 3.65,
+    "boost": 4.8
+   },
+   "l3_mb_per_socket": 256.0,
+   "l3_mb_per_core": 5.33,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.78,
+    "tt": 1.99,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9475F",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2025q1/cpu2017-20241216-45782.html",
+     "https://www.spec.org/cpu2017/results/res2025q1/cpu2017-20250127-46186.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9534",
+   "match": "EPYC 9534P?\\b",
+   "arch": "Zen 4 (Genoa, 2022)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.45,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 256.0,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-4800 per socket",
+   "estimate": {
+    "compute": 1.35,
+    "tt": 1.45,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9534",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2024q3/cpu2017-20240702-44022.html",
+     "https://www.spec.org/cpu2017/results/res2024q1/cpu2017-20231218-40298.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9565",
+   "match": "EPYC 9565P?\\b",
+   "arch": "Zen 5 (Turin, 2024)",
+   "cores_per_socket": 72,
+   "clock_ghz": {
+    "base": 3.15,
+    "boost": 4.3
+   },
+   "l3_mb_per_socket": 384.0,
+   "l3_mb_per_core": 5.33,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.54,
+    "tt": 1.73,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9565",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2025q1/cpu2017-20250126-46125.html",
+     "https://www.spec.org/cpu2017/results/res2025q1/cpu2017-20250113-45945.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9745",
+   "match": "EPYC 9745P?\\b",
+   "arch": "Zen 5c dense (Turin Dense, 2024)",
+   "cores_per_socket": 128,
+   "clock_ghz": {
+    "base": 2.4,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 256.0,
+   "l3_mb_per_core": 2.0,
+   "l3_layout": "32 MB per 16-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.29,
+    "tt": 1.29,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9745",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2025q1/cpu2017-20250127-46179.html",
+     "https://www.spec.org/cpu2017/results/res2025q1/cpu2017-20250113-46051.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD EPYC 9825",
+   "match": "EPYC 9825P?\\b",
+   "arch": "Zen 5c dense (Turin Dense, 2024)",
+   "cores_per_socket": 144,
+   "clock_ghz": {
+    "base": 2.2,
+    "boost": 3.7
+   },
+   "l3_mb_per_socket": 384.0,
+   "l3_mb_per_core": 2.67,
+   "l3_layout": "32 MB per 16-core cluster",
+   "memory": "12 channels DDR5-6400 per socket",
+   "estimate": {
+    "compute": 1.19,
+    "tt": 1.23,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 9825",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2025q1/cpu2017-20250127-46170.html",
+     "https://www.spec.org/cpu2017/results/res2025q1/cpu2017-20250113-46055.html"
+    ]
+   },
+   "measured": null,
+   "caveats": ""
+  },
+  {
+   "name": "AMD Eng Sample (other)",
+   "match": "Eng Sample",
+   "arch": "unknown (engineering sample)",
+   "cores_per_socket": null,
+   "clock_ghz": {
+    "base": null,
+    "boost": null
+   },
+   "l3_mb_per_socket": null,
+   "l3_mb_per_core": null,
+   "l3_layout": "?",
+   "memory": "?",
+   "estimate": {
+    "compute": 1.1,
+    "tt": 1.1,
+    "uncertainty": 0.4,
+    "basis": "estimate: Unidentified engineering sample.",
+    "sources": []
+   },
+   "measured": null,
+   "caveats": "Engineering sample: a pre-release chip identified only by its part number; clocks and stability can differ from the retail part."
+  }
+ ],
+ "machines": {
+  "137718": {
+   "usable_threads": 192,
+   "ram_gb": 251,
+   "note": "AMD Eng Sample 100-000000894-04, 384 threads advertised: our container got a cgroup quota of 192 (runs m3-agree-t4 and m3-agree-t1-a3, 2026-10-14); the trick-1 run was killed for lack of memory."
+  }
+ },
+ "observations": [
+  {
+   "run": "m2-spike-epyc",
+   "date": "2026-10-14",
+   "cpu": "AMD EPYC 7502",
+   "threads": 61,
+   "dph": 0.336,
+   "what": "exact solver costs, same worlds as the 4-vCPU Xeon VM",
+   "result": "trick 3 median 8.8 ms, trick 2 median 2.8 s per world (Xeon VM: 8.8 ms, 3.1 s): same speed per thread when lightly loaded",
+   "comparable": true
+  },
+  {
+   "run": "m2-trick1-1",
+   "date": "2026-10-14",
+   "cpu": "AMD EPYC 9654",
+   "threads": 368,
+   "dph": 4.27,
+   "what": "4 trick-1 worlds, one at a time, all 368 threads on one world (solve_fast_par)",
+   "result": "7 s, 32 s, 140 s, 25 s; about 0.5 million nodes/s per thread vs 3.6 million on 4 threads of the Xeon VM (world 0: 68 s on 4 threads): one world spread over 368 threads uses each thread at roughly 1/7 efficiency",
+   "comparable": false
+  },
+  {
+   "run": "m3-agree-t1-b",
+   "date": "2026-10-14",
+   "cpu": "AMD EPYC 9734",
+   "threads": 448,
+   "dph": 6.43,
+   "ram_gb": 1511,
+   "what": "exact trick-1 PIMC, leader decisions, 4 worlds x 112 threads",
+   "result": "about 1.2 worlds per minute (in progress)",
+   "comparable": false
+  },
+  {
+   "run": "m3-agree-t1-a5",
+   "date": "2026-10-14",
+   "cpu": "AMD EPYC 9754",
+   "threads": 512,
+   "dph": 11.24,
+   "ram_gb": 1007,
+   "what": "exact trick-1 PIMC on different (possibly harder) decisions",
+   "result": "about 0.7 worlds per minute (in progress). SPEC predicts about the same speed per thread as the 9734, so the 2x gap per thread is mostly the decisions, not the machine",
+   "comparable": false
+  }
+ ]
+}
