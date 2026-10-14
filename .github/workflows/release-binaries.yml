@@ -41,10 +41,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          BINS=(runner difftest equity)
+          BINS=(runner difftest equity solver-spike solver-identity)
+          PKGS=(-p runner -p difftest -p equity -p solver)
           # arena joins once its crate defines the binary.
-          if grep -qs '^name = "arena"' crates/arena/Cargo.toml && [ -f crates/arena/src/main.rs ]; then BINS+=(arena); fi
-          PKGS=(); for b in "${BINS[@]}"; do PKGS+=(-p "$b"); done
+          if grep -qs '^name = "arena"' crates/arena/Cargo.toml && [ -f crates/arena/src/main.rs ]; then BINS+=(arena); PKGS+=(-p arena); fi
           mkdir -p dist
           for level in v2 v3; do
             build="x86-64-$level"
