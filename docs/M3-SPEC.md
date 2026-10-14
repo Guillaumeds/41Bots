@@ -32,7 +32,7 @@ Terms used below, in plain words:
    impl Match { pub fn from_hand_start(s: HandStartState, deck: [Card; DECK_SIZE], seed: u64, rules: Rules)
                     -> Result<Match, StateError>; }
    ```
-   It validates the state (reachable scores; `bonus_taken[t] == (scores[t] % 5 == 1)`; no team at 41 or more; games won ≤ 1 each, and at most 2 teams at 1 game since the match is not over; `dealer < 8`) and deals `deck` as hand `hand_index`. Later hands are shuffled from `Rng::new(seed)`. `MatchRecord` gains an optional `start: Option<HandStartState>` (format version 2; version-1 records still read) so a record starting mid-match replays.
+   It validates the state (reachable scores; `bonus_taken[t] == (scores[t] % 5 == 1)`; no team at 41 or more; games won ≤ 1 each (any number of teams may hold one game while the match continues); `dealer < 8`) and deals `deck` as hand `hand_index`. Later hands are shuffled from `Rng::new(seed)`. `MatchRecord` gains an optional `start: Option<HandStartState>` (format version 2; version-1 records still read) so a record starting mid-match replays.
    - Test `from_hand_start_equals_played_match`: for 500 seeds, play a match with `rules-v1` to the start of some hand, rebuild it with `from_hand_start` from that hand's public state and deck, then play both on: every event and every `SeatView` agree.
 2. **Hidden burns in a view.** `PublicState` already has `burn_counts`; add `burn_order: Vec<(u8 /*seat*/, BurnKind)>` with `enum BurnKind { JokerTake, AceRobAtOnce, RobAtTurn }`, in burn order, so the tracker can tell the dealer's pre-trump burn (`JokerTake`) from a rob burn without parsing events. Covered by the difftest (the reference derives the same field) and a transcript check on transcripts 15–18.
 
