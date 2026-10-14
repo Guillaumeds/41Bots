@@ -37,7 +37,7 @@ pub mod fast;
 mod tt;
 pub mod worlds;
 
-pub use fast::{FastOptions, solve_fast};
+pub use fast::{FastOptions, ParProgress, solve_fast, solve_fast_par, solve_fast_par_split};
 pub use worlds::sample_world;
 
 use std::collections::HashMap;

@@ -5,7 +5,12 @@
 //! ```text
 //! solver-identity --leaf <equity.npy | fake | tie> --trick K --worlds N [--first W] [--seed S]
 //!                 [--threads T] [--combos all|lean|tt] [--extra-max E] [--cap-ms MS]
+//!                 [--par-threads P]
 //! ```
+//!
+//! With `--par-threads P` the check is instead the parallel single-world solve on P threads
+//! (`solve_fast_par`) against the sequential optimised solver, solver defaults, both tie orders
+//! (no naive solve, so trick 2 is affordable); `--combos` is then ignored.
 //!
 //! World `i` is `sample_world(seed, K, i, i % (E + 1))`, so roots are at the start of the trick
 //! and also part-way through it. `lean` checks all on, each switch alone and each switch off
@@ -16,7 +21,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use equity::{EquityTable, MatchState, MoneyChance};
-use solver::{FastOptions, FnLeaf, Leaf, Options, TieOrder, sample_world, solve, solve_fast};
+use solver::{
+    FastOptions, FnLeaf, Leaf, Options, TieOrder, sample_world, solve, solve_fast, solve_fast_par,
+};
 
 fn fake_value(s: &MatchState) -> MoneyChance {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -70,6 +77,7 @@ fn main() {
     let threads: usize = get("--threads").map_or(1, |s| s.parse().expect("threads"));
     let extra_max: u64 = get("--extra-max").map_or(7, |s| s.parse().expect("extra-max"));
     let cap: Option<u64> = get("--cap-ms").map(|s| s.parse().expect("cap"));
+    let par: Option<usize> = get("--par-threads").map(|s| s.parse().expect("par-threads"));
     let combos: Vec<u8> = match get("--combos").as_deref() {
         Some("lean") => vec![15, 1, 2, 4, 8, 14, 13, 11, 7],
         Some("tt") => vec![1, 3, 5, 7, 9, 11, 13, 15],
@@ -99,6 +107,39 @@ fn main() {
                     let extra = (w % (extra_max + 1)) as u8;
                     let (pos, ctx, _) = sample_world(seed, trick, w, extra);
                     for order in [TieOrder::Ascending, TieOrder::Descending] {
+                        if let Some(p) = par {
+                            let o = FastOptions {
+                                order,
+                                tt_mb: 1024,
+                                time_cap_ms: cap,
+                                ..FastOptions::default()
+                            };
+                            let f = solve_fast(&pos, ctx, &leaf, o);
+                            if f.timed_out {
+                                skipped.fetch_add(1, Ordering::Relaxed);
+                                continue;
+                            }
+                            let g = solve_fast_par(
+                                &pos,
+                                ctx,
+                                &leaf,
+                                FastOptions {
+                                    time_cap_ms: None,
+                                    ..o
+                                },
+                                p,
+                                None,
+                            );
+                            solves.fetch_add(1, Ordering::Relaxed);
+                            if g.value != f.value || g.best != f.best || g.children != f.children {
+                                bad.fetch_add(1, Ordering::Relaxed);
+                                println!(
+                                    "MISMATCH world {w} extra {extra} order {order:?} par {p}"
+                                );
+                            }
+                            checked.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
                         let naive = solve(
                             &pos,
                             ctx,
