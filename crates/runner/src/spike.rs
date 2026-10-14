@@ -312,7 +312,7 @@ fn sha256_file(p: &Path) -> Result<String, String> {
 }
 
 /// Step 1: build table v0 and verify it. Returns the table path and its record.
-fn build_table(ctx: &mut Ctx, params: &Value) -> Result<(PathBuf, Value), String> {
+pub(crate) fn build_table(ctx: &mut Ctx, params: &Value) -> Result<(PathBuf, Value), String> {
     let hands = params
         .get("hands")
         .and_then(Value::as_u64)
