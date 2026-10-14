@@ -1,8 +1,10 @@
 //! Match records (docs/M1-SPEC.md §3.2): every action of a match plus what it led to, replayable
 //! exactly, stored as JSON Lines (one record per line).
 
+use engine::cards::{Card, DECK_SIZE};
 use engine::game::{
-    Action, Event, GameEndReason, IllegalAction, Match, Phase, RULES_VERSION, Rules, Visibility,
+    Action, Event, GameEndReason, HandStartState, IllegalAction, Match, Phase, RULES_VERSION,
+    Rules, StateError, Visibility,
 };
 use engine::{SEATS, TEAMS};
 use serde::{Deserialize, Serialize};
@@ -12,8 +14,12 @@ use std::path::Path;
 
 use crate::table::{BlockSpec, build_match};
 
-/// The record format this crate writes and reads.
-pub const FORMAT_VERSION: u32 = 1;
+/// The record format this crate writes. Version 2 (docs/M3-SPEC.md §2.1) adds the optional
+/// mid-match start (`start`, `start_deck`); version-1 records still read and replay.
+pub const FORMAT_VERSION: u32 = 2;
+
+/// The oldest record format this crate still reads.
+pub const OLDEST_FORMAT_VERSION: u32 = 1;
 
 /// One game of a match.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +81,13 @@ pub struct MatchRecord {
     pub winner: u8,
     /// The public state after every completed trick.
     pub public_timeline: Vec<TrickPoint>,
+    /// Format 2: the match started mid-way, at the start of a hand in this state
+    /// (`Match::from_hand_start`); `None` for a match from its first deal. Absent in format 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<HandStartState>,
+    /// Format 2: the deck of the starting hand when `start` is set (53 cards in deal order).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_deck: Option<Vec<Card>>,
 }
 
 /// A record that cannot be read, replayed or verified.
@@ -82,12 +95,14 @@ pub struct MatchRecord {
 pub enum RecordError {
     /// The match is not over, so it has no record yet.
     NotOver,
-    /// The record's format version is not [`FORMAT_VERSION`].
+    /// The record's format version is not one this crate reads.
     FormatVersion(u32),
     /// The record was played under other rules than this engine's `RULES_VERSION`.
     RulesVersion(u32),
     /// The block's first dealer is not a seat.
     BadFirstDealer(u8),
+    /// The mid-match start state or deck is not valid.
+    BadStart(Option<StateError>),
     /// The engine refused a recorded action.
     Illegal {
         /// The action's position in `actions`.
@@ -116,13 +131,23 @@ impl core::fmt::Display for RecordError {
         match self {
             RecordError::NotOver => write!(f, "the match is not over"),
             RecordError::FormatVersion(v) => {
-                write!(f, "record format version {v}, expected {FORMAT_VERSION}")
+                write!(
+                    f,
+                    "record format version {v}, expected {OLDEST_FORMAT_VERSION} to {FORMAT_VERSION}"
+                )
             }
             RecordError::RulesVersion(v) => write!(
                 f,
                 "record played under rules version {v}, this engine is rules version {RULES_VERSION}"
             ),
             RecordError::BadFirstDealer(d) => write!(f, "first dealer {d} is not a seat"),
+            RecordError::BadStart(Some(e)) => write!(f, "bad mid-match start: {e}"),
+            RecordError::BadStart(None) => {
+                write!(
+                    f,
+                    "bad mid-match start: start and start_deck must come together"
+                )
+            }
             RecordError::Illegal { index, error } => {
                 write!(f, "recorded action {index} is refused: {error}")
             }
@@ -152,13 +177,36 @@ impl MatchRecord {
         block: Option<BlockSpec>,
         bots: [String; SEATS],
     ) -> Result<MatchRecord, RecordError> {
+        Self::build(m, seed, block, bots, None)
+    }
+
+    /// The record of a finished match started mid-way by `Match::from_hand_start(start, deck,
+    /// seed, rules)` (format 2, docs/M3-SPEC.md §2.1). The first dealer is the starting hand's
+    /// dealer, and the timeline's scores and games continue from `start`.
+    pub fn from_match_started(
+        m: &Match,
+        seed: u64,
+        start: HandStartState,
+        deck: [Card; DECK_SIZE],
+        bots: [String; SEATS],
+    ) -> Result<MatchRecord, RecordError> {
+        Self::build(m, seed, None, bots, Some((start, deck)))
+    }
+
+    fn build(
+        m: &Match,
+        seed: u64,
+        block: Option<BlockSpec>,
+        bots: [String; SEATS],
+        start: Option<(HandStartState, [Card; DECK_SIZE])>,
+    ) -> Result<MatchRecord, RecordError> {
         let money = m.money().ok_or(RecordError::NotOver)?;
         let mut first_dealer = 0;
         let mut winner = 0;
         let mut games = Vec::new();
         let mut timeline: Vec<TrickPoint> = Vec::new();
-        let mut scores = [0u8; TEAMS];
-        let mut games_won = [0u8; TEAMS];
+        let mut scores = start.map_or([0u8; TEAMS], |(s, _)| s.scores);
+        let mut games_won = start.map_or([0u8; TEAMS], |(s, _)| s.games_won);
         let (mut hand_index, mut game_index, mut hands_in_game) = (0u32, 0u8, 0u32);
         for (vis, e) in m.events() {
             if *vis != Visibility::Public {
@@ -245,13 +293,15 @@ impl MatchRecord {
             money,
             winner,
             public_timeline: timeline,
+            start: start.map(|(s, _)| s),
+            start_deck: start.map(|(_, d)| d.to_vec()),
         })
     }
 
     /// Rebuild the match: `Match::new(seed)` or the block's `Match::new_block`, then every
     /// recorded action in order. Refuses another format or rules version.
     pub fn replay(&self) -> Result<Match, RecordError> {
-        if self.format_version != FORMAT_VERSION {
+        if !(OLDEST_FORMAT_VERSION..=FORMAT_VERSION).contains(&self.format_version) {
             return Err(RecordError::FormatVersion(self.format_version));
         }
         if self.rules_version != RULES_VERSION {
@@ -262,7 +312,17 @@ impl MatchRecord {
         {
             return Err(RecordError::BadFirstDealer(b.first_dealer));
         }
-        let mut m = build_match(self.seed, self.block, self.rules);
+        let mut m = match (self.start, &self.start_deck) {
+            (None, None) => build_match(self.seed, self.block, self.rules),
+            (Some(start), Some(deck)) => {
+                let deck: [Card; DECK_SIZE] = deck.as_slice().try_into().map_err(|_| {
+                    RecordError::BadStart(Some(StateError("the start deck is not 53 cards")))
+                })?;
+                Match::from_hand_start(start, deck, self.seed, self.rules)
+                    .map_err(|e| RecordError::BadStart(Some(e)))?
+            }
+            _ => return Err(RecordError::BadStart(None)),
+        };
         for (index, &a) in self.actions.iter().enumerate() {
             m.apply(a)
                 .map_err(|error| RecordError::Illegal { index, error })?;
@@ -279,7 +339,15 @@ impl MatchRecord {
                 field: "actions (the match is not over after the last one)",
             });
         }
-        let again = MatchRecord::from_match(&m, self.seed, self.block, self.bots.clone())?;
+        let again = match (self.start, &self.start_deck) {
+            (Some(start), Some(deck)) => {
+                let deck = <[Card; DECK_SIZE]>::try_from(deck.as_slice()).map_err(|_| {
+                    RecordError::BadStart(Some(StateError("the start deck is not 53 cards")))
+                })?;
+                MatchRecord::from_match_started(&m, self.seed, start, deck, self.bots.clone())?
+            }
+            _ => MatchRecord::from_match(&m, self.seed, self.block, self.bots.clone())?,
+        };
         let checks: [(&'static str, bool); 6] = [
             ("rules", again.rules == self.rules),
             ("first_dealer", again.first_dealer == self.first_dealer),

@@ -10,6 +10,21 @@
 use crate::cards::{Bits, Card, Suit};
 use crate::game::{Event, Phase};
 
+/// Which kind of burn a seat made (M3-SPEC §2.2). The order is the derived order used by the
+/// belief crate's locations.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BurnKind {
+    /// The dealer's burn after taking a turned Joker, made before trumps are known (rule 24): it
+    /// may hold any card, even the card that turns out to be the ace of trumps (H3).
+    JokerTake,
+    /// The dealer's burn after robbing a turned ace at once (rules 22 and 24, H4): never the ace
+    /// of trumps.
+    AceRobAtOnce,
+    /// A robber's burn at their own first turn in trick 1 (rule 20, H2): never the ace of trumps.
+    RobAtTurn,
+}
+
 /// Everything every seat knows at this moment.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,6 +57,10 @@ pub struct PublicState {
     pub hand_sizes: [u8; 8],
     /// Cards each seat has burned this hand.
     pub burn_counts: [u8; 8],
+    /// Every burn made this hand, in order: the seat and which kind of burn it was (M3-SPEC §2.2).
+    /// The cards themselves stay hidden; this tells a dealer's pre-trump burn after a turned Joker
+    /// from a rob burn.
+    pub burn_order: Vec<(u8, BurnKind)>,
     /// Hidden, out-of-play cards: the undealt pack plus every burned card (always 12 or 13).
     pub hidden_count: u8,
     /// Every card played to a trick this hand.

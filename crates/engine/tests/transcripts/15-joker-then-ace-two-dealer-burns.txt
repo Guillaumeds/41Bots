@@ -25,6 +25,7 @@ phase: AwaitBurn 6
 legal: 2C AD 4D 9H JS JK
 > Burn 2C    # seat 6 burns
 = BurnDone seat=6
+burns: 6 JokerTake
 = Turned card=AS
 = Took seat=6 card=AS
 # The next card turned is the ace of spades: spades are trumps, and a turned ace is robbed by the dealer at once (rule 24, H4).
@@ -34,6 +35,7 @@ legal: AD 4D 9H JS JK
 > Burn 9H    # seat 6 burns
 = BurnDone seat=6
 phase: AwaitPlay 7
+burns: 6 JokerTake, 6 AceRobAtOnce
 # Two dealer burns: out of play and hidden are the 11 undealt cards plus the 2 burns, 13 in all.
 # Trick 1 is led by seat 7 as usual.
 > Play 8C    # seat 7

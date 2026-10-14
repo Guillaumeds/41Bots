@@ -145,7 +145,7 @@ const CARD_KEYS: [&str; 4] = ["card", "table_card", "Play", "Burn"];
 /// Keys whose value is a set of cards (a bitboard number).
 const BITS_KEYS: [&str; 4] = ["hand", "own_burns", "played", "cards"];
 /// Keys that hold no card directly (their value is searched further).
-const PLAIN_KEYS: [&str; 57] = [
+const PLAIN_KEYS: [&str; 58] = [
     // SeatView and PublicState
     "seat",
     "public",
@@ -162,6 +162,7 @@ const PLAIN_KEYS: [&str; 57] = [
     "joker_turned",
     "hand_sizes",
     "burn_counts",
+    "burn_order",
     "hidden_count",
     "trick_no",
     "leader",

@@ -16,7 +16,7 @@ use crate::rules::{
     EffSuit, ace_of_trumps, effective_suit, five_of, legal_burns, legal_plays, trick_winner,
     trump_rank,
 };
-use crate::view::{PublicState, SeatView};
+use crate::view::{BurnKind, PublicState, SeatView};
 use crate::{SEATS, TEAMS, team_of};
 use std::sync::Arc;
 
@@ -426,6 +426,7 @@ struct HandState {
     robber: Option<u8>,
     pending_robber: Option<u8>,
     took: [bool; SEATS],
+    burn_order: Vec<(u8, BurnKind)>,
     proved_no_ace: [bool; SEATS],
     ace_undealt: bool,
     after_burn: AfterBurn,
@@ -449,6 +450,7 @@ impl HandState {
             robber: None,
             pending_robber: None,
             took: [false; SEATS],
+            burn_order: Vec::with_capacity(2),
             proved_no_ace: [false; SEATS],
             ace_undealt: false,
             after_burn: AfterBurn::StartTricks,
@@ -772,6 +774,7 @@ impl Match {
             joker_turned: h.joker_turned,
             hand_sizes,
             burn_counts,
+            burn_order: h.burn_order.clone(),
             hidden_count,
             played: h.played,
             trick_no: h.trick_no,
@@ -996,6 +999,12 @@ impl Match {
     fn burn(&mut self, seat: u8, card: Card) {
         self.truth.hands[usize::from(seat)] &= !bit(card);
         self.truth.burns[usize::from(seat)] |= bit(card);
+        let kind = match self.hand.after_burn {
+            AfterBurn::TurnSecond => BurnKind::JokerTake,
+            AfterBurn::StartTricks => BurnKind::AceRobAtOnce,
+            AfterBurn::PlayFirst => BurnKind::RobAtTurn,
+        };
+        self.hand.burn_order.push((seat, kind));
         self.emit_private(seat, Event::Burned { seat, card });
         self.emit_public(Event::BurnDone { seat });
         match self.hand.after_burn {

@@ -24,6 +24,7 @@ phase: AwaitBurn 1
 legal: 4C 7C 2D 9H QH JK
 > Burn 2D    # seat 1 burns
 = BurnDone seat=1
+burns: 1 JokerTake
 = Turned card=3S
 # The 3 of spades is turned: spades are trumps. The 3 stays face up on the table; nobody, the dealer included,
 # is yet known to lack the ace of spades (H4, amended 2026-10-14).
