@@ -40,7 +40,7 @@ from datetime import datetime, timezone
 
 POLL_S = 60
 HEARTBEAT_STALE_S = 180
-LOW_CPU_PCT = 85.0
+LOW_CPU_PCT = 85.0  # default; --low-cpu-pct overrides per run
 LOW_CPU_S = 300
 
 
@@ -78,7 +78,7 @@ def offer_query(a) -> str:
     return " ".join([
         "reliability>0.98", "num_gpus>=1", "gpu_frac=1", "rentable=true", "verified=true",
         f"cpu_cores_effective>={a.min_cores}", f"cpu_ram>={a.min_ram_gb}",
-        "compute_cap>=600", "compute_cap<1000", "cuda_vers>=12.6",
+    ] + ([] if a.cpu_only else ["compute_cap>=600", "compute_cap<1000", "cuda_vers>=12.6"]) + [
         f"disk_space>={a.disk_gb}", f"inet_down_cost<={a.max_net_cost}", f"inet_up_cost<={a.max_net_cost}",
     ] + ([f"dph_total<={a.max_dph}"] if a.max_dph else []))
 
@@ -366,10 +366,10 @@ def cmd_run(a) -> int:
             partial_ok = bool((hb.get("progress") or {}).get("partial_cpu_ok"))
             if hb.get("phase") in ("benchmark", "chunk") and cpu is not None and not partial_ok:
                 cpu_samples.append(float(cpu))
-                if cpu < LOW_CPU_PCT:
+                if cpu < a.low_cpu_pct:
                     low_since = low_since or now
                     if now - low_since >= LOW_CPU_S:
-                        reason = f"CPU use below {LOW_CPU_PCT:.0f}% for 5 minutes while work remains"
+                        reason = f"CPU use below {a.low_cpu_pct:.0f}% for 5 minutes while work remains"
                         break
                 else:
                     low_since = None
@@ -441,6 +441,8 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("--max-dph", type=float, default=None, help="max total $/hour for the offer")
         s.add_argument("--cpu-match", default="", help="regex the offer's CPU name must match (e.g. EPYC)")
         s.add_argument("--cheapest", action="store_true", help="test runs: take the cheapest $/hour offer, not the best cost per work")
+        s.add_argument("--cpu-only", action="store_true",
+                       help="CPU-only job: drop the GPU compute-capability/CUDA filters (they only matter for PyTorch training)")
 
     s = sub.add_parser("plan", help="dry run: rank offers and print the choice")
     offer_args(s)
@@ -451,6 +453,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--image", required=True)
     s.add_argument("--bin-sha", required=True)
     s.add_argument("--max-minutes", type=int, default=30)
+    s.add_argument("--low-cpu-pct", type=float, default=LOW_CPU_PCT,
+                   help="destroy if CPU stays below this for 5 minutes (lower only for runs with known serial tails)")
     s.add_argument("--startup-minutes", type=int, default=15)
     s.add_argument("--state-file", help="write the instance id here (for a cleanup step)")
     s.add_argument("--dry-run", action="store_true", help="choose the offer, but create nothing")
