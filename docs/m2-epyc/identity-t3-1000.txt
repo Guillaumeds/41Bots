@@ -1,0 +1,1 @@
+identity	leaf=/home/app/w/work/m2-spike-epyc/equity-v0.npy trick=3 worlds=1000 first=0 seed=1 combos=16 root_solves_checked=2000 (worlds x 2 tie orders) fast_solves=32000 skipped_naive_timeouts=0 mismatches=0 wall_s=8.6 PASS

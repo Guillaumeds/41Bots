@@ -1,0 +1,21 @@
+{
+  "available_parallelism": 61,
+  "bin_build": "x86-64-v3",
+  "bin_sha": "27e8925b208a37af8c0b6aa4480a4f0fa0df76b6",
+  "cgroup_cpu_max": "6143999 100000",
+  "cgroup_quota_cores": 61.43999,
+  "cgroup_v1_cfs_period_us": null,
+  "cgroup_v1_cfs_quota_us": null,
+  "cpu_flags": "fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip rdpid overflow_recov succor smca sme sev sev_es ibpb_exit_to_user",
+  "cpu_logical_host": 64,
+  "cpu_model": "AMD EPYC 7502 32-Core Processor",
+  "dph_env": "0.33611",
+  "mem_total_kb": 263774016,
+  "ncpu_env": "64",
+  "nvidia_smi": "NVIDIA GeForce RTX 3090, 24576 MiB, 595.91.07, 8.6",
+  "threads_default": 61,
+  "usable_cores": 61.0,
+  "utc": "2026-10-14T06:28:27Z",
+  "vast_container_id": "55879039",
+  "x86_64_v3": true
+}

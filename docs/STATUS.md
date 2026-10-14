@@ -91,3 +91,8 @@ M1 adds the table manager, the arena (14-way duplicate block, generalised SPRT, 
   - **Gate: identical answers to the naive solver** (root value, every root card's value, chosen card, both tie orders, all 16 switch combinations): 0 differences over 150,000 worlds each at tricks 4 and 5, 3,000 at trick 3 (three leaf tables), 64 at trick 2 (table-on combinations). Four-layer validation in `crates/solver/tests/`: engine parity (found and fixed a `from_match` bug: a 5 of trumps already in the current trick was marked as scored), brute force on 1–3-card endgames, on/off identity, best response at the root. Forced-denial check (test-only) added and tested.
   - Costs (4-vCPU Xeon): trick 3 median 8.8 ms (naive 17.6), p90 30 ms (55); trick 2 median 3.1 s (naive 9.2 s), all 100 worlds solved, worst 29 s (naive: 7 over 60 s); trick 1 still unsolved in 60 s. Equivalent cards give almost all of it (3.3× fewer nodes at trick 3, 5× at trick 2); shallow pruning fires at ~1 node in 10,000; move ordering costs 15% and saves nothing, so it is off by default.
   - Next for the M2 gate: repeat the cost tables on a second CPU type (vast.ai EPYC).
+
+## M2 gate result (2026-10-14)
+- Optimised solver identical to the naive solver (0 mismatches on the Xeon and on an AMD EPYC 7502); pruning on/off identical; brute force on 1–3-card endgames passes; costs published for both CPU types (`docs/M2-SPIKE.md`). **M2 gate met.**
+- Follow-up in progress: a multi-core single-world solve to measure the true trick-1 duration on a high-core machine (owner request).
+- Next: M3 (card tracker, suit-length-matrix world generator, PIMC teacher: exact from trick 3, rollout-PIMC with the rules bot at tricks 1–2; pre-registered PIMC-suitability measurement; full runner).

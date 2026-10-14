@@ -112,3 +112,16 @@ Reversing the tie order changed the chosen card in exactly the 828 / 1000 roots 
 - **Trick 2 is now always solvable offline** (all 100 worlds, worst 29 s) but still seconds per world: still a teacher/post-mortem tool, not decision-time. Rollouts stay the plan for tricks 1–2.
 - **Trick 1 is still out of reach**: not one world finished in 5 minutes (over 1.5 billion nodes each, table full at 3 GB; 4 worlds at once with a 3 GB cap ran out of the VM's 16 GB). The plan's "0.1–150 s per world at trick 1" remains unconfirmed.
 - Still to do for the M2 gate: the same tables on a second CPU type (vast.ai EPYC).
+
+## Second CPU type: AMD EPYC 7502 (vast.ai, 2026-10-14)
+Run `m2-spike-epyc`: 64 logical cores (61 usable), same seeds, worlds and caps as the Xeon runs, each timing run alone (no concurrency). Raw outputs: `docs/m2-epyc/`. The equity table rebuilt on the box has the same hash (`64740dab…6808`). The cost was $0.17.
+
+| Start of trick | Naive median / p90 | Fast median / p90 / max | Notes |
+|---|---|---|---|
+| 3 | 27.9 ms / 98 ms (no table) | 8.8 ms / 30 ms / 120 ms | 1,000 worlds, all solved |
+| 2 | 8.7 s / 33.8 s (table on), 5 of 100 over 60 s | 2.8 s / 13.4 s / 26.4 s | fast: all 100 solved, 156 MB table used |
+| 1 | — | 0 of 8 within 60 s | as on the Xeon |
+
+**Identity on EPYC:** solver-identity on the real table, all 16 switch combinations and both tie orders: trick 5 (50,000 worlds), trick 4 (50,000) and trick 3 (1,000), with **0 mismatches**.
+
+**Verdict:** on both CPU types the costs agree with the Xeon within normal machine variation. Exact solving is cheap from trick 3, takes a few seconds at trick 2, and is out of reach within a minute at trick 1. The M2 gate's "published costs on two CPU types" item is met.
