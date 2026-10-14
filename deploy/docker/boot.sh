@@ -50,6 +50,10 @@ self_destroy() {
   echo "boot: instance $CONTAINER_ID could not destroy itself; the launcher destroys it on DONE/FAILED or a stale heartbeat, vast-cleanup.yml after 2 hours" >&2
 }
 
+# rclone's configuration in memory only (rclone's documented /dev/null switch): the r2 remote
+# comes from the RCLONE_CONFIG_R2_* variables, and with no config file rclone would print
+# "NOTICE: Config file ... not found" on every call (every heartbeat) into the machine's log.
+export RCLONE_CONFIG="${RCLONE_CONFIG:-/dev/null}"
 R="r2:${R2_BUCKET}"
 W="${HOME}/w"
 mkdir -p "$W"

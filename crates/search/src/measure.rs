@@ -461,7 +461,13 @@ struct Prepared<'d> {
 /// leader sees the fewest cards: trick-2 exact worlds take seconds at position 1 and hundredths
 /// of a second at position 8), then more candidates first, then decision id.
 fn batch_order(p: &Prepared) -> (u8, u8, Reverse<usize>, u64) {
-    (p.d.trick, p.d.position, Reverse(p.cands.len()), p.d.id)
+    batch_key(p.d, p.cands.len())
+}
+
+/// [`batch_order`]'s key for decision `d` with `n_cands` candidates (also the order of the
+/// trick-1 bench's production window, `crate::t1bench`).
+pub fn batch_key(d: &DecisionSpec, n_cands: usize) -> (u8, u8, Reverse<usize>, u64) {
+    (d.trick, d.position, Reverse(n_cands), d.id)
 }
 
 /// Value every candidate of every decision in `ds` in worlds `job.from..job.to`, handing each

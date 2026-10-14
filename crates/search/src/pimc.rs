@@ -16,7 +16,6 @@
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
 
 use bots::decide;
 use engine::cards::{Card, bit, cards};
@@ -288,12 +287,10 @@ fn solver_position(m: &Match, rules: Rules) -> (solver::Position, solver::MatchC
     (pos, mctx)
 }
 
-/// Limits and counters of the exact solves of one world (read by the trick-1 bench and the
-/// planned scheduler; neither ever changes a value).
+/// Counters of the exact solves of one world (read by the trick-1 bench; they never change a
+/// value).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WorldSolve {
-    /// Give up at this instant (the world then has no values).
-    pub deadline: Option<Instant>,
     /// Counters summed over the world's solves (one solve, or one per burn of a joint decision);
     /// `tt_entries` and `tt_bytes` are the largest of any one solve.
     pub stats: Stats,
@@ -319,7 +316,8 @@ impl WorldSolve {
     }
 }
 
-/// One exact solve; `None` if `run.deadline` passed before it finished.
+/// One exact solve; `None` if it was stopped through `par`'s `abort` flag before it finished
+/// (its counters, the nodes searched so far included, still go into `run`).
 fn solve(
     pos: &solver::Position,
     mctx: solver::MatchCtx,
@@ -329,16 +327,8 @@ fn solve(
     mem: &mut SolveMem,
     run: &mut WorldSolve,
 ) -> Option<Vec<(Card, MoneyChance)>> {
-    let time_cap_ms = match run.deadline {
-        None => None,
-        Some(d) => match d.saturating_duration_since(Instant::now()).as_millis() as u64 {
-            0 => return None,
-            left => Some(left),
-        },
-    };
     let opts = FastOptions {
         tt_mb: cfg.tt_mb,
-        time_cap_ms,
         ..FastOptions::default()
     };
     let leaf = DynLeaf(ctx.leaf);
@@ -366,7 +356,7 @@ fn pick(children: &[(Card, MoneyChance)], c: Card) -> MoneyChance {
         .expect("every legal root card is valued")
 }
 
-/// The exact value of every candidate in one rebuilt world (`None` if `run.deadline` passed).
+/// The exact value of every candidate in one rebuilt world (`None` if stopped through `par`).
 fn exact_world(
     m: &Match,
     cands: &[Candidate],
@@ -424,9 +414,9 @@ pub fn solves_per_world(cands: &[Candidate]) -> u32 {
     (burns.len() as u32).max(1)
 }
 
-/// [`world_row`] for exact PIMC, with a deadline and the solves' counters (`run`): the values of
-/// every candidate in world `w`, exactly [`world_row`]'s, or `None` if `run.deadline` passed
-/// first.
+/// [`world_row`] for exact PIMC, with a stop flag (`par`'s `abort`) and the solves' counters
+/// (`run`): the values of every candidate in world `w`, exactly [`world_row`]'s, or `None` if it
+/// was stopped first.
 #[allow(clippy::too_many_arguments)]
 pub fn exact_world_row(
     view: &SeatView,
@@ -467,7 +457,7 @@ pub fn world_row(
     match method {
         Method::RolloutPimc => rollout_world(&m, cands, ctx),
         Method::ExactPimc => exact_world(&m, cands, ctx, cfg, par, mem, &mut WorldSolve::default())
-            .expect("no deadline is set"),
+            .expect("nothing stops a solve here"),
         Method::Forced => vec![MoneyChance::even(); cands.len()],
     }
 }

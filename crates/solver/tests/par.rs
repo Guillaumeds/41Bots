@@ -102,13 +102,22 @@ fn watched_solves_equal_and_stop_on_request() {
             plain.stats.nodes & !0xFFF,
             "seed {seed}: the counter advances every 4096 nodes"
         );
+        // The threads-searching counter is back to 0 once a solve returns, stopped or not.
+        assert_eq!(pr.active.load(Ordering::Relaxed), 0, "seed {seed}");
+        let par = ParProgress::default();
+        let p = solve_fast_par_with(&pos, ctx, &leaf(), opts, 3, Some(&par), &mut mem);
+        same(&plain, &p, &format!("seed {seed}: parallel"));
+        assert_eq!(par.active.load(Ordering::Relaxed), 0, "seed {seed}");
         let stop = ParProgress::default();
         stop.abort.store(true, Ordering::Relaxed);
         if plain.stats.nodes >= 0x1000 {
             let s = solve_fast_watched(&pos, ctx, &leaf(), opts, &mut mem, Some(&stop));
             assert!(s.timed_out && s.children.is_empty(), "seed {seed}: stopped");
+            // A stopped solve still reports the nodes it searched.
+            assert!(s.stats.nodes >= 0x1000, "seed {seed}: partial nodes");
             let p = solve_fast_par_with(&pos, ctx, &leaf(), opts, 3, Some(&stop), &mut mem);
             assert!(p.timed_out, "seed {seed}: parallel solve stopped");
+            assert_eq!(stop.active.load(Ordering::Relaxed), 0, "seed {seed}");
         }
     }
 }

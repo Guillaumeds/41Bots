@@ -233,6 +233,32 @@ pub struct ParProgress {
     pub tasks_total: AtomicU64,
     /// Set to stop the solve early (it then reports a timeout); also set by the time cap.
     pub abort: AtomicBool,
+    /// Threads searching for this progress's solves right now: a sequential solve counts 1 while
+    /// it runs; a parallel solve counts its splitting thread while it splits and combines, and
+    /// each worker while it still takes subproblems (a worker that found none left no longer
+    /// counts, so a parallel solve's tail shows here). Read by the trick-1 bench's busy-thread
+    /// samples.
+    pub active: AtomicU64,
+}
+
+/// Counts one thread in [`ParProgress::active`] while alive.
+struct Active<'a>(Option<&'a ParProgress>);
+
+impl<'a> Active<'a> {
+    fn enter(p: Option<&'a ParProgress>) -> Self {
+        if let Some(p) = p {
+            p.active.fetch_add(1, Ordering::Relaxed);
+        }
+        Active(p)
+    }
+}
+
+impl Drop for Active<'_> {
+    fn drop(&mut self) {
+        if let Some(p) = self.0 {
+            p.active.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 }
 
 struct Search<'a, L: Leaf> {
@@ -471,6 +497,7 @@ pub fn solve_fast_watched<L: Leaf>(
     mem: &mut SolveMem,
     progress: Option<&ParProgress>,
 ) -> Solution {
+    let _active = Active::enter(progress);
     let mut s = Search {
         ctx,
         leaf,
@@ -712,6 +739,8 @@ fn par_solve<L: Leaf + Sync>(
     let threads = threads.max(1);
     let own = ParProgress::default();
     let pr = progress.unwrap_or(&own);
+    // This (splitting) thread counts while it splits and combines, not while the workers run.
+    let splitter = Active::enter(Some(pr));
     let start = Instant::now();
     let shared = mem.shared(if opts.tt { opts.tt_mb } else { 1 }, threads);
     let mut exp = Search {
@@ -769,11 +798,13 @@ fn par_solve<L: Leaf + Sync>(
         (0..tasks.len()).map(|_| Mutex::new(None)).collect();
     let workers = threads.min(tasks.len()).max(1);
     let mut stats = exp.stats;
+    drop(splitter);
     let worker_stats: Vec<Stats> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..workers)
             .map(|_| {
                 let (tasks, next, results) = (&tasks, &next, &results);
                 sc.spawn(move || {
+                    let _active = Active::enter(Some(pr));
                     let mut s = Search {
                         ctx,
                         leaf,
@@ -810,6 +841,7 @@ fn par_solve<L: Leaf + Sync>(
             .map(|h| h.join().expect("solver thread panicked"))
             .collect()
     });
+    let _combiner = Active::enter(Some(pr));
     for w in &worker_stats {
         stats.nodes += w.nodes;
         stats.leaves += w.leaves;

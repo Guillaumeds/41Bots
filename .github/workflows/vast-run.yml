@@ -29,6 +29,12 @@ on:
       low_cpu_pct:
         description: "Low-CPU watchdog threshold in % (default 85; lower only for runs with known serial tails)"
         default: "85"
+      low_cpu_s:
+        description: "Seconds of CPU below low_cpu_pct before the machine is stopped and destroyed (default 300)"
+        default: "300"
+      poll_s:
+        description: "Seconds between the launcher's checks of the machine (default 60)"
+        default: "60"
       cpu_match:
         description: "Regex the offer's CPU name must match, e.g. EPYC (blank = any)"
         default: ""
@@ -74,6 +80,8 @@ jobs:
           MIN_CORES: ${{ inputs.min_cores }}
           MAX_MINUTES: ${{ inputs.max_minutes }}
           LOW_CPU_PCT: ${{ inputs.low_cpu_pct }}
+          LOW_CPU_S: ${{ inputs.low_cpu_s }}
+          POLL_S: ${{ inputs.poll_s }}
           CPU_MATCH: ${{ inputs.cpu_match }}
           IMAGE: ${{ inputs.image }}
           BIN_SHA: ${{ inputs.bin_sha || github.sha }}
@@ -87,7 +95,8 @@ jobs:
           # A blank run_id gets a timestamp from the launcher.
           MANIFEST=$(python3 -c 'import json,os,sys; t=os.environ["MANIFEST"]; m=json.loads(t if t.lstrip().startswith("{") else open(t).read()); m["run_id"]=m.get("run_id") or "gh-${{ github.run_id }}"; print(json.dumps(m))')
           python3 python/launcher/launch.py run --manifest "$MANIFEST" --min-cores "$MIN_CORES" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} \
-            --max-minutes "$MAX_MINUTES" --low-cpu-pct "$LOW_CPU_PCT" --image "$IMAGE" --bin-sha "$BIN_SHA" --state-file instance-id.txt ${{ inputs.cheapest && '--cheapest' || '' }}
+            --max-minutes "$MAX_MINUTES" --low-cpu-pct "$LOW_CPU_PCT" --low-cpu-s "${LOW_CPU_S:-300}" --poll-s "${POLL_S:-60}" \
+            --image "$IMAGE" --bin-sha "$BIN_SHA" --state-file instance-id.txt ${{ inputs.cheapest && '--cheapest' || '' }}
       - name: Cancelled - ask the run to stop and wait (at most 5 minutes) for it to upload what it finished
         if: cancelled() && hashFiles('instance-id.txt.run-id') != ''
         shell: bash

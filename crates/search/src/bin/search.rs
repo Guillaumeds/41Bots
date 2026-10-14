@@ -7,10 +7,12 @@
 //!                  [--ids 3,17,42 | --ids FILE] [--threads K] [--solve-threads K] [--tt-mb M]
 //!                  [--schedule fixed|auto] [--tt-budget-mb B] [--sched-json JSON|FILE]
 //!                  --equity TABLE [--progress FILE]
-//! search bench-t1  --decisions FILE --equity TABLE --json OUT [--set P:D:W,…] [--name N]
-//!                  [--threads T] [--schedule fixed --worlds-at-once W --solve-threads S --tt-mb M
-//!                  | --schedule auto --tt-budget-mb B [--sched-json …]] [--cap-s X]
-//!                  [--stop-occ-s Y] [--seed 1] [--label 1] [--progress FILE]
+//! search bench-t1  --mode fill|prod --decisions FILE --equity TABLE --json OUT --threads T
+//!                  [--window-s 240] [--tt-mb 512 (fill)] [--tt-budget-mb B]
+//!                  [--worlds-per-decision 800] [--sched-json …] (prod) [--seed 1] [--label 1]
+//!                  [--usable-cores C] [--min-cpu-pct 80] [--ramp-s 20] [--busy-streak-s 10]
+//!                  [--cpu-interval-s 30] [--no-guard] [--sample-ms 1000]
+//!                  [--progress FILE] [--stop-file FILE]
 //! search agree     --worlds FILE [--worlds FILE …] [--grid 10,20,40,80,160,320] [--json FILE]
 //!                  [--decisions FILE …]
 //! search curves    --worlds FILE [--worlds FILE …] [--decisions FILE …]
@@ -39,10 +41,12 @@
 //! see exactly the rows one longer run would have written (§13.1 item 10).
 //! `--schedule auto` gives every exact world its own threads and table by position on `--threads`
 //! threads within `--tt-budget-mb` (`search::plan`, §13.1 item 11); the file is the same bytes.
-//! `bench-t1` is one run of the trick-1 bench (`search::t1bench`): set `--set` of the decisions
-//! file under one configuration, stopped at `--cap-s` seconds or once the thread-seconds held
-//! reach `--stop-occ-s`; it writes every world's time, threads, nodes, table use and values, and
-//! the process's CPU time and peak memory, to `--json`.
+//! `bench-t1` is one timed window of the trick-1 machine bench (`search::t1bench`): `fill` (one
+//! world per thread on `--threads` threads, positions spread evenly, `--tt-mb` tables) or `prod`
+//! (the position-aware schedule within `--tt-budget-mb`, on every decision × `--worlds-per-decision`
+//! worlds). It stops every solve at the window's end, or earlier when the guard sees low CPU or
+//! idle threads, or when `--stop-file` appears; it writes every world's nodes (stopped ones so
+//! far) and value hash, the samples, CPU time and peak memory to `--json`.
 //! `agree` reports N against 2N on the grid, per trick, per position in the trick (§13.1 item 6),
 //! per match-state stratum and per log2 world-count band (item 8) and per hand-type band (item 9:
 //! trumps, top trumps, longest plain suit; and the hand features added on 2026-10-14, holds the 5
@@ -69,7 +73,7 @@ use search::measure::{
 };
 use search::pimc::{Ctx, Method, SearchConfig, SharedLeaf};
 use search::plan::AutoParams;
-use search::t1bench::{BenchProgress, BenchSchedule, run_bench};
+use search::t1bench::{Guard, Mode, Sample, WindowParams, run_window};
 use search::teacher::{decisions_npy, teacher_deck, teacher_hand};
 use search::worlds::{BeliefSource, RejectionSource, WorldSource};
 
@@ -370,26 +374,29 @@ fn auto_params(a: &Args) -> Result<AutoParams, String> {
     }
 }
 
-/// CPU seconds of this process so far (Linux), with the kernel's clock tick from `getconf`.
-fn cpu_seconds() -> Option<f64> {
-    let tck = std::process::Command::new("getconf")
-        .arg("CLK_TCK")
-        .output()
-        .ok()
-        .and_then(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .trim()
-                .parse::<f64>()
-                .ok()
-        })
-        .filter(|&x| x > 0.0)
-        .unwrap_or(100.0);
-    search::t1bench::proc_cpu_ticks().map(|t| t as f64 / tck)
+/// Write `v` to `path` whole (a temporary file renamed over it, so a reader never sees half).
+fn write_atomic(path: &Path, v: &serde_json::Value) {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    if std::fs::write(&tmp, v.to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
 }
 
-/// `search bench-t1`: one run of the trick-1 bench (one configuration on one set; see
-/// `search::t1bench`), written as JSON to `--json`.
+fn float(a: &Args, k: &str, d: f64) -> Result<f64, String> {
+    a.get(k).map_or(Ok(d), |s| {
+        s.parse::<f64>()
+            .map_err(|_| format!("{k}: not a number: {s}"))
+    })
+}
+
+/// `search bench-t1`: one window of the trick-1 machine bench (`search::t1bench`), written as
+/// JSON to `--json`. `--progress FILE` is rewritten every sample (about every second) with the
+/// window's state; a `--stop-file` appearing stops the window at once with the file's text as the
+/// reason.
 fn bench_t1(a: &Args) -> Result<(), String> {
+    let mode = Mode::parse(a.req("--mode")?)?;
     let ds: Vec<DecisionSpec> = read_lines(a.req("--decisions")?)?;
     let table = load_equity(a.req("--equity")?)?;
     let leaf: Arc<SharedLeaf> = Arc::new(table);
@@ -399,86 +406,94 @@ fn bench_t1(a: &Args) -> Result<(), String> {
         source: &*src,
         rules: engine::game::Rules::HOUSE,
     };
-    let threads = a.num("--threads", 1)? as usize;
-    let sched = match a.get("--schedule").unwrap_or("fixed") {
-        "fixed" => BenchSchedule::Fixed {
-            worlds_at_once: a.num("--worlds-at-once", 1)? as usize,
-            solve_threads: a.num("--solve-threads", threads as u64)? as usize,
-            tt_mb: a.num("--tt-mb", 256)? as usize,
-        },
-        "auto" => BenchSchedule::Auto {
-            threads,
-            budget_mb: a.num("--tt-budget-mb", 16_384)?,
-            params: Box::new(auto_params(a)?),
-        },
-        s => return Err(format!("unknown --schedule {s} (fixed or auto)")),
+    let threads = a.num("--threads", 1)?.max(1) as usize;
+    let mut p = WindowParams::new(mode, float(a, "--window-s", 240.0)?, threads);
+    p.seed = a.num("--seed", 1)?;
+    p.label = a.num("--label", 1)?;
+    p.tt_mb = a.num("--tt-mb", 512)? as usize;
+    p.budget_mb = a.num("--tt-budget-mb", 16_384)?;
+    p.auto = auto_params(a)?;
+    p.worlds = a.num("--worlds-per-decision", 800)?;
+    p.sample_ms = a.num("--sample-ms", 1000)?;
+    let d = Guard::default();
+    let guard = Guard {
+        ramp_s: float(a, "--ramp-s", d.ramp_s)?,
+        min_cpu_pct: float(a, "--min-cpu-pct", d.min_cpu_pct)?,
+        cpu_interval_s: float(a, "--cpu-interval-s", d.cpu_interval_s)?,
+        busy_streak_s: float(a, "--busy-streak-s", d.busy_streak_s)?,
+        usable_cores: float(a, "--usable-cores", d.usable_cores)?,
     };
-    let cap_s = a.get("--cap-s").map_or(Ok(600.0), |s| {
-        s.parse::<f64>().map_err(|_| format!("--cap-s: {s}"))
-    })?;
-    let stop_occ = a
-        .get("--stop-occ-s")
-        .map(|s| s.parse::<f64>().map_err(|_| format!("--stop-occ-s: {s}")))
-        .transpose()?;
-    let name = a.get("--name").unwrap_or("run").to_string();
-    let set = a
-        .get("--set")
-        .unwrap_or(search::t1bench::MID_SET)
-        .to_string();
-    let prog = BenchProgress::default();
-    let finished = AtomicBool::new(false);
-    let progress_path = a.get("--progress").map(PathBuf::from);
-    let t0 = Instant::now();
-    let cpu0 = cpu_seconds();
-    let mut run = std::thread::scope(|s| {
-        if let Some(p) = &progress_path {
-            let (prog, finished) = (&prog, &finished);
-            s.spawn(move || {
-                while !finished.load(Ordering::Relaxed) {
-                    let ld = |x: &std::sync::atomic::AtomicU64| x.load(Ordering::Relaxed);
-                    let v = serde_json::json!({
-                        "worlds_total": ld(&prog.total), "worlds_done": ld(&prog.done),
-                        "running": ld(&prog.running), "elapsed_s": t0.elapsed().as_secs(),
-                    });
-                    let mut tmp = p.as_os_str().to_owned();
-                    tmp.push(".tmp");
-                    if std::fs::write(&tmp, v.to_string()).is_ok() {
-                        let _ = std::fs::rename(&tmp, p);
-                    }
-                    std::thread::sleep(Duration::from_millis(500));
-                }
-            });
+    // `--no-guard` keeps the usable cores (for the CPU share) but never stops the window.
+    p.guard = Some(if a.has("--no-guard") {
+        Guard {
+            ramp_s: f64::INFINITY,
+            ..guard
         }
-        let r = run_bench(
-            &name,
-            &ds,
-            &set,
-            a.num("--seed", 1)?,
-            a.num("--label", 1)?,
-            &ctx,
-            &sched,
-            cap_s,
-            stop_occ,
-            Some(&prog),
-        );
-        finished.store(true, Ordering::Relaxed);
-        r
-    })?;
-    run.cpu_s = match (cpu0, cpu_seconds()) {
-        (Some(a), Some(b)) => Some(b - a),
-        _ => None,
+    } else {
+        guard
+    });
+    let progress_path = a.get("--progress").map(PathBuf::from);
+    let stop_file = a.get("--stop-file").map(PathBuf::from);
+    if let Some(f) = &stop_file {
+        let _ = std::fs::remove_file(f);
+    }
+    let window_s = p.window_s;
+    let state = |s: Option<&Sample>, started: bool, stopped: Option<&str>| {
+        let (t, nodes) = s.map_or((0.0, 0), |s| (s.t, s.nodes));
+        serde_json::json!({
+            "window": mode.name(), "started": started, "window_s": window_s,
+            "t_s": (t * 10.0).round() / 10.0, "threads": threads,
+            "busy": s.map(|s| s.busy), "held": s.map(|s| s.held), "nodes": nodes,
+            "finished_worlds": s.map(|s| s.finished),
+            "rate": if t > 0.0 { (nodes as f64 / t).round() } else { 0.0 },
+            "cpu_s": s.map(|s| (s.cpu_s * 10.0).round() / 10.0),
+            "stopped": stopped,
+        })
     };
-    run.peak_rss_mb = search::t1bench::proc_peak_rss_mb();
-    let tot = search::t1bench::totals(&run);
+    if let Some(path) = &progress_path {
+        write_atomic(path, &state(None, false, None));
+    }
     eprintln!(
-        "bench-t1 {name}: {}/{} worlds in {:.1} s, occupancy {:.0} thread-s{}",
-        tot.finished,
-        tot.worlds,
+        "bench-t1 {}: {} decisions, {threads} threads, {window_s} s",
+        mode.name(),
+        ds.len()
+    );
+    let mut on_sample = |s: &Sample| {
+        if let Some(path) = &progress_path {
+            write_atomic(path, &state(Some(s), true, None));
+        }
+        let f = stop_file.as_ref()?;
+        let why = std::fs::read_to_string(f).ok()?;
+        Some(match why.trim() {
+            "" => "stopped by the runner".to_string(),
+            w => w.to_string(),
+        })
+    };
+    let run = run_window(&ds, &ctx, &p, &mut on_sample)?;
+    if let Some(path) = &progress_path {
+        write_atomic(
+            path,
+            &state(run.samples.last(), true, run.stopped.as_deref())
+                .as_object()
+                .cloned()
+                .map(|mut o| {
+                    o.insert("finished".into(), serde_json::json!(true));
+                    serde_json::Value::Object(o)
+                })
+                .unwrap_or_default(),
+        );
+    }
+    eprintln!(
+        "bench-t1 {}: {} nodes in {:.1} s ({:.3e} a second), {} of {} worlds finished{}",
+        mode.name(),
+        run.nodes(),
         run.wall_s,
-        tot.occupancy_s,
+        run.nodes() as f64 / run.wall_s.max(1e-9),
+        run.worlds.iter().filter(|w| w.finished).count(),
+        run.worlds.len(),
         run.stopped
             .as_deref()
-            .map_or(String::new(), |s| format!(", stopped ({s})"))
+            .map_or(String::new(), |s| format!("; stopped early: {s}"))
     );
     let text = serde_json::to_string(&run).map_err(|e| e.to_string())?;
     std::fs::write(a.req("--json")?, text + "\n").map_err(|e| e.to_string())

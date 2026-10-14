@@ -13,8 +13,8 @@
 //! **The plan** ([`plan_auto`]), per world, on `T` usable threads with a memory budget `B` for
 //! all tables at their peak:
 //! 1. expected cost `e` in thread-seconds ([`AutoParams::expected_cost`]): at trick 1 a cost per
-//!    position (`t1_costs_s`: measured one-thread solves, replaceable by the trick-1 bench's
-//!    `suggested_auto_params`), at other tricks a leader cost times `position_ratio^-position`;
+//!    position (`t1_costs_s`: measured one-thread solves, replaceable through the manifest's
+//!    `schedule`), at other tricks a leader cost times `position_ratio^-position`;
 //!    times the solves the world takes (a robber's joint burn-and-play decision takes one per
 //!    burn);
 //! 2. a target wall time per world `τ = clamp(E / (waves · T), target_min_s, target_max_s)`, `E`
@@ -64,8 +64,8 @@ pub struct AutoParams {
     /// the 4-vCPU Xeon (2026-10-14: positions 4, 6, 7, 8 measured at about 200, 16, 20, 25 s);
     /// the leader from run m3-agree-t1-b (about 72 leader worlds an hour on 448 threads as
     /// 4 × 112, so about 22,000 thread-seconds each at 112 threads), taken as 5000 s on one
-    /// thread; positions 2–3 and 5 interpolated. The trick-1 bench prints measured ones
-    /// (`suggested_auto_params`).
+    /// thread; positions 2–3 and 5 interpolated. A manifest's `schedule` can replace them with
+    /// measured ones (e.g. from the yardstick run's timings).
     pub t1_costs_s: Option<[f64; 8]>,
     /// The table (MB) a leader's world is expected to need per trick, scaled by position like
     /// the cost, for tricks without a per-position table below; a world whose share of the
@@ -266,12 +266,6 @@ pub fn plan_auto(tasks: &[PlanTask], threads: usize, budget_bytes: u64, p: &Auto
         expected_s: expected,
         record,
     }
-}
-
-/// The same plan for every one of `n` tasks, in task order (the explicit "worlds at once ×
-/// threads per world" settings: `worlds_at_once · solve_threads` threads in all).
-pub fn plan_uniform(n: usize, plan: WorldPlan) -> (Vec<WorldPlan>, Vec<usize>) {
-    (vec![plan; n], (0..n).collect())
 }
 
 /// Live state of [`run_planned`] (progress reports only).

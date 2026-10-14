@@ -202,6 +202,21 @@ impl Remote for DirRemote {
 
 // ---------------------------------------------------------------- rclone (R2)
 
+/// An `rclone` command. On a rented machine (`CONTAINER_ID` set) with no `RCLONE_CONFIG`, its
+/// configuration is kept in memory (`RCLONE_CONFIG=/dev/null`, rclone's documented switch): the
+/// image has no config file (the `r2` remote comes from the `RCLONE_CONFIG_R2_*` variables), and
+/// otherwise rclone prints `NOTICE: Config file "…" not found - using defaults` on every call,
+/// that is with every heartbeat. Nothing else changes; elsewhere the user's own config is kept.
+fn rclone() -> Command {
+    let mut c = Command::new("rclone");
+    if std::env::var_os("RCLONE_CONFIG").is_none()
+        && std::env::var("CONTAINER_ID").is_ok_and(|v| !v.is_empty())
+    {
+        c.env("RCLONE_CONFIG", "/dev/null");
+    }
+    c
+}
+
 pub struct RcloneRemote {
     /// e.g. `r2:bucket`.
     pub base: String,
@@ -227,7 +242,7 @@ impl Remote for RcloneRemote {
     }
 
     fn put(&self, local: &Path, key: &str, immutable: bool) -> Result<(), String> {
-        let mut c = Command::new("rclone");
+        let mut c = rclone();
         c.args(["copyto", "--s3-no-check-bucket", "--retries", "5"]);
         if immutable {
             c.arg("--immutable");
@@ -240,7 +255,7 @@ impl Remote for RcloneRemote {
         if self.sha256_exists(key)?.is_none() {
             return Ok(false);
         }
-        let mut c = Command::new("rclone");
+        let mut c = rclone();
         c.args(["copyto", "--retries", "5"])
             .arg(self.url(key))
             .arg(local);
@@ -248,7 +263,7 @@ impl Remote for RcloneRemote {
     }
 
     fn list_sized(&self, prefix: &str) -> Result<Vec<(String, u64)>, String> {
-        let o = Command::new("rclone")
+        let o = rclone()
             .args([
                 "lsf",
                 "-R",
@@ -289,7 +304,7 @@ impl Remote for RcloneRemote {
         if self.sha256_exists(key)?.is_none() {
             return Ok(None);
         }
-        let mut child = Command::new("rclone")
+        let mut child = rclone()
             .args(["cat", "--retries", "5"])
             .arg(self.url(key))
             .stdin(Stdio::null())
@@ -307,7 +322,7 @@ impl Remote for RcloneRemote {
     fn exists(&self, key: &str) -> Result<bool, String> {
         // One level of the key's directory only (cheap on S3: a delimited listing).
         let (dir, name) = key.rsplit_once('/').unwrap_or(("", key));
-        let o = Command::new("rclone")
+        let o = rclone()
             .args(["lsf", "--files-only", "--max-depth", "1", "--include"])
             .arg(format!("/{name}"))
             .arg(self.url(dir))
@@ -327,14 +342,14 @@ impl Remote for RcloneRemote {
             return Ok(Vec::new());
         }
         let prefix = prefix.trim_end_matches('/');
-        let mut c = Command::new("rclone");
+        let mut c = rclone();
         c.args(["copy", "--s3-no-check-bucket", "--retries", "5"]);
         if immutable {
             c.arg("--immutable");
         }
         c.arg(dir).arg(self.url(prefix));
         self.run(c)?;
-        let mut c = Command::new("rclone");
+        let mut c = rclone();
         c.args(["check", "--one-way"])
             .arg(dir)
             .arg(self.url(prefix));

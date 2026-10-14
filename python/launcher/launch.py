@@ -20,10 +20,16 @@ Rules applied:
   per core for that CPU model, from R2 bench/; unknown models use the median of known ones, or 1).
 - Owner's rule: among offers within 20% (--premium) of the cheapest cost per unit of work, take
   the one doing the most work per hour.
-- Watch through the vast API and the R2 heartbeat every 60 s, never SSH. Destroy when: no
-  heartbeat within --startup-minutes; heartbeat older than 3 minutes; CPU use below 85% for 5
-  minutes while the chunk is running (unless its heartbeat says progress.partial_cpu_ok); --max-minutes reached; DONE/FAILED seen. Always destroy,
-  never stop.
+- Watch through the vast API and the R2 heartbeat every --poll-s (60) seconds, never SSH. Destroy
+  when: no heartbeat within --startup-minutes; heartbeat older than 3 minutes; CPU use below
+  --low-cpu-pct (85%) for --low-cpu-s (300) seconds while the chunk is running (unless its
+  heartbeat says progress.partial_cpu_ok); --max-minutes reached; DONE/FAILED seen. Always
+  destroy, never stop.
+- Container start failures are caught at the next poll: while waiting for the first heartbeat, an
+  instance whose status shows a container error ("Error response from daemon", "failed to
+  inject", "OCI runtime", or actual_status exited/offline) is destroyed at once and the next offer
+  is rented (counted as a replacement, for format 1 too: nothing ran on it), instead of waiting
+  for --startup-minutes.
 - Keep finished work (docs/M3-SPEC.md §13.1 item 11): before destroying a machine that is still
   working (--max-minutes, low CPU, Ctrl-C) the launcher writes runs/<run_id>/STOP; the runner
   reads it at its next heartbeat, stops, uploads what it finished, writes DONE or FAILED, and the
@@ -71,12 +77,12 @@ import tempfile
 import time
 from datetime import datetime, timezone
 
-POLL_S = 60
+POLL_S = 60  # default; --poll-s overrides
 HEARTBEAT_STALE_S = 180
 MAX_REPLACEMENTS = 3
 MAX_CREATE_TRIES = 5
 LOW_CPU_PCT = 85.0  # default; --low-cpu-pct overrides per run
-LOW_CPU_S = 300
+LOW_CPU_S = 300  # default; --low-cpu-s overrides
 STOP_WAIT_S = 300  # default; --stop-wait-s overrides: how long a stopped machine may take to upload
 STOP_POLL_S = 10
 
@@ -426,6 +432,27 @@ def instance_gone(instance_id: int) -> bool:
     return not info or (info.get("actual_status") in (None, "exited", "offline") and info.get("intended_status") == "stopped")
 
 
+# Signs in an instance's status that its container cannot start: the image or its configuration
+# failed on the host (e.g. 2026-10-14: "Error response from daemon: failed to create task for
+# container: failed to inject ... OCI runtime create failed"). Such an instance never heartbeats.
+CONTAINER_ERRORS = ("error response from daemon", "failed to inject", "oci runtime")
+START_FAILED = "container failed to start"
+
+
+def container_start_error(info: dict | None) -> str | None:
+    """Why an instance that has not heartbeated yet cannot start, or None: a container error in
+    its status message, or a stopped state (actual_status exited or offline)."""
+    if not info:
+        return None
+    msg = str(info.get("status_msg") or "").strip().replace("\n", " ")
+    if any(e in msg.lower() for e in CONTAINER_ERRORS):
+        return msg[:300]
+    status = info.get("actual_status")
+    if status in ("exited", "offline"):
+        return f"actual_status {status}" + (f": {msg[:250]}" if msg else "")
+    return None
+
+
 def latest_heartbeat(run_id: str) -> tuple[str | None, dict | None]:
     keys = sorted(k for k in r2_list(f"runs/{run_id}/heartbeat/") if k.endswith(".json"))
     if not keys:
@@ -550,7 +577,7 @@ def rent_and_watch(a, run_id: str, best: dict | None, resumable: bool, run_start
                         reason = f"{reason}; stopped by the launcher, the runner uploaded what it finished ({marker})"
                         a.stopped = True
                 if final != "DONE":
-                    log(f"last status before destroy: {status_line(instance_status(instance_id))}")
+                    log(f"last status before destroy: {redact(status_line(instance_status(instance_id)))}")
                     print_logs(instance_id)
                 if final:
                     # The runner destroys itself after uploading; give it two minutes, then make sure.
@@ -565,7 +592,9 @@ def rent_and_watch(a, run_id: str, best: dict | None, resumable: bool, run_start
                          "minutes": round((ended - created) / 60, 1),
                          "dollars_est": round((ended - created) / 3600 * dph, 4), "ended": final or reason})
         log(f"instance {instance_id} ended: {reason}")
-        if final or not (resumable and replaceable):
+        # A container that never started ran nothing, so even a format-1 run is safe to retry.
+        start_failed = reason.startswith(START_FAILED)
+        if final or not ((resumable and replaceable) or start_failed):
             break
         if len(attempts) > MAX_REPLACEMENTS:
             reason = f"{reason}; {MAX_REPLACEMENTS} replacements used, stopping"
@@ -716,7 +745,7 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
     # Heartbeats of an earlier machine of this run do not count as this one's.
     first_key, _ = latest_heartbeat(run_id)
     while True:
-        time.sleep(POLL_S)
+        time.sleep(a.poll_s)
         now = time.time()
         for marker in ("DONE", "FAILED"):
             if r2_get(f"runs/{run_id}/{marker}") is not None:
@@ -732,9 +761,13 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
             if now - created > a.startup_minutes * 60:
                 return "", f"no heartbeat within {a.startup_minutes} minutes of renting", True, False
             info = instance_status(instance_id)
-            if instance_gone(instance_id) or (info or {}).get("actual_status") == "exited":
+            bad = container_start_error(info)
+            if bad:
+                log(f"::warning::instance {instance_id} cannot start its container: {redact(bad)}")
+                return "", f"{START_FAILED} ({redact(bad)[:200]})", True, False
+            if instance_gone(instance_id):
                 return "", "instance stopped before the first heartbeat", True, False
-            log(f"waiting for the machine to start (image download and boot): {status_line(info)}")
+            log(f"waiting for the machine to start (image download and boot): {redact(status_line(info))}")
             continue
         if now - last_change > HEARTBEAT_STALE_S:
             return "", "heartbeat missing for 3 minutes", True, False
@@ -757,8 +790,8 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
             cpu_samples.append(float(cpu))
             if cpu < a.low_cpu_pct:
                 low_since = low_since or now
-                if now - low_since >= LOW_CPU_S:
-                    return "", f"CPU use below {a.low_cpu_pct:.0f}% for 5 minutes while work remains", False, True
+                if now - low_since >= a.low_cpu_s:
+                    return "", f"CPU use below {a.low_cpu_pct:.0f}% for {a.low_cpu_s} s while work remains", False, True
             else:
                 low_since = None
 
@@ -838,7 +871,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--bin-sha", required=True)
     s.add_argument("--max-minutes", type=int, default=30)
     s.add_argument("--low-cpu-pct", type=float, default=LOW_CPU_PCT,
-                   help="destroy if CPU stays below this for 5 minutes (lower only for runs with known serial tails)")
+                   help="destroy if CPU stays below this for --low-cpu-s (lower only for runs with known serial tails)")
+    s.add_argument("--low-cpu-s", type=int, default=LOW_CPU_S,
+                   help="seconds of CPU below --low-cpu-pct before the machine is stopped and destroyed")
+    s.add_argument("--poll-s", type=int, default=POLL_S,
+                   help="seconds between checks of the machine (vast status, R2 heartbeat and markers)")
     s.add_argument("--startup-minutes", type=int, default=15)
     s.add_argument("--stop-wait-s", type=int, default=STOP_WAIT_S,
                    help="before destroying a machine that is still working (time limit, low CPU, Ctrl-C), ask it to "

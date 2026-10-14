@@ -12,7 +12,8 @@
 //!   held-out checks and the N each scenario needs (§13.1 item 10).
 //! - [`plan`]: position-aware threads and tables per exact world, and the runner that packs
 //!   them onto the machine (§13.1 item 11).
-//! - [`t1bench`]: the trick-1 bench: configurations compared on fixed yardstick worlds (§13.1
+//! - [`t1bench`]: the trick-1 machine bench: exact-solve work per second and per dollar with
+//!   every thread busy, and a check that the production schedule fills the machine (§13.1
 //!   item 11).
 //! - [`teacher`]: teacher hands and their output files (§5.10).
 //!

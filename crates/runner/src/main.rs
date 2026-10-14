@@ -437,6 +437,9 @@ struct Ctx {
     child: Option<u32>,
     phase: String,
     progress: Value,
+    /// Print one compact line per heartbeat to stdout ([`hb_line`]; format 1, where stdout is
+    /// the machine's log that `vastai logs` shows).
+    hb_stdout: bool,
 }
 
 impl Ctx {
@@ -459,6 +462,7 @@ impl Ctx {
             child: None,
             phase: "chunk".into(),
             progress: Value::Null,
+            hb_stdout: false,
         }
     }
 
@@ -523,6 +527,18 @@ impl Ctx {
             "host_cpu_busy_pct": round(cpu.host),
             "est_cost_usd": (elapsed / 3600.0 * self.dph * 10_000.0).round() / 10_000.0,
         });
+        if self.hb_stdout {
+            println!(
+                "{}",
+                hb_line(
+                    self.seq,
+                    &self.phase,
+                    &self.progress,
+                    cpu.tree.or(cpu.cgroup)
+                )
+            );
+            let _ = std::io::stdout().flush();
+        }
         match self.write_json("heartbeat.json", &hb) {
             Ok(p) => {
                 let rel = format!("heartbeat/{:06}.json", self.seq);
@@ -619,6 +635,45 @@ impl Ctx {
             std::thread::sleep(Duration::from_millis(200));
         }
     }
+}
+
+/// The compact heartbeat line, e.g. `hb 17 fill 95s cpu 98.7% busy 245/245 nodes 3.1e11
+/// rate 3.3e9/s` (a `t1bench` window), or `hb 3 chunk search_measure cpu 99.2%`.
+fn hb_line(seq: u32, phase: &str, progress: &Value, cpu: Option<f64>) -> String {
+    let mut s = format!("hb {seq}");
+    match progress.get("window").and_then(Value::as_str) {
+        Some(w) if progress["started"].as_bool() == Some(true) => {
+            s.push_str(&format!(
+                " {w} {:.0}s",
+                progress["t_s"].as_f64().unwrap_or(0.0)
+            ));
+        }
+        Some(w) => s.push_str(&format!(" {w} starting")),
+        None => {
+            s.push(' ');
+            s.push_str(phase);
+            for k in ["kind", "step"] {
+                if let Some(x) = progress.get(k).and_then(Value::as_str) {
+                    s.push(' ');
+                    s.push_str(x);
+                }
+            }
+        }
+    }
+    match cpu {
+        Some(c) => s.push_str(&format!(" cpu {c:.1}%")),
+        None => s.push_str(" cpu -"),
+    }
+    if let (Some(b), Some(t)) = (progress["busy"].as_u64(), progress["threads"].as_u64()) {
+        s.push_str(&format!(" busy {b}/{t}"));
+    }
+    if let Some(n) = progress["nodes"].as_f64() {
+        s.push_str(&format!(" nodes {n:.1e}"));
+    }
+    if let Some(r) = progress["rate"].as_f64() {
+        s.push_str(&format!(" rate {r:.1e}/s"));
+    }
+    s
 }
 
 fn sibling(name: &str) -> PathBuf {
@@ -724,6 +779,7 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
         child: None,
         phase: "start".into(),
         progress: Value::Null,
+        hb_stdout: true,
     };
     // Continue a heartbeat sequence if this run id was started before on this disk.
     if let Ok(t) = fs::read_to_string(ctx.root.join("heartbeat.json"))
@@ -1092,6 +1148,24 @@ mod tests {
             destroy_outcome("", "4242", key),
             Err("vastai printed nothing".into())
         );
+    }
+
+    #[test]
+    fn heartbeat_lines() {
+        let p = json!({ "kind": "t1bench", "window": "fill", "started": true, "t_s": 95.2,
+                        "threads": 245, "busy": 245, "nodes": 3.1e11, "rate": 3.26e9 });
+        assert_eq!(
+            hb_line(17, "chunk", &p, Some(98.66)),
+            "hb 17 fill 95s cpu 98.7% busy 245/245 nodes 3.1e11 rate 3.3e9/s"
+        );
+        let p = json!({ "kind": "t1bench", "window": "prod", "started": false, "threads": 4 });
+        assert_eq!(hb_line(2, "chunk", &p, None), "hb 2 prod starting cpu -");
+        let p = json!({ "kind": "search_measure", "step": "exact worlds" });
+        assert_eq!(
+            hb_line(3, "chunk", &p, Some(99.24)),
+            "hb 3 chunk search_measure exact worlds cpu 99.2%"
+        );
+        assert_eq!(hb_line(0, "start", &Value::Null, None), "hb 0 start cpu -");
     }
 
     #[test]

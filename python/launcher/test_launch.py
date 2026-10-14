@@ -36,6 +36,8 @@ class World:
         self.key_answer = "api-key created {'id': 77, 'key': 'dk-0123456789abcdef', 'permissions': {'api': {}}}"
         self.keys: dict[int, str] = {}  # destroy-only keys alive in the account
         self.deleted_keys: list[int] = []
+        self.poll = launch.POLL_S  # the launcher's poll interval in this test (--poll-s)
+        self.destroyed_at: dict[int, float] = {}  # instance id -> clock at its destroy
 
     # ---- clock
     def time(self) -> float:
@@ -51,7 +53,7 @@ class World:
                     self.store[f"runs/{RUN}/out/measure/exact.jsonl"] = b'{"id": 0}\n'
                     self.store[f"runs/{RUN}/FAILED"] = json.dumps({"stopped": "the launcher asked"}).encode()
                     inst["alive"] = False
-        if dt >= launch.POLL_S:
+        if dt >= self.poll:
             for inst in self.instances.values():
                 if inst["alive"]:
                     self.step(inst)
@@ -60,7 +62,7 @@ class World:
         inst["polls"] += 1
         kind, n = inst["script"].split(":")
         n = int(n)
-        if kind == "never":
+        if kind in ("never", "broken"):
             return
         if kind in ("work", "idle"):
             # Works on and on (at full CPU, or at 10%), never finishing by itself.
@@ -97,7 +99,8 @@ class World:
                 raise RuntimeError("vastai create instance failed: no_such_ask")
             iid = self.next_id
             self.next_id += 1
-            self.instances[iid] = {"alive": True, "polls": 0, "script": self.scripts.pop(0), "offer": oid}
+            self.instances[iid] = {"alive": True, "polls": 0, "script": self.scripts.pop(0), "offer": oid,
+                                   "created": self.t}
             self.created_on.append(oid)
             self.envs.append(args[args.index("--env") + 1])
             return {"success": True, "new_contract": iid, "instance_api_key": "ik-secret"}
@@ -116,15 +119,25 @@ class World:
             inst = self.instances.get(int(args[2]))
             if not inst or not inst["alive"]:
                 return {"actual_status": "exited", "intended_status": "stopped"}
+            if inst["script"].startswith("broken"):
+                # The 2026-10-14 failure: the host cannot start the container (the message here
+                # also carries a secret, which must never be logged).
+                return {"actual_status": "created", "intended_status": "running",
+                        "status_msg": "Error response from daemon: failed to create task for container: "
+                                      "failed to inject CDI devices: OCI runtime create failed: sk-test-secret-3"}
             return {"actual_status": "running", "intended_status": "running"}
         if cmd == ("destroy", "instance"):
             inst = self.instances.get(int(args[2]))
             if inst:
                 inst["alive"] = False
+                self.destroyed_at.setdefault(int(args[2]), self.t)
             return ""
         if args[0] == "logs":
             return ""
         raise AssertionError(f"unexpected vast call {args}")
+
+    def instances_created_at(self, iid: int) -> float:
+        return self.instances[iid]["created"]
 
     # ---- R2
     def r2_get(self, key: str):
@@ -160,13 +173,15 @@ class LauncherTest(unittest.TestCase):
         launch.r2_get, launch.r2_put = world.r2_get, world.r2_put
         launch.r2_list, launch.r2_exists = world.r2_list, world.r2_exists
         launch.time = world
+        out = io.StringIO()
         try:
-            with contextlib.redirect_stdout(io.StringIO()):
+            with contextlib.redirect_stdout(out):
                 code = launch.main(["run", "--manifest", json.dumps(manifest), "--image", "img:1", "--bin-sha", "abc",
                                     "--max-minutes", "600", "--startup-minutes", "5", *extra])
         finally:
             for n, v in saved.items():
                 setattr(launch, n, v)
+        self.log = out.getvalue()
         report = json.loads(world.store.get(f"runs/{RUN}/report.json", b"{}"))
         return code, report
 
@@ -288,8 +303,61 @@ class LauncherTest(unittest.TestCase):
         w = World([offer(1, 11, 1.0)], ["idle:0"])
         code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}})
         self.assertEqual((code, report["outcome"]), (1, "STOPPED"))
-        self.assertIn("CPU use below", report["reason"])
+        self.assertIn("CPU use below 85% for 300 s", report["reason"])
         self.assertIn(f"runs/{RUN}/STOP", w.store)
+        default_minutes = report["attempts"][0]["minutes"]
+        # --low-cpu-s shortens the wait (here 2 polls instead of 5).
+        w = World([offer(1, 11, 1.0)], ["idle:0"])
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}},
+                                       "--low-cpu-s", "120")
+        self.assertEqual((code, report["outcome"]), (1, "STOPPED"))
+        self.assertIn("CPU use below 85% for 120 s", report["reason"])
+        self.assertLess(report["attempts"][0]["minutes"], default_minutes - 2.5)
+
+    def test_poll_interval(self):
+        # --poll-s 30: the run's DONE is seen 30 s after it is written, not 60.
+        times = {}
+        for poll in (60, 30):
+            w = World([offer(1, 11, 1.0)], ["done:2"])
+            w.poll = poll
+            code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 10, "seed": 1}}},
+                                           "--poll-s", str(poll))
+            self.assertEqual((code, report["outcome"]), (0, "DONE"))
+            times[poll] = report["attempts"][0]["minutes"]
+        self.assertAlmostEqual(times[60] - times[30], 1.0, places=1)
+
+    def test_container_error_is_replaced_at_once(self):
+        # The container cannot start: destroyed at the first poll (not after --startup-minutes)
+        # and the next offer is rented, for a format-1 run too (nothing ran on the first).
+        w = World([offer(1, 11, 1.0), offer(2, 12, 1.5)], ["broken:0", "done:2"])
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 10, "seed": 1}}})
+        self.assertEqual((code, report["outcome"]), (0, "DONE"))
+        self.assertEqual(w.created_on, [1, 2])
+        self.assertEqual(report["replacements"], 1)
+        self.assertIn("container failed to start", report["attempts"][0]["ended"])
+        self.assertIn("OCI runtime create failed", report["attempts"][0]["ended"])
+        # Destroyed at the first check, a minute after it was created.
+        self.assertLessEqual(w.destroyed_at[100] - w.instances_created_at(100), launch.POLL_S + 1)
+        # The status message is logged, its secret redacted.
+        self.assertIn("cannot start its container: Error response from daemon", self.log)
+        self.assertNotIn("sk-test-secret-3", self.log)
+        self.assertIn("OCI runtime create failed: ***", self.log)
+        # Still at most 3 replacements.
+        w = World([offer(i, 10 + i, 1.0 + i / 10) for i in range(1, 7)], ["broken:0"] * 6)
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 10, "seed": 1}}})
+        self.assertEqual(code, 1)
+        self.assertEqual(len(w.created_on), 4)
+        self.assertEqual(report["replacements"], 3)
+
+    def test_container_start_error(self):
+        e = launch.container_start_error
+        self.assertIsNone(e(None))
+        self.assertIsNone(e({"actual_status": "loading", "status_msg": "Pulling image"}))
+        self.assertIsNone(e({"actual_status": "running", "status_msg": "success, running img"}))
+        self.assertIn("OCI runtime", e({"actual_status": "created", "status_msg": "x: OCI runtime create failed"}))
+        self.assertIn("failed to inject", e({"status_msg": "Failed To Inject CDI devices"}).lower())
+        self.assertEqual(e({"actual_status": "exited", "status_msg": ""}), "actual_status exited")
+        self.assertTrue(e({"actual_status": "offline", "status_msg": "host down"}).startswith("actual_status offline"))
 
     def test_silent_machine_is_destroyed_without_waiting(self):
         w = World([offer(1, 11, 1.0)], ["stall:2"])
@@ -389,7 +457,8 @@ def _env(values: dict[str, str]):
 
 
 def mock_env():
-    return _env({"VAST_API_KEY": "vk", "R2_ACCESS_KEY_ID": "ak", "R2_SECRET_ACCESS_KEY": "sk",
+    return _env({"VAST_API_KEY": "vk-test-key-1", "R2_ACCESS_KEY_ID": "ak-test-id-2",
+                 "R2_SECRET_ACCESS_KEY": "sk-test-secret-3",
                  "R2_BUCKET": "b", "R2_S3_ENDPOINT": "https://example.invalid"})
 
 

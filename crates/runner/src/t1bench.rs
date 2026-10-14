@@ -1,225 +1,289 @@
-//! The `t1bench` chunk kind (docs/M3-SPEC.md §13.1 item 11): the fastest and cheapest way to
-//! spread exact trick-1 world solves over this machine, measured on a fixed small set of real
-//! yardstick worlds (identical work on every machine, so machines compare directly). The bench
-//! itself is `search bench-t1` (one run per configuration, each its own process so its peak
-//! memory is its own) and `search::t1bench` (sets, measures, analysis).
+//! The `t1bench` chunk kind (docs/M3-SPEC.md §13.1 item 11): ranks machines by exact trick-1
+//! solving work per dollar, with every thread busy the whole time. The windows are run by
+//! `search bench-t1` (each its own process, so each has its own peak memory); the windows,
+//! guard and analysis are `search::t1bench`.
 //!
 //! ```json
-//! { "t1bench": { "dph": 1.25, "configs": ["16x", "8x", "32x", "4x", "auto", "1xall"],
-//!                "budget_s": 240, "cap_s": 120, "late_cap_s": 45, "lead_cap_s": 150,
-//!                "stop_ratio": 1.5 } }
+//! { "t1bench": { "dph": 1.25, "fill_s": 240, "prod_s": 120, "fill_tt_mb": 512,
+//!                "min_cpu_pct": 80, "golden": [128, 200],
+//!                "position_nodes": [1e10, 4.6e9, 2.2e9, 1e9, 2.8e8, 8e7, 1e8, 1.25e8] } }
 //! ```
-//! Every field is optional; the measured solving takes at most `budget_s + 2 × late_cap_s +
-//! lead_cap_s` (8 minutes by default), much less on big machines. Steps:
-//! 1. Table v0 (`table.source` `"auto"`: a format-2 input, else `inputs/sha256/<recorded hash>`
-//!    in R2, else rebuilt from the model in the repository in seconds; hash-checked), and the
-//!    stratified trick-1 decision set (`count` 32, `seed` 1: the yardstick's own).
-//! 2. The mid set (`search::t1bench::MID_SET`, 48 worlds at positions 4–6) under each
-//!    configuration in `configs`, in that order: `"<W>x"` = W worlds at once on T/W threads each,
-//!    `"1xall"` = one world at a time on all T threads, `"<W>x<S>"` explicit, `"auto"` = the
-//!    position-aware plan. Each run's tables are sized from the memory per configuration
-//!    (`mem.rs`; `tt_mb` may fix them). A run stops when it reaches `cap_s`, or once its
-//!    occupancy (thread-seconds held) passes `stop_ratio` × the best complete run's: it cannot be
-//!    the best. A run starts only while the mid runs' measured time is under `budget_s`.
-//! 3. The late set (128 worlds at positions 7–8) with one thread per world (`"<T>x1"`), then
-//!    with the best mid configuration, each capped at `late_cap_s`.
-//! 4. The lead set (one world at each of positions 1–3) once with `lead_config` (default
-//!    `"3x"`: all three at once on a third of the threads each, so a huge leader world does not
-//!    hold up the others), capped at `lead_cap_s`: their node counts scale every configuration
-//!    to the real position mix (a world stopped at the cap counts as a lower bound). These
-//!    counts belong to the game, not the machine: `position_nodes` (8 mean node counts, e.g.
-//!    from the yardstick run or an earlier bench) replaces them and skips this step.
-//! 5. `out/t1bench/results.json` (`search::t1bench::analyse`) and `out/t1bench/summary.txt`
-//!    (plain English): per run, worlds per hour for the real position mix, CPU use, peak memory,
-//!    table fill and dollars per 1000 worlds at `dph` (default: the launcher's `DPH`); the best
-//!    configuration and the best per position; a projection for a yardstick of `golden`
-//!    (default `[192, 200]`) decisions × worlds. Every world solved by several runs must have
-//!    byte-identical values; otherwise the chunk fails after writing its results.
+//! Every field is optional. Steps:
+//! 1. **Setup** (the only stretch the heartbeat marks `partial_cpu_ok`; a warning if it takes
+//!    over 90 s): table v0 (`table.source` `"auto"`: a format-2 input, else
+//!    `inputs/sha256/<recorded hash>` in R2, else rebuilt from the model in the repository in
+//!    seconds; hash-checked) and the stratified trick-1 decision set (`count` 32, `seed` 1: the
+//!    yardstick's own).
+//! 2. **Fill window** (`fill_s`, 240 s): `T` (this runner's usable threads) worlds at once, one
+//!    solver thread each, thread `k` on yardstick worlds of position `k mod 8`, every table
+//!    `fill_tt_mb` (lowered to fit the memory plan of `mem.rs`, with a warning).
+//! 3. **Production window** (`prod_s`, 120 s): the position-aware schedule with the memory budget
+//!    of the real runs (`schedule` overrides its settings) on every decision × `prod_worlds`
+//!    worlds (default: as many world solves as the golden set, so the plan is the golden run's).
+//! 4. **Results**: `out/t1bench/results.json` (`search::t1bench::analyse`, plus the table, setup
+//!    time, warnings and any failure), `out/t1bench/summary.txt` (plain English), and each
+//!    window's raw record `out/t1bench/fill.json`, `prod.json`. A world finished in both windows
+//!    must have byte-identical values, or the chunk fails after writing them.
 //!
-//! The heartbeat marks the whole bench `partial_cpu_ok` (the slow configurations are what it
-//! measures).
+//! **Self-protection.** During either window, from `ramp_s` (20 s) on: CPU over the last 30 s
+//! below `min_cpu_pct` (80) of the usable cores, or fewer than `T` solver threads searching for
+//! more than `busy_streak_s` (10 s) in a row, stops the bench at once (the window's own guard;
+//! the runner also measures the process tree's CPU over each 30-s heartbeat interval and asks the
+//! window to stop through its stop file). The results so far are written and the chunk ends
+//! FAILED with the reason, e.g. `low CPU: 41% in fill at 50 s`, so the normal end of the run
+//! uploads them and the machine destroys itself.
+//!
+//! **Heartbeats** show the window, seconds into it, threads searching of `T`, nodes so far and
+//! the node rate, with `partial_cpu_ok: false`; the runner prints one compact line per heartbeat
+//! (`hb 17 fill 95s cpu 98.7% busy 245/245 nodes 3.1e11 rate 3.3e9/s`).
 
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use search::t1bench::{
-    AnalyseParams, BenchRun, LATE_SET, LEAD_SET, MID_SET, analyse, summary_text, totals,
+    AnalyseParams, DEFAULT_POSITION_NODES, Mode, POSITIONS, WindowRun, analyse, summary_text,
 };
 use serde_json::{Value, json};
 
 use crate::mem::{self, Requested, Tables};
 use crate::spike::build_table_from;
-use crate::{Ctx, hardware, sibling};
+use crate::{Ctx, HEARTBEAT_EVERY, clk_tck, hardware, sibling, stop, tree_ticks};
 
-/// The default mid-set configurations, roughly shortest first.
-const CONFIGS: [&str; 6] = ["16x", "8x", "32x", "4x", "auto", "1xall"];
+/// The settings a `t1bench` chunk takes (anything else is refused: the configuration sweep's
+/// settings were removed on 2026-10-14).
+const KEYS: [&str; 15] = [
+    "dph",
+    "fill_s",
+    "prod_s",
+    "fill_tt_mb",
+    "min_cpu_pct",
+    "ramp_s",
+    "busy_streak_s",
+    "golden",
+    "position_nodes",
+    "schedule",
+    "prod_worlds",
+    "count",
+    "seed",
+    "start_hands",
+    "table",
+];
 
-/// A configuration on `t` threads: `Some((worlds at once, threads per world))`, or `None` for
-/// the position-aware plan.
-pub(crate) fn parse_config(name: &str, t: u64) -> Result<Option<(u64, u64)>, String> {
-    let bad = || format!("t1bench: unknown configuration {name:?} (e.g. 8x, 1xall, 4x96, auto)");
-    if name == "auto" {
-        return Ok(None);
+/// Setup longer than this is reported as a warning.
+const SETUP_WARN_S: f64 = 90.0;
+
+/// How long a window may take to stop after the runner asked it to, before the runner stops the
+/// whole run (and with it the window's process).
+const STOP_GRACE: Duration = Duration::from_secs(60);
+
+fn f(p: &Value, k: &str, d: f64) -> Result<f64, String> {
+    match p.get(k) {
+        None | Some(Value::Null) => Ok(d),
+        Some(v) => v
+            .as_f64()
+            .filter(|x| x.is_finite() && *x >= 0.0)
+            .ok_or_else(|| format!("t1bench: {k} must be a number (at least 0)")),
     }
-    let (w, s) = name.split_once('x').ok_or_else(bad)?;
-    let w: u64 = w.parse().map_err(|_| bad())?;
-    let s = match s {
-        "all" => t,
-        "" => t / w.max(1),
-        n => n.parse().map_err(|_| bad())?,
-    };
-    if w == 0 || s == 0 || w * s > t.max(1) {
-        return Err(format!(
-            "t1bench: {name} needs {} threads; this machine has {t}",
-            w * s.max(1)
-        ));
-    }
-    Ok(Some((w, s)))
 }
 
-fn f(p: &Value, k: &str, d: f64) -> f64 {
-    p.get(k).and_then(Value::as_f64).unwrap_or(d)
+/// The CPU use (percent of `cores`) of `ticks` over `secs`, when it is below `min_pct`.
+fn low_cpu(ticks: u64, tck: f64, secs: f64, cores: f64, min_pct: f64) -> Option<f64> {
+    if secs <= 0.0 || cores <= 0.0 || tck <= 0.0 || min_pct <= 0.0 {
+        return None;
+    }
+    let pct = 100.0 * ticks as f64 / tck / (secs * cores);
+    (pct < min_pct).then_some(pct)
 }
 
-struct Bench<'a> {
+/// The runner's own check during a window: the process tree's CPU over each heartbeat interval
+/// from the ramp's end on; when low, the window is asked to stop (its stop file), and if it has
+/// not stopped `STOP_GRACE` later, the run is stopped.
+struct CpuWatch {
+    min_pct: f64,
+    ramp_s: f64,
+    cores: f64,
+    tck: f64,
+    base: Option<(u64, Instant)>,
+    asked: Option<Instant>,
+}
+
+impl CpuWatch {
+    fn poll(&mut self, child: Option<u32>, mode: Mode, started: bool, t_s: f64, stop_file: &Path) {
+        if let Some(a) = self.asked {
+            if a.elapsed() > STOP_GRACE {
+                stop::request("the t1bench window did not stop when asked (low CPU)");
+            }
+            return;
+        }
+        if !started || t_s < self.ramp_s {
+            return;
+        }
+        let Some(pid) = child else { return };
+        let due = self
+            .base
+            .is_none_or(|(_, at)| at.elapsed() >= HEARTBEAT_EVERY);
+        if !due {
+            return;
+        }
+        let Some(ticks) = tree_ticks(pid) else { return };
+        let now = Instant::now();
+        if let Some((t0, a0)) = self.base {
+            let secs = now.duration_since(a0).as_secs_f64();
+            if let Some(pct) = low_cpu(
+                ticks.saturating_sub(t0),
+                self.tck,
+                secs,
+                self.cores,
+                self.min_pct,
+            ) {
+                let why = format!("low CPU: {pct:.0}% in {} at {t_s:.0} s", mode.name());
+                eprintln!("runner: t1bench: {why} (process tree over {secs:.0} s); stopping");
+                // Whole or not at all: written aside, then renamed into place.
+                let tmp = stop_file.with_extension("tmp");
+                if fs::write(&tmp, &why).is_ok() && fs::rename(&tmp, stop_file).is_ok() {
+                    self.asked = Some(now);
+                } else {
+                    stop::request(&why);
+                }
+            }
+        }
+        self.base = Some((ticks, now));
+    }
+}
+
+/// One window's settings.
+struct Win<'a> {
+    mode: Mode,
+    window_s: f64,
     dec: &'a Path,
     table: &'a Path,
     out: &'a Path,
-    p: &'a Value,
-    runs: Vec<BenchRun>,
-    measured_s: f64,
-    skipped: Vec<Value>,
-    warnings: Vec<String>,
+    /// Mode-specific `search bench-t1` arguments.
+    extra: Vec<String>,
+    min_cpu_pct: f64,
+    ramp_s: f64,
+    busy_streak_s: f64,
 }
 
-impl Bench<'_> {
-    /// One `search bench-t1` run; `None` if the configuration does not fit this machine.
-    fn run(
-        &mut self,
-        ctx: &mut Ctx,
-        name: &str,
-        config: &str,
-        set: &str,
-        cap_s: f64,
-        stop_occ: Option<f64>,
-    ) -> Result<Option<BenchRun>, String> {
-        let t = ctx.threads as u64;
-        let k = self.runs.len();
-        let file = self.out.join(format!("run-{k:02}-{name}.json"));
-        let progress = ctx.root.join("t1bench-progress.json");
-        let _ = fs::remove_file(&progress);
-        let mut c = Command::new(sibling("search"));
-        c.arg("bench-t1")
-            .arg("--decisions")
-            .arg(self.dec)
-            .arg("--equity")
-            .arg(self.table)
-            .args(["--set", set, "--name", name])
-            .args(["--threads", &t.to_string()])
-            .args(["--cap-s", &format!("{cap_s:.1}")])
-            .arg("--json")
-            .arg(&file)
-            .arg("--progress")
-            .arg(&progress);
-        if let Some(x) = stop_occ {
-            c.args(["--stop-occ-s", &format!("{x:.1}")]);
+/// The heartbeat's progress during a window, from the window's progress file.
+fn window_progress(mode: Mode, threads: usize, pr: &Value, warnings: &[String]) -> Value {
+    json!({
+        "kind": "t1bench", "window": mode.name(),
+        "started": pr["started"].as_bool().unwrap_or(false),
+        "t_s": pr["t_s"], "window_s": pr["window_s"], "threads": threads,
+        "busy": pr["busy"], "held": pr["held"], "nodes": pr["nodes"], "rate": pr["rate"],
+        "finished_worlds": pr["finished_worlds"], "stopped": pr["stopped"],
+        "partial_cpu_ok": false, "warnings": warnings,
+    })
+}
+
+/// Runs one window (`search bench-t1`) and reads its record.
+fn window(ctx: &mut Ctx, w: &Win, warnings: &[String]) -> Result<WindowRun, String> {
+    let name = w.mode.name();
+    let json_path = w.out.join(format!("{name}.json"));
+    let progress = ctx.root.join("t1bench-progress.json");
+    let stop_file = ctx.root.join("t1bench-stop");
+    for p in [&json_path, &progress, &stop_file] {
+        let _ = fs::remove_file(p);
+    }
+    let t = ctx.threads;
+    let cores = ctx.cpu.cores;
+    let mut c = Command::new(sibling("search"));
+    c.args(["bench-t1", "--mode", name])
+        .arg("--decisions")
+        .arg(w.dec)
+        .arg("--equity")
+        .arg(w.table)
+        .args(["--threads", &t.to_string()])
+        .args(["--window-s", &format!("{}", w.window_s)])
+        .args(["--usable-cores", &format!("{cores}")])
+        .args(["--min-cpu-pct", &format!("{}", w.min_cpu_pct)])
+        .args(["--ramp-s", &format!("{}", w.ramp_s)])
+        .args(["--busy-streak-s", &format!("{}", w.busy_streak_s)])
+        .args([
+            "--cpu-interval-s",
+            &format!("{}", HEARTBEAT_EVERY.as_secs()),
+        ])
+        .arg("--json")
+        .arg(&json_path)
+        .arg("--progress")
+        .arg(&progress)
+        .arg("--stop-file")
+        .arg(&stop_file)
+        .args(&w.extra);
+    println!(
+        "runner: t1bench {name} window: {} s on {t} threads ({cores:.2} usable cores)",
+        w.window_s
+    );
+    ctx.set_phase(
+        "chunk",
+        window_progress(w.mode, t, &json!({ "window_s": w.window_s }), warnings),
+    );
+    let mut watch = CpuWatch {
+        min_pct: w.min_cpu_pct,
+        ramp_s: w.ramp_s,
+        cores,
+        tck: clk_tck(),
+        base: None,
+        asked: None,
+    };
+    let res = ctx.run_child_with(c, "t1bench/search.log", &mut |ctx| {
+        let pr: Value = fs::read_to_string(&progress)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(Value::Null);
+        if pr.is_object() {
+            ctx.progress = window_progress(w.mode, t, &pr, warnings);
         }
-        let tt = match parse_config(config, t) {
-            Err(e) => {
-                self.skipped.push(json!({ "run": name, "why": e }));
-                return Ok(None);
-            }
-            Ok(Some((w, s))) => {
-                let tables = if s > 1 {
-                    Tables::Shared {
-                        count: w,
-                        solve_threads: s,
-                    }
-                } else {
-                    Tables::Own { count: w }
-                };
-                let tt = mem::plan_here(
-                    Requested::from_param(self.p, "tt_mb")?,
-                    tables,
-                    self.table,
-                    &format!("t1bench {name}"),
-                );
-                c.args(["--schedule", "fixed"])
-                    .args(["--worlds-at-once", &w.to_string()])
-                    .args(["--solve-threads", &s.to_string()])
-                    .args(["--tt-mb", &tt.tt_mb.to_string()]);
-                tt
-            }
-            Ok(None) => {
-                let (tt, b) = mem::budget_here(self.table, t, &format!("t1bench {name}"));
-                c.args([
-                    "--schedule",
-                    "auto",
-                    "--tt-budget-mb",
-                    &(b >> 20).to_string(),
-                ]);
-                if let Some(s) = self.p.get("schedule").filter(|v| v.is_object()) {
-                    c.args(["--sched-json", &s.to_string()]);
-                }
-                tt
-            }
-        };
-        if let Some(w) = &tt.warning {
-            self.warnings.push(format!("{name}: {w}"));
+        watch.poll(
+            ctx.child,
+            w.mode,
+            pr["started"].as_bool().unwrap_or(false),
+            pr["t_s"].as_f64().unwrap_or(0.0),
+            &stop_file,
+        );
+    });
+    // The record is kept whenever the window wrote it, even if the process then failed.
+    let run: Option<WindowRun> = fs::read_to_string(&json_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+    match (res, run) {
+        (Ok(()), Some(r)) => {
+            println!(
+                "runner: t1bench {name}: {:.3e} nodes in {:.0} s{}",
+                r.nodes() as f64,
+                r.wall_s,
+                r.stopped
+                    .as_deref()
+                    .map_or(String::new(), |s| format!("; stopped early: {s}"))
+            );
+            Ok(r)
         }
-        let warnings = self.warnings.clone();
-        let (runs_done, total_runs) = (
-            k,
-            self.p.get("configs").map_or(CONFIGS.len(), |c| {
-                c.as_array().map_or(CONFIGS.len(), Vec::len)
-            }) + 3,
-        );
-        let label = name.to_string();
-        ctx.set_phase(
-            "chunk",
-            json!({ "kind": "t1bench", "run": label, "runs_done": runs_done,
-                    "partial_cpu_ok": true, "warnings": warnings }),
-        );
-        let t0 = Instant::now();
-        ctx.run_child_with(c, "t1bench/search.log", &mut |ctx| {
-            let pr: Value = fs::read_to_string(&progress)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or(Value::Null);
-            ctx.progress = json!({
-                "kind": "t1bench", "run": label, "runs_done": runs_done,
-                "runs_planned": total_runs,
-                "worlds_done": pr["worlds_done"], "worlds_total": pr["worlds_total"],
-                "running": pr["running"], "partial_cpu_ok": true, "warnings": warnings,
-            });
-        })?;
-        self.measured_s += t0.elapsed().as_secs_f64();
-        let mut r: BenchRun = serde_json::from_str(
-            &fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?,
-        )
-        .map_err(|e| format!("{}: {e}", file.display()))?;
-        r.schedule["config"] = json!(config);
-        r.schedule["tt"] = tt.record;
-        let tot = totals(&r);
-        println!(
-            "runner: t1bench {name} ({config}): {}/{} worlds, {:.0} s, occupancy {:.0} thread-s{}",
-            tot.finished,
-            tot.worlds,
-            r.wall_s,
-            tot.occupancy_s,
-            r.stopped
-                .as_deref()
-                .map_or(String::new(), |s| format!(", stopped ({s})"))
-        );
-        self.runs.push(r.clone());
-        Ok(Some(r))
+        (Ok(()), None) => Err(format!(
+            "t1bench: the {name} window wrote no record ({})",
+            json_path.display()
+        )),
+        (Err(e), _) => Err(e),
     }
 }
 
 /// Run one `t1bench` chunk.
 pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
+    if let Some(o) = p.as_object()
+        && let Some(k) = o.keys().find(|k| !KEYS.contains(&k.as_str()))
+    {
+        return Err(format!(
+            "t1bench: unknown setting {k:?} (settings: {}; the configuration sweep was removed)",
+            KEYS.join(", ")
+        ));
+    }
+    let setup0 = Instant::now();
+    ctx.set_phase(
+        "chunk",
+        json!({ "kind": "t1bench", "step": "setup: table v0", "partial_cpu_ok": true }),
+    );
     let (table, table_rec) = build_table_from(ctx, p.get("table").unwrap_or(&json!({})), "auto")?;
     let out = ctx.root.join("out").join("t1bench");
     fs::create_dir_all(&out).map_err(|e| e.to_string())?;
@@ -240,148 +304,146 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         .arg(&dec);
     ctx.set_phase(
         "chunk",
-        json!({ "kind": "t1bench", "step": "decisions", "partial_cpu_ok": true }),
+        json!({ "kind": "t1bench", "step": "setup: decisions", "partial_cpu_ok": true }),
     );
     ctx.run_child(c, "t1bench/search.log")?;
-    let set = |k: &str, d: &str| p.get(k).and_then(Value::as_str).unwrap_or(d).to_string();
-    let (mid, late, lead) = (
-        set("mid_set", MID_SET),
-        set("late_set", LATE_SET),
-        set("lead_set", LEAD_SET),
-    );
-    let configs: Vec<String> = match p.get("configs") {
-        None => CONFIGS.iter().map(|s| s.to_string()).collect(),
-        Some(v) => v
-            .as_array()
-            .ok_or("t1bench: configs must be a list")?
-            .iter()
-            .map(|x| {
-                x.as_str()
-                    .map(str::to_string)
-                    .ok_or("t1bench: configs are names like \"8x\"".to_string())
-            })
-            .collect::<Result<_, _>>()?,
-    };
-    for c in &configs {
-        // Unknown names fail now; too big for this machine is only skipped later.
-        parse_config(c, u64::MAX / 2)?;
+    let setup_s = setup0.elapsed().as_secs_f64();
+    let mut warnings: Vec<String> = Vec::new();
+    if setup_s > SETUP_WARN_S {
+        warnings.push(format!(
+            "setup (table v0 and the decision set) took {setup_s:.0} s, over {SETUP_WARN_S:.0} s"
+        ));
     }
-    let budget_s = f(p, "budget_s", 240.0);
-    let cap_s = f(p, "cap_s", 120.0);
-    let late_cap_s = f(p, "late_cap_s", 45.0);
-    let stop_ratio = f(p, "stop_ratio", 1.5).max(1.0);
-    let t = ctx.threads as u64;
-    let mut b = Bench {
+    // Settings.
+    let t = ctx.threads;
+    let fill_s = f(p, "fill_s", 240.0)?;
+    let prod_s = f(p, "prod_s", 120.0)?;
+    let min_cpu_pct = f(p, "min_cpu_pct", 80.0)?;
+    let ramp_s = f(p, "ramp_s", 20.0)?;
+    let busy_streak_s = f(p, "busy_streak_s", 10.0)?;
+    let golden = match p.get("golden") {
+        None | Some(Value::Null) => (128, 200),
+        Some(g) => match (
+            g.get(0).and_then(Value::as_u64),
+            g.get(1).and_then(Value::as_u64),
+        ) {
+            (Some(d), Some(w)) if d > 0 && w > 0 => (d, w),
+            _ => return Err("t1bench: golden must be [decisions, worlds]".into()),
+        },
+    };
+    let (position_nodes, pn_source) = match p.get("position_nodes") {
+        None | Some(Value::Null) => (DEFAULT_POSITION_NODES, "default"),
+        Some(v) => (
+            serde_json::from_value::<[f64; POSITIONS]>(v.clone())
+                .ok()
+                .filter(|x| x.iter().all(|n| n.is_finite() && *n >= 0.0))
+                .ok_or("t1bench: position_nodes must be 8 numbers (positions 1-8)")?,
+            "given",
+        ),
+    };
+    let prod_worlds = match p.get("prod_worlds").and_then(Value::as_u64) {
+        Some(w) if w > 0 => w,
+        _ => (golden.0 * golden.1).div_ceil(count.max(1)),
+    };
+    // Fill tables: `fill_tt_mb` each, lowered to fit the memory with a warning.
+    let requested = match Requested::from_param(p, "fill_tt_mb")? {
+        Requested::Auto => Requested::Mb(512),
+        r => r,
+    };
+    let tt = mem::plan_here(
+        requested,
+        Tables::Own { count: t as u64 },
+        &table,
+        "t1bench fill",
+    );
+    if let Some(w) = &tt.warning {
+        warnings.push(format!("fill window: {w}"));
+    }
+    // Production tables: the budget the real runs use.
+    let (budget_rec, budget) = mem::budget_here(&table, t as u64, "t1bench prod");
+    let mut prod_extra = vec![
+        "--tt-budget-mb".to_string(),
+        (budget >> 20).to_string(),
+        "--worlds-per-decision".to_string(),
+        prod_worlds.to_string(),
+    ];
+    if let Some(s) = p.get("schedule").filter(|v| !v.is_null()) {
+        if !s.is_object() {
+            return Err("t1bench: schedule must be an object of plan settings".into());
+        }
+        prod_extra.extend(["--sched-json".to_string(), s.to_string()]);
+    }
+    let win = |mode: Mode, window_s: f64, extra: Vec<String>| Win {
+        mode,
+        window_s,
         dec: &dec,
         table: &table,
         out: &out,
-        p,
-        runs: Vec::new(),
-        measured_s: 0.0,
-        skipped: Vec::new(),
-        warnings: Vec::new(),
+        extra,
+        min_cpu_pct,
+        ramp_s,
+        busy_streak_s,
     };
-    // The ranking: every configuration on the mid set.
-    let mut best: Option<(String, f64)> = None;
-    for cfg in &configs {
-        let left = budget_s - b.measured_s;
-        if left < 10.0 {
-            b.skipped
-                .push(json!({ "run": cfg, "why": "bench time budget used" }));
-            continue;
-        }
-        let stop_occ = best.as_ref().map(|(_, o)| o * stop_ratio);
-        if let Some(r) = b.run(ctx, cfg, cfg, &mid, cap_s.min(left), stop_occ)? {
-            let tot = totals(&r);
-            if tot.finished == tot.worlds && best.as_ref().is_none_or(|(_, o)| tot.occupancy_s < *o)
-            {
-                best = Some((cfg.clone(), tot.occupancy_s));
+    // The windows: production only if the fill window ran to its end.
+    let fill = window(
+        ctx,
+        &win(
+            Mode::Fill,
+            fill_s,
+            vec!["--tt-mb".into(), tt.tt_mb.to_string()],
+        ),
+        &warnings,
+    )?;
+    let mut failure = fill.stopped.clone();
+    let prod = if failure.is_none() {
+        // A failed production window still leaves the fill window's results written.
+        match window(ctx, &win(Mode::Prod, prod_s, prod_extra), &warnings) {
+            Ok(r) => {
+                failure = r.stopped.clone();
+                Some(r)
+            }
+            Err(e) => {
+                failure = Some(e);
+                None
             }
         }
-    }
-    // Late positions (their own caps, outside the mid budget): one thread per world, then the
-    // best mid configuration.
-    let one = format!("{t}x1");
-    let mut late_occ = None;
-    if let Some(r) = b.run(ctx, "late-1thread", &one, &late, late_cap_s, None)? {
-        let tot = totals(&r);
-        late_occ = (tot.finished == tot.worlds).then_some(tot.occupancy_s);
-    }
-    if let Some((cfg, _)) = &best
-        && *cfg != one
-    {
-        b.run(
-            ctx,
-            &format!("late-{cfg}"),
-            cfg,
-            &late,
-            late_cap_s,
-            late_occ.map(|o| o * stop_ratio),
-        )?;
-    }
-    // The big positions once, three at once (a huge leader world does not hold up the other
-    // two), for their node counts; not needed when the node counts are given.
-    let position_nodes: Option<[f64; 8]> = match p.get("position_nodes") {
-        None | Some(Value::Null) => None,
-        Some(v) => Some(
-            serde_json::from_value(v.clone())
-                .map_err(|_| "t1bench: position_nodes must be 8 numbers (positions 1-8)")?,
-        ),
-    };
-    let lead_cfg = p
-        .get("lead_config")
-        .and_then(Value::as_str)
-        .unwrap_or("3x")
-        .to_string();
-    if position_nodes.is_some() && p.get("lead_set").is_none() {
-        b.skipped
-            .push(json!({ "run": "lead", "why": "position_nodes given" }));
     } else {
-        b.run(
-            ctx,
-            &format!("lead-{lead_cfg}"),
-            &lead_cfg,
-            &lead,
-            f(p, "lead_cap_s", 150.0),
-            None,
-        )?;
-    }
+        None
+    };
     // Analysis.
     let hw = hardware();
+    let dph = p
+        .get("dph")
+        .and_then(Value::as_f64)
+        .unwrap_or(ctx.dph)
+        .max(0.0);
     let params = AnalyseParams {
-        threads: ctx.threads,
-        dph: p
-            .get("dph")
-            .and_then(Value::as_f64)
-            .unwrap_or(ctx.dph)
-            .max(0.0),
-        golden_decisions: p
-            .get("golden")
-            .and_then(|g| g.get(0))
-            .and_then(Value::as_u64)
-            .unwrap_or(192),
-        golden_worlds: p
-            .get("golden")
-            .and_then(|g| g.get(1))
-            .and_then(Value::as_u64)
-            .unwrap_or(200),
-        stop_ratio,
+        threads: t,
+        usable_cores: ctx.cpu.cores,
+        dph,
+        golden_decisions: golden.0,
+        golden_worlds: golden.1,
+        position_nodes,
+        position_nodes_source: pn_source.to_string(),
         cpu_model: hw["cpu_model"].as_str().unwrap_or("").to_string(),
         mem_gb: mem::Sys::host().limit().mb() as f64 / 1024.0,
-        mid_set: mid.clone(),
-        position_nodes,
+        busy_skip_s: 5.0,
     };
-    let mut a = analyse(&b.runs, &params);
+    let mut a = analyse(Some(&fill), prod.as_ref(), &params);
+    a["failure"] = json!(failure);
+    a["setup_s"] = json!((setup_s * 10.0).round() / 10.0);
     a["table"] = table_rec.clone();
-    a["skipped"] = json!(b.skipped);
-    a["warnings"] = json!(b.warnings);
-    a["measured_s"] = json!((b.measured_s * 10.0).round() / 10.0);
-    a["sets"] = json!({ "mid": mid, "late": late, "lead": lead });
-    a["configs"] = json!(configs);
-    let text = summary_text(&a, &params)
+    a["fill_tables"] = tt.record.clone();
+    a["prod_tables"] = budget_rec.record.clone();
+    a["warnings"] = json!(warnings);
+    a["settings"] = json!({
+        "fill_s": fill_s, "prod_s": prod_s, "fill_tt_mb_requested": p.get("fill_tt_mb"),
+        "min_cpu_pct": min_cpu_pct, "ramp_s": ramp_s, "busy_streak_s": busy_streak_s,
+        "prod_worlds": prod_worlds, "count": count, "seed": seed, "schedule": p.get("schedule"),
+    });
+    let text = summary_text(&a)
         + &format!(
-            "\nMeasured solving took {:.0} s in all (table: {}).\n",
-            b.measured_s,
+            "\nSetup took {setup_s:.0} s (table v0: {}; then the decision set).\n",
             table_rec["source"].as_str().unwrap_or("?")
         );
     fs::write(
@@ -391,18 +453,27 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
     .map_err(|e| e.to_string())?;
     fs::write(out.join("summary.txt"), &text).map_err(|e| e.to_string())?;
     println!("{text}");
+    if let Some(why) = failure {
+        return Err(format!(
+            "t1bench: {why} (results so far in out/t1bench/results.json)"
+        ));
+    }
     if a["ok"].as_bool() != Some(true) {
         return Err(format!(
-            "t1bench: configurations gave different values for {} world(s): this is a bug; \
+            "t1bench: the windows gave different values for {} world(s): this is a bug; \
              see out/t1bench/results.json (identity.mismatches)",
             a["identity"]["mismatches"].as_array().map_or(0, Vec::len)
         ));
     }
     Ok(json!({
-        "kind": "t1bench", "threads": ctx.threads, "dph": params.dph,
-        "best_config": a["best_config"], "combined": a["combined"], "golden": a["golden"],
-        "identity": a["identity"]["worlds_compared"], "measured_s": a["measured_s"],
-        "table": table_rec, "warnings": b.warnings,
+        "kind": "t1bench", "threads": t, "dph": dph,
+        "score": a["score"], "golden": a["golden"],
+        "fill": { "nodes_per_s": a["fill"]["nodes_per_s"], "cpu_pct": a["fill"]["cpu_pct"],
+                  "busy_pct": a["fill"]["busy_pct"], "tt_mb": tt.tt_mb },
+        "prod": { "nodes_per_s": a["prod"]["nodes_per_s"], "cpu_pct": a["prod"]["cpu_pct"],
+                  "busy_pct": a["prod"]["busy_pct"] },
+        "identity": a["identity"]["worlds_compared"], "setup_s": a["setup_s"],
+        "table": table_rec, "warnings": warnings,
     }))
 }
 
@@ -411,19 +482,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn configs_parse() {
-        assert_eq!(parse_config("auto", 256), Ok(None));
-        assert_eq!(parse_config("8x", 256), Ok(Some((8, 32))));
-        assert_eq!(parse_config("1xall", 256), Ok(Some((1, 256))));
-        assert_eq!(parse_config("256x1", 256), Ok(Some((256, 1))));
-        assert_eq!(parse_config("4x96", 384), Ok(Some((4, 96))));
-        assert_eq!(parse_config("32x", 368), Ok(Some((32, 11))));
-        assert!(
-            parse_config("8x", 4).is_err(),
-            "too many worlds for 4 threads"
+    fn low_cpu_rule() {
+        // 4 cores for 30 s at 100 ticks a second: 12,000 ticks is 100%.
+        assert_eq!(low_cpu(12_000, 100.0, 30.0, 4.0, 80.0), None);
+        assert_eq!(low_cpu(9_600, 100.0, 30.0, 4.0, 80.0), None, "exactly 80%");
+        assert_eq!(low_cpu(4_920, 100.0, 30.0, 4.0, 80.0), Some(41.0));
+        assert_eq!(low_cpu(0, 100.0, 30.0, 4.0, 0.0), None, "check off");
+        assert_eq!(low_cpu(0, 100.0, 0.0, 4.0, 80.0), None, "no interval yet");
+    }
+
+    #[test]
+    fn progress_for_heartbeats() {
+        let pr = json!({ "window": "fill", "started": true, "t_s": 95.0, "window_s": 240.0,
+                         "threads": 245, "busy": 245, "nodes": 3.1e11, "rate": 3.3e9 });
+        let v = window_progress(Mode::Fill, 245, &pr, &["w".to_string()]);
+        assert_eq!(v["partial_cpu_ok"], json!(false));
+        assert_eq!(v["window"], json!("fill"));
+        assert_eq!(v["busy"], json!(245));
+        assert_eq!(v["warnings"], json!(["w"]));
+        assert_eq!(
+            crate::hb_line(17, "chunk", &v, Some(98.7)),
+            "hb 17 fill 95s cpu 98.7% busy 245/245 nodes 3.1e11 rate 3.3e9/s"
         );
-        assert!(parse_config("4x2", 4).is_err());
-        assert!(parse_config("fast", 64).is_err());
-        assert!(parse_config("0x", 64).is_err());
     }
 }
