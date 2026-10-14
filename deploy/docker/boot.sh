@@ -4,7 +4,8 @@
 # vast.ai adds CONTAINER_ID and CONTAINER_API_KEY (a key that can only manage this instance).
 # 1. pick the x86-64-v3 build if the CPU supports it, else v2
 # 2. download bin/<BIN_SHA>/<build>.tar.zst and its manifest.json, check every SHA-256
-# 3. download runs/<RUN_ID>/manifest.json and run `runner run` (which uploads and self-destroys)
+# 3. download runs/<RUN_ID>/manifest.json and run `runner run` (which uploads and self-destroys);
+#    a format-2 manifest resumes from the run's done-list, so a replacement machine boots the same way
 # Any failure before the runner starts is reported as runs/<RUN_ID>/FAILED and the instance is
 # destroyed, so nothing is left billing.
 set -euo pipefail
@@ -55,6 +56,10 @@ for name, want in m["files"].items():
         sys.exit(f"{name}: hash mismatch")
 print("boot: all binary hashes match")
 PY
+
+# The compiler that built the binaries, for the run's final manifest.
+BIN_RUSTC=$(python3 -c 'import json; print(json.load(open("bin-manifest.json")).get("rustc", ""))' 2>/dev/null) || BIN_RUSTC=""
+export BIN_RUSTC
 
 trap - ERR
 # The runner uploads its outputs, writes DONE or FAILED last, and destroys the instance.
