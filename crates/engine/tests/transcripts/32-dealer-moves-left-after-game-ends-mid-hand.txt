@@ -1,0 +1,145 @@
+title: After a game ends in the middle of a hand, the deal still moves one seat to the left (H5)
+story: Hand 1 (seat 5 deals) builds the score: team 0 (seats 0 and 4) reaches 26 (scores 26,5,0,0).
+story: Hand 2 is dealt by seat 6, the next seat to the left. Team 0 wins tricks 1, 2 and 3 and reaches 41 at trick 3; the game ends at once and the rest of the hand is not played (final scores 41,5,0,0).
+story: Hand 3 starts game 2. House rule H5: after a game ends mid-hand the deal moves one seat to the left exactly as after any hand, so seat 7 deals (not seat 6 again, and not the winners).
+story: Seat 7 turns the ace of clubs and, as dealer, robs it at once and burns (it holds no other ace); seat 0, on the dealer's left, then leads trick 1. The transcript stops there.
+dealer: 5
+# ---- Hand 1 of this file (hand index 0), dealer seat 5: hearts trumps, builds the score ----
+hand 0: 4H 5H 8H QH JK
+hand 1: QC KC 6H AS 10S
+hand 2: 7C 3S 4S 7S JS
+hand 3: 3C 6C 10C 7D KD
+hand 4: 2D 8D JD 5S KS
+hand 5: AC 4D 2H 10H KH
+hand 6: 2C 8C 3H 6S 9S
+hand 7: AD 9D 10D QD 8S
+turned: 9H
+undealt: AH JH 4C 9C JC QS 7H 2S 3D 5D 5C 6D
+
+# ---- Hand 2 of this file (hand index 1), dealer seat 6: spades trumps, the game ends at trick 3 ----
+then hand 0: 3C 4D QD AH KS
+then hand 1: 7D KD 5H 6H 7H
+then hand 2: 9C AD 10D QH 9S
+then hand 3: 7C 6D 4H 10H 10S
+then hand 4: 5C 5D 2S 6S 7S
+then hand 5: 4C 10C JC 9D JS
+then hand 6: QC 3D JD KH 3S
+then hand 7: 6C 8D 8H 9H JK
+then turned: 4S
+then undealt: AS 5S 8C QS 2H AC KC JH 2D 3H 2C 8S
+
+# ---- Hand 3 of this file (hand index 2), dealer seat 7: game 2: seat 7 deals ----
+then hand 0: 3C 10C QC 3H 9H
+then hand 1: 5C JC 5D KH QS
+then hand 2: 6C 2S 6S 7S 9S
+then hand 3: 7D 8D AH 10H 3S
+then hand 4: 9C 3D 9D QH 4S
+then hand 5: KC 2D 2H JS JK
+then hand 6: 8C 10D JD KD AS
+then hand 7: 2C 4D 6H 8S 10S
+then turned: AC
+then undealt: 6D AD KS JH QD 5S 4C 8H 7H 4H 7C 5H
+
+# ======== Play ========
+# Hand 1 (seat 5 deals, hearts trumps; the A♥ undealt) builds the score: team 0 (seats 0 and 4) reaches 26.
+> Play 9S    # seat 6
+> Play 8S    # seat 7
+> Play 5H    # seat 0
+> Play 10S    # seat 1
+> Play 7S    # seat 2
+> Play 10C    # seat 3
+> Play KS    # seat 4
+> Play 4D    # seat 5
+= TrickWon trick=1 seat=0 team=0 points=5
+= Bonus team=0 points=6 kind=immediate card=5H
+scores: 11,0,0,0
+# Trick 2
+> Play JK    # seat 0
+> Play 6H    # seat 1
+> Play 7C    # seat 2
+> Play 6C    # seat 3
+> Play JD    # seat 4
+> Play 2H    # seat 5
+> Play 3H    # seat 6
+> Play AD    # seat 7
+# Trick 3
+> Play QH    # seat 0
+> Play AS    # seat 1
+> Play 4S    # seat 2
+> Play 7D    # seat 3
+> Play 8D    # seat 4
+> Play 10H    # seat 5
+> Play 8C    # seat 6
+> Play 9D    # seat 7
+# Trick 4
+> Play 8H    # seat 0
+> Play QC    # seat 1
+> Play 3S    # seat 2
+> Play 3C    # seat 3
+> Play 5S    # seat 4
+> Play KH    # seat 5
+> Play 6S    # seat 6
+> Play 10D    # seat 7
+# Trick 5
+> Play AC    # seat 5
+> Play 2C    # seat 6
+> Play QD    # seat 7
+> Play 4H    # seat 0
+> Play KC    # seat 1
+> Play JS    # seat 2
+> Play KD    # seat 3
+> Play 2D    # seat 4
+= HandEnd hand=0 aborted=false
+scores: 26,5,0,0
+
+# Hand 2: seat 6 deals (spades trumps; the ace and 5 of spades undealt). Team 0 wins tricks 1, 2 and 3 and reaches 41 in the middle of the hand.
+= HandStart hand=1 game=0 dealer=6
+= Turned card=4S
+# Trick 1
+> Play 6C    # seat 7
+> Play AH    # seat 0
+> Play 5H    # seat 1
+> Play 9C    # seat 2
+> Play 7C    # seat 3
+> Play 2S    # seat 4
+> Play 10C    # seat 5
+> Play QC    # seat 6
+= TrickWon trick=1 seat=0 team=0 points=5
+scores: 31,5,0,0
+# Trick 2
+> Play KS    # seat 0
+> Play 6H    # seat 1
+> Play 9S    # seat 2
+> Play 10S    # seat 3
+> Play 6S    # seat 4
+> Play 4C    # seat 5
+> Play 3S    # seat 6
+> Play 8D    # seat 7
+= TrickWon trick=2 seat=0 team=0 points=5
+scores: 36,5,0,0
+# Trick 3
+> Play QD    # seat 0
+> Play 7D    # seat 1
+> Play AD    # seat 2
+> Play 6D    # seat 3
+> Play 7S    # seat 4
+> Play 9D    # seat 5
+> Play 3D    # seat 6
+> Play 8H    # seat 7
+# Team 0 reaches 41 at trick 3: game 1 is over and tricks 4 and 5 are not played.
+= TrickWon trick=3 seat=4 team=0 points=5
+= GameWon team=0 reason=trick scores=41,5,0,0
+= HandEnd hand=1 aborted=true
+result: game team=0 reason=trick
+scores: 0,0,0,0
+
+# Hand 3 (game 2): the deal moves one seat to the left as after any hand, from seat 6 to seat 7 (H5). The ace of clubs is turned,
+# so the dealer, seat 7, robs it at once: that shows who the dealer is. Seat 0, left of the dealer, will lead trick 1.
+= HandStart hand=2 game=1 dealer=7
+= Turned card=AC
+= Took seat=7 card=AC
+phase: AwaitBurn 7
+legal: 2C 4D 6H 8S 10S
+> Burn 10S    # seat 7 burns
+= BurnDone seat=7
+phase: AwaitPlay 0

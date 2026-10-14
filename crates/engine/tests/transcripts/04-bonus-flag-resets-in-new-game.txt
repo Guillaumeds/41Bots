@@ -1,0 +1,146 @@
+title: A new game resets every partnership's bonus: the first best-trump trick of the new game is worth 11 again
+story: Game 1, hand 1: seat 2 deals and the 8 of clubs is turned (clubs trumps); the ace of clubs is undealt, so nobody robs.
+story: Seat 3 holds the 5, the J of clubs, the Joker, the ace of hearts and the king of clubs. Trick 1: seat 3 leads the 5 and wins; its bonus counts at once: team 3 (seats 3 and 7) has 11, and has now had its first bonus of the game.
+story: Seat 3 then leads the J, the Joker, the ace of hearts and the king and wins every trick: a jink, so team 3 wins game 1 with 31.
+story: Game 2, hand 2: seat 3 deals, diamonds trumps (the ace and the 5 of diamonds undealt). Team 3 again holds the best trump played (the J of diamonds) and gets the end-of-hand bonus.
+story: Because a new game has begun, the flag is cleared: this is team 3's first bonus of game 2 and it is worth +6 again (11 for the trick), not +5 (rule 28: "the first time in a game").
+story: Scores after hand 2: 0,0,5,26.
+dealer: 2
+# ---- Hand 1 of this file (hand index 0), dealer seat 2: clubs trumps, team 3 makes a jink ----
+hand 0: 4C 9D 5H 7H KH
+hand 1: QD 3H 6H JH QH
+hand 2: AD 6D JD AS 9S
+hand 3: 5C JC KC AH JK
+hand 4: 6C 6S 7S 8S KS
+hand 5: 7C 2D 10D 9H 4S
+hand 6: 3D 8D KD 10H JS
+hand 7: 9C 10C 4D 2H 2S
+turned: 8C
+undealt: AC 10S QS QC 5D 7D 5S 4H 2C 3S 8H 3C
+
+# ---- Hand 2 of this file (hand index 1), dealer seat 3: game 2, diamonds trumps ----
+then hand 0: 3C 7D 2H 4H KS
+then hand 1: 10D 3H 8H 9H 10H
+then hand 2: 9C 2D KD 2S 9S
+then hand 3: 7C 9D 7H KH 10S
+then hand 4: 5C 8D 4S 6S 7S
+then hand 5: 4C 10C JC QD JS
+then hand 6: QC 4D AH 3S 5S
+then hand 7: 6C JD JH QH JK
+then turned: 6D
+then undealt: AD 5D 8C QS 5H AC KC AS 3D 6H 2C 8S
+
+# ======== Play ========
+= Turned card=8C
+phase: AwaitPlay 3
+# Trick 1: seat 3 leads the 5 of clubs, the best trump: it wins, and the bonus counts at once (team 3's first this game, +6).
+> Play 5C    # seat 3
+> Play 6C    # seat 4
+> Play 7C    # seat 5
+> Play KD    # seat 6
+> Play 9C    # seat 7
+> Play 4C    # seat 0
+> Play JH    # seat 1
+> Play AS    # seat 2
+= TrickWon trick=1 seat=3 team=3 points=5
+= Bonus team=3 points=6 kind=immediate card=5C
+= AceUndealt
+scores: 0,0,0,11
+# Tricks 2 to 5: seat 3 leads the J of clubs, the Joker, the ace of hearts and the king of clubs (the ace of clubs is undealt) and wins them all.
+> Play JC    # seat 3
+> Play 6S    # seat 4
+> Play 2D    # seat 5
+> Play 3D    # seat 6
+> Play 10C    # seat 7
+> Play 5H    # seat 0
+> Play 6H    # seat 1
+> Play JD    # seat 2
+scores: 0,0,0,16
+# Trick 3
+> Play JK    # seat 3
+> Play 7S    # seat 4
+> Play 4S    # seat 5
+> Play JS    # seat 6
+> Play 4D    # seat 7
+> Play 7H    # seat 0
+> Play QH    # seat 1
+> Play 6D    # seat 2
+scores: 0,0,0,21
+# Trick 4
+> Play AH    # seat 3
+> Play 8S    # seat 4
+> Play 9H    # seat 5
+> Play 8D    # seat 6
+> Play 2S    # seat 7
+> Play KH    # seat 0
+> Play QD    # seat 1
+> Play AD    # seat 2
+scores: 0,0,0,26
+# Trick 5
+> Play KC    # seat 3
+> Play KS    # seat 4
+> Play 10D    # seat 5
+> Play 10H    # seat 6
+> Play 2H    # seat 7
+> Play 9D    # seat 0
+> Play 3H    # seat 1
+> Play 9S    # seat 2
+= TrickWon trick=5 seat=3 team=3 points=5
+= GameWon team=3 reason=jink scores=0,0,0,31
+= HandEnd hand=0 aborted=false
+result: game team=3 reason=jink
+# Game 2 starts: scores back to nought and every bonus flag cleared (rule 36).
+scores: 0,0,0,0
+
+# Hand 2 (game 2): seat 3 deals, diamonds trumps; the ace and the 5 of diamonds are undealt, so nobody robs and the bonus is awarded at the end of the hand.
+= HandStart hand=1 game=1 dealer=3
+= Turned card=6D
+phase: AwaitPlay 4
+# Trick 1
+> Play 7S    # seat 4
+> Play JS    # seat 5
+> Play 5S    # seat 6
+> Play JD    # seat 7
+> Play KS    # seat 0
+> Play 3H    # seat 1
+> Play 9S    # seat 2
+> Play 9D    # seat 3
+# Trick 2
+> Play JK    # seat 7
+> Play 7D    # seat 0
+> Play 10D    # seat 1
+> Play 2D    # seat 2
+> Play KH    # seat 3
+> Play 8D    # seat 4
+> Play QD    # seat 5
+> Play 4D    # seat 6
+# Trick 3
+> Play QH    # seat 7
+> Play 2H    # seat 0
+> Play 8H    # seat 1
+> Play 9C    # seat 2
+> Play 7H    # seat 3
+> Play 6S    # seat 4
+> Play 10C    # seat 5
+> Play 3S    # seat 6
+# Trick 4
+> Play JH    # seat 7
+> Play 4H    # seat 0
+> Play 9H    # seat 1
+> Play 2S    # seat 2
+> Play 7C    # seat 3
+> Play 5C    # seat 4
+> Play 4C    # seat 5
+> Play QC    # seat 6
+# Trick 5
+> Play 6C    # seat 7
+> Play 3C    # seat 0
+> Play 10H    # seat 1
+> Play KD    # seat 2
+> Play 10S    # seat 3
+> Play 4S    # seat 4
+> Play JC    # seat 5
+> Play AH    # seat 6
+= Bonus team=3 points=6 kind=end card=JD
+= HandEnd hand=1 aborted=false
+scores: 0,0,5,26

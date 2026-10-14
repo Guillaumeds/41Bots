@@ -1,0 +1,354 @@
+title: A five-game match: each partnership wins one game, then the decider; the losers pay the stake
+story: A whole match of five games, each won as fast as possible, by a jink in a single hand. The deal moves one seat left every hand, so the first player (the jinker) is a different partnership each time.
+story: Game 1: seat 7 deals and seat 0 makes a jink (team 0). Game 2: seat 0 deals and seat 1 makes a jink (team 1). Game 3: seat 1 deals and seat 2 makes a jink, starting with the 5 of diamonds, whose bonus counts at once (team 2). Game 4: seat 2 deals and seat 3 makes a jink (team 3).
+story: After four games every partnership has won one game. Each new game starts from nought (rule 36); the games won are kept.
+story: Game 5, the decider: seat 3 deals and seat 4 makes a jink, so team 0 (seats 0 and 4) wins its second game and the match (rule 35).
+story: Money (H6, stake 5): every player of the three losing partnerships pays 5 to the winners. Per partnership: team 0 +30, teams 1, 2 and 3 -10 each.
+dealer: 7
+# ---- Hand 1 of this file (hand index 0), dealer seat 7: game 1, spades trumps, seat 0 makes a jink ----
+hand 0: AH JS QS KS JK
+hand 1: 3C 4D QD 2H 8H
+hand 2: 7D 10D KD 6H 7H
+hand 3: 5C 9C AD 6D 4S
+hand 4: 4C 9H KH 2S 10S
+hand 5: 10C 5D 3H JH QH
+hand 6: JC 3D JD 4H 7S
+hand 7: 6C 7C 2D 8D 5H
+turned: 9S
+undealt: 5S AS 6S 8S 8C QC 9D 3S AC KC 10H 2C
+
+# ---- Hand 2 of this file (hand index 1), dealer seat 0: game 2, clubs trumps, seat 1 makes a jink ----
+then hand 0: 4C 10D 6H 8H AS
+then hand 1: JC QC KC AH JK
+then hand 2: KD 4H 7H QH KH
+then hand 3: 7C 2D 7D QD 9S
+then hand 4: 6C 2S 6S 7S KS
+then hand 5: 3D JD 9H 4S 5S
+then hand 6: 4D 9D 5H 10H JS
+then hand 7: 9C 10C 8D 2H JH
+then turned: 8C
+then undealt: 5C AC 10S QS AD 5D 3H 8S 2C 6D 3S 3C
+
+# ---- Hand 3 of this file (hand index 2), dealer seat 1: game 3, diamonds trumps, seat 2 makes a jink ----
+then hand 0: 3C 6D 5H 7H KH
+then hand 1: 10D 3H 6H JH QH
+then hand 2: 5D JD KD AH JK
+then hand 3: 9C 2D 9D AS 9S
+then hand 4: 4C 6S 7S 8S KS
+then hand 5: 5C 10C 8D 9H 4S
+then hand 6: JC 4D QD 10H JS
+then hand 7: 6C 7C QC 2H 2S
+then turned: 7D
+then undealt: AD 10S QS 8C KC 3D 5S 4H AC 3S 8H 2C
+
+# ---- Hand 4 of this file (hand index 3), dealer seat 2: game 4, hearts trumps, seat 3 makes a jink ----
+then hand 0: 3C 4D QD 2H AS
+then hand 1: 7D 10D KD 7H 8H
+then hand 2: 5C 9C AD 6D 9S
+then hand 3: 10H JH QH KH JK
+then hand 4: 4C 2S 6S 7S KS
+then hand 5: 10C 5D 3H 4S 5S
+then hand 6: JC 3D JD 4H JS
+then hand 7: 6C 7C 2D 8D 6H
+then turned: 9H
+then undealt: 5H AH 10S QS 8C QC 9D 8S AC KC 3S 2C
+
+# ---- Hand 5 of this file (hand index 4), dealer seat 3: game 5, spades trumps, seat 4 makes a jink ----
+then hand 0: 3C 4D QD 2H 8H
+then hand 1: 7D 10D KD 6H 7H
+then hand 2: 5C 9C AD 6D 4S
+then hand 3: 4C 9H KH 2S 10S
+then hand 4: AH JS QS KS JK
+then hand 5: 10C 5D 3H JH QH
+then hand 6: JC 3D JD 4H 8S
+then hand 7: 6C 7C 2D 8D 5H
+then turned: 6S
+then undealt: 5S AS 7S 9S 8C QC 9D 3S AC KC 10H 2C
+
+# ======== Play ========
+# Game 1 (hand 1): seat 7 deals, spades trumps (9 of spades turned; 5 of spades, ace of spades undealt, so nobody robs).
+# Seat 0 leads and holds J of spades, Joker, ace of hearts, king of spades, queen of spades: it leads them one by one and wins every trick.
+= Turned card=9S
+phase: AwaitPlay 0
+# Trick 1
+> Play JS    # seat 0
+> Play 8H    # seat 1
+> Play 10D    # seat 2
+> Play 4S    # seat 3
+> Play 2S    # seat 4
+> Play 10C    # seat 5
+> Play 7S    # seat 6
+> Play 2D    # seat 7
+# Trick 2
+> Play JK    # seat 0
+> Play 2H    # seat 1
+> Play 6H    # seat 2
+> Play 5C    # seat 3
+> Play 10S    # seat 4
+> Play QH    # seat 5
+> Play 4H    # seat 6
+> Play 8D    # seat 7
+# Trick 3
+> Play AH    # seat 0
+> Play 4D    # seat 1
+> Play 7H    # seat 2
+> Play 6D    # seat 3
+> Play 9H    # seat 4
+> Play 3H    # seat 5
+> Play JC    # seat 6
+> Play 5H    # seat 7
+# Trick 4
+> Play KS    # seat 0
+> Play 3C    # seat 1
+> Play 7D    # seat 2
+> Play AD    # seat 3
+> Play KH    # seat 4
+> Play 5D    # seat 5
+> Play 3D    # seat 6
+> Play 6C    # seat 7
+# Trick 5
+> Play QS    # seat 0
+> Play QD    # seat 1
+> Play KD    # seat 2
+> Play 9C    # seat 3
+> Play 4C    # seat 4
+> Play JH    # seat 5
+> Play JD    # seat 6
+> Play 7C    # seat 7
+= TrickWon trick=5 seat=0 team=0 points=5
+= GameWon team=0 reason=jink scores=25,0,0,0
+= HandEnd hand=0 aborted=false
+result: game team=0 reason=jink
+scores: 0,0,0,0
+# Games won so far (teams 0 to 3): 1,0,0,0.
+
+# Game 2 (hand 2): seat 0 deals, clubs trumps (8 of clubs turned; 5 of clubs, ace of clubs undealt, so nobody robs).
+# Seat 1 leads and holds J of clubs, Joker, ace of hearts, king of clubs, queen of clubs: it leads them one by one and wins every trick.
+= HandStart hand=1 game=1 dealer=0
+= Turned card=8C
+phase: AwaitPlay 1
+# Trick 1
+> Play JC    # seat 1
+> Play KH    # seat 2
+> Play 7C    # seat 3
+> Play 6C    # seat 4
+> Play 5S    # seat 5
+> Play 5H    # seat 6
+> Play 10C    # seat 7
+> Play 4C    # seat 0
+# Trick 2
+> Play JK    # seat 1
+> Play QH    # seat 2
+> Play 9S    # seat 3
+> Play KS    # seat 4
+> Play JD    # seat 5
+> Play 9D    # seat 6
+> Play 9C    # seat 7
+> Play AS    # seat 0
+# Trick 3
+> Play AH    # seat 1
+> Play 7H    # seat 2
+> Play QD    # seat 3
+> Play 6S    # seat 4
+> Play 3D    # seat 5
+> Play JS    # seat 6
+> Play 2H    # seat 7
+> Play 8H    # seat 0
+# Trick 4
+> Play KC    # seat 1
+> Play KD    # seat 2
+> Play 2D    # seat 3
+> Play 7S    # seat 4
+> Play 4S    # seat 5
+> Play 10H    # seat 6
+> Play JH    # seat 7
+> Play 6H    # seat 0
+# Trick 5
+> Play QC    # seat 1
+> Play 4H    # seat 2
+> Play 7D    # seat 3
+> Play 2S    # seat 4
+> Play 9H    # seat 5
+> Play 4D    # seat 6
+> Play 8D    # seat 7
+> Play 10D    # seat 0
+= TrickWon trick=5 seat=1 team=1 points=5
+= GameWon team=1 reason=jink scores=0,25,0,0
+= HandEnd hand=1 aborted=false
+result: game team=1 reason=jink
+scores: 0,0,0,0
+# Games won so far (teams 0 to 3): 1,1,0,0.
+
+# Game 3 (hand 3): seat 1 deals, diamonds trumps (7 of diamonds turned; ace of diamonds undealt, so nobody robs).
+# Seat 2 leads and holds 5 of diamonds, J of diamonds, Joker, ace of hearts, king of diamonds: it leads them one by one and wins every trick.
+= HandStart hand=2 game=2 dealer=1
+= Turned card=7D
+phase: AwaitPlay 2
+# Trick 1
+> Play 5D    # seat 2
+> Play 9D    # seat 3
+> Play 8S    # seat 4
+> Play 8D    # seat 5
+> Play QD    # seat 6
+> Play 7C    # seat 7
+> Play 6D    # seat 0
+> Play 10D    # seat 1
+# Trick 2
+> Play JD    # seat 2
+> Play 2D    # seat 3
+> Play 7S    # seat 4
+> Play 4S    # seat 5
+> Play 4D    # seat 6
+> Play QC    # seat 7
+> Play 3C    # seat 0
+> Play 6H    # seat 1
+# Trick 3
+> Play JK    # seat 2
+> Play 9C    # seat 3
+> Play KS    # seat 4
+> Play 10C    # seat 5
+> Play JC    # seat 6
+> Play 6C    # seat 7
+> Play KH    # seat 0
+> Play 3H    # seat 1
+# Trick 4
+> Play AH    # seat 2
+> Play 9S    # seat 3
+> Play 4C    # seat 4
+> Play 9H    # seat 5
+> Play 10H    # seat 6
+> Play 2S    # seat 7
+> Play 5H    # seat 0
+> Play JH    # seat 1
+# Trick 5
+> Play KD    # seat 2
+> Play AS    # seat 3
+> Play 6S    # seat 4
+> Play 5C    # seat 5
+> Play JS    # seat 6
+> Play 2H    # seat 7
+> Play 7H    # seat 0
+> Play QH    # seat 1
+= TrickWon trick=5 seat=2 team=2 points=5
+= GameWon team=2 reason=jink scores=0,0,31,0
+= HandEnd hand=2 aborted=false
+result: game team=2 reason=jink
+scores: 0,0,0,0
+# Games won so far (teams 0 to 3): 1,1,1,0.
+
+# Game 4 (hand 4): seat 2 deals, hearts trumps (9 of hearts turned; 5 of hearts, ace of hearts undealt, so nobody robs).
+# Seat 3 leads and holds J of hearts, Joker, king of hearts, queen of hearts, 10 of hearts: it leads them one by one and wins every trick.
+= HandStart hand=3 game=3 dealer=2
+= Turned card=9H
+phase: AwaitPlay 3
+# Trick 1
+> Play JH    # seat 3
+> Play KS    # seat 4
+> Play 3H    # seat 5
+> Play 4H    # seat 6
+> Play 6H    # seat 7
+> Play 2H    # seat 0
+> Play 8H    # seat 1
+> Play 9C    # seat 2
+# Trick 2
+> Play JK    # seat 3
+> Play 7S    # seat 4
+> Play 5S    # seat 5
+> Play JS    # seat 6
+> Play 7C    # seat 7
+> Play QD    # seat 0
+> Play 7H    # seat 1
+> Play AD    # seat 2
+# Trick 3
+> Play KH    # seat 3
+> Play 6S    # seat 4
+> Play 10C    # seat 5
+> Play JD    # seat 6
+> Play 8D    # seat 7
+> Play AS    # seat 0
+> Play KD    # seat 1
+> Play 9S    # seat 2
+# Trick 4
+> Play QH    # seat 3
+> Play 4C    # seat 4
+> Play 5D    # seat 5
+> Play JC    # seat 6
+> Play 6C    # seat 7
+> Play 3C    # seat 0
+> Play 10D    # seat 1
+> Play 6D    # seat 2
+# Trick 5
+> Play 10H    # seat 3
+> Play 2S    # seat 4
+> Play 4S    # seat 5
+> Play 3D    # seat 6
+> Play 2D    # seat 7
+> Play 4D    # seat 0
+> Play 7D    # seat 1
+> Play 5C    # seat 2
+= TrickWon trick=5 seat=3 team=3 points=5
+= GameWon team=3 reason=jink scores=0,0,0,25
+= HandEnd hand=3 aborted=false
+result: game team=3 reason=jink
+scores: 0,0,0,0
+# Games won so far (teams 0 to 3): 1,1,1,1.
+
+# Game 5 (hand 5): seat 3 deals, spades trumps (6 of spades turned; 5 of spades, ace of spades undealt, so nobody robs).
+# Seat 4 leads and holds J of spades, Joker, ace of hearts, king of spades, queen of spades: it leads them one by one and wins every trick.
+= HandStart hand=4 game=4 dealer=3
+= Turned card=6S
+phase: AwaitPlay 4
+# Trick 1
+> Play JS    # seat 4
+> Play 3H    # seat 5
+> Play 8S    # seat 6
+> Play 6C    # seat 7
+> Play 3C    # seat 0
+> Play KD    # seat 1
+> Play 4S    # seat 2
+> Play 2S    # seat 3
+# Trick 2
+> Play JK    # seat 4
+> Play JH    # seat 5
+> Play 4H    # seat 6
+> Play 5H    # seat 7
+> Play 2H    # seat 0
+> Play 7D    # seat 1
+> Play AD    # seat 2
+> Play 10S    # seat 3
+# Trick 3
+> Play AH    # seat 4
+> Play 5D    # seat 5
+> Play JC    # seat 6
+> Play 8D    # seat 7
+> Play 8H    # seat 0
+> Play 10D    # seat 1
+> Play 6D    # seat 2
+> Play 9H    # seat 3
+# Trick 4
+> Play KS    # seat 4
+> Play 10C    # seat 5
+> Play 3D    # seat 6
+> Play 7C    # seat 7
+> Play QD    # seat 0
+> Play 7H    # seat 1
+> Play 9C    # seat 2
+> Play KH    # seat 3
+# Trick 5
+> Play QS    # seat 4
+> Play QH    # seat 5
+> Play JD    # seat 6
+> Play 2D    # seat 7
+> Play 4D    # seat 0
+> Play 6H    # seat 1
+> Play 5C    # seat 2
+> Play 4C    # seat 3
+= TrickWon trick=5 seat=4 team=0 points=5
+= GameWon team=0 reason=jink scores=25,0,0,0
+= HandEnd hand=4 aborted=false
+result: game team=0 reason=jink
+# Team 0 has won its second game: the match is over. The stake is 5: each of the six losing players pays 5,
+# so each losing partnership pays 10 and the winning partnership receives 30 (15 for each winner).
+= MatchWon team=0 money=30,-10,-10,-10
+result: match team=0 money=30,-10,-10,-10
+phase: MatchOver

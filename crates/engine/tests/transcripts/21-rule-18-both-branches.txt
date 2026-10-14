@@ -1,0 +1,91 @@
+title: Rule 18: a player whose only trumps may all be held back may play any card; otherwise a trump must be played
+story: Seat 4 deals and turns the 9 of spades: spades are trumps. The ace of spades is undealt, so nobody robs.
+story: Trick 1: seat 5 leads the 7 of spades. Seat 6 holds the 5 of spades and the Joker as its only trumps; both outrank the 7 and may be held back, so it may play any card at all (rule 18), and it plays a plain card.
+story: Seat 7 holds the J and the 2 of spades: the 2 may not be held back, so it must play a trump (either one) and plays the 2. Seat 0, whose only trump is the A♥, may play anything. Seat 2 must play its 4 of spades. The 2 of spades (black suit: the 2 is the best number) wins.
+story: Trick 2: seat 7 leads the J of spades. Seat 0's A♥ is now forced out. Seat 6 still has the 5 and the Joker: the 5 may be held back against the J but the Joker may not, so seat 6 must now play a trump. It plays the Joker; the J wins.
+story: The rest of the hand is ordinary play. Final scores of the hand: 5,0,11,15.
+dealer: 4
+# ---- Hand 1 of this file (hand index 0), dealer seat 4: spades trumps ----
+hand 0: 3C 4D QD AH 2H
+hand 1: KD 5H 7H 8H 9H
+hand 2: 10C QC 3D QH 4S
+hand 3: 5C 7C 6D 3H 10H
+hand 4: 4C 9C 7D 8D 9D
+hand 5: 2C JC 2D 6H 7S
+hand 6: 6C 8C 5D 5S JK
+hand 7: KC JH KH 2S JS
+turned: 9S
+undealt: AS KS QS 3S 6S 8S 10S JD 4H 10D AD AC
+
+# ======== Play ========
+= Turned card=9S
+phase: AwaitPlay 5
+# Trick 1: seat 5 leads the 7 of spades, a low trump. The 5, the J, the Joker and the A♥ all rank above it and may be held back.
+> Play 7S    # seat 5
+# Seat 6 holds the 5 of spades and the Joker and no other trump. Both may be held back, so rule 18 lets it play any card.
+legal: 6C 8C 5D 5S JK
+> Play 6C    # seat 6
+# Seat 7 holds the J and the 2 of spades. The 2 may not be held back, so seat 7 must play a trump; it may still choose the J.
+legal: 2S JS
+> Play 2S    # seat 7
+# Seat 0's only trump is the A♥, which may be held back against the 7: any card.
+legal: 3C 4D QD AH 2H
+> Play 3C    # seat 0
+> Play 5H    # seat 1
+# Seat 2 must play its 4 of spades.
+legal: 4S
+> Play 4S    # seat 2
+> Play 6D    # seat 3
+> Play 8D    # seat 4
+# Spades are black, so the 2 is the best of the small trumps: seat 7 wins with the 2 of spades.
+= TrickWon trick=1 seat=7 team=3 points=5
+= AceUndealt
+scores: 0,0,0,5
+# Trick 2: seat 7 leads the J of spades. Now only the 5 outranks the led card.
+> Play JS    # seat 7
+# Seat 0's A♥ ranks below the J: it is forced out.
+legal: AH
+> Play AH    # seat 0
+> Play KD    # seat 1
+> Play 10C    # seat 2
+> Play 7C    # seat 3
+> Play 7D    # seat 4
+> Play 2D    # seat 5
+# Seat 6 still holds the 5 of spades and the Joker. The 5 may be held back, but the Joker ranks below the J and may not,
+# so this time seat 6 must play a trump (either one); it plays the Joker and keeps the 5.
+legal: 5S JK
+> Play JK    # seat 6
+= TrickWon trick=2 seat=7 team=3 points=5
+scores: 0,0,0,10
+# The rest of the hand is any legal play.
+> Play KH    # seat 7
+> Play 2H    # seat 0
+> Play 7H    # seat 1
+> Play QH    # seat 2
+> Play 10H    # seat 3
+> Play 9D    # seat 4
+> Play 6H    # seat 5
+> Play 8C    # seat 6
+# Trick 4
+> Play KC    # seat 7
+> Play 4D    # seat 0
+> Play 9H    # seat 1
+> Play QC    # seat 2
+> Play 5C    # seat 3
+> Play 9C    # seat 4
+> Play JC    # seat 5
+> Play 5S    # seat 6
+= TrickWon trick=4 seat=6 team=2 points=5
+= Bonus team=2 points=6 kind=immediate card=5S
+scores: 0,0,11,15
+# Trick 5
+> Play 5D    # seat 6
+> Play JH    # seat 7
+> Play QD    # seat 0
+> Play 8H    # seat 1
+> Play 3D    # seat 2
+> Play 3H    # seat 3
+> Play 4C    # seat 4
+> Play 2C    # seat 5
+= HandEnd hand=0 aborted=false
+scores: 5,0,11,15

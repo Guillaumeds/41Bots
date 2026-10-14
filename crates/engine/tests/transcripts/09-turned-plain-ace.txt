@@ -1,0 +1,80 @@
+title: A turned plain ace: the dealer robs at once, and the ace of trumps ranks just below the A♥
+story: Seat 5 deals and turns the ace of clubs: clubs are trumps. The dealer must rob a turned ace at once, before the first lead (rule 22, H4): it takes the ace of clubs and burns a card.
+story: The dealer also holds the ace of diamonds; no ace may be burned (H3), so the legal burns are the 10 of clubs, 8 of diamonds, 4 of hearts and 7 of spades. It burns the 4 of hearts.
+story: Trick 1: seat 6 leads the 9 of diamonds; seat 7 trumps with the king of clubs, seat 1 with the ace of hearts and the dealer with the ace of clubs. The A♥ is the best of them (rule 8: the ace of trumps comes straight after the A♥), so seat 1 wins.
+story: The 5 and J of clubs and the Joker are undealt, so the A♥ is the best trump of the hand: team 1 gets +6 at the end. Final scores of the hand: 10,11,0,10.
+dealer: 5
+# ---- Hand 1 of this file (hand index 0), dealer seat 5: the ace of clubs turned ----
+hand 0: 4C QD 9H JH 4S
+hand 1: AH 3H 10H 2S 3S
+hand 2: 9C 2H 7H KH 10S
+hand 3: 6C 7C 3D 5S QS
+hand 4: 2D KD 6S 8S KS
+hand 5: 10C AD 8D 4H 7S
+hand 6: 7D 9D 10D 8H JS
+hand 7: 8C QC KC 4D 6H
+turned: AC
+undealt: 5C JC JK 3C 5D QH JD 9S 5H 6D AS 2C
+
+# ======== Play ========
+= Turned card=AC
+= Took seat=5 card=AC
+# A turned ace is robbed by the dealer at once (rule 22, H4). Clubs are trumps. The dealer burns one of six cards;
+# the ace of clubs and the ace of diamonds may not be burned (H3).
+phase: AwaitBurn 5
+legal: 10C 8D 4H 7S
+> Burn 4H    # seat 5 burns
+= BurnDone seat=5
+phase: AwaitPlay 6
+# Trick 1: seat 6 leads the 9 of diamonds. Seat 7 trumps with the king of clubs, seat 1 with the A♥, and the dealer, last, with the ace of clubs.
+> Play 9D    # seat 6
+> Play KC    # seat 7
+> Play 4C    # seat 0
+> Play AH    # seat 1
+> Play 9C    # seat 2
+> Play 6C    # seat 3
+> Play 2D    # seat 4
+> Play AC    # seat 5
+# Trump order with clubs trumps: 5, J, Joker, A♥, A♣, K♣ ... so the A♥ beats the ace of clubs, which beats the king.
+= TrickWon trick=1 seat=1 team=1 points=5
+scores: 0,5,0,0
+# Tricks 2 to 5: any legal cards.
+> Play 10H    # seat 1
+> Play 2H    # seat 2
+> Play 3D    # seat 3
+> Play KS    # seat 4
+> Play 8D    # seat 5
+> Play 8H    # seat 6
+> Play 8C    # seat 7
+> Play 9H    # seat 0
+# Trick 3
+> Play 4D    # seat 7
+> Play QD    # seat 0
+> Play 2S    # seat 1
+> Play KH    # seat 2
+> Play 5S    # seat 3
+> Play KD    # seat 4
+> Play AD    # seat 5
+> Play 7D    # seat 6
+# Trick 4
+> Play 8S    # seat 4
+> Play 10C    # seat 5
+> Play JS    # seat 6
+> Play QC    # seat 7
+> Play 4S    # seat 0
+> Play 3S    # seat 1
+> Play 10S    # seat 2
+> Play 7C    # seat 3
+# Trick 5
+> Play 6H    # seat 7
+> Play JH    # seat 0
+> Play 3H    # seat 1
+> Play 7H    # seat 2
+> Play QS    # seat 3
+> Play 6S    # seat 4
+> Play 7S    # seat 5
+> Play 10D    # seat 6
+# The 5 and J of clubs and the Joker are undealt, so the A♥ is the best trump played: team 1 gets the end-of-hand bonus.
+= Bonus team=1 points=6 kind=end card=AH
+= HandEnd hand=0 aborted=false
+scores: 10,11,0,10

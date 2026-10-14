@@ -1,0 +1,161 @@
+title: Card orders: in trumps the black 2 beats the black 10 and the red 10 beats the red 2; a plain red ace is lowest, a plain black ace fourth
+story: Two hands showing the orders of rules 6, 9 and 10. Nobody robs in either hand (the ace of trumps is undealt).
+story: Hand 1 (seat 0 deals, clubs trumps, a black suit): seat 1 leads the 10 of clubs and the small clubs follow: 2, 9, 4, 6, 8 and 3. In a black trump suit the numbers run 2 up to 10, so the 2 is the best of them and the 10 the worst: seat 2 wins with the 2.
+story: Trick 2: seat 2 leads the ace of diamonds and seat 3 follows with the 2; the rest throw hearts. A red ace that is not a trump is the lowest card of its suit, so the 2 wins.
+story: Trick 3: seat 3 leads the 10 of spades; the 2, ace and J of spades follow. A black plain suit runs K, Q, J, A, 2 ... 10: the ace beats the 2 but the J beats the ace, so seat 6 wins.
+story: Hand 2 (seat 1 deals, diamonds trumps, a red suit): seat 2 leads the 2 of diamonds and the others follow with the 10, 9, 3, 4, 7 and 8. In a red trump suit the numbers run 10 down to 2: seat 3 wins with the 10.
+story: Trick 2: seat 3 leads the 2 of clubs, followed by the ace, 10, J, 3, 4, 5 and 6 of clubs: the black plain ace sits fourth, after K, Q and J, so the J wins.
+story: The other tricks are any legal play. Scores after hand 1: 16,0,10,5; after hand 2: 16,15,15,16.
+dealer: 0
+# ---- Hand 1 of this file (hand index 0), dealer seat 0: clubs trumps (black) ----
+hand 0: 3C 5C AH 8H 9H
+hand 1: 10C QH KH 5S 6S
+hand 2: 2C AD 7S 8S 9S
+hand 3: 9C 2D 10S QS KS
+hand 4: JC 2H 3H 2S JK
+hand 5: 4C KC 4H 5H AS
+hand 6: 6C QC 6H 7H JS
+hand 7: 8C 10H JH 3S 4S
+turned: 7C
+undealt: AC 3D 4D 5D 6D 7D 8D 9D 10D JD QD KD
+
+# ---- Hand 2 of this file (hand index 1), dealer seat 1: diamonds trumps (red) ----
+then hand 0: 4C 8D 8H 9H AS
+then hand 1: 5C 10H JH QH KH
+then hand 2: 6C 7C 2D QS KS
+then hand 3: 2C 8C 10D 10S JS
+then hand 4: AC 9C 9D 8S 9S
+then hand 5: 10C 3D 5H 6S 7S
+then hand 6: JC 4D 6H 4S 5S
+then hand 7: 3C 7D 7H 2S 3S
+then turned: 6D
+then undealt: AD 5D JD JK AH KD QD KC QC 2H 3H 4H
+
+# ======== Play ========
+= Turned card=7C
+phase: AwaitPlay 1
+# Hand 1, clubs trumps. Trick 1: seat 1 leads the 10 of clubs, the lowest trump of all in a black suit.
+> Play 10C    # seat 1
+> Play 2C    # seat 2
+> Play 9C    # seat 3
+# Seat 4 holds only the J of clubs and the Joker as trumps; both may be held back, so it may play any card.
+legal: JC 2H 3H 2S JK
+> Play 2H    # seat 4
+> Play 4C    # seat 5
+> Play 6C    # seat 6
+> Play 8C    # seat 7
+# Seat 0 holds the 3 and 5 of clubs and the A♥: the 3 may not be held back, so it must play a trump.
+legal: 3C 5C AH
+> Play 3C    # seat 0
+# Black trump numbers run 2 (best), 3, 4, 6, 7, 8, 9, 10 (worst): the 2 of clubs wins.
+= TrickWon trick=1 seat=2 team=2 points=5
+= AceUndealt
+scores: 0,0,5,0
+# Trick 2: seat 2 leads the ace of diamonds. Only seat 3 has another diamond (the 2); everyone else throws a heart.
+> Play AD    # seat 2
+> Play 2D    # seat 3
+> Play 3H    # seat 4
+> Play 5H    # seat 5
+> Play 7H    # seat 6
+> Play 10H    # seat 7
+> Play 8H    # seat 0
+> Play QH    # seat 1
+# In a red suit that is not trumps the ace is the lowest card (rule 9): the 2 of diamonds beats it.
+= TrickWon trick=2 seat=3 team=3 points=5
+scores: 0,0,5,5
+# Trick 3: seat 3 leads the 10 of spades.
+> Play 10S    # seat 3
+> Play 2S    # seat 4
+> Play AS    # seat 5
+> Play JS    # seat 6
+> Play 3S    # seat 7
+> Play 9H    # seat 0
+> Play 5S    # seat 1
+> Play 7S    # seat 2
+# In a black suit that is not trumps the order is K, Q, J, A, 2 ... 10 (rule 10): the ace beats the 2 and the 10 but the J beats the ace.
+= TrickWon trick=3 seat=6 team=2 points=5
+scores: 0,0,10,5
+# Tricks 4 and 5: any legal cards.
+> Play 6H    # seat 6
+> Play JH    # seat 7
+> Play AH    # seat 0
+> Play KH    # seat 1
+> Play 8S    # seat 2
+> Play KS    # seat 3
+> Play JK    # seat 4
+> Play 4H    # seat 5
+# Trick 5
+> Play JC    # seat 4
+> Play KC    # seat 5
+> Play QC    # seat 6
+> Play 4S    # seat 7
+> Play 5C    # seat 0
+> Play 6S    # seat 1
+> Play 9S    # seat 2
+> Play QS    # seat 3
+= TrickWon trick=5 seat=0 team=0 points=5
+= Bonus team=0 points=6 kind=immediate card=5C
+= HandEnd hand=0 aborted=false
+scores: 16,0,10,5
+
+# Hand 2: seat 1 deals, diamonds trumps (red). The ace, 5, J, king and queen of diamonds, the Joker and the A♥ are undealt.
+= HandStart hand=1 game=0 dealer=1
+= Turned card=6D
+phase: AwaitPlay 2
+# Trick 1: seat 2 leads the 2 of diamonds, the lowest trump in a red suit. Every other diamond holder must follow with its one trump.
+> Play 2D    # seat 2
+> Play 10D    # seat 3
+> Play 9D    # seat 4
+> Play 3D    # seat 5
+> Play 4D    # seat 6
+> Play 7D    # seat 7
+> Play 8D    # seat 0
+# Seat 1 has no trump and no diamond: any card.
+legal: 5C 10H JH QH KH
+> Play KH    # seat 1
+# Red trump numbers run 10 (best), 9, 8, 7, 6, 4, 3, 2 (worst): the 10 of diamonds wins.
+= TrickWon trick=1 seat=3 team=3 points=5
+= AceUndealt
+scores: 16,0,10,10
+# Trick 2: seat 3 leads the 2 of clubs; everyone follows with a club.
+> Play 2C    # seat 3
+> Play AC    # seat 4
+> Play 10C    # seat 5
+> Play JC    # seat 6
+> Play 3C    # seat 7
+> Play 4C    # seat 0
+> Play 5C    # seat 1
+> Play 6C    # seat 2
+# Plain black order K, Q, J, A, 2, 3 ... 10: the ace of clubs beats the 2 and the 10, the J beats the ace.
+= TrickWon trick=2 seat=6 team=2 points=5
+scores: 16,0,15,10
+# Tricks 3 to 5: any legal cards.
+> Play 6H    # seat 6
+> Play 7H    # seat 7
+> Play 9H    # seat 0
+> Play 10H    # seat 1
+> Play 7C    # seat 2
+> Play 10S    # seat 3
+> Play 8S    # seat 4
+> Play 5H    # seat 5
+# Trick 4
+> Play JH    # seat 1
+> Play QS    # seat 2
+> Play JS    # seat 3
+> Play 9S    # seat 4
+> Play 6S    # seat 5
+> Play 4S    # seat 6
+> Play 3S    # seat 7
+> Play 8H    # seat 0
+# Trick 5
+> Play QH    # seat 1
+> Play KS    # seat 2
+> Play 8C    # seat 3
+> Play 9C    # seat 4
+> Play 7S    # seat 5
+> Play 5S    # seat 6
+> Play 2S    # seat 7
+> Play AS    # seat 0
+= Bonus team=3 points=6 kind=end card=10D
+= HandEnd hand=1 aborted=false
+scores: 16,15,15,16

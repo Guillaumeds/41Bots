@@ -1,0 +1,115 @@
+title: The 5 of trumps bonus counts at once and ends the game in the middle of a hand
+story: Hand 1 (seat 0 deals, clubs trumps) only builds the score: team 2 (seats 2 and 6) takes four tricks and its first best-trump bonus (seat 2 plays the 5 of clubs in trick 1), so the scores are 5, 0, 26, 0 (teams 0 to 3).
+story: Hand 2: seat 1 deals and the 8 of diamonds is turned, so diamonds are trumps. The ace and J of diamonds are undealt, so nobody robs.
+story: Seat 2 leads trick 1 with the Joker and wins it: team 2 has 31.
+story: Seat 2 then leads the 5 of diamonds and wins trick 2: 5 for the trick makes 36, and because the 5 of trumps was played its bonus counts the moment the trick is won (rule 29).
+story: Team 2 already had a bonus this game (hand 1), so this one is worth 5 extra (rule 28: 10 for the trick): 36 + 5 = 41. Team 2 wins the game at once, in the middle of the hand (rule 32); tricks 3 to 5 are not played.
+story: The game-end reason is "immediate bonus": the trick alone left team 2 on 36, and the bonus took it to 41.
+dealer: 0
+# ---- Hand 1 of this file (hand index 0), dealer seat 0: clubs trumps, only builds the score ----
+hand 0: 3C JC 5D 5H 3S
+hand 1: 10C AD QD 5S 8S
+hand 2: 5C 8C 4D 7D 10D
+hand 3: 6D 4H AS 9S QS
+hand 4: 9C QC 3D 10H 4S
+hand 5: 8D KD 2H 8H 9H
+hand 6: KC 9D JH KH JK
+hand 7: 6C 2D 2S 6S KS
+turned: 7C
+undealt: AC 4C JS 7H 6H 3H 2C 7S AH JD QH 10S
+
+# ---- Hand 2 of this file (hand index 1), dealer seat 1: diamonds trumps, the game ends at trick 2 ----
+then hand 0: 3C 6D 3H 5H JH
+then hand 1: 10D AH 4H 9H 10H
+then hand 2: 2D 5D 3S 9S JK
+then hand 3: 7C 9C 9D KH 6S
+then hand 4: 7D 8H AS 4S 7S
+then hand 5: 4C 5C 10C 5S JS
+then hand 6: JC QC 4D KD 6H
+then hand 7: 6C 8S 10S QS KS
+then turned: 8D
+then undealt: AD JD 7H 8C KC 3D 2H QD AC 2S QH 2C
+
+# ======== Play ========
+# Hand 1 (seat 0 deals, clubs trumps, the ace of clubs undealt so nobody robs) only builds the score:
+# team 2 (seats 2 and 6) takes tricks 1 to 4, and its first best-trump bonus (the 5 of clubs in trick 1): 4 x 5 + 6 = 26.
+> Play AD    # seat 1
+> Play 5C    # seat 2
+> Play 6D    # seat 3
+> Play 3D    # seat 4
+> Play 8D    # seat 5
+> Play JK    # seat 6
+> Play 2D    # seat 7
+> Play 5D    # seat 0
+# Trick 2
+> Play 8C    # seat 2
+> Play 9S    # seat 3
+> Play 9C    # seat 4
+> Play 2H    # seat 5
+> Play KC    # seat 6
+> Play 6C    # seat 7
+> Play 3C    # seat 0
+> Play 10C    # seat 1
+# Trick 3
+> Play KH    # seat 6
+> Play 6S    # seat 7
+> Play 5H    # seat 0
+> Play 8S    # seat 1
+> Play 10D    # seat 2
+> Play 4H    # seat 3
+> Play 10H    # seat 4
+> Play 8H    # seat 5
+# Trick 4
+> Play JH    # seat 6
+> Play 2S    # seat 7
+> Play 3S    # seat 0
+> Play 5S    # seat 1
+> Play 7D    # seat 2
+> Play AS    # seat 3
+> Play 4S    # seat 4
+> Play 9H    # seat 5
+# Trick 5
+> Play 9D    # seat 6
+> Play KS    # seat 7
+> Play JC    # seat 0
+> Play QD    # seat 1
+> Play 4D    # seat 2
+> Play QS    # seat 3
+> Play QC    # seat 4
+> Play KD    # seat 5
+= HandEnd hand=0 aborted=false
+scores: 5,0,26,0
+
+# Hand 2: seat 1 deals, diamonds are trumps (8 of diamonds turned); the ace and J of diamonds are undealt, so nobody robs.
+= HandStart hand=1 game=0 dealer=1
+= Turned card=8D
+phase: AwaitPlay 2
+# Trick 1: seat 2 leads the Joker; only the 5 of diamonds could beat it and seat 2 holds it.
+> Play JK    # seat 2
+> Play 9D    # seat 3
+> Play 7D    # seat 4
+> Play 10C    # seat 5
+> Play 4D    # seat 6
+> Play QS    # seat 7
+> Play 6D    # seat 0
+> Play AH    # seat 1
+= TrickWon trick=1 seat=2 team=2 points=5
+= AceUndealt
+scores: 5,0,31,0
+# Trick 2: seat 2 leads the 5 of diamonds and wins: 5 for the trick (36), and the best-trump bonus counts at once (rule 29).
+# It is team 2's second bonus this game, so it is worth 5 more: 41. The game ends now; tricks 3 to 5 are never played.
+> Play 5D    # seat 2
+> Play 7C    # seat 3
+> Play 8H    # seat 4
+> Play 4C    # seat 5
+> Play KD    # seat 6
+> Play 8S    # seat 7
+> Play 5H    # seat 0
+> Play 10D    # seat 1
+= TrickWon trick=2 seat=2 team=2 points=5
+= Bonus team=2 points=5 kind=immediate card=5D
+= GameWon team=2 reason=immediate_bonus scores=5,0,41,0
+= HandEnd hand=1 aborted=true
+result: game team=2 reason=immediate_bonus
+# The next game starts from nought.
+scores: 0,0,0,0

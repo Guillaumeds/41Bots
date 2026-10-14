@@ -1,0 +1,83 @@
+title: Jink: one partnership takes all five tricks and wins the game at once
+story: Seat 0 deals and spades are trumps (the 9 of spades is turned). The 5 and the ace of spades are in the undealt pack, so nobody robs.
+story: Seat 1 holds the J of spades, the Joker, the ace of hearts, the king of spades and the 2 of diamonds; partner seat 5 holds the queen of spades and four small spades.
+story: Seat 1 leads the J, the Joker, the ace of hearts and the king in turn and wins tricks 1 to 4 (each trump lead makes everyone holding an ordinary trump follow with a trump).
+story: In trick 5 seat 1 leads the 2 of diamonds and partner seat 5 trumps it with the queen of spades, the best trump left.
+story: Team 1 (seats 1 and 5) has taken all five tricks: a jink (rule 33), which wins the game at once with 25 points. The jink is checked before the end-of-hand bonus, so no bonus is awarded for the J of spades.
+story: The next game starts with all scores back to nought (rule 36).
+dealer: 0
+# ---- Hand 1 of this file (hand index 0), dealer seat 0 ----
+hand 0: 3C 5D KD 3H 9H
+hand 1: 2D AH JS KS JK
+hand 2: KC 2H 6H 8H 2S
+hand 3: 10C QC 4D QH 3S
+hand 4: 5C 7C 7D 10H 4S
+hand 5: 6S 7S 8S 10S QS
+hand 6: 4C 9C 9D QD 4H
+hand 7: 2C JC AD 5H KH
+turned: 9S
+undealt: 5S AS 6C 8C 7H JH 6D JD 10D 3D 8D AC
+
+# ======== Play ========
+= Turned card=9S
+phase: AwaitPlay 1
+# Trick 1: seat 1 leads the J of spades. Only the 5 of spades could beat it and it is out of play.
+> Play JS    # seat 1
+> Play 2S    # seat 2
+> Play 3S    # seat 3
+> Play 4S    # seat 4
+> Play 10S    # seat 5
+> Play 4C    # seat 6
+> Play 2C    # seat 7
+> Play 3C    # seat 0
+= TrickWon trick=1 seat=1 team=1 points=5
+= AceUndealt
+scores: 0,5,0,0
+# Trick 2: the Joker.
+> Play JK    # seat 1
+> Play 2H    # seat 2
+> Play QC    # seat 3
+> Play 7D    # seat 4
+> Play 8S    # seat 5
+> Play 9D    # seat 6
+> Play 5H    # seat 7
+> Play 5D    # seat 0
+= TrickWon trick=2 seat=1 team=1 points=5
+scores: 0,10,0,0
+# Trick 3: the ace of hearts (a trump in every hand).
+> Play AH    # seat 1
+> Play 8H    # seat 2
+> Play 4D    # seat 3
+> Play 10H    # seat 4
+> Play 7S    # seat 5
+> Play 4H    # seat 6
+> Play JC    # seat 7
+> Play 3H    # seat 0
+= TrickWon trick=3 seat=1 team=1 points=5
+scores: 0,15,0,0
+# Trick 4: the king of spades (the ace of spades is undealt, so the king is now the best trump left).
+> Play KS    # seat 1
+> Play 6H    # seat 2
+> Play 10C    # seat 3
+> Play 7C    # seat 4
+> Play 6S    # seat 5
+> Play 9C    # seat 6
+> Play KH    # seat 7
+> Play 9H    # seat 0
+= TrickWon trick=4 seat=1 team=1 points=5
+scores: 0,20,0,0
+# Trick 5: seat 1 leads a small diamond; partner seat 5 trumps with the queen of spades.
+> Play 2D    # seat 1
+> Play KC    # seat 2
+> Play QH    # seat 3
+> Play 5C    # seat 4
+> Play QS    # seat 5
+> Play QD    # seat 6
+> Play AD    # seat 7
+> Play KD    # seat 0
+= TrickWon trick=5 seat=5 team=1 points=5
+= GameWon team=1 reason=jink scores=0,25,0,0
+= HandEnd hand=0 aborted=false
+result: game team=1 reason=jink
+# A new game begins: scores are back to nought.
+scores: 0,0,0,0

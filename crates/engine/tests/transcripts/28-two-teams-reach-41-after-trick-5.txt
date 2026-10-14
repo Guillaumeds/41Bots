@@ -1,0 +1,210 @@
+title: Two partnerships would reach 41 after trick 5: the trick winner wins, the other's pending bonus is lost
+story: Hands 1 and 2 build the score: team 0 (seats 0 and 4) has 26 with its first bonus taken, team 1 (seats 1 and 5) has 25 and no bonus yet (scores 26,25,0,11).
+story: Hand 3: seat 2 deals and turns the 9 of spades. The 5 and the ace of spades are undealt, so nobody robs and the bonus can only come at the end of the hand.
+story: In tricks 1 to 4 team 0 takes two tricks (36) and team 1 takes two (35); one of team 1's tricks holds the best trump of the hand (ace of hearts, seat 5).
+story: Trick 5 is won by team 0: 36 + 5 = 41. The trick is scored first and team 0 wins the game at once. Team 1 would also have reached 41 with its end-of-hand bonus (35 + 6), but that bonus is never awarded (RULES default: "two teams at 41 after the last trick").
+story: Final scores of the game: 41,35,0,11; the next game starts from nought.
+dealer: 0
+# ---- Hand 1 of this file (hand index 0), dealer seat 0: hearts trumps, builds the score ----
+hand 0: 4D KD 5H 2S 4S
+hand 1: KC 10D QD JH JK
+hand 2: 2C 6C 8C 3S 9S
+hand 3: 5C 7C AD 8D 6S
+hand 4: 4H 7H KH 5S KS
+hand 5: QC 7D QH AS 10S
+hand 6: 4C 10C JC 10H JS
+hand 7: AC 3C 6D 3H 7S
+turned: 6H
+undealt: AH 8H 9C 8S 9H 2D 5D JD 9D 3D QS 2H
+
+# ---- Hand 2 of this file (hand index 1), dealer seat 1: clubs trumps, builds the score ----
+then hand 0: JD 6H 9H JH QH
+then hand 1: 3C QC KC AH 7H
+then hand 2: 2C 8D 10D 5H 2S
+then hand 3: 7C JC 4D 9D QD
+then hand 4: 9C 6D KH 5S 9S
+then hand 5: 8C 7D 4S 6S JS
+then hand 6: 10C 2D 3H 10H 10S
+then hand 7: AD 3D 3S 8S JK
+then turned: 6C
+then undealt: AC QS 8H KD 4H 2H 4C 5D 7S AS 5C KS
+
+# ---- Hand 3 of this file (hand index 2), dealer seat 2: spades trumps: the deciding hand ----
+then hand 0: QC 7D KD 8S QS
+then hand 1: 4C 7C 9D QD 5H
+then hand 2: 2C AD 6D 3H 3S
+then hand 3: 6C 3D 8H 9H 2S
+then hand 4: 3C 4D 10D 7H 7S
+then hand 5: JC AH 6H JH KS
+then hand 6: 5C 5D QH KH 6S
+then hand 7: 10C KC 8D 10H 4S
+then turned: 9S
+then undealt: 5S AS 2H 10S AC 9C 2D 8C JS 4H JK JD
+
+# ======== Play ========
+# Hand 1 (seat 0 deals, hearts trumps; the A♥ undealt, nobody robs) builds the score: team 0 (seats 0 and 4) takes four tricks and its first bonus (26), team 1 one trick (5).
+> Play JH    # seat 1
+> Play 9S    # seat 2
+> Play AD    # seat 3
+> Play KH    # seat 4
+> Play QH    # seat 5
+> Play 10H    # seat 6
+> Play 3H    # seat 7
+> Play 5H    # seat 0
+= TrickWon trick=1 seat=0 team=0 points=5
+= Bonus team=0 points=6 kind=immediate card=5H
+scores: 11,0,0,0
+# Trick 2
+> Play KD    # seat 0
+> Play JK    # seat 1
+> Play 8C    # seat 2
+> Play 8D    # seat 3
+> Play 7H    # seat 4
+> Play 7D    # seat 5
+> Play 10C    # seat 6
+> Play 6D    # seat 7
+# Trick 3
+> Play KC    # seat 1
+> Play 6C    # seat 2
+> Play 7C    # seat 3
+> Play 4H    # seat 4
+> Play QC    # seat 5
+> Play 4C    # seat 6
+> Play 3C    # seat 7
+> Play 2S    # seat 0
+# Trick 4
+> Play KS    # seat 4
+> Play AS    # seat 5
+> Play JS    # seat 6
+> Play 7S    # seat 7
+> Play 4S    # seat 0
+> Play QD    # seat 1
+> Play 3S    # seat 2
+> Play 6S    # seat 3
+# Trick 5
+> Play 5S    # seat 4
+> Play 10S    # seat 5
+> Play JC    # seat 6
+> Play AC    # seat 7
+> Play 4D    # seat 0
+> Play 10D    # seat 1
+> Play 2C    # seat 2
+> Play 5C    # seat 3
+= HandEnd hand=0 aborted=false
+scores: 26,5,0,0
+
+# Hand 2 (seat 1 deals, clubs trumps; the ace of clubs undealt) builds the score: team 1 (seats 1 and 5) takes four tricks but not the best-trump trick: 25, still no bonus.
+= HandStart hand=1 game=0 dealer=1
+# Trick 1
+> Play 5H    # seat 2
+> Play 4D    # seat 3
+> Play KH    # seat 4
+> Play 8C    # seat 5
+> Play 3H    # seat 6
+> Play AD    # seat 7
+> Play 6H    # seat 0
+> Play AH    # seat 1
+# Trick 2
+> Play KC    # seat 1
+> Play 2C    # seat 2
+> Play 7C    # seat 3
+> Play 9C    # seat 4
+> Play JS    # seat 5
+> Play 10C    # seat 6
+> Play 3D    # seat 7
+> Play 9H    # seat 0
+# Trick 3
+> Play QC    # seat 1
+> Play 8D    # seat 2
+> Play 9D    # seat 3
+> Play 9S    # seat 4
+> Play 7D    # seat 5
+> Play 10S    # seat 6
+> Play 8S    # seat 7
+> Play JD    # seat 0
+# Trick 4
+> Play 3C    # seat 1
+> Play 2S    # seat 2
+> Play QD    # seat 3
+> Play 6D    # seat 4
+> Play 4S    # seat 5
+> Play 2D    # seat 6
+> Play 3S    # seat 7
+> Play JH    # seat 0
+# Trick 5
+> Play 7H    # seat 1
+> Play 10D    # seat 2
+> Play JC    # seat 3
+> Play 5S    # seat 4
+> Play 6S    # seat 5
+> Play 10H    # seat 6
+> Play JK    # seat 7
+> Play QH    # seat 0
+= Bonus team=3 points=6 kind=end card=JC
+= HandEnd hand=1 aborted=false
+scores: 26,25,0,11
+
+# Hand 3: seat 2 deals, spades trumps (9 of spades turned). The 5 and the ace of spades are undealt: nobody robs, and the best-trump bonus
+# will only be awarded at the end of the hand.
+= HandStart hand=2 game=0 dealer=2
+= Turned card=9S
+# Trick 1
+> Play 3D    # seat 3
+> Play 7S    # seat 4
+> Play AH    # seat 5
+> Play 5D    # seat 6
+> Play 8D    # seat 7
+> Play QS    # seat 0
+> Play QD    # seat 1
+> Play AD    # seat 2
+= TrickWon trick=1 seat=5 team=1 points=5
+scores: 26,30,0,11
+# Trick 2
+> Play KS    # seat 5
+> Play 6S    # seat 6
+> Play 4S    # seat 7
+> Play 8S    # seat 0
+> Play 9D    # seat 1
+> Play 3S    # seat 2
+> Play 2S    # seat 3
+> Play 10D    # seat 4
+= TrickWon trick=2 seat=5 team=1 points=5
+scores: 26,35,0,11
+# Trick 3
+> Play JC    # seat 5
+> Play 5C    # seat 6
+> Play 10C    # seat 7
+> Play QC    # seat 0
+> Play 4C    # seat 1
+> Play 2C    # seat 2
+> Play 6C    # seat 3
+> Play 3C    # seat 4
+= TrickWon trick=3 seat=0 team=0 points=5
+scores: 31,35,0,11
+# Trick 4
+> Play KD    # seat 0
+> Play 5H    # seat 1
+> Play 6D    # seat 2
+> Play 8H    # seat 3
+> Play 4D    # seat 4
+> Play JH    # seat 5
+> Play QH    # seat 6
+> Play 10H    # seat 7
+= TrickWon trick=4 seat=0 team=0 points=5
+scores: 36,35,0,11
+# Trick 5
+> Play 7D    # seat 0
+> Play 7C    # seat 1
+> Play 3H    # seat 2
+> Play 9H    # seat 3
+> Play 7H    # seat 4
+> Play 6H    # seat 5
+> Play KH    # seat 6
+> Play KC    # seat 7
+# Trick 5 is won by team 0: 36 + 5 = 41, and the game ends at once. Team 1 holds the best trump of the hand and would have got +6 at the end
+# (35 + 6 = 41), but the trick is scored first and the game is already over: the pending bonus is lost.
+= TrickWon trick=5 seat=0 team=0 points=5
+= GameWon team=0 reason=trick scores=41,35,0,11
+= HandEnd hand=2 aborted=false
+result: game team=0 reason=trick
+scores: 0,0,0,0

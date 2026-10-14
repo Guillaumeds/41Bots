@@ -1,0 +1,81 @@
+title: The A♥ led when hearts are not trumps is a trump lead, not a heart lead
+story: Seat 6 deals and turns the 8 of diamonds: diamonds are trumps. The ace, 5 and J of diamonds are undealt, so nobody robs.
+story: Seat 7 leads the A♥. Because the A♥ is always a trump, this is a trump lead, not a heart lead (RULES interpretation note on trump leads).
+story: Seat 0 holds the king and queen of hearts and no trump: it is not obliged to play a heart and may play any card. Seat 1 holds the 10 of hearts and the 3 of diamonds: it must play the 3 of diamonds, and may not play the heart. Seat 2's only trump is the Joker, which outranks the A♥ and may be held back, so it may play any card.
+story: Nobody plays a higher trump, so the A♥ wins trick 1. The rest of the hand is ordinary play. Final scores of the hand: 5,5,11,10.
+dealer: 6
+# ---- Hand 1 of this file (hand index 0), dealer seat 6: diamonds trumps; seat 7 leads the A♥ ----
+hand 0: 2C 6C 9C QH KH
+hand 1: 4C 3D 10H 8S KS
+hand 2: 7C QC 5H JS JK
+hand 3: 3C 4D 3H 2S 4S
+hand 4: 6D 10D 2H 3S 5S
+hand 5: 10C KC 9D 6H 6S
+hand 6: 8C 4H 9H 10S QS
+hand 7: 5C KD AH 7H 7S
+turned: 8D
+undealt: AD 5D JD QD 9S JC AC 7D AS JH 8H 2D
+
+# ======== Play ========
+= Turned card=8D
+phase: AwaitPlay 7
+# Trick 1: seat 7 leads the A♥. Diamonds are trumps, but the A♥ is a trump in every hand, so this is a trump lead (RULES, trump leads).
+> Play AH    # seat 7
+# Seat 0 holds the king and queen of hearts but no trump. A trump was led, not a heart, so seat 0 need not play a heart:
+# holding no trump, it may play any card.
+legal: 2C 6C 9C QH KH
+> Play QH    # seat 0
+# Seat 1 holds the 10 of hearts and the 3 of diamonds, a trump that may not be held back: it must play the 3 of diamonds;
+# the 10 of hearts is not allowed.
+legal: 3D
+> Play 3D    # seat 1
+# Seat 2's only trump is the Joker, which outranks the A♥ and may be held back: any card.
+legal: 7C QC 5H JS JK
+> Play 5H    # seat 2
+> Play 4D    # seat 3
+> Play 6D    # seat 4
+> Play 9D    # seat 5
+> Play 10S    # seat 6
+# The 5 and J of diamonds are undealt and the Joker was held back, so the A♥ wins.
+= TrickWon trick=1 seat=7 team=3 points=5
+= AceUndealt
+scores: 0,0,0,5
+# The rest of the hand is any legal play.
+> Play 7S    # seat 7
+> Play 2C    # seat 0
+> Play 8S    # seat 1
+> Play JK    # seat 2
+> Play 2S    # seat 3
+> Play 10D    # seat 4
+> Play 6S    # seat 5
+> Play QS    # seat 6
+# Trick 3
+> Play 7C    # seat 2
+> Play 3C    # seat 3
+> Play 2H    # seat 4
+> Play KC    # seat 5
+> Play 8C    # seat 6
+> Play 5C    # seat 7
+> Play 9C    # seat 0
+> Play 4C    # seat 1
+# Trick 4
+> Play 6H    # seat 5
+> Play 9H    # seat 6
+> Play 7H    # seat 7
+> Play KH    # seat 0
+> Play 10H    # seat 1
+> Play JS    # seat 2
+> Play 3H    # seat 3
+> Play 5S    # seat 4
+# Trick 5
+> Play 6C    # seat 0
+> Play KS    # seat 1
+> Play QC    # seat 2
+> Play 4S    # seat 3
+> Play 3S    # seat 4
+> Play 10C    # seat 5
+> Play 4H    # seat 6
+> Play KD    # seat 7
+= Bonus team=2 points=6 kind=end card=JK
+= HandEnd hand=0 aborted=false
+scores: 5,5,11,10

@@ -1,0 +1,31 @@
+[package]
+name = "wasm"
+version = "0.1.0"
+description = "41 engine for WebAssembly: the native-versus-WASM determinism check (M0)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# cdylib: the .wasm module for wasm32-unknown-unknown. rlib: the same code, used natively by the
+# `wasm-native` binary and the tests.
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "wasm-native"
+path = "src/bin/wasm_native.rs"
+
+[dependencies]
+engine = { path = "../engine" }
+
+# Not `[lints] workspace = true`. The workspace sets `unsafe_code = "forbid"`, and in edition 2024
+# exporting a function to WebAssembly needs the `#[unsafe(no_mangle)]` attribute, which that lint
+# rejects; a `forbid` cannot be lifted for one item (checked with rustc 1.99.0: error E0453).
+# So this crate denies the lint and allows it on exactly one item, the export in src/lib.rs.
+# There are no unsafe blocks or unsafe functions here. The clippy setting copies the workspace's.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

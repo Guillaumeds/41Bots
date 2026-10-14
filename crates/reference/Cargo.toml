@@ -1,0 +1,14 @@
+[package]
+name = "reference"
+version = "0.1.0"
+description = "Independent, naive reference implementation of the 41 rules, used to cross-check the engine"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Must stay empty: the reference is written independently of the engine (docs/M0-SPEC.md section 4).
+[dependencies]
+
+[lints]
+workspace = true

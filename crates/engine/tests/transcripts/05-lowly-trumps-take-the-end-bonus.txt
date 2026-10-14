@@ -1,0 +1,152 @@
+title: When only low trumps are played, the end-of-hand bonus goes to the best of them (the A♥, then a black 2)
+story: There are 15 trumps (14 when hearts are trumps) and only 13 cards are out of play, so at least two trumps always reach the players when hearts are not trumps; here the deals leave exactly two.
+story: Hand 1: seat 1 deals and the 10 of spades is turned. The other spades and the Joker are undealt, so the only trumps in play are the ace of hearts (a trump in every hand, rule 7) and the 3 of spades.
+story: Seat 0 wins trick 1 with the 3 of spades and seat 3 wins trick 3 with the ace of hearts. The 5 is never played, so at the end of the hand the bonus goes to the trick with the highest trump played, the ace of hearts (rule 30): team 3 gets +6. Scores 10,0,10,11.
+story: Hand 2: seat 2 deals and the 9 of clubs is turned. All other clubs, the Joker and the ace of hearts are undealt, so the only trumps in play are the 2 and the 10 of clubs.
+story: Seat 1 wins trick 3 with the 10 of clubs, the lowest trump of all, and seat 4 wins trick 4 with the 2 of clubs. In a black trump suit the 2 beats the 10 (rule 6), so the 2 of clubs is the best trump played and team 0 gets the end-of-hand bonus, +6. Scores 21,5,15,21.
+dealer: 1
+# ---- Hand 1 of this file (hand index 0), dealer seat 1: spades trumps; only the A♥ and the 3♠ reach the players ----
+hand 0: 2C 4D 10D 8H 3S
+hand 1: 4C JC 3D 4H 7H
+hand 2: 8C QC KC 2H JH
+hand 3: AC 5D 6D AH 5H
+hand 4: 6C 7C 9C AD KD
+hand 5: 3C 2D 3H 10H QH
+hand 6: 10C 8D 9D 6H 9H
+hand 7: 5C 7D JD QD KH
+turned: 10S
+undealt: 5S JS JK AS KS QS 2S 4S 6S 7S 8S 9S
+
+# ---- Hand 2 of this file (hand index 1), dealer seat 2: clubs trumps; only the 2♣ and the 10♣ reach the players ----
+then hand 0: 5D 2H 6H QH 4S
+then hand 1: 10C 3D 4D 8D JD
+then hand 2: 4H JH 5S 8S 10S
+then hand 3: 6D 7D 10D 3H 3S
+then hand 4: 2C 2D 7H 7S JS
+then hand 5: 9D QD 8H 6S 9S
+then hand 6: AD KD 5H 9H QS
+then hand 7: 10H KH AS 2S KS
+then turned: 9C
+then undealt: 5C JC JK AH AC KC QC 3C 4C 6C 7C 8C
+
+# ======== Play ========
+# Hand 1: seat 1 deals and the 10 of spades is turned. Every other spade and the Joker are in the undealt pack (13 trumps out of play),
+# so the only trumps the players hold are the ace of hearts and the 3 of spades. The ace of spades is undealt: nobody robs.
+= Turned card=10S
+# Trick 1
+> Play 2H    # seat 2
+> Play 5H    # seat 3
+> Play AD    # seat 4
+> Play QH    # seat 5
+> Play 6H    # seat 6
+> Play KH    # seat 7
+> Play 3S    # seat 0
+> Play 4H    # seat 1
+# The 3 of spades is the only trump in this trick, so it wins the trick.
+= TrickWon trick=1 seat=0 team=0 points=5
+scores: 5,0,0,0
+# Trick 2
+> Play 8H    # seat 0
+> Play 7H    # seat 1
+> Play JH    # seat 2
+> Play 5D    # seat 3
+> Play KD    # seat 4
+> Play 3H    # seat 5
+> Play 9H    # seat 6
+> Play QD    # seat 7
+# Trick 3
+> Play QC    # seat 2
+> Play AH    # seat 3
+> Play 9C    # seat 4
+> Play 3C    # seat 5
+> Play 10C    # seat 6
+> Play 5C    # seat 7
+> Play 2C    # seat 0
+> Play 4C    # seat 1
+# The ace of hearts is the only trump in this trick, so it wins the trick.
+= TrickWon trick=3 seat=3 team=3 points=5
+scores: 5,0,5,5
+# Trick 4
+> Play AC    # seat 3
+> Play 6C    # seat 4
+> Play 10H    # seat 5
+> Play 9D    # seat 6
+> Play JD    # seat 7
+> Play 4D    # seat 0
+> Play JC    # seat 1
+> Play KC    # seat 2
+# Trick 5
+> Play 8C    # seat 2
+> Play 6D    # seat 3
+> Play 7C    # seat 4
+> Play 2D    # seat 5
+> Play 8D    # seat 6
+> Play 7D    # seat 7
+> Play 10D    # seat 0
+> Play 3D    # seat 1
+= TrickWon trick=5 seat=4 team=0 points=5
+# End of the hand: the best trump played was the ace of hearts; its trick gets the bonus.
+= Bonus team=3 points=6 kind=end card=AH
+= HandEnd hand=0 aborted=false
+scores: 10,0,10,11
+
+# Hand 2: seat 2 deals and the 9 of clubs is turned. All other clubs, the Joker and the ace of hearts are undealt,
+# so the only trumps in play are the 2 and the 10 of clubs. Clubs are black: the 2 is the better trump and the 10 the worst of all.
+= HandStart hand=1 game=0 dealer=2
+= Turned card=9C
+# Trick 1
+> Play 7D    # seat 3
+> Play 2D    # seat 4
+> Play QD    # seat 5
+> Play KD    # seat 6
+> Play 2S    # seat 7
+> Play 5D    # seat 0
+> Play 8D    # seat 1
+> Play 10S    # seat 2
+# Trick 2
+> Play 5H    # seat 6
+> Play 10H    # seat 7
+> Play 2H    # seat 0
+> Play JD    # seat 1
+> Play 4H    # seat 2
+> Play 3H    # seat 3
+> Play 7H    # seat 4
+> Play 8H    # seat 5
+# Trick 3
+> Play AS    # seat 7
+> Play 4S    # seat 0
+> Play 10C    # seat 1
+> Play 8S    # seat 2
+> Play 3S    # seat 3
+> Play 7S    # seat 4
+> Play 9S    # seat 5
+> Play QS    # seat 6
+# The 10 of clubs is the only trump in this trick, so it wins the trick.
+= TrickWon trick=3 seat=1 team=1 points=5
+scores: 10,5,15,16
+# Trick 4
+> Play 4D    # seat 1
+> Play JH    # seat 2
+> Play 6D    # seat 3
+> Play 2C    # seat 4
+> Play 9D    # seat 5
+> Play AD    # seat 6
+> Play KH    # seat 7
+> Play 6H    # seat 0
+# The 2 of clubs is the only trump in this trick, so it wins the trick.
+= TrickWon trick=4 seat=4 team=0 points=5
+scores: 15,5,15,16
+# Trick 5
+> Play JS    # seat 4
+> Play 6S    # seat 5
+> Play 9H    # seat 6
+> Play KS    # seat 7
+> Play QH    # seat 0
+> Play 3D    # seat 1
+> Play 5S    # seat 2
+> Play 10D    # seat 3
+= TrickWon trick=5 seat=7 team=3 points=5
+# End of the hand: the best trump played was the 2 of clubs; its trick gets the bonus.
+= Bonus team=0 points=6 kind=end card=2C
+= HandEnd hand=1 aborted=false
+scores: 21,5,15,21

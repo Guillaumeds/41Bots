@@ -1,0 +1,91 @@
+title: A turned Joker, then an ordinary card with the ace of trumps undealt: nobody robs the second card
+story: Seat 1 deals and turns the Joker. The dealer takes it and burns at once (rule 24); it holds no ace, so any of its six cards may go. It burns the 2 of diamonds and keeps the Joker.
+story: The next card, the 3 of spades, is turned: spades are trumps. The ace of spades is in the undealt pack, so nobody can rob the 3: it stays face up on the table for the whole hand (rule 23).
+story: The dealer would have had to rob at once if it held the ace (H4), so it is known to lack it straight away. The seven other players prove it one by one as they play to trick 1 without robbing; after the eighth card the ace is known to be undealt.
+story: The dealer plays the Joker last and wins trick 1 (the 5 and J of spades are undealt). The rest of the hand is ordinary play. Final scores of the hand: 5,16,5,5.
+dealer: 1
+# ---- Hand 1 of this file (hand index 0), dealer seat 1: the Joker turned, then the 3 of spades; the ace of spades undealt ----
+hand 0: 3C 7D 2H 4H JH
+hand 1: 4C 7C 2D 9H QH
+hand 2: 10D KD 3H 8H 10H
+hand 3: 6C JC QC 4D KS
+hand 4: 5C 8D 4S 6S 7S
+hand 5: 5H 7H KH 2S QS
+hand 6: 2C KC 6D 6H 10S
+hand 7: 8C 9C 3D 9D QD
+turned: JK
+second: 3S
+undealt: AS 5S JS 10C 5D JD AH AC 9S AD 8S
+
+# ======== Play ========
+= Turned card=JK
+= Took seat=1 card=JK
+phase: AwaitBurn 1
+legal: 4C 7C 2D 9H QH JK
+> Burn 2D    # seat 1 burns
+= BurnDone seat=1
+= Turned card=3S
+= ProvedNoAce seat=1
+# The 3 of spades is turned: spades are trumps. The dealer does not hold the ace of spades (it would have had to rob at once),
+# so the dealer is known at once to lack it. The 3 stays face up on the table.
+phase: AwaitPlay 2
+# Trick 1
+> Play 10D    # seat 2
+= ProvedNoAce seat=2
+> Play 4D    # seat 3
+= ProvedNoAce seat=3
+> Play 4S    # seat 4
+= ProvedNoAce seat=4
+> Play QS    # seat 5
+= ProvedNoAce seat=5
+> Play 6D    # seat 6
+= ProvedNoAce seat=6
+> Play 9D    # seat 7
+= ProvedNoAce seat=7
+> Play 7D    # seat 0
+= ProvedNoAce seat=0
+# The dealer plays last. Its lack of the ace is already known, so no new fact is announced; it plays the Joker.
+> Play JK    # seat 1
+# All eight have played to trick 1 and nobody robbed: the ace of spades is known to be undealt (rule 23).
+= TrickWon trick=1 seat=1 team=1 points=5
+= AceUndealt
+scores: 0,5,0,0
+# The rest of the hand is any legal play.
+> Play QH    # seat 1
+> Play 10H    # seat 2
+> Play JC    # seat 3
+> Play 7S    # seat 4
+> Play 7H    # seat 5
+> Play 6H    # seat 6
+> Play 8C    # seat 7
+> Play 2H    # seat 0
+# Trick 3
+> Play 8D    # seat 4
+> Play 5H    # seat 5
+> Play 2C    # seat 6
+> Play QD    # seat 7
+> Play JH    # seat 0
+> Play 7C    # seat 1
+> Play KD    # seat 2
+> Play QC    # seat 3
+# Trick 4
+> Play 3H    # seat 2
+> Play KS    # seat 3
+> Play 6S    # seat 4
+> Play KH    # seat 5
+> Play 10S    # seat 6
+> Play 9C    # seat 7
+> Play 4H    # seat 0
+> Play 9H    # seat 1
+# Trick 5
+> Play 6C    # seat 3
+> Play 5C    # seat 4
+> Play 2S    # seat 5
+> Play KC    # seat 6
+> Play 3D    # seat 7
+> Play 3C    # seat 0
+> Play 4C    # seat 1
+> Play 8H    # seat 2
+= Bonus team=1 points=6 kind=end card=JK
+= HandEnd hand=0 aborted=false
+scores: 5,16,5,5

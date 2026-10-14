@@ -1,0 +1,91 @@
+title: A turned Joker: the dealer must take it and may burn the Joker itself
+story: Seat 5 deals and turns the Joker. The dealer must take it at once and burn a card (rule 24, H4), before the trump suit is known.
+story: The dealer holds the ace of spades, 3 of clubs, 8 of diamonds, queen of hearts and 6 of spades. Any card but an ace may be burned (H3), and the Joker just taken is allowed: the legal burns are the 3 of clubs, 8 of diamonds, queen of hearts, 6 of spades and the Joker. The dealer burns the Joker, which is then out of play, hidden, for the whole hand.
+story: The next card of the pack, the 9 of hearts, is turned: hearts are trumps. The dealer does not hold the A♥ (the ace of trumps), so the 9 stays on the table and the dealer has proved it lacks the ace.
+story: Seat 6, first to play, holds the A♥: it takes the 9 of hearts and burns (not the A♥) before leading. There are two burns in this hand, the dealer's Joker and seat 6's 4 of clubs, and 11 cards stay undealt.
+story: The rest of the hand is ordinary play. Final scores of the hand: 11,10,5,5.
+dealer: 5
+# ---- Hand 1 of this file (hand index 0), dealer seat 5: the Joker turned, then the 9 of hearts ----
+hand 0: 5C 9D 5H 7H 3S
+hand 1: QD 3H 6H KH 2S
+hand 2: 7C 9C JD 10H 9S
+hand 3: 6C JC QC 4S QS
+hand 4: 10D 4H 5S 7S KS
+hand 5: 3C 8D QH AS 6S
+hand 6: 4C KC 7D AH 10S
+hand 7: 8C AD 4D 5D JS
+turned: JK
+second: 9H
+undealt: 10C 2H 2C 2D 8H 6D 8S KD 3D JH AC
+
+# ======== Play ========
+= Turned card=JK
+= Took seat=5 card=JK
+# A turned Joker must be taken by the dealer at once, with a burn (rule 24, H4). Trumps are not known yet.
+# The dealer may burn any of its six cards except an ace (H3), the Joker included; the ace of spades is excluded.
+phase: AwaitBurn 5
+legal: 3C 8D QH 6S JK
+> Burn JK    # seat 5 burns
+= BurnDone seat=5
+= Turned card=9H
+= ProvedNoAce seat=5
+= Took seat=6 card=9H
+# The dealer burns the Joker: it is out of play, face down, for the whole hand. The next card, the 9 of hearts, is turned:
+# hearts are trumps and the A♥ is the ace of trumps. The dealer does not hold it, so the 9 stays on the table for now,
+# and the dealer has proved it lacks the ace. Seat 6 holds the A♥ and leads trick 1, so it robs before leading (H2).
+phase: AwaitBurn 6
+legal: 4C KC 7D 9H 10S
+> Burn 4C    # seat 6 burns
+= BurnDone seat=6
+phase: AwaitPlay 6
+# Two burns in one hand: the dealer's Joker and seat 6's 4 of clubs, each hidden in its own place.
+> Play 7D    # seat 6
+> Play AD    # seat 7
+> Play 9D    # seat 0
+> Play QD    # seat 1
+> Play 10H    # seat 2
+> Play JC    # seat 3
+> Play 4H    # seat 4
+> Play QH    # seat 5
+= TrickWon trick=1 seat=5 team=1 points=5
+scores: 0,5,0,0
+# The rest of the hand is any legal play; the Joker never appears.
+> Play 6S    # seat 5
+> Play 10S    # seat 6
+> Play JS    # seat 7
+> Play 3S    # seat 0
+> Play 2S    # seat 1
+> Play 9S    # seat 2
+> Play 4S    # seat 3
+> Play 7S    # seat 4
+# Trick 3
+> Play 8C    # seat 7
+> Play 7H    # seat 0
+> Play KH    # seat 1
+> Play 9C    # seat 2
+> Play 6C    # seat 3
+> Play 5S    # seat 4
+> Play 3C    # seat 5
+> Play KC    # seat 6
+# Trick 4
+> Play 3H    # seat 1
+> Play 7C    # seat 2
+> Play QS    # seat 3
+> Play 10D    # seat 4
+> Play 8D    # seat 5
+> Play AH    # seat 6
+> Play 5D    # seat 7
+> Play 5C    # seat 0
+# Trick 5
+> Play 9H    # seat 6
+> Play 4D    # seat 7
+> Play 5H    # seat 0
+> Play 6H    # seat 1
+> Play JD    # seat 2
+> Play QC    # seat 3
+> Play KS    # seat 4
+> Play AS    # seat 5
+= TrickWon trick=5 seat=0 team=0 points=5
+= Bonus team=0 points=6 kind=immediate card=5H
+= HandEnd hand=0 aborted=false
+scores: 11,10,5,5
