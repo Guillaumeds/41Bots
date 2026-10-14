@@ -21,6 +21,9 @@
 //!   with the fewest cards left (the cheapest to solve again), the lowest slot index first among
 //!   equals, and only if that position has no more cards left than the new one.
 
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+
 use engine::SEATS;
 use engine::cards::Bits;
 use equity::MoneyChance;
@@ -62,7 +65,7 @@ impl TtKey {
         }
     }
 
-    fn hash(&self) -> u64 {
+    pub(crate) fn hash(&self) -> u64 {
         let mut h: u64 = 0x9E37_79B9_7F4A_7C15 ^ u64::from(self.meta);
         for &w in &self.hands {
             h = mix(h ^ w);
@@ -118,7 +121,12 @@ const EMPTY: Slot = Slot {
 impl Table {
     /// A table using at most about `mb` megabytes (at least one bucket).
     pub fn new(mb: usize) -> Table {
-        let max_buckets = (((mb << 20) / SLOT_BYTES / WAYS) as u64).max(1);
+        Table::with_bytes(mb << 20)
+    }
+
+    /// A table using at most about `bytes` bytes (at least one bucket).
+    pub fn with_bytes(bytes: usize) -> Table {
+        let max_buckets = ((bytes / SLOT_BYTES / WAYS) as u64).max(1);
         let buckets = max_buckets.min(16);
         Table {
             slots: vec![EMPTY; buckets as usize * WAYS],
@@ -191,5 +199,79 @@ impl Table {
             self.slots[victim] = new;
             self.replaced += 1;
         }
+    }
+}
+
+/// A table shared by the threads of one parallel solve: [`Table`] shards, each behind its own
+/// lock, the shard picked by the low bits of the key's hash (the bucket inside a shard uses the
+/// high bits). Every property that makes [`Table`] exact holds per shard: only exact values are
+/// stored and a probe matches the whole key, so a probe returns the true value or nothing. What
+/// is cached when depends on thread timing, which changes only the speed, never an answer.
+pub struct SharedTable {
+    shards: Vec<Mutex<Table>>,
+    mask: u64,
+    entries: AtomicI64,
+    replaced: AtomicU64,
+}
+
+impl SharedTable {
+    /// A table of about `mb` megabytes in all, split into a power-of-two number of shards
+    /// (enough to keep `threads` threads from waiting on each other; each shard at least 1 MB).
+    pub fn new(mb: usize, threads: usize) -> SharedTable {
+        let want = (threads.max(1) * 64).next_power_of_two();
+        let n = want.min(mb.max(1).next_power_of_two() / 2).max(1);
+        let per = (mb << 20) / n;
+        SharedTable {
+            shards: (0..n).map(|_| Mutex::new(Table::with_bytes(per))).collect(),
+            mask: n as u64 - 1,
+            entries: AtomicI64::new(0),
+            replaced: AtomicU64::new(0),
+        }
+    }
+
+    fn shard(&self, k: &TtKey) -> std::sync::MutexGuard<'_, Table> {
+        // A poisoned lock means a worker panicked; the solve fails with that panic anyway.
+        self.shards[(k.hash() & self.mask) as usize]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The stored value of a key, if any.
+    pub fn get(&self, k: &TtKey) -> Option<MoneyChance> {
+        self.shard(k).get(k)
+    }
+
+    /// Store an exact value.
+    pub fn put(&self, k: TtKey, v: MoneyChance) {
+        let mut t = self.shard(&k);
+        let (e, r) = (t.entries, t.replaced);
+        t.put(k, v);
+        let (e2, r2) = (t.entries, t.replaced);
+        drop(t);
+        self.entries
+            .fetch_add(e2 as i64 - e as i64, Ordering::Relaxed);
+        self.replaced.fetch_add(r2 - r, Ordering::Relaxed);
+    }
+
+    /// Entries in use (cheap; read while a solve runs).
+    pub fn entries(&self) -> u64 {
+        self.entries.load(Ordering::Relaxed).max(0) as u64
+    }
+
+    /// Entries overwritten.
+    pub fn replaced(&self) -> u64 {
+        self.replaced.load(Ordering::Relaxed)
+    }
+
+    /// Bytes allocated now (locks every shard; call when the solve is over).
+    pub fn bytes(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|s| {
+                s.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .bytes()
+            })
+            .sum()
     }
 }

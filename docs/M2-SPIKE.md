@@ -125,3 +125,10 @@ Run `m2-spike-epyc`: 64 logical cores (61 usable), same seeds, worlds and caps a
 **Identity on EPYC:** solver-identity on the real table, all 16 switch combinations and both tie orders: trick 5 (50,000 worlds), trick 4 (50,000) and trick 3 (1,000), with **0 mismatches**.
 
 **Verdict:** on both CPU types the costs agree with the Xeon within normal machine variation. Exact solving is cheap from trick 3, takes a few seconds at trick 2, and is out of reach within a minute at trick 1. The M2 gate's "published costs on two CPU types" item is met.
+
+## Parallel single-world solve (2026-10-14)
+
+`solve_fast_par` splits the top of the tree into ≥ 16 subproblems per thread, solves them on a thread pool with one shared, sharded transposition table (exact values only), and combines them with the sequential max^n tie rule. Identity vs sequential `solve_fast`: tests at tricks 3–5 (1/2/4/7 threads, both tie orders, several switch sets, tiny tables), trick 2 `#[ignore]` test, `solver-identity --par-threads 4` on 24 trick-2 worlds (48 root solves) and on trick-1 world 0 (both tie orders): no difference.
+
+- Speed-up on the 4-vCPU VM, 8 trick-2 worlds (seed 1): 17.9 s on 1 thread, 5.5 s on 4 (×3.2).
+- **Trick 1, world 0 (seed 1) solved exactly: 68 s on 4 threads**, 0.97 billion nodes, table 2.1 GB, peak RSS 2.5 GB. One world, so not yet a distribution; the runner plan `trick1` measures 4 worlds on a large box.
