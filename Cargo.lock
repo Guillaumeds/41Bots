@@ -432,6 +432,7 @@ dependencies = [
  "arena",
  "bots",
  "engine",
+ "search",
  "serde_json",
  "sha2",
  "zstd",

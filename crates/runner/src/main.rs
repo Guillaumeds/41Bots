@@ -26,11 +26,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
+mod bundle;
 mod measure;
+mod remote;
+mod sched;
 mod spike;
+mod v2;
 
 const USAGE: &str = "usage:
   runner run <manifest.json> [--work-dir DIR]
+  runner chunk <spec.json>        (internal: one format-2 chunk, started by `runner run`)
   runner hardware";
 
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(30);
@@ -52,6 +57,7 @@ fn main() -> ExitCode {
             }
             run(Path::new(&args[1]), &work)
         }
+        Some("chunk") if args.len() == 2 => v2::worker(Path::new(&args[1])),
         Some("hardware") => {
             println!(
                 "{}",
@@ -400,6 +406,8 @@ impl CpuSampler {
 struct Ctx {
     run_id: String,
     root: PathBuf,
+    /// Where child-process logs go (`out/` for format 1; outside the bundle for format 2).
+    logs: PathBuf,
     remote: Option<String>,
     threads: usize,
     dph: f64,
@@ -414,6 +422,27 @@ struct Ctx {
 }
 
 impl Ctx {
+    /// A context with no uploads and no deadline, rooted at `root` (format-2 chunk workers and
+    /// the start-up benchmark); child logs go to `root/logs`, outside the bundled `root/out`.
+    fn local(run_id: &str, root: &Path, threads: usize) -> Ctx {
+        Ctx {
+            run_id: run_id.to_string(),
+            root: root.to_path_buf(),
+            logs: root.join("logs"),
+            remote: None,
+            threads,
+            dph: 0.0,
+            start: Instant::now(),
+            deadline: None,
+            seq: 0,
+            last_hb: None,
+            cpu: CpuSampler::new(),
+            child: None,
+            phase: "chunk".into(),
+            progress: Value::Null,
+        }
+    }
+
     fn elapsed(&self) -> f64 {
         self.start.elapsed().as_secs_f64()
     }
@@ -485,8 +514,10 @@ impl Ctx {
     /// Runs a child process to completion, heartbeating meanwhile and killing it at the deadline.
     /// Its stdout and stderr are appended to `out/<log>`.
     fn run_child(&mut self, mut cmd: Command, log: &str) -> Result<(), String> {
-        let log_path = self.root.join("out").join(log);
-        fs::create_dir_all(self.root.join("out")).map_err(|e| e.to_string())?;
+        let log_path = self.logs.join(log);
+        if let Some(d) = log_path.parent() {
+            fs::create_dir_all(d).map_err(|e| e.to_string())?;
+        }
         let f = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -524,8 +555,13 @@ impl Ctx {
                 let _ = child.wait();
                 return Err("deadline reached; chunk killed".into());
             }
+            if v2::orphaned() {
+                let _ = child.kill();
+                let _ = child.wait();
+                std::process::exit(3);
+            }
             self.heartbeat(false);
-            std::thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(Duration::from_millis(200));
         }
     }
 }
@@ -574,6 +610,14 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    match sched::format_of(&manifest) {
+        Ok(1) => {}
+        Ok(_) => return v2::run(&manifest, work),
+        Err(e) => {
+            eprintln!("runner: {e}");
+            return ExitCode::from(2);
+        }
+    }
     let Some(run_id) = manifest.get("run_id").and_then(Value::as_str) else {
         eprintln!("runner: manifest needs a `run_id`");
         return ExitCode::from(2);
@@ -622,6 +666,7 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
     let root = work.join(run_id);
     let mut ctx = Ctx {
         run_id: run_id.to_string(),
+        logs: root.join("out"),
         root,
         remote,
         threads,
@@ -750,7 +795,21 @@ fn steps(ctx: &mut Ctx, manifest: &Value) -> Result<(), String> {
         .ok_or("`chunk` must be an object with exactly one kind, e.g. {\"difftest\": {...}}")?;
     ctx.set_phase("chunk", json!({ "kind": kind }));
     let t0 = Instant::now();
-    let mut result = match kind.as_str() {
+    let mut result = run_kind(ctx, kind, params)?;
+    let secs = t0.elapsed().as_secs_f64();
+    if let Some(o) = result.as_object_mut() {
+        o.insert("kind".into(), json!(kind));
+        o.insert("seconds".into(), json!((secs * 10.0).round() / 10.0));
+        o.insert("threads".into(), json!(ctx.threads));
+        o.insert("dph".into(), json!(ctx.dph));
+    }
+    ctx.write_json("result.json", &result)?;
+    Ok(())
+}
+
+/// Runs one chunk of an existing (format-1) kind; also used by format-2 workers.
+fn run_kind(ctx: &mut Ctx, kind: &str, params: &Value) -> Result<Value, String> {
+    Ok(match kind {
         "difftest" => {
             let matches = num(params, "matches")?;
             let seed = num(params, "seed")?;
@@ -815,16 +874,7 @@ fn steps(ctx: &mut Ctx, manifest: &Value) -> Result<(), String> {
             return Err("arena_block chunks need the arena binary (not built yet)".into());
         }
         other => return Err(format!("unknown chunk kind `{other}`")),
-    };
-    let secs = t0.elapsed().as_secs_f64();
-    if let Some(o) = result.as_object_mut() {
-        o.insert("kind".into(), json!(kind));
-        o.insert("seconds".into(), json!((secs * 10.0).round() / 10.0));
-        o.insert("threads".into(), json!(ctx.threads));
-        o.insert("dph".into(), json!(ctx.dph));
-    }
-    ctx.write_json("result.json", &result)?;
-    Ok(())
+    })
 }
 
 /// Runs growing `difftest` batches for about `secs` seconds on all threads.

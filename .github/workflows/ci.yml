@@ -45,6 +45,11 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Runner resume test (M3-SPEC 7.4, release binaries)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --release -p runner -p search -p equity -p difftest
+          RUNNER_TEST_BIN_DIR=target/release cargo test --release -p runner --test resume_identity
       - name: Build engine with serde
         run: cargo build -p engine --features serde
       - name: Reference crate must not depend on the engine

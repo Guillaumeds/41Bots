@@ -125,7 +125,8 @@ pub fn bundle_dir(dir: &Path, dest: &Path) -> Result<(String, u64), String> {
     Ok((sha256_hex(&z), z.len() as u64))
 }
 
-/// Reads one file back out of a bundle (for tests and resume summaries).
+/// Reads one file back out of a bundle (tests).
+#[cfg(test)]
 pub fn read_member(bundle: &[u8], name: &str) -> Result<Option<Vec<u8>>, String> {
     let tar = zstd::stream::decode_all(bundle).map_err(|e| format!("zstd: {e}"))?;
     let mut at = 0usize;
@@ -141,8 +142,8 @@ pub fn read_member(bundle: &[u8], name: &str) -> Result<Option<Vec<u8>>, String>
         if !prefix.is_empty() {
             n = format!("{prefix}/{n}");
         }
-        let size = u64::from_str_radix(field(124..136).trim(), 8).map_err(|e| e.to_string())?
-            as usize;
+        let size =
+            u64::from_str_radix(field(124..136).trim(), 8).map_err(|e| e.to_string())? as usize;
         let start = at + 512;
         if n == name {
             return Ok(tar.get(start..start + size).map(<[u8]>::to_vec));
@@ -176,7 +177,10 @@ mod tests {
         let (s2, n2) = bundle_dir(&d, &base.join("2.tar.zst")).unwrap();
         assert_eq!((s1, n1), (s2, n2));
         let z = fs::read(base.join("1.tar.zst")).unwrap();
-        assert_eq!(read_member(&z, "sub/a.json").unwrap(), Some(b"{}\n".to_vec()));
+        assert_eq!(
+            read_member(&z, "sub/a.json").unwrap(),
+            Some(b"{}\n".to_vec())
+        );
         assert_eq!(read_member(&z, "b.txt").unwrap(), Some(b"bee".to_vec()));
         assert_eq!(read_member(&z, "nope").unwrap(), None);
         let _ = fs::remove_dir_all(&base);

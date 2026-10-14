@@ -8,11 +8,12 @@ use engine::rng::Rng;
 use serde_json::{Value, json};
 
 /// Kinds a format-2 stream may run.
-pub const KINDS: [&str; 9] = [
+pub const KINDS: [&str; 10] = [
     "difftest",
     "equity_sweep",
     "benchmark",
     "solver_spike",
+    "search_measure",
     "teacher",
     "arena_blocks",
     "suitability",
@@ -69,7 +70,12 @@ impl Stream {
     pub fn order(&self) -> Vec<u64> {
         let mut v: Vec<u64> = (0..self.total()).collect();
         if let Some(s) = &self.sizes {
-            v.sort_by_key(|&i| (std::cmp::Reverse(s.get(i as usize).copied().unwrap_or(0)), i));
+            v.sort_by_key(|&i| {
+                (
+                    std::cmp::Reverse(s.get(i as usize).copied().unwrap_or(0)),
+                    i,
+                )
+            });
         }
         v
     }
@@ -164,7 +170,9 @@ pub fn parse_v2(v: &Value) -> Result<Manifest2, String> {
                 .filter(|x| x.len() == 64 && x.bytes().all(|b| b.is_ascii_hexdigit()))
                 .ok_or_else(|| format!("input `{name}` must be \"sha256:<64 hex>\""))?;
             if !valid_id(name) {
-                return Err(format!("input name `{name}` may only use letters, digits, - _ ."));
+                return Err(format!(
+                    "input name `{name}` may only use letters, digits, - _ ."
+                ));
             }
             inputs.push((name.clone(), hex.to_ascii_lowercase()));
         }
@@ -510,11 +518,24 @@ mod tests {
         assert_eq!(m.streams[1].blocks_in(144), 2);
         assert_eq!(m.streams[0].total(), 50);
         // Bad inputs.
-        assert!(parse_v2(&m2(json!([{"name": "a", "priority": 1, "kind": "nope", "chunks": 1}]))).is_err());
-        assert!(parse_v2(&m2(json!([{"name": "a", "priority": 1, "kind": "teacher", "chunks": "until_decided"}]))).is_err());
-        assert!(parse_v2(&m2(json!([
+        assert!(
+            parse_v2(&m2(
+                json!([{"name": "a", "priority": 1, "kind": "nope", "chunks": 1}])
+            ))
+            .is_err()
+        );
+        assert!(
+            parse_v2(&m2(
+                json!([{"name": "a", "priority": 1, "kind": "teacher", "chunks": "until_decided"}])
+            ))
+            .is_err()
+        );
+        assert!(
+            parse_v2(&m2(json!([
             {"name": "a", "priority": 1, "kind": "teacher", "chunks": 1},
-            {"name": "a", "priority": 2, "kind": "teacher", "chunks": 1}]))).is_err());
+            {"name": "a", "priority": 2, "kind": "teacher", "chunks": 1}])))
+            .is_err()
+        );
         assert!(parse_v2(&json!({"format": 3})).is_err());
     }
 
@@ -549,8 +570,10 @@ mod tests {
 
     #[test]
     fn lpt_order() {
-        let s = streams(json!([{"name": "fixed", "priority": 1, "kind": "teacher", "chunks": 5,
-            "params": {"chunk_sizes": [3, 9, 1, 9, 4]}}]));
+        let s = streams(
+            json!([{"name": "fixed", "priority": 1, "kind": "teacher", "chunks": 5,
+            "params": {"chunk_sizes": [3, 9, 1, 9, 4]}}]),
+        );
         assert_eq!(s[0].order(), vec![1, 3, 4, 0, 2]);
         let mut st = vec![StreamState::default()];
         let mut got = vec![];
@@ -560,8 +583,13 @@ mod tests {
         }
         assert_eq!(got, vec![1, 3, 4, 0, 2]);
         // Bad sizes list.
-        assert!(parse_v2(&m2(json!([{"name": "f", "priority": 1, "kind": "teacher", "chunks": 2,
-            "params": {"chunk_sizes": [1]}}]))).is_err());
+        assert!(
+            parse_v2(&m2(
+                json!([{"name": "f", "priority": 1, "kind": "teacher", "chunks": 2,
+            "params": {"chunk_sizes": [1]}}])
+            ))
+            .is_err()
+        );
     }
 
     #[test]
@@ -592,12 +620,17 @@ mod tests {
         let sp = s[0].sprt.clone().unwrap();
         let unit = arena::block::SCORE_DEN * 4_294_967_296;
         // A clearly winning candidate: block scores alternate 0.5 and 0.3 (mean 0.4 ≫ s1).
-        let good = |j: u64| if j % 2 == 0 { unit / 2 } else { unit * 3 / 10 };
+        let good = |j: u64| {
+            if j.is_multiple_of(2) {
+                unit / 2
+            } else {
+                unit * 3 / 10
+            }
+        };
         let mut st = StreamState::default();
         // Chunks finish out of order: 0, 2, 3 … but 1 is missing, so only chunk 0 counts.
         for i in [0u64, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] {
-            st.scores
-                .insert(i, vec![good(2 * i) as i64, good(2 * i + 1) as i64]);
+            st.scores.insert(i, vec![good(2 * i), good(2 * i + 1)]);
             st.done.insert(i, 1.0);
         }
         let p = sprt_prefix(&st.scores, &sp);
@@ -605,7 +638,7 @@ mod tests {
         assert!(!st.decided(&s[0]));
         assert_eq!(st.next(&s[0]), Some(1));
         // Chunk 1 arrives: the prefix grows until the bound (MIN_BLOCKS = 20 blocks first).
-        st.scores.insert(1, vec![good(2) as i64, good(3) as i64]);
+        st.scores.insert(1, vec![good(2), good(3)]);
         st.done.insert(1, 1.0);
         let p = sprt_prefix(&st.scores, &sp);
         assert_eq!(p.decision, Decision::Accept);
@@ -623,7 +656,7 @@ mod tests {
         // Losing candidate rejects.
         let mut bad = BTreeMap::new();
         for i in 0u64..15 {
-            bad.insert(i, vec![-(unit as i64) / 2, -(unit as i64) * 3 / 10]);
+            bad.insert(i, vec![-unit / 2, -unit * 3 / 10]);
         }
         assert_eq!(sprt_prefix(&bad, &sp).decision, Decision::Reject);
         // The cap.

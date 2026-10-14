@@ -232,7 +232,7 @@ impl RcloneRemote {
         let (dir, name) = key.rsplit_once('/').unwrap_or(("", key));
         let found = self.list(&format!("{dir}/"))?;
         let want = format!("{dir}/{name}");
-        Ok(found.iter().any(|k| *k == want).then_some(()))
+        Ok(found.contains(&want).then_some(()))
     }
 }
 

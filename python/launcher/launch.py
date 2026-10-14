@@ -23,6 +23,10 @@ Rules applied:
   heartbeat within --startup-minutes; heartbeat older than 3 minutes; CPU use below 85% for 5
   minutes while the chunk is running (unless its heartbeat says progress.partial_cpu_ok); --max-minutes reached; DONE/FAILED seen. Always destroy,
   never stop.
+- Format-2 manifests (docs/M3-SPEC.md section 7.3) resume: when the heartbeat goes missing for 3
+  minutes, the machine never starts, or the instance dies before DONE, the launcher destroys it
+  and rents a replacement (another machine) with the same manifest, which carries on from the
+  done-list. At most 3 replacements per run, then it stops and reports.
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ from datetime import datetime, timezone
 
 POLL_S = 60
 HEARTBEAT_STALE_S = 180
+MAX_REPLACEMENTS = 3
 LOW_CPU_PCT = 85.0
 LOW_CPU_S = 300
 
@@ -88,7 +93,8 @@ def search_offers(a) -> list[dict]:
     rows = vast("search", "offers", offer_query(a), "--type", "on-demand", "--order", "dph_total", "--limit", "200")
     return [o for o in (rows or []) if not o.get("is_bid") and o.get("dph_total") and o.get("cpu_cores_effective")
             and (not a.max_dph or float(o["dph_total"]) <= a.max_dph)
-            and (not a.cpu_match or re.search(a.cpu_match, o.get("cpu_name") or "", re.I))]
+            and (not a.cpu_match or re.search(a.cpu_match, o.get("cpu_name") or "", re.I))
+            and o.get("machine_id", o.get("id")) not in getattr(a, "exclude_machines", set())]
 
 
 # ------------------------------------------------------------------ R2 (aws CLI, S3 API)
@@ -302,8 +308,6 @@ def cmd_run(a) -> int:
     best = choose(a)
     if not best:
         sys.exit("launch: no offer matches the filters")
-    ncpu = int(best["cpu_cores_effective"])
-    dph = float(best["dph_total"])
     # No "threads" here: the runner derives the usable cores from the container's cgroup CPU quota
     # (vast's cpu_cores_effective is a fraction of the host; NCPU below is recorded for comparison).
     manifest.setdefault("deadline_utc", datetime.fromtimestamp(time.time() + a.max_minutes * 60 - 120, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
@@ -311,7 +315,77 @@ def cmd_run(a) -> int:
         log("dry run: would upload manifest and create the instance:\n" + json.dumps(manifest, indent=2))
         return 0
     r2_put(f"runs/{run_id}/manifest.json", json.dumps(manifest, indent=2).encode())
+    resumable = manifest.get("format") == 2
+    run_start = time.time()
+    attempts: list[dict] = []
+    cpu_samples: list[float] = []
+    a.exclude_machines = set()
+    while True:
+        ncpu = int(best["cpu_cores_effective"])
+        dph = float(best["dph_total"])
+        instance_id = create_instance(a, best, run_id, ncpu, dph)
+        created = time.time()
+        final, reason, replaceable = "", "", False
+        try:
+            final, reason, replaceable = watch(a, run_id, instance_id, created, run_start, cpu_samples)
+        finally:
+            if final != "DONE":
+                log(f"last status before destroy: {status_line(instance_status(instance_id))}")
+                print_logs(instance_id)
+            if final:
+                # The runner destroys itself after uploading; give it two minutes, then make sure.
+                for _ in range(4):
+                    if instance_gone(instance_id):
+                        break
+                    time.sleep(30)
+            destroy(instance_id)
+        ended = time.time()
+        attempts.append({"instance_id": instance_id, "offer_id": best["id"], "cpu_name": best.get("cpu_name"),
+                         "cores_effective": ncpu, "dph": dph, "minutes": round((ended - created) / 60, 1),
+                         "dollars_est": round((ended - created) / 3600 * dph, 4), "ended": final or reason})
+        log(f"instance {instance_id} ended: {reason}")
+        if final or not (resumable and replaceable):
+            break
+        if len(attempts) > MAX_REPLACEMENTS:
+            reason = f"{reason}; {MAX_REPLACEMENTS} replacements used, stopping"
+            log(f"::error::{reason}")
+            break
+        a.exclude_machines.add(best.get("machine_id", best.get("id")))
+        best = choose(a)
+        if not best:
+            reason = f"{reason}; no replacement offer"
+            break
+        log(f"replacement {len(attempts)} of {MAX_REPLACEMENTS}: renting another machine; it resumes from the done-list")
 
+    log(f"run ended: {reason}")
+    result = json.loads(r2_get(f"runs/{run_id}/result.json") or r2_get(f"runs/{run_id}/merged.json") or b"{}")
+    bench = json.loads(r2_get(f"runs/{run_id}/benchmark.json") or b"{}")
+    dollars = sum(x["dollars_est"] for x in attempts)
+    last = attempts[-1]
+    matches = result.get("matches") or 0
+    report = {
+        "run_id": run_id, "instance_id": last["instance_id"], "offer_id": last["offer_id"], "outcome": final or "KILLED",
+        "reason": reason, "cpu_name": last["cpu_name"], "gpu_name": best.get("gpu_name") if best else None,
+        "cores_effective": last["cores_effective"], "dph": last["dph"],
+        "elapsed_min": round((time.time() - run_start) / 60, 1), "dollars_est": round(dollars, 4), "matches": matches,
+        "matches_per_dollar": round(matches / dollars) if dollars > 0 and matches else None,
+        "avg_cpu_pct": round(statistics.mean(cpu_samples), 1) if cpu_samples else None,
+        "attempts": attempts, "replacements": len(attempts) - 1,
+        "benchmark": bench, "result": result, "bin_sha": a.bin_sha, "image": a.image,
+        "utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    r2_put(f"runs/{run_id}/report.json", json.dumps(report, indent=2).encode())
+    if bench.get("matches_per_sec_per_core"):
+        r2_put(f"bench/{cpu_slug(bench.get('cpu_model') or last['cpu_name'])}/{run_id}.json", json.dumps(bench).encode())
+    print(json.dumps(report, indent=2))
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a") as fh:
+            fh.write(f"## vast.ai run {run_id}: {report['outcome']}\n\n```json\n{json.dumps(report, indent=2)}\n```\n")
+    return 0 if final == "DONE" else 1
+
+
+def create_instance(a, best: dict, run_id: str, ncpu: int, dph: float) -> int:
     # Entrypoint ("args") launch mode. Without --args the CLI defaults to the ssh runtype, and vast's
     # ssh/jupyter modes replace the image's ENTRYPOINT/CMD with their own init, so the boot script
     # never ran (run 38509301077). --entrypoint names the boot script; an empty --args (must be the
@@ -322,98 +396,61 @@ def cmd_run(a) -> int:
     instance_id = (res or {}).get("new_contract")
     if not instance_id:
         sys.exit(f"launch: create failed: {res}")
-    created = time.time()
     log(f"created instance {instance_id} for run {run_id}")
     if a.state_file:
+        # Always the live instance, so the workflow's cleanup step destroys the right one.
         with open(a.state_file, "w") as fh:
             fh.write(str(instance_id))
+    return instance_id
 
-    reason, cpu_samples, low_since, last_key, last_change = "", [], None, None, created
-    final = None
-    try:
-        while True:
-            time.sleep(POLL_S)
-            now = time.time()
-            for marker in ("DONE", "FAILED"):
-                if r2_get(f"runs/{run_id}/{marker}") is not None:
-                    final = marker
-            if final:
-                reason = final
-                break
-            key, hb = latest_heartbeat(run_id)
-            if key != last_key:
-                last_key, last_change = key, now
-            if key is None:
-                if now - created > a.startup_minutes * 60:
-                    reason = f"no heartbeat within {a.startup_minutes} minutes of renting"
-                    break
-                info = instance_status(instance_id)
-                if instance_gone(instance_id) or (info or {}).get("actual_status") == "exited":
-                    reason = "instance stopped before the first heartbeat"
-                    break
-                log(f"waiting for the machine to start (image download and boot): {status_line(info)}")
-                continue
-            if now - last_change > HEARTBEAT_STALE_S:
-                reason = "heartbeat missing for 3 minutes"
-                break
-            hb = hb or {}
-            cpu = hb.get("cpu_util_pct")
-            if cpu is None:
-                cpu = hb.get("host_cpu_busy_pct")
-            log(f"heartbeat {hb.get('seq')}: phase {hb.get('phase')}, cpu {cpu}%, elapsed {hb.get('elapsed_s')} s, est ${hb.get('est_cost_usd')}")
-            # A chunk may declare a stretch of deliberately partial CPU use (e.g. the solver
-            # measurement, which times single-thread solves); the low-CPU rule skips it.
-            partial_ok = bool((hb.get("progress") or {}).get("partial_cpu_ok"))
-            if hb.get("phase") in ("benchmark", "chunk") and cpu is not None and not partial_ok:
-                cpu_samples.append(float(cpu))
-                if cpu < LOW_CPU_PCT:
-                    low_since = low_since or now
-                    if now - low_since >= LOW_CPU_S:
-                        reason = f"CPU use below {LOW_CPU_PCT:.0f}% for 5 minutes while work remains"
-                        break
-                else:
-                    low_since = None
-            if now - created > a.max_minutes * 60:
-                reason = f"max_minutes ({a.max_minutes}) reached"
-                break
-    finally:
-        if final != "DONE":
-            log(f"last status before destroy: {status_line(instance_status(instance_id))}")
-            print_logs(instance_id)
-        if final:
-            # The runner destroys itself after uploading; give it two minutes, then make sure.
-            for _ in range(4):
-                if instance_gone(instance_id):
-                    break
-                time.sleep(30)
-        destroy(instance_id)
-    ended = time.time()
 
-    log(f"run ended: {reason}")
-    result = json.loads(r2_get(f"runs/{run_id}/result.json") or b"{}")
-    bench = json.loads(r2_get(f"runs/{run_id}/benchmark.json") or b"{}")
-    hours = (ended - created) / 3600
-    dollars = hours * dph
-    matches = result.get("matches") or 0
-    report = {
-        "run_id": run_id, "instance_id": instance_id, "offer_id": best["id"], "outcome": final or "KILLED",
-        "reason": reason, "cpu_name": best.get("cpu_name"), "gpu_name": best.get("gpu_name"),
-        "cores_effective": ncpu, "dph": dph, "elapsed_min": round(hours * 60, 1),
-        "dollars_est": round(dollars, 4), "matches": matches,
-        "matches_per_dollar": round(matches / dollars) if dollars > 0 and matches else None,
-        "avg_cpu_pct": round(statistics.mean(cpu_samples), 1) if cpu_samples else None,
-        "benchmark": bench, "result": result, "bin_sha": a.bin_sha, "image": a.image,
-        "utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }
-    r2_put(f"runs/{run_id}/report.json", json.dumps(report, indent=2).encode())
-    if bench.get("matches_per_sec_per_core"):
-        r2_put(f"bench/{cpu_slug(bench.get('cpu_model') or best.get('cpu_name'))}/{run_id}.json", json.dumps(bench).encode())
-    print(json.dumps(report, indent=2))
-    summary = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary:
-        with open(summary, "a") as fh:
-            fh.write(f"## vast.ai run {run_id}: {report['outcome']}\n\n```json\n{json.dumps(report, indent=2)}\n```\n")
-    return 0 if final == "DONE" else 1
+def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
+          cpu_samples: list[float]) -> tuple[str, str, bool]:
+    """Watch one instance. Returns (DONE/FAILED or "", reason, whether a replacement may resume)."""
+    low_since, last_key, last_change = None, None, created
+    # Heartbeats of an earlier machine of this run do not count as this one's.
+    first_key, _ = latest_heartbeat(run_id)
+    while True:
+        time.sleep(POLL_S)
+        now = time.time()
+        for marker in ("DONE", "FAILED"):
+            if r2_get(f"runs/{run_id}/{marker}") is not None:
+                return marker, marker, False
+        if now - run_start > a.max_minutes * 60:
+            return "", f"max_minutes ({a.max_minutes}) reached", False
+        key, hb = latest_heartbeat(run_id)
+        if key == first_key:
+            key = None
+        if key != last_key:
+            last_key, last_change = key, now
+        if key is None:
+            if now - created > a.startup_minutes * 60:
+                return "", f"no heartbeat within {a.startup_minutes} minutes of renting", True
+            info = instance_status(instance_id)
+            if instance_gone(instance_id) or (info or {}).get("actual_status") == "exited":
+                return "", "instance stopped before the first heartbeat", True
+            log(f"waiting for the machine to start (image download and boot): {status_line(info)}")
+            continue
+        if now - last_change > HEARTBEAT_STALE_S:
+            return "", "heartbeat missing for 3 minutes", True
+        if instance_gone(instance_id):
+            return "", "instance died before DONE", True
+        hb = hb or {}
+        cpu = hb.get("cpu_util_pct")
+        if cpu is None:
+            cpu = hb.get("host_cpu_busy_pct")
+        log(f"heartbeat {hb.get('seq')}: phase {hb.get('phase')}, cpu {cpu}%, elapsed {hb.get('elapsed_s')} s, est ${hb.get('est_cost_usd')}")
+        # A chunk may declare a stretch of deliberately partial CPU use (e.g. the solver
+        # measurement, which times single-thread solves); the low-CPU rule skips it.
+        partial_ok = bool((hb.get("progress") or {}).get("partial_cpu_ok"))
+        if hb.get("phase") in ("benchmark", "chunk", "chunks") and cpu is not None and not partial_ok:
+            cpu_samples.append(float(cpu))
+            if cpu < LOW_CPU_PCT:
+                low_since = low_since or now
+                if now - low_since >= LOW_CPU_S:
+                    return "", f"CPU use below {LOW_CPU_PCT:.0f}% for 5 minutes while work remains", False
+            else:
+                low_since = None
 
 
 def cmd_plan(a) -> int:
