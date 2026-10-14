@@ -1,0 +1,22 @@
+[package]
+name = "belief"
+version = "0.1.0"
+description = "The card tracker (hard facts) and the exactly uniform counted world generator (M3)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# docs/M3-SPEC.md §1: engine only.
+[dependencies]
+engine = { path = "../engine" }
+
+[[bin]]
+name = "belief-bench"
+path = "src/bin/belief-bench.rs"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest = "1"

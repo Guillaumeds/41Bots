@@ -74,6 +74,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build engine for wasm32
         run: cargo build -p engine --target wasm32-unknown-unknown --release
+      - name: Build the belief crate for wasm32 (M3b runs the world generator in a Worker)
+        run: cargo build -p belief --target wasm32-unknown-unknown --release
       - name: Native vs wasm result hash
         if: hashFiles('tools/wasm_check.sh') != ''
         run: bash tools/wasm_check.sh
