@@ -492,3 +492,9 @@ The yardstick is for **measuring only, not training**. Its size is set by measur
 5. **Repeatability:** re-solve 20 decisions with fresh deals at the chosen N. The chosen card must match in at least 95% of them, or N is raised.
 6. **Position in the trick (owner, 2026-10-14).** The plateau N is measured and set **per trick and per position in the trick** (1st to 8th to play). The leader of trick 1 has the most unknowns; the 8th player has seen 7 cards. Decisions are stratified equally across positions. Positions may be pooled into pairs (1–2, 3–4, 5–6, 7–8) only if their plateaus agree within one doubling step. Time per deal is also reported per position.
 7. **Tricks 3 and 4 too (owner, 2026-10-14).** The same agreement curve, with 200 decisions (25 per position) and N up to 320, is measured for tricks 3 and 4. Exact solves are cheap there, about 9 ms per world at trick 3. This replaces the assumed N for the exact-PIMC teacher at tricks 3–4 with a measured one. Trick 5 has no decisions, since each player has one card left, so it needs no N.
+8. **Match situation and uncertainty (owner, 2026-10-14).**
+   - Decisions are stratified equally over the four match-state strata S1–S4 (§5), as well as over positions, and the plateau is reported **per stratum** as well as per position. Near the money, values are more extreme, so a small difference can flip the choice.
+   - The plateau is also reported against the decision's **number of consistent worlds** (log2, from the belief counter): what N must cover is the uncertainty about the hidden cards.
+   - **Rule:** N is set per trick and position. If any stratum or world-count band needs a larger N than that, the larger N is used for that band.
+   - The decision count is raised until every reported cell has at least 25 decisions.
+   - The golden set is built with the same stratification.
