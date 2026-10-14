@@ -57,3 +57,4 @@ M1 adds the table manager, the arena (14-way duplicate block, generalised SPRT, 
 ## M0 gate result (2026-10-14 00:37 UTC)
 - 10M-match differential gate: 5 shards × 2M matches on GitHub CI (run 38480695319), all PASS, zero engine/reference disagreements.
 - All M0 gate items met **except the owner's reading and approval of the transcripts** (`docs/TRANSCRIPTS.md`, `crates/engine/tests/transcripts/`).
+- 2026-10-14: the owner read and approved the transcripts. **M0 gate fully met.**
