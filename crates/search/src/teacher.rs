@@ -70,20 +70,8 @@ pub fn encode_row(d: &TeacherDecision, out: &mut Vec<u8>) {
         BeliefMode::Uniform => 0,
     });
     out.extend_from_slice(&dv.n_worlds.to_le_bytes());
-    let lq = dv.world_count.map_or(0u16, |n| {
-        // ⌊256·log2 N⌋ in integers: 256·(bits−1) + the next 8 bits of the mantissa.
-        if n == 0 {
-            return 0;
-        }
-        let e = 127 - n.leading_zeros();
-        let frac8 = if e >= 8 {
-            (n >> (e - 8)) & 0xFF
-        } else {
-            (n << (8 - e)) & 0xFF
-        };
-        // Linear in the mantissa, a lower bound within 0.09 bits; documented.
-        (256 * e + frac8 as u32) as u16
-    });
+    // ⌊256·log2 N⌋ in integers (0 when not counted).
+    let lq = dv.world_count.map_or(0u16, belief::log2_q8);
     out.extend_from_slice(&lq.to_le_bytes());
     assert!(dv.candidates.len() <= MAX_CANDS, "at most 32 candidates");
     for i in 0..MAX_CANDS {

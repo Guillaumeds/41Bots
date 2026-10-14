@@ -16,7 +16,7 @@ use equity::EquityTable;
 
 use crate::labels;
 use crate::pimc::{Ctx, DecisionValues, Early, SearchConfig, SharedLeaf, evaluate};
-use crate::worlds::{RejectionSource, WorldSource};
+use crate::worlds::{BeliefSource, WorldSource};
 
 /// The sha256 of the production equity table the bots must use.
 pub const EQUITY_SHA256: &str = "64740dab7845f0502c93ce195d721e1ffb8aa6ab141739ef43f754690de16808";
@@ -309,9 +309,10 @@ pub fn equity() -> Result<Arc<EquityTable>, String> {
         .clone()
 }
 
-/// The default world generator.
+/// The default world generator: `crates/belief`'s counted, exactly uniform sampler (M3-SPEC
+/// §5.2, `belief = uniform`).
 pub fn default_source() -> Arc<dyn WorldSource> {
-    Arc::new(RejectionSource::new())
+    Arc::new(BeliefSource::new())
 }
 
 /// The bot registry: PIMC bots by name (with the production equity table), else `bots::factory`.

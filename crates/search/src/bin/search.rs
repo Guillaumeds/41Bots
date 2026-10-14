@@ -10,6 +10,9 @@
 //! search score     --yardstick FILE --n N --method FILE:N [--method FILE:N …]
 //! search teacher   --hands N --out DIR --equity TABLE [--seed S] [--config NAME] [--start-hands H]
 //! ```
+//! `worlds` and `teacher` take `--source belief|rejection`: the world generator, by default
+//! `crates/belief`'s counted uniform sampler (which also records each decision's exact world
+//! count); `rejection` is the engine-based oracle (same distribution, no counts).
 //! `worlds` is the yardstick builder and the method runner: every (decision, world) task of the
 //! run goes through one work queue on `--threads` threads (longest expected first), and one JSON
 //! line per decision is appended to `--out` in that order; decisions already there are skipped,
@@ -35,7 +38,7 @@ use search::measure::{
 };
 use search::pimc::{Ctx, Method, SearchConfig, SharedLeaf};
 use search::teacher::{decisions_npy, teacher_deck, teacher_hand};
-use search::worlds::RejectionSource;
+use search::worlds::{BeliefSource, RejectionSource, WorldSource};
 
 struct Args(Vec<String>);
 
@@ -62,6 +65,15 @@ impl Args {
     }
     fn req(&self, k: &str) -> Result<&str, String> {
         self.get(k).ok_or_else(|| format!("missing {k}"))
+    }
+}
+
+/// `--source belief|rejection` (default `belief`): the world generator.
+fn world_source(a: &Args) -> Result<Arc<dyn WorldSource>, String> {
+    match a.get("--source").unwrap_or("belief") {
+        "belief" => Ok(Arc::new(BeliefSource::new())),
+        "rejection" => Ok(Arc::new(RejectionSource::new())),
+        s => Err(format!("unknown --source {s} (belief or rejection)")),
     }
 }
 
@@ -149,10 +161,10 @@ fn worlds(a: &Args) -> Result<(), String> {
     let t0 = Instant::now();
     let table = load_equity(a.req("--equity")?)?;
     let leaf: Arc<SharedLeaf> = Arc::new(table);
-    let src = RejectionSource::new();
+    let src = world_source(a)?;
     let ctx = Ctx {
         leaf: &*leaf,
-        source: &src,
+        source: &*src,
         rules: engine::game::Rules::HOUSE,
     };
     let cfg = SearchConfig {
@@ -354,7 +366,7 @@ fn agree(a: &Args) -> Result<(), String> {
     for t in tricks {
         if !rows.iter().any(|r| r.trick == t && r.log2_worlds.is_some()) {
             println!(
-                "trick {t} by log2 world count: n/a (the world source cannot count worlds; needs crates/belief)"
+                "trick {t} by log2 world count: n/a (the world source cannot count worlds; use --source belief)"
             );
             report.insert(format!("trick{t}-log2worlds"), serde_json::json!("n/a"));
         }
@@ -427,7 +439,7 @@ fn teacher(a: &Args) -> Result<(), String> {
     let spec = PimcSpec::parse(a.get("--config").unwrap_or("pimc-teacher"))?;
     let table = load_equity(a.req("--equity")?)?;
     let leaf: Arc<SharedLeaf> = Arc::new(table);
-    let f = PimcFactory::new(&spec, leaf, Arc::new(RejectionSource::new()));
+    let f = PimcFactory::new(&spec, leaf, world_source(a)?);
     let starts = collect_starts(a.num("--start-hands", 20_000)?, seed);
     let dir = std::path::Path::new(a.req("--out")?);
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;

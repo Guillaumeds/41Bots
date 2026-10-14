@@ -1,7 +1,8 @@
 //! The PIMC teacher of checkpoint M3 (docs/M3-SPEC.md §5, §8, §13).
 //!
 //! - [`worlds`]: worlds [complete guesses of where every hidden card is], the [`WorldSource`]
-//!   trait, an exactly uniform rejection sampler, and rebuilding a world as a match.
+//!   trait with the counted belief sampler (default) and the rejection oracle, and rebuilding a
+//!   world as a match.
 //! - [`pimc`]: rollout-PIMC (`rules-v1` inner player) and exact PIMC (`solve_fast`), scored in
 //!   money chance, with common worlds for every candidate and thread-independent results.
 //! - [`bot`]: the `pimc-v0` / `pimc-teacher` bots, the robber's joint (burn, first card)
@@ -20,7 +21,7 @@ pub mod worlds;
 
 pub use bot::{PimcBot, PimcFactory, PimcSpec, factory};
 pub use pimc::{DecisionValues, SearchConfig, evaluate};
-pub use worlds::{RejectionSource, World, WorldSource, Worlds};
+pub use worlds::{BeliefSource, RejectionSource, World, WorldSource, Worlds, world_count};
 
 /// Labels for seed derivation (docs/M3-SPEC.md §1).
 pub mod labels {
@@ -40,5 +41,7 @@ pub mod labels {
     pub const AGREE: u64 = 0xA62E;
 }
 
+#[cfg(test)]
+mod belief_tests;
 #[cfg(test)]
 mod tests;

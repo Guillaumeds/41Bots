@@ -8,10 +8,9 @@ license.workspace = true
 publish.workspace = true
 
 # docs/M3-SPEC.md §1: engine, bot, bots, equity, solver, belief, serde, serde_json.
-# (`belief` is added when crates/belief lands; until then worlds come from the engine-based
-# rejection sampler in `worlds`.)
 [dependencies]
 engine = { path = "../engine", features = ["serde"] }
+belief = { path = "../belief" }
 bot = { path = "../bot" }
 bots = { path = "../bots" }
 equity = { path = "../equity" }

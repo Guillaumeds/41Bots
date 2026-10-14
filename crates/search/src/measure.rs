@@ -260,7 +260,7 @@ pub struct WorldRows {
     /// One row per world (from `from`), each the candidates' values (four u64 per value).
     pub rows: Vec<Vec<[u64; 4]>>,
     /// floor(log2) of the exact number of worlds consistent with the decider's view, when the
-    /// world source can count them (`None` with the rejection sampler: needs `crates/belief`).
+    /// world source can count them (the belief source does; `None` with the rejection sampler).
     #[serde(default)]
     pub log2_worlds: Option<u32>,
     /// The deciding seat's hand type (§13.1 item 9), once trumps are known.

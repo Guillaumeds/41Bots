@@ -509,13 +509,16 @@ pub fn evaluate(
             own_sd: vec![0; cands.len()],
         };
     }
+    // The exact number of consistent worlds, when the source counts them (for records and the
+    // world-count bands; preparing again costs a fraction of a millisecond).
+    let world_count = ctx.source.prepare(view, ctx.rules).count();
     let rows = world_values(view, &cands, method, 0, u64::from(n), dseed, ctx, cfg);
     let (means, chosen, own_sd) = aggregate(&rows, cands.len(), team_of(view.seat));
     DecisionValues {
         kind,
         method,
         n_worlds: n,
-        world_count: None,
+        world_count,
         belief: BeliefMode::Uniform,
         candidates: cands
             .iter()

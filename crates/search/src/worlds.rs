@@ -3,12 +3,15 @@
 //!
 //! The search draws worlds through the small [`WorldSource`] trait, so the world generator can be
 //! swapped without touching the search:
+//! - [`BeliefSource`] (the default, M3-SPEC §5.2 `belief = uniform`): `crates/belief`'s card
+//!   tracker and counted world space. Exactly uniform over the worlds consistent with the hard
+//!   facts, and it reports the exact number of those worlds (for records and the §13.1
+//!   world-count bands).
 //! - [`RejectionSource`]: deal the unknown cards uniformly into the hidden places by size, rebuild
 //!   the match and keep the deal only if the deciding seat's view comes out identical. It is
 //!   exactly uniform over the worlds consistent with the view (every consistent deal is kept,
 //!   every inconsistent one refused) and needs no card tracker, but it cannot count worlds and
-//!   gets slow when the facts are tight. It is the test oracle and the stand-in until
-//!   `crates/belief`'s counted sampler is wired in.
+//!   gets slow when the facts are tight. It is the test oracle for the belief source.
 //!
 //! World `w` of a decision is drawn from `Rng::derive(dseed, &[WORLD, w])`, so it is the same
 //! however many worlds are drawn and whichever thread draws it.
@@ -326,6 +329,94 @@ impl Worlds for RejectionWorlds<'_> {
         }
         panic!("no consistent world found by rejection: the view is inconsistent or too tight");
     }
+}
+
+/// The counted, exactly uniform world generator of `crates/belief` (docs/M3-SPEC.md §4): the
+/// default source.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BeliefSource;
+
+impl BeliefSource {
+    /// The belief source.
+    pub fn new() -> Self {
+        BeliefSource
+    }
+}
+
+struct BeliefWorlds {
+    space: belief::WorldSpace,
+    /// The other seats' burn locations, in the order the burns were made (`World::burns`).
+    burn_locs: Vec<belief::Loc>,
+    /// The dealer is burning after a turned Joker: each world also draws the card turned next.
+    joker_burn: bool,
+}
+
+impl WorldSource for BeliefSource {
+    fn name(&self) -> &str {
+        "belief-uniform"
+    }
+
+    fn prepare<'a>(&'a self, view: &'a SeatView, _rules: Rules) -> Box<dyn Worlds + 'a> {
+        Box::new(BeliefWorlds::of(view))
+    }
+}
+
+impl BeliefWorlds {
+    fn of(view: &SeatView) -> BeliefWorlds {
+        let t = belief::Tracker::from_view(view);
+        let space = belief::WorldSpace::new(&t)
+            .expect("the hard facts never exclude the true deal (A6), so some world exists");
+        let burn_locs = view
+            .public
+            .burn_order
+            .iter()
+            .filter(|&&(s, _)| s != view.seat)
+            .map(|&(s, k)| belief::Loc::Burn(s, k))
+            .collect();
+        BeliefWorlds {
+            space,
+            burn_locs,
+            joker_burn: view.public.trump.is_none(),
+        }
+    }
+}
+
+impl Worlds for BeliefWorlds {
+    fn count(&self) -> Option<u128> {
+        Some(self.space.count())
+    }
+
+    /// One world from the counted space; during the dealer's burn after a turned Joker, the card
+    /// turned next is then drawn uniformly from the world's undealt cards with the same
+    /// generator (§4.5: deck position 41 is a uniform position of the pack). Both depend only on
+    /// the world's own generator, so world `w` is the same on any thread.
+    fn sample(&self, rng: &mut Rng) -> World {
+        let w = self.space.sample(rng);
+        let burns = self
+            .burn_locs
+            .iter()
+            .map(|l| {
+                w.burns
+                    .iter()
+                    .find(|(x, _)| x == l)
+                    .map(|&(_, c)| c)
+                    .expect("one card per burn location")
+            })
+            .collect();
+        let next_turned = self.joker_burn.then(|| w.draw_next_turned(rng));
+        World {
+            hands: w.hands,
+            burns,
+            undealt: w.undealt,
+            next_turned,
+        }
+    }
+}
+
+/// The exact number of worlds consistent with a view's hard facts (`crates/belief`), for records
+/// and the §13.1 world-count bands.
+pub fn world_count(view: &SeatView) -> u128 {
+    BeliefWorlds::of(view).space.count()
 }
 
 /// Is the phase a decision of the viewer?

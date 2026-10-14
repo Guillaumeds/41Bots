@@ -591,12 +591,12 @@ fn golden_counts() {
 #[test]
 #[ignore = "A6 property with world counts on many matches; BELIEF_MATCHES_WS (default 2,000)"]
 fn world_space_feasible_on_many_matches() {
-    for seed in 0..env_size("BELIEF_MATCHES_WS", 2_000) {
+    super::on_threads(env_size("BELIEF_MATCHES_WS", 2_000), |seed| {
         random_match(Match::new(seed ^ 0xF00D, Rules::HOUSE), seed, |m| {
             let t = Tracker::from_view(&m.view(m.to_act().expect("to act")));
             let ws = WorldSpace::new(&t).expect("feasible");
             let w = ws.sample(&mut Rng::new(seed));
             assert!(accepts(&t, &w));
         });
-    }
+    });
 }

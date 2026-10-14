@@ -256,6 +256,23 @@ pub(crate) fn transcripts() -> Vec<TranscriptDeal> {
     out
 }
 
+/// Run `f(i)` for `i` in `0..n` on all cores (test sweeps only; the crate itself has no threads).
+pub(crate) fn on_threads(n: u64, f: impl Fn(u64) + Sync) {
+    let threads = std::thread::available_parallelism().map_or(1, |t| t.get()) as u64;
+    std::thread::scope(|s| {
+        for k in 0..threads {
+            let f = &f;
+            s.spawn(move || {
+                let mut i = k;
+                while i < n {
+                    f(i);
+                    i += threads;
+                }
+            });
+        }
+    });
+}
+
 /// Number of matches for a full-size run, from an environment variable (for `--ignored` runs).
 pub(crate) fn env_size(var: &str, default: u64) -> u64 {
     std::env::var(var)
@@ -280,6 +297,24 @@ proptest! {
     fn tracker_never_excludes_truth(seed in any::<u64>()) {
         random_match(Match::new(seed, Rules::HOUSE), seed, check_truth);
     }
+}
+
+/// The true deal has positive mass: the deciding seat's world space counts at least one world
+/// and, whenever it holds at most 10^4, its enumeration contains the true deal (`check_truth`).
+#[test]
+fn true_deal_has_positive_mass() {
+    let mut enumerated = 0;
+    for seed in 100..106u64 {
+        random_match(Match::new(seed, Rules::HOUSE), seed, |m| {
+            check_truth(m);
+            let t = Tracker::from_view(&m.view(m.to_act().expect("to act")));
+            let ws = WorldSpace::new(&t).expect("feasible");
+            if ws.count() <= 10_000 {
+                enumerated += 1;
+            }
+        });
+    }
+    assert!(enumerated >= 50, "small spaces occur ({enumerated})");
 }
 
 #[test]
@@ -308,9 +343,9 @@ fn tracker_never_excludes_truth_on_transcripts_and_rare_branches() {
 #[ignore = "full size: BELIEF_MATCHES (default 20,000) random matches; run in release"]
 fn tracker_never_excludes_truth_full() {
     let n = env_size("BELIEF_MATCHES", 20_000);
-    for seed in 0..n {
+    on_threads(n, |seed| {
         random_match(Match::new(seed, Rules::HOUSE), seed, check_truth);
-    }
+    });
     for (i, b) in rare_branches().into_iter().enumerate() {
         for seed in 0..500u64 {
             random_hand(rare_match(b), (i as u64) << 16 | seed, check_truth);
@@ -357,9 +392,9 @@ fn tracker_incremental_equals_batch() {
 #[test]
 #[ignore = "full size: BELIEF_MATCHES_INC (default 2,000) matches"]
 fn tracker_incremental_equals_batch_full() {
-    for seed in 0..env_size("BELIEF_MATCHES_INC", 2_000) {
+    on_threads(env_size("BELIEF_MATCHES_INC", 2_000), |seed| {
         incremental_equals_batch(Match::new(seed, Rules::HOUSE), seed);
-    }
+    });
 }
 
 // ----- tracker_capacity_sums -----
