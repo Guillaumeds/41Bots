@@ -463,3 +463,18 @@ Every figure is re-measured by the start-up benchmark and the first chunks; the 
 3. **Early tricks.** In tricks 1 and 2 the bot imagines everyone playing like the simple rules bot when it tests a card, because exact analysis is far too slow that early. Do you see any common situations in the first two tricks where good players play very differently from the plain rules (for example around robbing or holding back top trumps) that we should test specially?
 4. **Budget.** The M3 measurements need about €5 of rented machine time in total. Is that fine to spend without asking each time?
 5. *(Already answered, for the record.)* The dealer may burn, after a turned Joker, the card that turns out to be the ace of trumps (RULES H3: legal). The tracker allows for it. STATUS still lists it as open and should be updated.
+
+## 13. Amendment (2026-10-14): early-trick quality, from the owner and the trick-1 measurement
+**Owner:** in tricks 1–2, good players often play differently from the plain rules. The bots must find the best plays themselves, so the early-trick searches must come as close as possible to a true solve.
+
+**Measurement** (`m2-trick1-1`, AMD EPYC 9654, 368 threads, parallel exact solver): four trick-1 worlds solved exactly in **7 s, 32 s, 140 s and 25 s**, using up to 65 GB. Exact trick-1 world solves are therefore affordable offline on a large machine. They are not affordable inside a timed decision.
+
+Changes to this spec:
+1. **Exact early-trick reference set (new, required for the gate report).** Build 300 trick-1 and 300 trick-2 decisions, stratified as §5. Value each with **exact PIMC**: N exact world solves per decision, with N taken from the agreement curve. Trick 1 runs on a large vast.ai machine with the parallel solver (`solve_fast_par`); trick 2 runs on ordinary cores. This set is the yardstick for every cheaper early-trick method.
+2. **Report against the yardstick.** For rollout-PIMC (rules-v1 inner player) and every other early-trick arm, report per trick:
+   - the agreement of the chosen card with exact PIMC;
+   - the mean money-chance loss of the chosen card under the exact-PIMC values (in 2^-32 units and in stake units);
+   - the loss distribution.
+3. **Trick 2 teacher default.** The few-worlds exact trick-2 arm stops being only a comparison. It becomes the **default trick-2 teacher** if its mean loss against the yardstick is lower than rollout-PIMC's by more than 2 standard errors at a compute cost within the M3 budget. Otherwise rollouts stay the default, and the gap is reported.
+4. **Trick 1 teacher.** Rollout-PIMC stays the scalable trick-1 teacher at M3. Its measured loss against the exact yardstick is a pre-registered number the later phases must reduce: M4 network rollouts, M5 recursive search and M6 self-play. Each of these is scored against the same yardstick in addition to tournaments.
+5. **Scope note.** Exact PIMC is itself an approximation of true imperfect-information play, because it plays each world with all cards face up. It ignores what each card reveals and how it is inferred. The yardstick measures how close the cheap searches come to exact PIMC. Strength beyond PIMC comes from M5 search and M6 self-play, judged by money in tournaments (PLAN §8–9).
