@@ -1,0 +1,59 @@
+# Read-only health check: list our vast.ai instances and, for a run id, its latest heartbeats and result markers in R2.
+name: vast-status
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Optional run id to show heartbeats for"
+        required: false
+        default: ""
+      logs:
+        description: "Also print the last 100 lines of each 41bots- instance's container log"
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install vastai
+        run: pip install -q vastai==1.8.3
+      - name: Instances
+        env:
+          VAST_API_KEY: ${{ secrets.VAST_API_KEY }}
+          LOGS: ${{ inputs.logs }}
+        run: |
+          set -euo pipefail
+          vastai show instances --raw --api-key "$VAST_API_KEY" > inst.json
+          python3 - <<'PY'
+          import json, time
+          now = time.time()
+          rows = [i for i in json.load(open("inst.json")) if (i.get("label") or "").startswith("41bots-")]
+          print(f"{len(rows)} 41bots instance(s)")
+          for i in rows:
+              age = (now - float(i.get("start_date") or now)) / 60
+              print(f'{i["id"]} {i.get("label")} {i.get("actual_status")}/{i.get("intended_status")} '
+                    f'cpu={i.get("cpu_util")} age={age:.0f}min dph=${i.get("dph_total")} cpu={i.get("cpu_name")} '
+                    f'msg={str(i.get("status_msg") or "")[:120]!r}')
+          open("ids.txt","w").write("\n".join(str(i["id"]) for i in rows))
+          PY
+          if [ "$LOGS" = "true" ]; then
+            while read -r id; do [ -n "$id" ] && { echo "::group::log $id"; vastai logs "$id" --tail 100 --api-key "$VAST_API_KEY" || true; echo "::endgroup::"; }; done < ids.txt
+          fi
+      - name: Run heartbeats
+        if: inputs.run_id != ''
+        env:
+          AWS_ACCESS_KEY_ID: ${{ vars.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          ENDPOINT: ${{ vars.R2_S3_ENDPOINT }}
+          BUCKET: ${{ vars.R2_BUCKET }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          case "$RUN_ID" in *[!A-Za-z0-9._-]*) echo "bad run_id"; exit 1;; esac
+          aws --endpoint-url "$ENDPOINT" s3 ls "s3://$BUCKET/runs/$RUN_ID/" || true
+          last=$(aws --endpoint-url "$ENDPOINT" s3 ls "s3://$BUCKET/runs/$RUN_ID/heartbeat/" | awk '{print $4}' | sort | tail -5)
+          for k in $last; do aws --endpoint-url "$ENDPOINT" s3 cp "s3://$BUCKET/runs/$RUN_ID/heartbeat/$k" - ; echo; done
