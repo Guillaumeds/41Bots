@@ -104,7 +104,12 @@ pub struct DecisionSpec {
     pub hand_type: Option<HandType>,
 }
 
-/// A hand's type, from the cards its holder can see (docs/M3-SPEC.md §13.1 item 9).
+/// A hand's type, from what its holder can see (docs/M3-SPEC.md §13.1 item 9).
+///
+/// The last three fields were added on 2026-10-14 (owner). They are `None` in records made before
+/// they existed; [`relabel`] recomputes them from the decision set, which stores each decision's
+/// deck and actions, so old measurements need no new solves. They are never written as `null`, so
+/// old records keep their exact bytes when a file is rewritten.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HandType {
     /// Trumps held (the trump suit, the Joker and the A♥).
@@ -114,6 +119,18 @@ pub struct HandType {
     pub top_trumps: u8,
     /// Cards in the longest plain (non-trump) suit.
     pub longest_plain: u8,
+    /// Holds the 5 of trumps (the bonus card).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_five: Option<bool>,
+    /// Has taken a turned card this hand: robbed it at their own turn in trick 1 (rule 20, H2), or
+    /// is the dealer who robbed a turned ace or took a turned Joker (rules 22 and 24, H4). Public
+    /// knowledge, from the hand's burn order or the burn now due from this seat ([`view_robber`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub robber: Option<bool>,
+    /// Plain (non-trump) suits the hand holds no card of, 0–3 (the A♥ is a trump, not a heart,
+    /// when another suit is trumps).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voids: Option<u8>,
 }
 
 impl HandType {
@@ -126,31 +143,102 @@ impl HandType {
             self.longest_plain.clamp(1, 3),
         ]
     }
+
+    /// The bands of the 2026-10-14 features: holds the 5 of trumps (0 no, 1 yes), robber (0 no,
+    /// 1 yes), void plain suits 0, 1, 2+; `None` in records made before they existed.
+    pub fn feature_bands(&self) -> Option<[u8; 3]> {
+        Some([
+            u8::from(self.has_five?),
+            u8::from(self.robber?),
+            self.voids?.min(2),
+        ])
+    }
 }
 
-/// The hand type of the cards `hand` with trump suit `trump`.
-pub fn hand_type(hand: Bits, trump: Suit) -> HandType {
+/// The name of band `band` of feature `feature` of [`HandType::feature_bands`] (0 = the 5 of
+/// trumps, 1 = robber, 2 = voids), as `search agree` and `search curves` report it.
+pub fn feature_band_name(feature: usize, band: u8) -> String {
+    let yes = if band == 1 { "yes" } else { "no" };
+    match feature {
+        0 => format!("has5-{yes}"),
+        1 => format!("robber-{yes}"),
+        _ => format!("voids{band}{}", if band >= 2 { "+" } else { "" }),
+    }
+}
+
+/// The hand type of the cards `hand` with trump suit `trump`; `robber`: whether the holder has
+/// taken a turned card this hand.
+pub fn hand_type(hand: Bits, trump: Suit, robber: bool) -> HandType {
     use engine::rules::{ACE_HEARTS, ace_of_trumps, five_of, jack_of, plain_mask, trump_mask};
     let top = bit(five_of(trump))
         | bit(jack_of(trump))
         | bit(JOKER)
         | bit(ACE_HEARTS)
         | bit(ace_of_trumps(trump));
+    let plain: Vec<u8> = Suit::ALL
+        .iter()
+        .filter(|&&s| s != trump)
+        .map(|&s| count(hand & plain_mask(s, trump)))
+        .collect();
     HandType {
         trumps: count(hand & trump_mask(trump)),
         top_trumps: count(hand & top),
-        longest_plain: Suit::ALL
-            .iter()
-            .filter(|&&s| s != trump)
-            .map(|&s| count(hand & plain_mask(s, trump)))
-            .max()
-            .unwrap_or(0),
+        longest_plain: plain.iter().copied().max().unwrap_or(0),
+        has_five: Some(hand & bit(five_of(trump)) != 0),
+        robber: Some(robber),
+        voids: Some(plain.iter().filter(|&&n| n == 0).count() as u8),
     }
+}
+
+/// Whether the view's seat has taken a turned card this hand, from public facts only: a burn by
+/// this seat in the hand's burn order, or the burn this seat must make now (every take is followed
+/// at once by the taker's burn, so this is exactly "took a turned card").
+pub fn view_robber(v: &SeatView) -> bool {
+    v.public.burn_order.iter().any(|&(s, _)| s == v.seat)
+        || v.public.phase == Phase::AwaitBurn(v.seat)
 }
 
 /// The deciding seat's hand type in a view, once trumps are known.
 pub fn view_hand_type(v: &SeatView) -> Option<HandType> {
-    v.public.trump.map(|t| hand_type(v.hand, t))
+    v.public.trump.map(|t| hand_type(v.hand, t, view_robber(v)))
+}
+
+/// Recompute the hand type of worlds records from their decision set, matched by (trick, id): each
+/// decision is replayed from its start state, deck and actions, and labelled from the deciding
+/// seat's view, exactly as a new run would label it. This adds the 2026-10-14 features to records
+/// made before they existed, with no new solves. A record whose decision is not in `ds` is left
+/// as it is; one whose decision disagrees with it (position, stratum, team, candidates, or the
+/// labels it already has) is an error: the wrong decision file. Returns the records relabelled.
+pub fn relabel(rows: &mut [WorldRows], ds: &[DecisionSpec]) -> Result<usize, String> {
+    let by: std::collections::BTreeMap<(u8, u64), &DecisionSpec> =
+        ds.iter().map(|d| ((d.trick, d.id), d)).collect();
+    let mut n = 0;
+    for r in rows.iter_mut() {
+        let Some(d) = by.get(&(r.trick, r.id)) else {
+            continue;
+        };
+        let (_, view, legal) = d.replay();
+        let (_, cands) = candidates(&view, &legal);
+        let h = view_hand_type(&view);
+        let old = r
+            .hand_type
+            .map(|x| (x.trumps, x.top_trumps, x.longest_plain));
+        if d.position != r.position
+            || d.stratum != r.stratum
+            || engine::team_of(d.seat) != r.team
+            || cands != r.cands
+            || old.is_some_and(|o| Some(o) != h.map(|x| (x.trumps, x.top_trumps, x.longest_plain)))
+        {
+            return Err(format!(
+                "trick {} decision {}: the decision file does not match the worlds record \
+                 (another decision set?)",
+                r.trick, r.id
+            ));
+        }
+        r.hand_type = h;
+        n += 1;
+    }
+    Ok(n)
 }
 
 impl DecisionSpec {
@@ -1016,7 +1104,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use engine::cards::card;
+    use engine::cards::{Card, card};
     use equity::MatchState;
     use solver::FnLeaf;
 
@@ -1305,11 +1393,17 @@ mod tests {
     #[test]
     fn hand_types() {
         let h = |cs: &[(Suit, u8)]| cs.iter().fold(0, |a, &(s, r)| a | bit(card(s, r)));
-        use Suit::{Clubs, Hearts, Spades};
+        use Suit::{Clubs, Diamonds, Hearts, Spades};
         let a = h(&[(Hearts, 5), (Hearts, 11), (Hearts, 1), (Spades, 13)]) | bit(JOKER);
-        let t = hand_type(a, Hearts);
+        let t = hand_type(a, Hearts, false);
         assert_eq!((t.trumps, t.top_trumps, t.longest_plain), (4, 4, 1));
         assert_eq!(t.bands(), [3, 2, 1]);
+        // Holds the 5 of hearts; void in clubs and diamonds.
+        assert_eq!(
+            (t.has_five, t.robber, t.voids),
+            (Some(true), Some(false), Some(2))
+        );
+        assert_eq!(t.feature_bands(), Some([1, 0, 2]));
         let b = h(&[
             (Hearts, 1),
             (Spades, 1),
@@ -1318,11 +1412,232 @@ mod tests {
             (Clubs, 4),
             (Clubs, 5),
         ]);
-        let t = hand_type(b, Spades);
+        let t = hand_type(b, Spades, true);
         assert_eq!((t.trumps, t.top_trumps, t.longest_plain), (3, 2, 3));
-        let t = hand_type(h(&[(Clubs, 2), (Spades, 3)]), Hearts);
+        // The 5 of clubs is not the 5 of trumps; the A♥ is a trump, so hearts is void too.
+        assert_eq!(
+            (t.has_five, t.robber, t.voids),
+            (Some(false), Some(true), Some(2))
+        );
+        assert_eq!(t.feature_bands(), Some([0, 1, 2]));
+        let t = hand_type(h(&[(Clubs, 2), (Spades, 3)]), Hearts, false);
         assert_eq!((t.trumps, t.top_trumps, t.longest_plain), (0, 0, 1));
         assert_eq!(t.bands(), [0, 0, 1]);
+        assert_eq!(t.voids, Some(1), "diamonds");
+        // Voids counting: none, the A♥ leaving hearts void, and all three plain suits (band 2+).
+        let none = h(&[
+            (Clubs, 2),
+            (Diamonds, 3),
+            (Spades, 4),
+            (Hearts, 5),
+            (Hearts, 6),
+        ]);
+        assert_eq!(hand_type(none, Hearts, false).voids, Some(0));
+        let ah = h(&[
+            (Hearts, 1),
+            (Clubs, 2),
+            (Spades, 3),
+            (Diamonds, 4),
+            (Diamonds, 5),
+        ]);
+        let t = hand_type(ah, Diamonds, false);
+        assert_eq!((t.has_five, t.voids), (Some(true), Some(1)));
+        let all = h(&[(Hearts, 5), (Hearts, 11), (Hearts, 1), (Hearts, 13)]) | bit(JOKER);
+        let t = hand_type(all, Hearts, false);
+        assert_eq!(t.voids, Some(3));
+        assert_eq!(t.feature_bands(), Some([1, 0, 2]));
+        assert_eq!(
+            [0, 1].map(|b| feature_band_name(0, b)),
+            ["has5-no", "has5-yes"]
+        );
+        assert_eq!(feature_band_name(1, 1), "robber-yes");
+        assert_eq!(
+            [0, 1, 2].map(|b| feature_band_name(2, b)),
+            ["voids0", "voids1", "voids2+"]
+        );
+    }
+
+    /// Records made before the 2026-10-14 features read with them unknown (no feature bands), and
+    /// are written back byte for byte; new records carry them.
+    #[test]
+    fn hand_types_read_old_records() {
+        let old = r#"{"trumps":2,"top_trumps":1,"longest_plain":3}"#;
+        let t: HandType = serde_json::from_str(old).expect("old record");
+        assert_eq!((t.has_five, t.robber, t.voids), (None, None, None));
+        assert_eq!(t.feature_bands(), None);
+        assert_eq!(t.bands(), [2, 1, 3]);
+        assert_eq!(serde_json::to_string(&t).expect("json"), old);
+        let new = HandType {
+            has_five: Some(true),
+            robber: Some(false),
+            voids: Some(1),
+            ..t
+        };
+        let s = serde_json::to_string(&new).expect("json");
+        assert_eq!(
+            s,
+            r#"{"trumps":2,"top_trumps":1,"longest_plain":3,"has_five":true,"robber":false,"voids":1}"#
+        );
+        assert_eq!(serde_json::from_str::<HandType>(&s).expect("new"), new);
+    }
+
+    fn deal(dealer: u8, holds: &[(u8, Card)], pack: &[Card]) -> Match {
+        let mut hands = [0 as Bits; 8];
+        for &(s, c) in holds {
+            hands[usize::from(s)] |= bit(c);
+        }
+        let deck = engine::game::build_deck(dealer, &hands, pack).expect("valid deal");
+        Match::with_decks(dealer, vec![deck], 1, Rules::HOUSE)
+    }
+
+    fn apply_lowest(m: &mut Match) {
+        let a = m.legal_actions()[0];
+        m.apply(a).expect("legal");
+    }
+
+    /// Robber after the dealer takes a turned Joker, and the ace holder robbing at their own turn;
+    /// the 5 of trumps known only once trumps are; all from the seat's own view.
+    #[test]
+    fn robber_and_five_from_the_view() {
+        let ad = card(Suit::Diamonds, 1);
+        let five_d = card(Suit::Diamonds, 5);
+        // Dealer 0; seat 3 holds the A♦; the Joker is turned, then the 5♦.
+        let mut m = deal(0, &[(3, ad)], &[JOKER, five_d]);
+        assert_eq!(m.phase(), Phase::AwaitBurn(0));
+        let v0 = m.view(0);
+        assert!(view_robber(&v0), "the dealer took the Joker and must burn");
+        assert_eq!(
+            view_hand_type(&v0),
+            None,
+            "trumps unknown: no hand type, no 5 of trumps"
+        );
+        assert!((1..8).all(|s| view_hand_type(&m.view(s)).is_none()));
+        apply_lowest(&mut m); // the dealer's burn; the 5♦ is turned: diamonds are trumps
+        assert_eq!(m.view(0).public.trump, Some(Suit::Diamonds));
+        let ht = |m: &Match, s: u8| view_hand_type(&m.view(s)).expect("trumps known");
+        assert_eq!(ht(&m, 0).robber, Some(true), "robber after the Joker take");
+        for s in 1..8 {
+            let t = ht(&m, s);
+            assert_eq!(t.robber, Some(false), "seat {s}");
+            assert_eq!(t.has_five, Some(false), "the 5♦ is on the table");
+        }
+        // Seats 1 and 2 play; then seat 3 takes the 5♦ at its own turn and must burn.
+        apply_lowest(&mut m);
+        apply_lowest(&mut m);
+        assert_eq!(m.phase(), Phase::AwaitBurn(3));
+        let t = ht(&m, 3);
+        assert_eq!(
+            (t.robber, t.has_five),
+            (Some(true), Some(true)),
+            "robber at own turn"
+        );
+        assert!(
+            !m.view(3).public.burn_order.iter().any(|&(s, _)| s == 3),
+            "not yet in the burn order"
+        );
+        apply_lowest(&mut m); // seat 3's burn (any card but the A♦)
+        assert_eq!(m.phase(), Phase::AwaitPlay(3));
+        assert_eq!(ht(&m, 3).robber, Some(true));
+        // Everyone else is unchanged, and stays so to the end of the hand.
+        while m.view(0).public.trick_no <= 3 {
+            for s in [1, 2, 4, 5, 6, 7] {
+                assert_eq!(ht(&m, s).robber, Some(false), "seat {s}");
+            }
+            assert_eq!(ht(&m, 0).robber, Some(true));
+            assert_eq!(ht(&m, 3).robber, Some(true));
+            apply_lowest(&mut m);
+        }
+    }
+
+    /// A turned ace is robbed by the dealer at once: trumps are known, so the dealer's burn
+    /// decision already has a hand type, with robber set; the 5 of trumps is seen in hand.
+    #[test]
+    fn dealer_robs_a_turned_ace() {
+        let as_ = card(Suit::Spades, 1);
+        let five_s = card(Suit::Spades, 5);
+        let mut m = deal(5, &[(2, five_s)], &[as_]);
+        assert_eq!(m.phase(), Phase::AwaitBurn(5));
+        let t = view_hand_type(&m.view(5)).expect("trumps known");
+        assert_eq!(t.robber, Some(true));
+        assert_eq!(
+            view_hand_type(&m.view(2)).expect("known").has_five,
+            Some(true)
+        );
+        assert_eq!(
+            view_hand_type(&m.view(1)).expect("known").has_five,
+            Some(false)
+        );
+        apply_lowest(&mut m);
+        assert_eq!(
+            view_hand_type(&m.view(5)).expect("known").robber,
+            Some(true)
+        );
+        assert!(
+            (0..8)
+                .filter(|&s| s != 5)
+                .all(|s| { view_hand_type(&m.view(s)).expect("known").robber == Some(false) })
+        );
+        // No rob at all: a plain turned card with the ace of trumps undealt (it is the next
+        // card of the pack).
+        let m = deal(5, &[], &[card(Suit::Clubs, 9), card(Suit::Clubs, 1)]);
+        assert!((0..8).all(|s| view_hand_type(&m.view(s)).expect("known").robber == Some(false)));
+    }
+
+    /// `relabel` recomputes the hand types of records from their decision set (old records gain
+    /// the features), leaves records of other decisions alone, and refuses a mismatched set.
+    #[test]
+    fn relabel_from_decisions() {
+        let starts = collect_starts(400, 5);
+        let ds = build_decisions(3, 16, 2, &starts);
+        assert!(
+            ds.iter()
+                .all(|d| d.hand_type.is_some_and(|h| h.feature_bands().is_some()))
+        );
+        let rec = |d: &DecisionSpec| {
+            let (_, v, legal) = d.replay();
+            let (_, cands) = candidates(&v, &legal);
+            let h = view_hand_type(&v).expect("trumps known at trick 3");
+            assert_eq!(Some(h), d.hand_type);
+            WorldRows {
+                id: d.id,
+                trick: d.trick,
+                stratum: d.stratum,
+                position: d.position,
+                team: engine::team_of(d.seat),
+                method: "exact".into(),
+                label: 1,
+                from: 0,
+                cands,
+                rows: Vec::new(),
+                log2_worlds: None,
+                // As written before the features existed.
+                hand_type: Some(HandType {
+                    has_five: None,
+                    robber: None,
+                    voids: None,
+                    ..h
+                }),
+            }
+        };
+        let mut rows: Vec<WorldRows> = ds.iter().map(rec).collect();
+        let mut other = rec(&ds[0]);
+        other.id = 999;
+        rows.push(other.clone());
+        assert_eq!(relabel(&mut rows, &ds), Ok(ds.len()));
+        for (r, d) in rows.iter().zip(&ds) {
+            assert_eq!(r.hand_type, d.hand_type, "decision {}", d.id);
+        }
+        assert_eq!(rows[ds.len()], other, "not in the set: unchanged");
+        // A decision set that does not match is refused.
+        let mut bad = vec![rec(&ds[1])];
+        bad[0].position = (bad[0].position + 1) % 8;
+        assert!(relabel(&mut bad, &ds).is_err());
+        let mut bad = vec![rec(&ds[1])];
+        bad[0].id = ds[2].id;
+        assert!(relabel(&mut bad, &ds).is_err());
+        let mut wrong_trick = vec![rec(&ds[1])];
+        wrong_trick[0].trick = 4;
+        assert_eq!(relabel(&mut wrong_trick, &ds), Ok(0));
     }
 
     #[test]

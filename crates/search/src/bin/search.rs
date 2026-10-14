@@ -7,7 +7,9 @@
 //!                  [--ids 3,17,42 | --ids FILE] [--threads K] [--solve-threads K] [--tt-mb M]
 //!                  --equity TABLE [--progress FILE]
 //! search agree     --worlds FILE [--worlds FILE …] [--grid 10,20,40,80,160,320] [--json FILE]
-//! search curves    --worlds FILE [--worlds FILE …] [--grid 10,20,…|10:320:10] [--m M]
+//!                  [--decisions FILE …]
+//! search curves    --worlds FILE [--worlds FILE …] [--decisions FILE …]
+//!                  [--grid 10,20,…|10:320:10] [--m M]
 //!                  [--splits 400] [--boot 1000] [--seed 1] [--ids …]
 //!                  [--thresholds 0.0001,0.00005,0.00002] [--min-cell 10] [--threads K]
 //!                  [--method exact] [--label 1] [--json FILE]
@@ -31,7 +33,11 @@
 //! file or another), and `agree`, `curves` and `score` join every record of a decision, so they
 //! see exactly the rows one longer run would have written (§13.1 item 10).
 //! `agree` reports N against 2N on the grid, per trick, per position in the trick (§13.1 item 6),
-//! per match-state stratum and per log2 world-count band (item 8) and per hand-type band (item 9);
+//! per match-state stratum and per log2 world-count band (item 8) and per hand-type band (item 9:
+//! trumps, top trumps, longest plain suit; and the hand features added on 2026-10-14, holds the 5
+//! of trumps, robber, void plain suits). Worlds records made before those features existed lack
+//! them: `--decisions FILE` (the decision set, repeatable) replays each decision from its deck and
+//! actions and labels it again, with no new solves; `agree` and `curves` both take it.
 //! `curves` turns the saved rows into money-loss curves on a fine N grid, with power-law fits,
 //! held-out checks and the N needed per money-loss threshold (item 10, `search::curves`);
 //! `score` reports per position and stratum.
@@ -47,8 +53,8 @@ use search::bot::{PimcFactory, PimcSpec, load_equity};
 use search::curves::{CurveParams, N_CAP, TrickReport, analyse, score_groups};
 use search::measure::{
     BatchProgress, DecisionSpec, DecisionTiming, WorldRows, WorldsJob, agreement_curve,
-    build_decisions, collect_starts, paired, parse_ids, read_jsonl, read_worlds, score, stratum_of,
-    summarise, timing_path, worlds_file,
+    build_decisions, collect_starts, feature_band_name, paired, parse_ids, read_jsonl, read_worlds,
+    relabel, score, stratum_of, summarise, timing_path, worlds_file,
 };
 use search::pimc::{Ctx, Method, SearchConfig, SharedLeaf};
 use search::teacher::{decisions_npy, teacher_deck, teacher_hand};
@@ -330,7 +336,7 @@ fn grid(a: &Args) -> Result<Vec<usize>, String> {
 }
 
 /// Every `--worlds` file, merged (extension records joined to the earlier worlds), restricted to
-/// `--ids` when given.
+/// `--ids` when given, with hand types recomputed from the `--decisions` files when given.
 fn worlds_args(a: &Args) -> Result<Vec<WorldRows>, String> {
     let paths: Vec<&Path> = a.all("--worlds").into_iter().map(Path::new).collect();
     if paths.is_empty() {
@@ -341,10 +347,34 @@ fn worlds_args(a: &Args) -> Result<Vec<WorldRows>, String> {
         eprintln!("warning: {w}");
     }
     let ids = a.get("--ids").map(parse_ids).transpose()?;
-    Ok(rows
+    let mut rows: Vec<WorldRows> = rows
         .into_iter()
         .filter(|r| ids.as_ref().is_none_or(|ids| ids.contains(&r.id)))
-        .collect())
+        .collect();
+    // Hand types recomputed from the decision sets (the 2026-10-14 features for old records).
+    let decision_files = a.all("--decisions");
+    if !decision_files.is_empty() {
+        let mut ds: Vec<DecisionSpec> = Vec::new();
+        for f in &decision_files {
+            ds.extend(read_lines::<DecisionSpec>(f)?);
+        }
+        let n = relabel(&mut rows, &ds)?;
+        eprintln!(
+            "hand types recomputed for {n} of {} records from {}",
+            rows.len(),
+            decision_files.join(", ")
+        );
+    }
+    if rows
+        .iter()
+        .any(|r| r.hand_type.is_some_and(|h| h.feature_bands().is_none()))
+    {
+        eprintln!(
+            "note: some records predate the hand features (holds the 5 of trumps, robber, voids); \
+             pass --decisions FILE (their decision set) to compute them"
+        );
+    }
+    Ok(rows)
 }
 
 /// The fewest decisions a reported cell should have (§13.1 item 8).
@@ -390,6 +420,9 @@ fn agree(a: &Args) -> Result<(), String> {
                 (6, u32::from(top)),
                 (7, u32::from(plain)),
             ]);
+            if let Some(f) = h.feature_bands() {
+                keys.extend((0..3).map(|j| (8 + j as u8, u32::from(f[j]))));
+            }
         }
         for (kind, i) in keys {
             groups.entry((r.trick, kind, i)).or_default().push(r);
@@ -403,11 +436,12 @@ fn agree(a: &Args) -> Result<(), String> {
         4 => format!("log2worlds{i}"),
         5 => format!("trumps{i}{}", if i == 3 { "+" } else { "" }),
         6 => format!("top{i}{}", if i == 2 { "+" } else { "" }),
-        _ => match i {
+        7 => match i {
             1 => "plain0-1".to_string(),
             3 => "plain3+".to_string(),
             _ => format!("plain{i}"),
         },
+        _ => feature_band_name(usize::from(kind - 8), i as u8),
     };
     let mut report = serde_json::Map::new();
     let mut last_kind = None;
@@ -425,6 +459,9 @@ fn agree(a: &Args) -> Result<(), String> {
                     "hand type: trumps held",
                     "hand type: top trumps held (5, J, Joker, A♥, ace of trumps)",
                     "hand type: longest plain suit",
+                    "hand type: holds the 5 of trumps",
+                    "hand type: robber (took a turned card this hand)",
+                    "hand type: void plain suits",
                 ][usize::from(kind)]
             );
         }
@@ -613,6 +650,20 @@ fn print_trick(t: &TrickReport) {
         search::curves::ENOUGH,
         t.k
     );
+    if !t.contrasts.is_empty() {
+        println!(
+            "hand features, N({}) of one group over another [95%, paired bootstrap]: {}",
+            pct(t.thresholds.first().copied().unwrap_or(f64::NAN)),
+            t.contrasts
+                .iter()
+                .map(|c| format!(
+                    "{}/{} {:.2} [{:.2}, {:.2}]",
+                    c.group, c.vs, c.n_ratio.v, c.n_ratio.lo, c.n_ratio.hi
+                ))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
 }
 
 fn curves(a: &Args) -> Result<(), String> {

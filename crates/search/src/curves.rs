@@ -20,9 +20,11 @@
 //! - *cv on half the data* (`cv_half`): the same on the first M/2 worlds only (K' = M/4), for the
 //!   extrapolation check below.
 //!
-//! **Groups**: all decisions; each position, stratum and hand-type band; position × stratum,
-//! position × trumps band, stratum × trumps band and position × stratum × trumps band cells with
-//! at least `min_cell` decisions. A group's curve is the plain mean over its decisions.
+//! **Groups**: all decisions; each position, stratum and hand-type band (trumps, top trumps,
+//! longest plain suit, and the hand features: holds the 5 of trumps, robber, void plain suits);
+//! position × stratum, position × trumps band, stratum × trumps band and position × stratum ×
+//! trumps band cells with at least `min_cell` decisions. A group's curve is the plain mean over
+//! its decisions.
 //!
 //! **Uncertainty**: a stratified bootstrap of decisions (each replicate resamples, with
 //! replacement, the decisions of every position × stratum design cell; seeded), recomputing every
@@ -42,7 +44,9 @@
 //! marked inside or outside the measured 95% band.
 //!
 //! **Thresholds**: N(θ) = (a/θ)^(1/b) per group and threshold θ (money chance), capped at
-//! [`N_CAP`].
+//! [`N_CAP`]. The hand-feature groups are also compared in pairs ([`CONTRASTS`]: holders of the 5
+//! of trumps against the rest, robbers against the rest, one void against none, two or more
+//! against one): the ratio of their N at the first threshold, with a paired bootstrap range.
 //!
 //! Everything here is a report: values and choices are integer, statistics are `f64`.
 
@@ -53,7 +57,7 @@ use engine::rng::Rng;
 use equity::{MoneyChance, ONE};
 use serde::Serialize;
 
-use crate::measure::WorldRows;
+use crate::measure::{WorldRows, feature_band_name};
 
 /// Seed label for the curves' world permutations and bootstrap.
 pub const CURVES: u64 = 0xC0F5;
@@ -111,6 +115,9 @@ pub struct DecisionCurve {
     pub stratum: u8,
     /// Hand-type bands (trumps, top trumps, longest plain suit), when known.
     pub bands: Option<[u8; 3]>,
+    /// Hand-feature bands (holds the 5 of trumps, robber, void plain suits), when known
+    /// ([`crate::measure::HandType::feature_bands`]).
+    pub features: Option<[u8; 3]>,
     /// log2 world count, when known.
     pub log2_worlds: Option<u32>,
     /// Loss of the first-N choice under the M-world means (units of 2^-32), per grid N.
@@ -253,6 +260,7 @@ pub fn decision_curve(
         position: r.position,
         stratum: r.stratum,
         bands: r.hand_type.map(|h| h.bands()),
+        features: r.hand_type.and_then(|h| h.feature_bands()),
         log2_worlds: r.log2_worlds,
         prefix,
         plain,
@@ -486,9 +494,9 @@ pub struct Check {
 #[derive(Clone, Debug, Serialize)]
 pub struct GroupReport {
     /// `all`, `position`, `stratum`, `trumps`, `top_trumps`, `longest_plain`, `log2_worlds`,
-    /// or a cell kind such as `position×stratum`.
+    /// `has_five`, `robber`, `voids`, or a cell kind such as `position×stratum`.
     pub kind: String,
-    /// Display name (`pos1`, `S2`, `trumps3+`, `pos1·S2`, …).
+    /// Display name (`pos1`, `S2`, `trumps3+`, `has5-yes`, `robber-no`, `voids2+`, `pos1·S2`, …).
     pub name: String,
     /// Decisions.
     pub decisions: usize,
@@ -561,6 +569,30 @@ pub struct TrickReport {
     pub half_log_ratio: f64,
     /// Groups.
     pub groups: Vec<GroupReport>,
+    /// Hand-feature groups compared ([`CONTRASTS`]), when both groups are there.
+    pub contrasts: Vec<Contrast>,
+}
+
+/// The hand-feature comparisons reported (kind, group, the group it is compared with).
+pub const CONTRASTS: [(&str, &str, &str); 4] = [
+    ("has_five", "has5-yes", "has5-no"),
+    ("robber", "robber-yes", "robber-no"),
+    ("voids", "voids1", "voids0"),
+    ("voids", "voids2+", "voids1"),
+];
+
+/// The N one group needs relative to another of the same trick.
+#[derive(Clone, Debug, Serialize)]
+pub struct Contrast {
+    /// The feature (`has_five`, `robber`, `voids`).
+    pub kind: String,
+    /// The group (e.g. `has5-yes`).
+    pub group: String,
+    /// The group it is compared with (e.g. `has5-no`).
+    pub vs: String,
+    /// N(group) / N(vs) at the first threshold, and its 95% range from the same bootstrap
+    /// replicates (paired: each replicate refits both groups on one re-draw of the decisions).
+    pub n_ratio: Est,
 }
 
 struct Group {
@@ -602,10 +634,10 @@ fn groups_of(cs: &[DecisionCurve], min_cell: usize) -> Vec<Group> {
                 },
                 i,
             );
-            add(8, "position×trumps", format!("{p}·{}", tb(t)), i);
-            add(9, "stratum×trumps", format!("{s}·{}", tb(t)), i);
+            add(11, "position×trumps", format!("{p}·{}", tb(t)), i);
+            add(12, "stratum×trumps", format!("{s}·{}", tb(t)), i);
             add(
-                10,
+                13,
                 "position×stratum×trumps",
                 format!("{p}·{s}·{}", tb(t)),
                 i,
@@ -614,10 +646,15 @@ fn groups_of(cs: &[DecisionCurve], min_cell: usize) -> Vec<Group> {
         if let Some(l) = c.log2_worlds {
             add(6, "log2_worlds", format!("log2worlds{l}"), i);
         }
-        add(7, "position×stratum", format!("{p}·{s}"), i);
+        if let Some(f) = c.features {
+            for (j, kind) in ["has_five", "robber", "voids"].into_iter().enumerate() {
+                add(7 + j as u8, kind, feature_band_name(j, f[j]), i);
+            }
+        }
+        add(10, "position×stratum", format!("{p}·{s}"), i);
     }
     map.into_iter()
-        .filter(|((o, _, _), m)| *o <= 6 || m.len() >= min_cell)
+        .filter(|((o, _, _), m)| *o <= 9 || m.len() >= min_cell)
         .map(|((o, kind, name), members)| Group {
             kind,
             name,
@@ -879,6 +916,8 @@ pub fn analyse_trick(trick: u8, rows: &[&WorldRows], p: &CurveParams) -> Option<
         .collect();
 
     let mut reports = Vec::new();
+    // ln a and its replicates of the groups that [`CONTRASTS`] compares.
+    let mut fits: BTreeMap<(String, String), (Option<f64>, Vec<f64>)> = BTreeMap::new();
     let (mut ho_in, mut ho_tot, mut ho_lr, mut ho_lrn) = (0, 0, 0.0, 0);
     let (mut hf_in, mut hf_tot, mut hf_lr, mut hf_lrn) = (0, 0, 0.0, 0);
     for g in &groups {
@@ -1024,6 +1063,12 @@ pub fn analyse_trick(trick: u8, rows: &[&WorldRows], p: &CurveParams) -> Option<
                 .collect(),
             _ => Vec::new(),
         };
+        if CONTRASTS
+            .iter()
+            .any(|&(kind, a, b)| kind == g.kind && (a == g.name || b == g.name))
+        {
+            fits.insert((g.kind.clone(), g.name.clone()), (la, la_reps.clone()));
+        }
         reports.push(GroupReport {
             kind: g.kind.clone(),
             name: g.name.clone(),
@@ -1042,6 +1087,24 @@ pub fn analyse_trick(trick: u8, rows: &[&WorldRows], p: &CurveParams) -> Option<
             n_for: n_for_v,
         });
     }
+    let th0 = p.thresholds.first().copied().unwrap_or(1e-4);
+    let contrasts = CONTRASTS
+        .iter()
+        .filter_map(|&(kind, a, b)| {
+            let fa = fits.get(&(kind.to_string(), a.to_string()))?;
+            let fb = fits.get(&(kind.to_string(), b.to_string()))?;
+            let v = n_for(fa.0?, b0?, th0) / n_for(fb.0?, b0?, th0);
+            let mut reps: Vec<f64> = (0..counts.len())
+                .map(|r| n_for(fa.1[r], b_reps[r], th0) / n_for(fb.1[r], b_reps[r], th0))
+                .collect();
+            Some(Contrast {
+                kind: kind.to_string(),
+                group: a.to_string(),
+                vs: b.to_string(),
+                n_ratio: est(v, &mut reps),
+            })
+        })
+        .collect();
     Some(TrickReport {
         trick,
         decisions: used.len(),
@@ -1071,6 +1134,7 @@ pub fn analyse_trick(trick: u8, rows: &[&WorldRows], p: &CurveParams) -> Option<
             f64::NAN
         },
         groups: reports,
+        contrasts,
     })
 }
 
@@ -1237,6 +1301,9 @@ mod tests {
                 trumps: (id % 4) as u8,
                 top_trumps: (id % 3) as u8,
                 longest_plain: 2,
+                has_five: Some(id.is_multiple_of(5)),
+                robber: Some(id.is_multiple_of(7)),
+                voids: Some((id % 3) as u8),
             }),
         }
     }
@@ -1433,6 +1500,91 @@ mod tests {
         assert!(t.groups.iter().any(|g| g.name == "pos1·S1"));
         assert_eq!(t.groups[0].name, "all");
         assert_eq!(t.groups[0].n_for.len(), 3);
+    }
+
+    /// The hand-feature groups (holds the 5 of trumps, robber, void plain suits) hold exactly the
+    /// right decisions, and adding them changes no other group: records made before the features
+    /// existed give the same report, without those groups.
+    #[test]
+    fn feature_groups_and_old_records() {
+        let rs = random_set(64, 48, 11);
+        let p = CurveParams {
+            grid: (1..=12).map(|i| 4 * i).collect(),
+            splits: 10,
+            boots: 20,
+            min_cell: 4,
+            ..CurveParams::default()
+        };
+        let t = &analyse(&rs, &p)[0];
+        let members = |kind: &str, name: &str| {
+            t.groups
+                .iter()
+                .find(|g| g.kind == kind && g.name == name)
+                .map_or(0, |g| g.decisions)
+        };
+        let n = |f: &dyn Fn(u64) -> bool| rs.iter().filter(|r| f(r.id)).count();
+        assert_eq!(
+            members("has_five", "has5-yes"),
+            n(&|id| id.is_multiple_of(5))
+        );
+        assert_eq!(
+            members("has_five", "has5-no"),
+            n(&|id| !id.is_multiple_of(5))
+        );
+        assert_eq!(
+            members("robber", "robber-yes"),
+            n(&|id| id.is_multiple_of(7))
+        );
+        assert_eq!(
+            members("robber", "robber-no"),
+            n(&|id| !id.is_multiple_of(7))
+        );
+        for v in 0..3u64 {
+            let name = ["voids0", "voids1", "voids2+"][v as usize];
+            assert_eq!(members("voids", name), n(&|id| id % 3 == v), "{name}");
+        }
+        let new_kinds = ["has_five", "robber", "voids"];
+        assert!(
+            t.groups
+                .iter()
+                .all(|g| !new_kinds.contains(&g.kind.as_str()) || g.a.is_some())
+        );
+        // The comparisons: every pair present, each the ratio of the two groups' N.
+        assert_eq!(t.contrasts.len(), CONTRASTS.len());
+        for c in &t.contrasts {
+            let nf = |name: &str| {
+                t.groups
+                    .iter()
+                    .find(|g| g.kind == c.kind && g.name == name)
+                    .expect("group")
+                    .n_for[0]
+                    .v
+            };
+            assert!((c.n_ratio.v - nf(&c.group) / nf(&c.vs)).abs() < 1e-9 * c.n_ratio.v);
+            assert!(c.n_ratio.lo <= c.n_ratio.hi);
+        }
+        let old: Vec<WorldRows> = rs
+            .iter()
+            .map(|r| WorldRows {
+                hand_type: r.hand_type.map(|h| HandType {
+                    has_five: None,
+                    robber: None,
+                    voids: None,
+                    ..h
+                }),
+                ..r.clone()
+            })
+            .collect();
+        let t_old = &analyse(&old, &p)[0];
+        let json = |g: &GroupReport| serde_json::to_string(g).expect("json");
+        let kept: Vec<String> = t
+            .groups
+            .iter()
+            .filter(|g| !new_kinds.contains(&g.kind.as_str()))
+            .map(json)
+            .collect();
+        assert_eq!(kept, t_old.groups.iter().map(json).collect::<Vec<_>>());
+        assert!(t_old.contrasts.is_empty());
     }
 
     #[test]

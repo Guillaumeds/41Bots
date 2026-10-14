@@ -499,6 +499,7 @@ The yardstick is for **measuring only, not training**. Its size is set by measur
    - The decision count is raised until every reported cell has at least 25 decisions.
    - The golden set is built with the same stratification.
 9. **Hand type (owner, 2026-10-14).** Every decision record carries the deciding seat's hand type, computed from cards it can see: number of trumps held, number of top trumps held (5, J, Joker, A♥, ace of trumps), and the longest plain suit.
+   - **Added features (owner, 2026-10-14):** holds the 5 of trumps (yes/no); robber (yes/no: took a turned card this hand, including a dealer who took a turned Joker or robbed a turned ace, from the public burn order); void plain suits (0, 1, 2+). Partners always sit across, so there is no partner feature. `agree` and `curves` report these groups too, and `curves` compares their N in pairs (paired bootstrap ratio). Older worlds files get them by `--decisions FILE`, which replays each decision; no re-solving.
    - The agreement output reports the plateau per hand-type band, alongside position and stratum.
    - **Tricks 2–4 run first**, to learn which hand types need the most worlds. The expensive trick-1 set is then sampled with more decisions in the bands that need them.
    - Each band is weighted back to its true frequency, from the 20,000-hand start pool, when the overall N and the golden set's summary are reported. Sampling more of the hard bands never biases the answer.

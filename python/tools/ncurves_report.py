@@ -446,6 +446,161 @@ def n_table(t, groups):
             f"<th>own b</th>{th}</tr></thead><tbody>{''.join(rows)}</tbody></table>")
 
 
+FEATURE_KINDS = ("has_five", "robber", "voids")
+FEATURE_ORDER = ["has5-yes", "has5-no", "robber-yes", "robber-no", "voids0", "voids1", "voids2+"]
+FEATURE_TEXT = {
+    "has5-yes": "holds the 5 of trumps",
+    "has5-no": "does not hold the 5",
+    "robber-yes": "robber (took a turned card)",
+    "robber-no": "not a robber",
+    "voids0": "no void plain suit",
+    "voids1": "void in one plain suit",
+    "voids2+": "void in two or more",
+}
+CONTRAST_TEXT = {
+    ("has5-yes", "has5-no"): "Holding the 5 of trumps",
+    ("robber-yes", "robber-no"): "Being the robber",
+    ("voids1", "voids0"): "One void plain suit rather than none",
+    ("voids2+", "voids1"): "Two or more voids rather than one",
+}
+
+
+def feature_groups(t):
+    return [g for g in t["groups"] if g["kind"] in FEATURE_KINDS]
+
+
+def ratio_text(e):
+    return f"{e['v']:.1f}× <span class=r>({e['lo']:.1f}–{e['hi']:.1f}×)</span>"
+
+
+def verdict(e):
+    if e["lo"] > 1:
+        return "more deals, clearly"
+    if e["hi"] < 1:
+        return "fewer deals, clearly"
+    return "no clear difference yet"
+
+
+def overview_features(tricks, out_dir, images):
+    """N for the first threshold per hand-feature group (dots with 95% whiskers), one series per
+    trick (fixed colours and marker shapes, as in the position chart)."""
+    colors = [BLUE, ORANGE, "#1baf7a", "#6250d6"]
+    marks = ["o", "s", "D", "^"]
+    fig, ax = plt.subplots(figsize=(9.6, 3.8))
+    width = 0.2
+    for i, t in enumerate(tricks):
+        by_name = {g["name"]: g for g in feature_groups(t) if g["n_for"]}
+        xs, v, lo, hi = [], [], [], []
+        for j, name in enumerate(FEATURE_ORDER):
+            g = by_name.get(name)
+            if g is None or not g["enough"]:
+                continue
+            e = g["n_for"][0]
+            xs.append(j + (i - (len(tricks) - 1) / 2) * width)
+            v.append(e["v"])
+            lo.append(e["lo"])
+            hi.append(e["hi"])
+        ax.errorbar(xs, v, yerr=[[a - b for a, b in zip(v, lo)], [c - a for a, c in zip(v, hi)]],
+                    fmt=marks[i % 4], ms=6, color=colors[i % 4], ecolor=colors[i % 4], elinewidth=1.4,
+                    capsize=0, label=f"trick {t['trick']}")
+    for x in (1.5, 3.5):
+        ax.axvline(x, color=GRIDC, lw=1.2)
+    ax.set_yscale("log")
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v:,.0f}"))
+    ax.set_xticks(range(len(FEATURE_ORDER)))
+    ax.set_xticklabels([n.replace("-", " ") for n in FEATURE_ORDER])
+    ax.set_xlim(-0.5, len(FEATURE_ORDER) - 0.5)
+    ax.set_ylabel("deals needed")
+    th = tricks[0]["thresholds"][0]
+    ax.set_title(f"Deals needed for an expected loss of {thr_label(th)}, by hand feature (dot, 95% range)", loc="left")
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.1), ncol=len(tricks), fontsize=7.5)
+    fig.tight_layout()
+    save(fig, out_dir, "overview-hand-features.png", images)
+
+
+def features_section(tricks, out_dir, images):
+    """The hand features added on 2026-10-14 (holds the 5 of trumps, robber, voids): N for the
+    first threshold per group and trick, and the paired comparisons."""
+    have = [t for t in tricks if feature_groups(t)]
+    if not have:
+        return ""
+    overview_features(have, out_dir, images)
+    th = have[0]["thresholds"][0]
+    head = "".join(f"<th>trick {t['trick']}: decisions</th><th>N for {thr_label(th)}</th>" for t in have)
+    rows = []
+    for name in FEATURE_ORDER:
+        cells = []
+        for t in have:
+            g = next((g for g in feature_groups(t) if g["name"] == name), None)
+            if g is None:
+                cells.append("<td>0</td><td>–</td>")
+                continue
+            warn = "" if g["enough"] else " <span class=warn>few</span>"
+            nf = est_text(g["n_for"][0]) if g["n_for"] else "no fit"
+            cells.append(f"<td>{g['decisions']}{warn}</td><td>{nf}</td>")
+        rows.append(f"<tr><td>{html.escape(name)} <span class=r>{FEATURE_TEXT[name]}</span></td>{''.join(cells)}</tr>")
+    table = (f"<table><thead><tr><th>group</th>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table>")
+    chead = "".join(f"<th>trick {t['trick']}</th>" for t in have)
+    crow = []
+    for (a, b), label in CONTRAST_TEXT.items():
+        cells = []
+        for t in have:
+            c = next((c for c in t.get("contrasts", []) if c["group"] == a and c["vs"] == b), None)
+            if c is None:
+                cells.append("<td>–</td>")
+                continue
+            enough = all(g["enough"] for g in feature_groups(t) if g["name"] in (a, b))
+            warn = "" if enough else " <span class=warn>few</span>"
+            cells.append(f"<td>{ratio_text(c['n_ratio'])}{warn}<br><span class=r>{verdict(c['n_ratio'])}</span></td>")
+        crow.append(f"<tr><td>{label} <span class=r>({a} ÷ {b})</span></td>{''.join(cells)}</tr>")
+    ctable = (f"<table><thead><tr><th>deals needed by …</th>{chead}</tr></thead>"
+              f"<tbody>{''.join(crow)}</tbody></table>")
+    # Plain-English findings, from the numbers.
+    facts = []
+    for (a, b), label in CONTRAST_TEXT.items():
+        parts = []
+        for t in have:
+            c = next((c for c in t.get("contrasts", []) if c["group"] == a and c["vs"] == b), None)
+            if c is None:
+                continue
+            ga = next(g for g in feature_groups(t) if g["name"] == a)
+            gb = next(g for g in feature_groups(t) if g["name"] == b)
+            few = "" if ga["enough"] and gb["enough"] else ", too few decisions to judge"
+            parts.append(f"trick {t['trick']}: {n_text(ga['n_for'][0]['v'])} against {n_text(gb['n_for'][0]['v'])} "
+                         f"deals, {c['n_ratio']['v']:.1f}× ({verdict(c['n_ratio'])}{few})")
+        if parts:
+            facts.append(f"<li><b>{label}:</b> " + "; ".join(parts) + ".</li>")
+    def size(t, name):
+        return next((g["decisions"] for g in feature_groups(t) if g["name"] == name), 0)
+
+    yes = [size(t, n) for t in have for n in ("has5-yes", "robber-yes")]
+    no_void = ", ".join(f"{size(t, 'voids0')} at trick {t['trick']}" for t in have)
+    sparse = [str(t["trick"]) for t in have if size(t, "voids0") < 25]
+    return f"""
+<h2 id=features>The 5 of trumps, robbing and voids</h2>
+<p>Three more facts about the deciding player's hand, each something the player can see for themselves
+(owner, 2026-10-14): whether they <b>hold the 5 of trumps</b> (the bonus card), whether they are
+<b>the robber</b> (they took a turned card this hand: robbed it with the ace of trumps, or, as dealer,
+robbed a turned ace or took a turned Joker), and how many <b>plain suits they are void in</b> [hold no card
+of]. Partners always sit across, so there is no feature for that. These were worked out again from the saved
+decisions (each one replayed from its deal and the cards played), so nothing was solved again.</p>
+{img(images, "overview-hand-features.png", "Deals needed by hand feature, per trick")}
+<p class=sub>Groups with fewer than 25 decisions are left out of the chart{
+f" (the no-void group at trick{'s' if len(sparse) > 1 else ''} {' and '.join(sparse)})" if sparse else ""}. Deals needed for an expected loss of {thr_label(th)} per decision, with the 95% range in brackets:</p>
+{table}
+<p>The fairest comparison is the ratio of the deals two groups need, because both groups are refitted on the
+same 1,000 re-draws of the decisions. A ratio above 1 means the first group needs more deals; when the whole
+range is above 1 the difference is clear, when the range straddles 1 these samples cannot tell yet.</p>
+{ctable}
+<ul>{''.join(facts)}</ul>
+<p class=sub>The holders of the 5 and the robbers are only {min(yes)}–{max(yes)} decisions per trick (the
+decisions were not chosen with these features in mind), so most ranges are wide; like every group, their curves
+use the trick's shared exponent. Players hold fewer cards as the hand goes on, so hands with no void get rare
+(decisions with no void: {no_void}). The trick-1 set can sample more decisions in a group that turns out to need
+many deals (M3-SPEC §13.1 item 9).</p>
+"""
+
+
 def compare_table(t, groups, ns):
     """Measured loss at chosen N by the three readings: cross-fitted, plain, nested prefix."""
     head = "".join(f"<th>N = {n}</th>" for n in ns)
@@ -506,6 +661,7 @@ def main():
     overview_n(tricks, a.out, images)
     overview_curves(tricks, a.out, images)
     overview_b(tricks, a.out, images)
+    features = features_section(tricks, a.out, images)
     rollout = ""
     for sp in a.score:
         with open(sp) as f:
@@ -520,6 +676,9 @@ def main():
         group_figure(t, by("stratum"), f"t{tr}-strata.png", a.out, images)
         hand = by("trumps") + by("top_trumps") + by("longest_plain")
         group_figure(t, hand, f"t{tr}-hand-types.png", a.out, images)
+        feats = feature_groups(t)
+        if feats:
+            group_figure(t, feats, f"t{tr}-hand-features.png", a.out, images)
         cells = [g for g in t["groups"] if "×" in g["kind"]]
         b = t["b"]
         ho_in, ho_tot = t["heldout_inside"]
@@ -556,14 +715,18 @@ def main():
              n_table(t, by("stratum")),
              "<h3>By hand type (trumps held, top trumps held, longest plain suit)</h3>",
              img(images, f"t{tr}-hand-types.png", f"Trick {tr} loss curves by hand type"),
-             n_table(t, hand),
-             "<details><summary>Cells: position × situation × trumps held (small groups; indicative only)</summary>",
-             n_table(t, cells), "</details>",
-             "<details><summary>The three readings of the measured loss, side by side</summary>",
-             "<p>Split-half is what the curve is fitted to. The plain reading (random N deals judged against all "
-             f"{t['worlds']}) reads low as N approaches {t['worlds']}, because its referee shares deals with the player. "
-             "The first-N reading is the single nested run the agreement report uses: noisy, since it is one draw.</p>",
-             compare_table(t, allg + by("position"), ns), "</details>"]
+             n_table(t, hand)]
+        if feats:
+            s += ["<h3>By hand feature (holds the 5 of trumps, robber, void plain suits)</h3>",
+                  img(images, f"t{tr}-hand-features.png", f"Trick {tr} loss curves by hand feature"),
+                  n_table(t, feats)]
+        s += ["<details><summary>Cells: position × situation × trumps held (small groups; indicative only)</summary>",
+              n_table(t, cells), "</details>",
+              "<details><summary>The three readings of the measured loss, side by side</summary>",
+              "<p>Split-half is what the curve is fitted to. The plain reading (random N deals judged against all "
+              f"{t['worlds']}) reads low as N approaches {t['worlds']}, because its referee shares deals with the player. "
+              "The first-N reading is the single nested run the agreement report uses: noisy, since it is one draw.</p>",
+              compare_table(t, allg + by("position"), ns), "</details>"]
         sections.append("\n".join(s))
     t0 = tricks[0]
     th = t0["thresholds"]
@@ -606,6 +769,21 @@ def main():
     summary = ("<table><thead><tr><th></th><th>b</th><th>all</th>"
                + "".join(f"<th>pos {i}</th>" for i in range(1, 9))
                + f"</tr></thead><tbody>{''.join(summary_rows)}</tbody></table>")
+    # One line on the hand features: the comparisons whose whole range is on one side of 1.
+    clear = []
+    for t in tricks:
+        for c in t.get("contrasts", []):
+            e = c["n_ratio"]
+            if e["lo"] > 1 or e["hi"] < 1:
+                label = CONTRAST_TEXT.get((c["group"], c["vs"]), f"{c['group']} vs {c['vs']}")
+                clear.append(f"{label.lower()} at trick {t['trick']} ({e['v']:.1f}×, range {e['lo']:.1f}–{e['hi']:.1f}×)")
+    features_bullet = ""
+    if features:
+        features_bullet = (
+            "<li><b>Hand features</b> (<a href=#features>details</a>): "
+            + ("the clear differences in deals needed: " + "; ".join(clear) + ". "
+               if clear else "no comparison shows a clear difference yet. ")
+            + "The other comparisons have ranges on both sides of 1, so these samples cannot call them yet.</li>")
     page = f"""<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>How Many Deals</title><style>{CSS}</style></head><body><main>
@@ -629,6 +807,7 @@ player per decision, since a match swings 8 stakes.)</p>
 {img(images, "overview-n-by-position.png", "Deals needed per position, both tricks")}
 {img(images, "overview-predicted-loss.png", "Predicted loss against deals, by position")}
 <ul>
+{features_bullet}
 <li>The loss shrinks like a power of N: <b>loss = a × N<sup>−b</sup></b>. Each scenario has its own size <i>a</i>;
 one exponent <i>b</i> is shared by all scenarios of a trick, as asked. With b around 0.7–0.8, doubling the
 deals cuts the loss by roughly 40–45%. (If b were 1, doubling would halve it.)</li>
@@ -664,6 +843,8 @@ is the honest test of predicting beyond the measured range.</p>
 <p class=sub>Each group's own exponent is uncertain because each group has only about 50–100 decisions.
 {b_note}</p>
 
+{features}
+
 {rollout}
 
 {''.join(sections)}
@@ -682,8 +863,13 @@ group; other groups get their own a with the trick's b. N for a threshold θ is 
 replicate; ranges are the 2.5% and 97.5% points.</li>
 <li>Decisions are an equal mix of positions and match situations, not their natural frequencies; "all"
 is the plain average over that mix.</li>
-<li>Reproduce: <code>search curves --worlds exact-t3-n320.jsonl --json curves-t3.json</code> (likewise the
-other tricks); <code>search score --yardstick exact-t2-n320.jsonl --n 320 --method rollout-t2-l2-n64.jsonl:8 …:64
+<li>Hand features (the 5 of trumps, robber, voids) are worked out from what the deciding player can see:
+the robber flag comes from the public record of who burned a card (or must burn one now), never from hidden
+cards. Records saved before these features existed get them by replaying each decision from its decision file
+(<code>--decisions</code>), with no new solving. The comparisons between two groups are ratios of their N,
+with ranges from the same bootstrap re-draws (paired).</li>
+<li>Reproduce: <code>search curves --worlds exact-t3-n320.jsonl --decisions decisions-t3.jsonl --json
+curves-t3.json</code> (likewise the other tricks); <code>search score --yardstick exact-t2-n320.jsonl --n 320 --method rollout-t2-l2-n64.jsonl:8 …:64
 --json score-t2.json</code>; then <code>uv run python/tools/ncurves_report.py --out docs/m3-ncurves --score
 score-t2.json curves-t2.json curves-t3.json curves-t4.json</code>. The text tables are in
 <code>curves-t*.txt</code> and <code>score-t2.txt</code> next to this page.
