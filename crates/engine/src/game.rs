@@ -18,10 +18,15 @@ use crate::rules::{
 };
 use crate::view::{PublicState, SeatView};
 use crate::{SEATS, TEAMS, team_of};
+use std::sync::Arc;
 
 /// Version of the rules this engine implements. Every game record carries it; it is bumped
-/// whenever an owner answer changes the engine (RULES.md, "Records").
-pub const RULES_VERSION: u32 = 1;
+/// whenever an owner answer changes the engine (RULES.md, "Records"). Version 2 (2026-10-14):
+/// the owner withdrew the "no ace may be burned" amendment to H3 (any card but the ace of trumps
+/// may be burned, as rules 21 and 24 say); after a
+/// turned Joker and an ordinary card, a dealer holding the ace of trumps robs at their own turn
+/// (H4); the `bonus_later` switch was removed (bonuses are always 6 then 5).
+pub const RULES_VERSION: u32 = 2;
 
 /// Points for each trick (rule 27).
 pub const TRICK_POINTS: u8 = 5;
@@ -41,32 +46,33 @@ pub const HAND_SIZE: u8 = 5;
 /// Deck position of the turned card.
 const TURNED_POS: usize = 40;
 
-/// Rule switches (docs/M0-SPEC.md §1).
+/// Label of the per-hand deck streams of a duplicate block (docs/M1-SPEC.md §1): the deck for hand
+/// index `k` is the identity deck shuffled by `Rng::derive(block_seed, &[BLOCK_DECK_LABEL, k])`.
+pub const BLOCK_DECK_LABEL: u64 = 0xDEC;
+
+/// Label of a duplicate block's first-dealer draw (docs/M1-SPEC.md §1).
+pub const BLOCK_DEALER_LABEL: u64 = 0xDEA;
+
+/// Bonus for a partnership's first best-trump trick in a game (rule 28: 6, so the trick is worth
+/// 11).
+pub const BONUS_FIRST: u8 = 6;
+
+/// Bonus for each later best-trump trick of that partnership in the same game (house rule: 5, so
+/// the trick is worth 10). The flat-11 variant was considered and rejected by the owner on
+/// 2026-10-14; there is no switch.
+pub const BONUS_LATER: u8 = 5;
+
+/// Match settings (docs/M0-SPEC.md §1). Only the stake can vary; the scoring is fixed.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rules {
-    /// Bonus for a team's first best-trump trick in a game (rule 28: 6, so the trick is worth 11).
-    pub bonus_first: u8,
-    /// Bonus for each later best-trump trick of that team in the same game (house rule 5; the
-    /// Irish flat rule is 6).
-    pub bonus_later: u8,
     /// The stake each player of a losing partnership pays (H6).
     pub stake: i32,
 }
 
 impl Rules {
-    /// The owner's house rules: first bonus 6, later bonuses 5, stake 5.
-    pub const HOUSE: Rules = Rules {
-        bonus_first: 6,
-        bonus_later: 5,
-        stake: 5,
-    };
-
-    /// The flat rule of the written sources: every best-trump bonus is 6 (each such trick is 11).
-    pub const FLAT: Rules = Rules {
-        bonus_first: 6,
-        bonus_later: 6,
-        stake: 5,
-    };
+    /// The owner's house rules: first bonus 6, later bonuses 5 (fixed), stake 5.
+    pub const HOUSE: Rules = Rules { stake: 5 };
 }
 
 impl Default for Rules {
@@ -76,6 +82,7 @@ impl Default for Rules {
 }
 
 /// A decision by the seat to act. Robbing and taking are never actions: the engine does them.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Action {
     /// Burn this card face down (after taking a turned card).
@@ -94,6 +101,7 @@ impl Action {
 }
 
 /// What the match is waiting for.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     /// This seat must burn a card.
@@ -105,6 +113,7 @@ pub enum Phase {
 }
 
 /// Why a game ended.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GameEndReason {
     /// A trick's 5 points took the team to 41 or more.
@@ -130,6 +139,7 @@ impl GameEndReason {
 }
 
 /// When a best-trump bonus was awarded.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BonusKind {
     /// At once, for the trick holding the 5 of trumps (rule 29).
@@ -149,6 +159,7 @@ impl BonusKind {
 }
 
 /// Who may see an event.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Visibility {
     /// Every seat.
@@ -168,6 +179,7 @@ impl Visibility {
 }
 
 /// One step of the match, as recorded in the event log.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     /// The match begins with this dealer.
@@ -228,7 +240,9 @@ pub enum Event {
         /// The seat.
         seat: u8,
     },
-    /// Everyone played to trick 1 without a rob: the ace of trumps is in the undealt pack.
+    /// Everyone played to trick 1 without a rob: the ace of trumps is out of play, in the undealt
+    /// pack or (after a turned Joker) in the dealer's first burn, made before trumps were known
+    /// (nothing is forbidden then, H3). The name is kept for stability.
     AceUndealt,
     /// A trick is complete.
     TrickWon {
@@ -245,7 +259,7 @@ pub enum Event {
     Bonus {
         /// The team receiving it.
         team: u8,
-        /// The bonus points (`bonus_first` or `bonus_later`).
+        /// The bonus points (`BONUS_FIRST` or `BONUS_LATER`).
         points: u8,
         /// Immediate (5 of trumps) or at the end of the hand.
         kind: BonusKind,
@@ -458,6 +472,42 @@ const fn identity_deck() -> [Card; DECK_SIZE] {
     d
 }
 
+/// The deck for hand index `k` (counted across the games of the match) of every match in the
+/// duplicate block with this seed: the cards 0..53 shuffled by
+/// `Rng::derive(block_seed, &[BLOCK_DECK_LABEL, k])` (docs/M1-SPEC.md §1). The standard deck
+/// closure for [`Match::new_block`]: `move |k| block_deck(block_seed, k)`.
+pub fn block_deck(block_seed: u64, k: u32) -> [Card; DECK_SIZE] {
+    let mut d = identity_deck();
+    Rng::derive(block_seed, &[BLOCK_DECK_LABEL, u64::from(k)]).shuffle(&mut d);
+    d
+}
+
+/// The first dealer of every match in the duplicate block with this seed:
+/// `Rng::derive(block_seed, &[BLOCK_DEALER_LABEL]).bounded(8)` (docs/M1-SPEC.md §1).
+pub fn block_first_dealer(block_seed: u64) -> u8 {
+    Rng::derive(block_seed, &[BLOCK_DEALER_LABEL]).bounded(SEATS as u64) as u8
+}
+
+/// The deck source of a [`Match::new_block`] match: the deck for each hand index, asked for when
+/// the hand starts. Two of them are equal only if they are the same closure (one match is a clone
+/// of the other), since closures cannot be compared.
+#[derive(Clone)]
+struct HandDecks(Arc<dyn Fn(u32) -> [Card; DECK_SIZE] + Send + Sync>);
+
+impl core::fmt::Debug for HandDecks {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("HandDecks(..)")
+    }
+}
+
+impl PartialEq for HandDecks {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for HandDecks {}
+
 /// Is the deck an ordering of all 53 cards?
 fn is_full_deck(deck: &[Card; DECK_SIZE]) -> bool {
     let mut seen: Bits = 0;
@@ -478,6 +528,7 @@ pub struct Match {
     rng: Rng,
     decks: Vec<[Card; DECK_SIZE]>,
     next_deck: usize,
+    hand_decks: Option<HandDecks>,
     dealer: u8,
     hand_index: u32,
     game_index: u8,
@@ -499,7 +550,7 @@ impl Match {
     pub fn new(seed: u64, rules: Rules) -> Match {
         let mut rng = Rng::new(seed);
         let first_dealer = rng.bounded(SEATS as u64) as u8;
-        Match::start(first_dealer, Vec::new(), rng, seed, rules)
+        Match::start(first_dealer, Vec::new(), None, rng, seed, rules)
     }
 
     /// A match with chosen decks (for tests, hand-made deals and the differential test): the
@@ -519,7 +570,36 @@ impl Match {
             decks.iter().all(is_full_deck),
             "every deck must hold each of the 53 cards exactly once"
         );
-        Match::start(first_dealer, decks, Rng::new(seed), seed, rules)
+        Match::start(first_dealer, decks, None, Rng::new(seed), seed, rules)
+    }
+
+    /// A match of a duplicate block (docs/M1-SPEC.md §1–2): like [`Match::with_decks`], but the
+    /// deck for hand index `k` (counted across the games of the match, from 0) is asked from
+    /// `hand_decks(k)` when that hand starts, for as many hands as the match lasts. The standard
+    /// closure is `move |k| block_deck(block_seed, k)`, with `block_first_dealer(block_seed)` as
+    /// the first dealer; then every match of the block deals the same cards in hand `k`.
+    /// [`Match::seed`] returns `block_seed`. The closure must be a pure function of `k` (it is
+    /// shared, not re-run, when the match is cloned) so the match replays exactly.
+    ///
+    /// # Panics
+    /// If `first_dealer` is not a seat; and, when a hand starts (so possibly inside
+    /// [`Match::apply`]), if the closure returns a deck that is not an ordering of all 53 cards.
+    pub fn new_block(
+        block_seed: u64,
+        hand_decks: impl Fn(u32) -> [Card; DECK_SIZE] + Send + Sync + 'static,
+        first_dealer: u8,
+        rules: Rules,
+    ) -> Match {
+        assert!(usize::from(first_dealer) < SEATS, "no such dealer seat");
+        let decks = Some(HandDecks(Arc::new(hand_decks)));
+        Match::start(
+            first_dealer,
+            Vec::new(),
+            decks,
+            Rng::new(block_seed),
+            block_seed,
+            rules,
+        )
     }
 
     /// Rebuild a match from its seed and recorded actions. Fails on the first illegal action.
@@ -534,6 +614,7 @@ impl Match {
     fn start(
         first_dealer: u8,
         decks: Vec<[Card; DECK_SIZE]>,
+        hand_decks: Option<HandDecks>,
         rng: Rng,
         seed: u64,
         rules: Rules,
@@ -544,6 +625,7 @@ impl Match {
             rng,
             decks,
             next_deck: 0,
+            hand_decks,
             dealer: first_dealer,
             hand_index: 0,
             game_index: 0,
@@ -574,7 +656,7 @@ impl Match {
         self.rules
     }
 
-    /// The seed the match was created with.
+    /// The seed the match was created with (the block seed for [`Match::new_block`]).
     pub fn seed(&self) -> u64 {
         self.seed
     }
@@ -595,7 +677,7 @@ impl Match {
     /// The cards the seat to act may burn or play (empty once the match is over).
     pub fn legal_mask(&self) -> Bits {
         match self.phase {
-            Phase::AwaitBurn(s) => legal_burns(self.truth.hands[usize::from(s)]),
+            Phase::AwaitBurn(s) => legal_burns(self.truth.hands[usize::from(s)], self.hand.trump),
             Phase::AwaitPlay(s) => match self.hand.trump {
                 Some(trump) => legal_plays(
                     self.truth.hands[usize::from(s)],
@@ -747,8 +829,8 @@ impl Match {
                 if !has(hand, c) {
                     return reject("that card is not in the burning player's hand");
                 }
-                if !has(legal_burns(hand), c) {
-                    return reject("an ace may never be burned (house rule H3)");
+                if !has(legal_burns(hand, self.hand.trump), c) {
+                    return reject("the ace of trumps may never be burned (rules 21 and 24)");
                 }
                 self.actions.push(action);
                 self.burn(seat, c);
@@ -802,6 +884,14 @@ impl Match {
         let deck = if let Some(d) = self.decks.get(self.next_deck) {
             self.next_deck += 1;
             *d
+        } else if let Some(HandDecks(f)) = &self.hand_decks {
+            let d = f(self.hand_index);
+            assert!(
+                is_full_deck(&d),
+                "the block's deck for hand {} must hold each of the 53 cards exactly once",
+                self.hand_index
+            );
+            d
         } else {
             let mut d = identity_deck();
             self.rng.shuffle(&mut d);
@@ -872,16 +962,15 @@ impl Match {
         let trump = Suit::from_index(card / 13);
         self.hand.trump = Some(trump);
         let ace = ace_of_trumps(trump);
-        if rank_of(card) == ACE || has(self.truth.hands[usize::from(dealer)], ace) {
-            // Steps 2c and 2d: the dealer robs the new card at once.
+        if rank_of(card) == ACE {
+            // Step 2c: a turned ace is robbed by the dealer at once.
             self.take(dealer, card);
             self.await_burn(dealer, AfterBurn::StartTricks);
             return;
         }
-        // Step 2e: the card stays face up; not robbing proves the dealer lacks the ace.
+        // Step 2e: the card stays face up; whoever holds the ace of trumps, the dealer included,
+        // robs at their own first turn in trick 1 (H2, H4 as amended on 2026-10-14).
         self.hand.pending_robber = self.holder(ace);
-        self.hand.proved_no_ace[usize::from(dealer)] = true;
-        self.emit_public(Event::ProvedNoAce { seat: dealer });
         self.start_tricks();
     }
 
@@ -945,7 +1034,7 @@ impl Match {
     /// Step 7: a play.
     fn play(&mut self, seat: u8, card: Card) {
         let s = usize::from(seat);
-        if self.rob_open() && !self.hand.took[s] && !self.hand.proved_no_ace[s] {
+        if self.rob_open() && !self.hand.proved_no_ace[s] {
             // Step 6: playing a first card without robbing proves the seat lacks the ace.
             self.hand.proved_no_ace[s] = true;
             self.emit_public(Event::ProvedNoAce { seat });
@@ -1013,10 +1102,11 @@ impl Match {
             self.end_game(team, reason);
             return;
         }
-        if trick_no == 1
-            && self.hand.robber.is_none()
-            && has(self.truth.undealt, ace_of_trumps(trump))
-        {
+        if trick_no == 1 && self.hand.robber.is_none() {
+            debug_assert!(has(
+                self.truth.undealt | self.truth.burns[usize::from(self.dealer)],
+                ace_of_trumps(trump)
+            ));
             self.hand.ace_undealt = true;
             self.emit_public(Event::AceUndealt);
         }
@@ -1032,9 +1122,9 @@ impl Match {
     fn award_bonus(&mut self, team: u8, kind: BonusKind, card: Card) {
         let t = usize::from(team);
         let points = if self.bonus_taken[t] {
-            self.rules.bonus_later
+            BONUS_LATER
         } else {
-            self.rules.bonus_first
+            BONUS_FIRST
         };
         self.bonus_taken[t] = true;
         self.scores[t] = self.scores[t].saturating_add(points);
@@ -1263,7 +1353,7 @@ fn render(m: &Match, include_private: bool) -> String {
                 format!("Seat {seat} has not robbed, so does not hold the ace of trumps.")
             }
             Event::AceUndealt => {
-                "Nobody robbed: the ace of trumps is in the undealt pack.".to_string()
+                "Nobody robbed: the ace of trumps is out of play (undealt or burned).".to_string()
             }
             Event::TrickWon {
                 trick,

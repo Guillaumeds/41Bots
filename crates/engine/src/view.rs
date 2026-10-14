@@ -11,6 +11,7 @@ use crate::cards::{Bits, Card, Suit};
 use crate::game::{Event, Phase};
 
 /// Everything every seat knows at this moment.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublicState {
     /// Who must act and how, or that the match is over.
@@ -64,11 +65,13 @@ pub struct PublicState {
     pub robber: Option<u8>,
     /// Seats that have shown they do not hold the ace of trumps this hand.
     pub proved_no_ace: [bool; 8],
-    /// Whether everyone has played to trick 1 without a rob, proving the ace of trumps undealt.
+    /// Whether everyone has played to trick 1 without a rob, proving the ace of trumps out of play:
+    /// undealt, or in the dealer's burn after a turned Joker (made before trumps were known, H3).
     pub ace_undealt: bool,
 }
 
 /// One seat's view: the public state plus that seat's private knowledge.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SeatView {
     /// The seat this view belongs to.

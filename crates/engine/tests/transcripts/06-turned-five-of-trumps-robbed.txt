@@ -1,7 +1,7 @@
 title: A turned 5 of trumps is robbed by the holder of the ace, who then plays it for the bonus at once
 story: Seat 6 deals and the 5 of diamonds is turned: diamonds are trumps. Seat 2 holds the ace of diamonds (and the ace of clubs).
 story: Seat 7 leads trick 1; seats 7, 0 and 1 play without robbing. When seat 2's turn comes it must rob (rule 20, H2): it takes the 5 of diamonds and burns one card face down.
-story: The burn may be any card except an ace (H3): the legal burns are the 3 of clubs, the 5 of diamonds itself, the 7 of hearts and the 9 of spades; seat 2 burns the 9 of spades.
+story: Any card except the ace of trumps may be burned (rule 21, H3): the ace of clubs (a plain ace here) and the 5 of diamonds itself are allowed, the ace of diamonds is not; seat 2 burns the 9 of spades.
 story: Seat 2 then plays the 5 of diamonds, which wins trick 1. Because the 5 of trumps was played, its trick is the best-trump trick and the bonus counts at once: team 2 (seats 2 and 6) has 11 after trick 1.
 story: The other tricks are ordinary; no bonus is awarded at the end of the hand. Final scores of the hand: 5,5,16,5.
 dealer: 6
@@ -29,9 +29,9 @@ phase: AwaitPlay 7
 = ProvedNoAce seat=1
 = Took seat=2 card=5D
 # Seat 2 holds the ace of diamonds: at its first turn it takes the turned 5 of diamonds and must burn one card.
-# Aces may never be burned (H3): not the ace of diamonds, and not the ace of clubs either. The 5 just taken could be burned.
+# Any card but the ace of diamonds (the ace of trumps) may be burned (rule 21, H3); the plain ace of clubs and the 5 just taken may go.
 phase: AwaitBurn 2
-legal: 3C 5D 7H 9S
+legal: AC 3C 5D 7H 9S
 > Burn 9S    # seat 2 burns
 = BurnDone seat=2
 phase: AwaitPlay 2

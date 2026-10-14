@@ -7,10 +7,18 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# No dependencies by default: the native and wasm32 builds of the engine stay dependency-free.
 [dependencies]
+serde = { version = "1.0.229", features = ["derive"], optional = true }
+
+[features]
+# Serialize/Deserialize on the action, view and event types (docs/M1-SPEC.md §2), for the crates
+# that send views and records as JSON (tablemgr and later ones). Off by default.
+serde = ["dep:serde"]
 
 [dev-dependencies]
 proptest = "1"
+serde_json = "1.0.154"
 
 [lints]
 workspace = true

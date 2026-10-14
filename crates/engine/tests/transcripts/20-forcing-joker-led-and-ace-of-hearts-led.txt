@@ -1,7 +1,7 @@
-title: Rule 17: the Joker led forces out the A♥; the A♥ led forces out the ace of trumps (5, J and Joker may be held back)
+title: Rule 17: the Joker led forces out the A♥ and every lower trump; the A♥ led forces out the ace of trumps and every lower trump (5, J and Joker may be held back)
 story: Two hands, one for each of the two remaining forcing cases of rule 17 (transcript 19 has the 5 and the J led).
 story: Hand 1: seat 3 deals, spades trumps (the ace of spades undealt, so nobody robs). Seat 4 leads the Joker. Seats 5 and 6 hold the 5 and the J of spades as their only trumps: both outrank the Joker, so they may be held back and those seats may play any card (rule 18). Seat 7's only trump is the A♥, which ranks below the Joker: it must be played. Seat 0 must play its 3 of spades. The Joker wins.
-story: Hand 2: seat 4 deals, clubs trumps. Seat 5 leads the A♥ (a trump lead even though hearts are not trumps). Seat 6 may hold back its Joker. Seat 7, holding the ace of clubs, robs at its turn, burns the 7 of clubs it has just taken, and must then play the ace of clubs: the A♥ led forces out the ace of trumps. Seat 0 may hold back both its 5 and J of clubs. The A♥ wins.
+story: Hand 2: seat 4 deals, clubs trumps. Seat 5 leads the A♥ (a trump lead even though hearts are not trumps). Seat 6 may hold back its Joker. Seat 7, holding the ace of clubs, robs at its turn, burns the 7 of clubs it has just taken, and must then play the ace of clubs: the A♥ led forces out the ace of trumps and every lower trump. Seat 0 may hold back both its 5 and J of clubs. The A♥ wins.
 story: The rest of each hand is ordinary play. Scores after hand 1: 5,16,10,0; after hand 2: 21,21,10,10.
 dealer: 3
 # ---- Hand 1 of this file (hand index 0), dealer seat 3: spades trumps; the Joker is led ----

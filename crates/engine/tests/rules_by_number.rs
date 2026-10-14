@@ -19,7 +19,10 @@ use engine::cards::{
     has, name, names, parse, suit_of,
 };
 use engine::game::build_deck;
-use engine::game::{Action, Event, Match, Phase, RULES_VERSION, Rules, TRICK_POINTS, Visibility};
+use engine::game::{
+    Action, BONUS_FIRST, BONUS_LATER, Event, Match, Phase, RULES_VERSION, Rules, TRICK_POINTS,
+    Visibility,
+};
 use engine::rng::Rng;
 use engine::rules::trump_mask;
 use engine::{SEATS, TEAMS, team_of};
@@ -1467,8 +1470,8 @@ fn rule_20_ace_holder_robs_before_first_card() {
 /// Rule 21: "The ace of trumps itself may not be burned. Nobody sees the burned card, but
 /// everyone now knows that player holds the ace of trumps."
 ///
-/// The burn may be any card but an ace (H3 tightens rule 21 to every ace); only the burner's
-/// view shows the burned card; every view shows who robbed.
+/// The burn may be any card but the ace of trumps (H3); only the burner's view shows the burned
+/// card; every view shows who robbed.
 #[test]
 fn rule_21_ace_of_trumps_never_burned_rob_is_public() {
     let mut m = robber_deal();
@@ -1477,7 +1480,7 @@ fn rule_21_ace_of_trumps_never_burned_rob_is_public() {
     assert_legal(&m, "2D 3D 4D 5D 7S");
     assert_eq!(
         refused(&mut m, Action::Burn(c("AS"))),
-        "an ace may never be burned (house rule H3)"
+        "the ace of trumps may never be burned (rules 21 and 24)"
     );
     burn(&mut m, "3D");
     for seat in 0..8u8 {
@@ -1528,11 +1531,9 @@ fn rule_22_turned_ace_dealer_robs_at_once() {
     assert!(p.trick_cards.is_empty());
     assert_eq!(p.trump, Some(Suit::Clubs));
     assert_eq!(p.robber, Some(7));
+    // The turned ace is now the ace of trumps: it may not be burned.
     assert_legal(&m, "2D 3D 4D 5D 6D");
-    assert_eq!(
-        refused(&mut m, Action::Burn(c("AC"))),
-        "an ace may never be burned (house rule H3)"
-    );
+    refused(&mut m, Action::Burn(c("AC")));
     burn(&mut m, "6D");
     assert_eq!(
         log_from(&m, l.len()),
@@ -1589,7 +1590,7 @@ fn rule_24_turned_joker_dealer_takes_and_burns() {
     assert_eq!((p.trump, p.trick_no, p.joker_turned), (None, 0, true));
     assert_eq!(p.robber, None, "taking the Joker is not a rob");
     assert_eq!(p.hand_sizes[7], 6);
-    assert_legal(&m, "2C 3C 4C JK");
+    assert_legal(&m, "AC 2C 3C 4C AD JK");
     assert_eq!(
         refused(&mut m, Action::Play(c("2C"))),
         "a burn is due: the player who took the turned card must burn first"
@@ -1597,12 +1598,11 @@ fn rule_24_turned_joker_dealer_takes_and_burns() {
     burn(&mut m, "2C");
     assert_eq!(
         log_from(&m, l.len()),
-        [
-            "Burned seat=7 card=2C",
-            "BurnDone seat=7",
-            "Turned card=7S",
-            "ProvedNoAce seat=7",
-        ]
+        ["Burned seat=7 card=2C", "BurnDone seat=7", "Turned card=7S",]
+    );
+    assert!(
+        !m.public().proved_no_ace[7],
+        "H4: the dealer proves nothing yet"
     );
     let p = m.public();
     assert_eq!(p.trump, Some(Suit::Spades), "the next card names trumps");
@@ -1623,25 +1623,27 @@ fn rule_24_turned_joker_dealer_takes_and_burns() {
     assert_eq!(m.phase(), Phase::AwaitBurn(7));
     assert_eq!(m.public().trick_no, 0);
     assert_legal(&m, "2C 3C 4C 5C 6C");
+    refused(&mut m, Action::Burn(c("AD")));
     burn(&mut m, "6C");
     assert_eq!(m.phase(), Phase::AwaitPlay(0));
     assert_eq!(m.truth().burns[7], set("JK 6C"));
     assert_eq!(m.public().robber, Some(7));
     assert_eq!(count(m.truth().undealt), 11);
 
-    // The dealer holds the ace of the new trump suit: it robs the new card at once.
+    // The dealer holds the ace of the new trump suit: H4 (amended 2026-10-14) makes it rob at its
+    // own first turn in trick 1, as the eighth card, not at once.
     let mut m = game(7, ["", "", "", "", "", "", "", "AS 2C 3C 4C 5C"], "JK 7S");
     burn(&mut m, "2C");
-    let l = log(&m);
-    assert_eq!(l[l.len() - 2..], ["Turned card=7S", "Took seat=7 card=7S"]);
+    assert_eq!(last_event(&m), "Turned card=7S");
+    assert_eq!(m.phase(), Phase::AwaitPlay(0));
+    for _ in 0..7 {
+        lowest(&mut m);
+    }
+    assert_eq!(last_event(&m), "Took seat=7 card=7S");
     assert_eq!(m.phase(), Phase::AwaitBurn(7));
     assert_legal(&m, "3C 4C 5C 7S JK");
-    assert_eq!(
-        refused(&mut m, Action::Burn(c("AS"))),
-        "an ace may never be burned (house rule H3)"
-    );
     burn(&mut m, "JK");
-    assert_eq!(m.phase(), Phase::AwaitPlay(0));
+    assert_eq!(m.phase(), Phase::AwaitPlay(7));
 
     // Another seat holds the new ace: rule 20 applies, it robs at its first turn.
     let mut m = game(7, ["", "", "AS", "", "", "", "", "2C 3C 4C 5C 6C"], "JK 7S");
@@ -1712,7 +1714,6 @@ fn rule_26_dealer_cannot_refuse_a_turned_ace() {
         for x in cards(hand(&m, 7)).chain(cards(hand(&m, 0))) {
             refused(&mut m, Action::Play(x));
         }
-        refused(&mut m, Action::Burn(c("AC")));
         burn(&mut m, "2D");
         assert_eq!(m.public().robber, Some(7));
         assert_eq!(m.phase(), Phase::AwaitPlay(0));
@@ -2351,60 +2352,62 @@ fn house_h2_rob_at_own_first_turn_in_trick_one() {
     assert_eq!(m.public().trick_cards, vec![(0, c("AS"))]);
 }
 
-/// H3: "Burn choice (tightened by the owner on 2026-10-13). Any card may be burned except an ace
-/// of any suit (the ace of hearts included). This applies to every burn: the dealer's after
-/// taking a turned Joker (made before the next card is turned, so before trumps are known), the
-/// dealer's after robbing a turned ace, and the robber's. The card just taken (the turned card,
-/// or the Joker for the dealer) may be burned. A legal burn always exists: at most four aces can
-/// sit among the six cards held at a burn, so at least two cards are burnable."
+/// H3: "Burn choice. Any card may be burned except the ace of trumps (rules 21 and 24), including
+/// plain aces, the card just taken and the Joker. The dealer's first burn after a turned Joker
+/// comes before trumps are known, so nothing is forbidden there."
 ///
-/// Each kind of burn with all four aces in hand: exactly the two other cards may be burned.
+/// Each kind of burn with four aces in hand: only the ace of trumps is refused.
 #[test]
-fn house_h3_no_ace_is_ever_burned() {
-    let aces = ["AC", "AD", "AH", "AS"];
-    // The dealer's burn after a turned Joker, then (holding the A♥ when hearts turn up) the
-    // dealer's rob of the new card.
-    let mut m = game(7, ["", "", "", "", "", "", "", "AC AD AH AS 2C"], "JK 7H");
+fn house_h3_only_the_ace_of_trumps_is_never_burned() {
+    // The dealer's burn after a turned Joker (trumps unknown: anything), then its rob of the A♥
+    // turned next (hearts trumps: the A♥ is the ace of trumps).
+    let mut m = game(7, ["", "", "", "", "", "", "", "AC AD AS 2C 3C"], "JK AH");
     assert_eq!(m.public().trump, None);
-    assert_legal(&m, "2C JK");
-    for a in aces {
-        refused(&mut m, Action::Burn(c(a)));
-    }
-    burn(&mut m, "2C");
-    assert_eq!(last_event(&m), "Took seat=7 card=7H");
+    assert_legal(&m, "AC 2C 3C AD AS JK");
+    burn(&mut m, "AD");
+    assert_eq!(last_event(&m), "Took seat=7 card=AH");
     assert_eq!(m.phase(), Phase::AwaitBurn(7));
-    assert_legal(&m, "7H JK");
-    for a in aces {
-        refused(&mut m, Action::Burn(c(a)));
-    }
-    burn(&mut m, "7H");
-    assert_eq!(m.truth().burns[7], set("2C 7H"));
-    // The dealer's burn after robbing a turned ace.
+    assert_legal(&m, "AC 2C 3C AS JK");
+    refused(&mut m, Action::Burn(c("AH")));
+    burn(&mut m, "AC"); // a plain ace
+    assert_eq!(m.truth().burns[7], set("AC AD"));
+    // The dealer's burn after robbing a turned ace: the turned ace may not go, other aces may.
     let mut m = game(7, ["", "", "", "", "", "", "", "AD AH AS 2C 3C"], "AC");
-    assert_legal(&m, "2C 3C");
-    for a in aces {
-        refused(&mut m, Action::Burn(c(a)));
-    }
-    // The robber's burn: the turned card just taken may be burned.
+    assert_legal(&m, "2C 3C AD AH AS");
+    burn(&mut m, "AH");
+    assert_eq!(m.phase(), Phase::AwaitPlay(0));
+    // The robber's burn: any card but the ace of trumps, a plain ace included.
     let mut m = game(7, ["", "", "AS AC AD AH 9C", "", "", "", "", ""], "7S");
     lowest(&mut m);
     lowest(&mut m);
-    assert_legal(&m, "9C 7S");
-    for a in aces {
-        assert_eq!(
-            refused(&mut m, Action::Burn(c(a))),
-            "an ace may never be burned (house rule H3)"
-        );
-    }
-    burn(&mut m, "7S");
-    assert_eq!(hand(&m, 2), set("AS AC AD AH 9C"));
+    assert_legal(&m, "AC 9C AD AH 7S");
+    burn(&mut m, "AD");
+    assert_eq!(hand(&m, 2), set("AS AC AH 9C 7S"));
 }
 
-/// H4: "Dealer robs at once (rules 22 and 24). A turned ace is robbed by the dealer at once,
-/// before the first lead. With a turned Joker, the dealer takes it and burns at once, then the
-/// next card is turned. If that card is an ace, or if the dealer holds the ace of trumps, the
-/// dealer robs the new card at once, always, burning another card. Otherwise rule 20 / H2 applies
-/// to whoever holds the ace of trumps, or rule 23 if it is undealt."
+/// The dealer burns, before trumps are known, the card that the next turned card makes the ace of
+/// trumps: nothing forbids it retroactively (open question for the owner, see STATUS). Nobody can
+/// rob the new card, and after trick 1 the ace is announced out of play.
+#[test]
+fn house_h3_dealer_burns_the_future_ace_of_trumps() {
+    let mut m = game(7, ["", "", "", "", "", "", "", "AS 2C 3C 4C 5C"], "JK 7S");
+    burn(&mut m, "AS");
+    assert_eq!(last_event(&m), "Turned card=7S");
+    assert_eq!(m.phase(), Phase::AwaitPlay(0));
+    for _ in 0..8 {
+        lowest(&mut m);
+    }
+    assert_eq!(last_event(&m), "AceUndealt");
+    assert_eq!(m.public().robber, None);
+    assert_eq!(count_events(&m, "Took"), 1, "only the Joker was taken");
+}
+
+/// H4: "Dealer robs at once (rules 22 and 24; amended by the owner on 2026-10-14). A turned ace
+/// is robbed by the dealer at once, before the first lead. With a turned Joker, the dealer takes
+/// it and burns at once, then the next card is turned. If that card is an ace, the dealer robs it
+/// at once, burning another card. Otherwise rule 20 / H2 applies to whoever holds the ace of
+/// trumps, the dealer included (a dealer holding it robs at their own first turn in trick 1, as
+/// the eighth card), or rule 23 if nobody holds it."
 #[test]
 fn house_h4_dealer_robs_at_once() {
     let dealer = "2C 3C 4C 5C 6C";
@@ -2428,10 +2431,16 @@ fn house_h4_dealer_robs_at_once() {
     assert_eq!(m.public().trick_no, 0);
     burn(&mut m, "2C");
     at_once(&m, "Took seat=7 card=AS");
-    // A turned Joker with the dealer holding the new ace of trumps: robbed at once.
+    // A turned Joker with the dealer holding the new ace of trumps: not at once; the dealer
+    // robs as the eighth card of trick 1.
     let mut m = game(7, ["", "", "", "", "", "", "", "AD 2C 3C 4C 5C"], "JK 7D");
     burn(&mut m, "2C");
-    at_once(&m, "Took seat=7 card=7D");
+    assert_eq!(m.phase(), Phase::AwaitPlay(0));
+    for _ in 0..7 {
+        lowest(&mut m);
+    }
+    assert_eq!(last_event(&m), "Took seat=7 card=7D");
+    assert_eq!(m.public().trick_cards.len(), 7);
     // Otherwise H2: the holder robs at its own first turn in trick 1.
     let mut m = game(7, ["", "", "", "AS", "", "", "", dealer], "JK 7S");
     burn(&mut m, "2C");
@@ -2490,10 +2499,7 @@ fn house_h6_money_settlement() {
         (10, 2, [-20, -20, 60, -20]),
         (1, 3, [-2, -2, -2, 6]),
     ] {
-        let rules = Rules {
-            stake,
-            ..Rules::default()
-        };
+        let rules = Rules { stake };
         let (h0, h1) = (jink(7, team), jink(0, team + 4));
         let mut m = scripted_match(rules, &[&h0, &h1]);
         play_tricks(&mut m, &h0, 5);
@@ -2562,8 +2568,7 @@ fn house_h7_money_is_the_only_ground_truth() {
 /// of 6 is unreachable. A team has taken its first bonus this game exactly when score mod 5 == 1;
 /// the engine still keeps the flag explicitly and a test asserts the two agree."
 ///
-/// After every action of whole random matches. (Under the flat rule the shortcut fails: see
-/// `decision_bonus_later_rule_switch`.)
+/// After every action of whole random matches.
 #[test]
 fn decision_reachable_scores_and_the_bonus_flag() {
     for seed in [101u64, 102, 103] {
@@ -2586,7 +2591,7 @@ fn decision_reachable_scores_and_the_bonus_flag() {
 
 /// Decision (owner, rule 32): "'Reach 41' means 41 or more: a team on 40 taking a plain trick
 /// (45) or a team on 36 taking the best-trump trick (46, since a team on 36 has already had its
-/// first bonus; 47 under the flat rule) wins the game."
+/// first bonus) wins the game."
 #[test]
 fn decision_reaching_41_means_41_or_more() {
     let (h0, h1, h2) = (b0(), b1(), b2());
@@ -2602,23 +2607,21 @@ fn decision_reaching_41_means_41_or_more() {
         after(&m, start, "TrickWon trick=1 seat=4 team=0 points=5", 1),
         ["GameWon team=0 reason=trick scores=45,21,0,0"]
     );
-    for (rules, total) in [(Rules::HOUSE, 46), (Rules::FLAT, 47)] {
-        let (h0, h1) = (a0(), a1_five_from_36());
-        let mut m = scripted_match(rules, &[&h0, &h1]);
-        play_tricks(&mut m, &h0, 5);
-        play_tricks(&mut m, &h1, 2);
-        assert_eq!(m.scores(), [36, 5, 0, 0]);
-        assert!(m.bonus_taken()[0]);
-        let start = m.events().len();
-        play_trick(&mut m, &h1, 2);
-        assert_eq!(
-            after(&m, start, "TrickWon trick=3 seat=0 team=0 points=5", 2),
-            [
-                format!("Bonus team=0 points={} kind=immediate card=5S", total - 41),
-                format!("GameWon team=0 reason=trick scores={total},5,0,0"),
-            ]
-        );
-    }
+    let (h0, h1) = (a0(), a1_five_from_36());
+    let mut m = scripted_match(Rules::HOUSE, &[&h0, &h1]);
+    play_tricks(&mut m, &h0, 5);
+    play_tricks(&mut m, &h1, 2);
+    assert_eq!(m.scores(), [36, 5, 0, 0]);
+    assert!(m.bonus_taken()[0]);
+    let start = m.events().len();
+    play_trick(&mut m, &h1, 2);
+    assert_eq!(
+        after(&m, start, "TrickWon trick=3 seat=0 team=0 points=5", 2),
+        [
+            "Bonus team=0 points=5 kind=immediate card=5S",
+            "GameWon team=0 reason=trick scores=46,5,0,0",
+        ]
+    );
 }
 
 /// Decision (default): "Order of checks after tricks 1–4: award the 5 points for the trick → if
@@ -2992,43 +2995,25 @@ fn decision_first_dealer_drawn_once_and_fresh_deck_every_hand() {
     assert!(starts.last().expect("hands").1 >= 1, "more than one game");
 }
 
-/// Decision (owner): "Rule switch bonus_later: the house rule is bonus_later = 5 (first bonus 6,
-/// later ones 5). The Irish 25 app and every other written source use a flat 6 every time;
-/// bonus_later = 6 reproduces that. With the flat rule the 'bonus flag ⟺ score mod 5 == 1'
-/// shortcut no longer holds."
+/// Decision (owner, 2026-10-14): a partnership's first best-trump bonus in a game is 6 and every
+/// later one in the same game is 5; there is no switch (the flat-11 variant was rejected).
 #[test]
-fn decision_bonus_later_rule_switch() {
+fn decision_bonus_six_then_five() {
     assert_eq!(Rules::default(), Rules::HOUSE);
+    assert_eq!((BONUS_FIRST, BONUS_LATER, Rules::HOUSE.stake), (6, 5, 5));
+    let (r0, r1, r2) = rule28_hands();
+    let mut m = scripted_match(Rules::HOUSE, &[&r0, &r1, &r2]);
+    play_tricks(&mut m, &r0, 5);
+    play_tricks(&mut m, &r1, 5);
+    assert_eq!(m.scores(), [15, 16, 16, 15], "first bonuses are 6");
+    let start = m.events().len();
+    play_tricks(&mut m, &r2, 5);
     assert_eq!(
-        (
-            Rules::HOUSE.bonus_first,
-            Rules::HOUSE.bonus_later,
-            Rules::HOUSE.stake
-        ),
-        (6, 5, 5)
+        after(&m, start, "TrickWon trick=5 seat=0 team=0 points=5", 1),
+        ["Bonus team=1 points=5 kind=end card=JS"]
     );
-    assert_eq!((Rules::FLAT.bonus_first, Rules::FLAT.bonus_later), (6, 6));
-    for (rules, second, team1) in [(Rules::HOUSE, 5, 26), (Rules::FLAT, 6, 27)] {
-        let (r0, r1, r2) = rule28_hands();
-        let mut m = scripted_match(rules, &[&r0, &r1, &r2]);
-        play_tricks(&mut m, &r0, 5);
-        play_tricks(&mut m, &r1, 5);
-        assert_eq!(
-            m.scores(),
-            [15, 16, 16, 15],
-            "first bonuses are 6 either way"
-        );
-        let start = m.events().len();
-        play_tricks(&mut m, &r2, 5);
-        assert_eq!(
-            after(&m, start, "TrickWon trick=5 seat=0 team=0 points=5", 1),
-            [format!("Bonus team=1 points={second} kind=end card=JS")]
-        );
-        assert_eq!(m.scores(), [25, team1, 21, 20]);
-        assert!(m.bonus_taken()[1]);
-    }
-    // Under the flat rule team 1's 27 is 2 more than a multiple of 5: the shortcut fails.
-    assert_eq!(27 % 5, 2);
+    assert_eq!(m.scores(), [25, 26, 21, 20]);
+    assert!(m.bonus_taken()[1]);
 }
 
 /// Decision (owner): "Table size: 8 players in 4 partnerships is the only configuration the bots
@@ -3075,14 +3060,14 @@ fn decision_table_of_eight_in_four_partnerships() {
 /// rules and actions replays the match exactly (CLAUDE.md: replays re-apply actions).
 #[test]
 fn decision_records_carry_rules_version_and_replay() {
-    assert_eq!(RULES_VERSION, 1);
+    assert_eq!(RULES_VERSION, 2);
     let m = random_match(14, Rules::default(), |_| {});
     let again = Match::replay(m.seed(), m.rules(), m.actions()).expect("a valid record");
     assert_eq!(again.events(), m.events());
     assert_eq!(again.money(), m.money());
-    // A corrupted record is refused rather than replayed differently (an ace is never burnable).
+    // A corrupted record is refused rather than replayed differently (no such card).
     let mut bad = m.actions().to_vec();
-    bad[0] = Action::Burn(c("AC"));
+    bad[0] = Action::Burn(53);
     assert!(Match::replay(m.seed(), m.rules(), &bad).is_err());
 }
 

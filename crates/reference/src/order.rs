@@ -228,9 +228,13 @@ pub fn legal_plays(hand: &[Card], led: Option<Card>, trump: Suit) -> Vec<Card> {
     }
 }
 
-/// The cards of `hand` that may be burned: every card except an ace (H3).
-pub fn legal_burns(hand: &[Card]) -> Vec<Card> {
-    hand.iter().copied().filter(|card| !card.is_ace()).collect()
+/// The cards of `hand` that may be burned: every card except the ace of trumps (rules 21, 24,
+/// H3). Before trumps are known (the Joker burn) every card may go.
+pub fn legal_burns(hand: &[Card], trump: Option<Suit>) -> Vec<Card> {
+    hand.iter()
+        .copied()
+        .filter(|&card| trump.is_none_or(|t| card != ace_of_trumps(t)))
+        .collect()
 }
 
 /// The seat that wins a trick given as `(seat, card)` in play order (rule 19):
@@ -440,6 +444,11 @@ mod tests {
         // of trumps and lower trumps, while the 5, J and Joker may be held back.
         assert_eq!(legal("AD 7C 8C 9S 10S", "AH", Diamonds), "AD");
         assert_eq!(legal("5D JD JK 9S 10S", "AH", Diamonds), "5D JD JK 9S 10S");
+        // Every case also forces out every lower trump (rule 16).
+        assert_eq!(legal("3C 7D 8H 9S 10S", "5C", Clubs), "3C");
+        assert_eq!(legal("QC 7D 8H 9S 10S", "JC", Clubs), "QC");
+        assert_eq!(legal("KS 7D 8H 9H 10H", "JK", Spades), "KS");
+        assert_eq!(legal("2D 7C 8C 9S 10S", "AH", Diamonds), "2D");
         // Hearts trumps: AH is a top trump that may be held back against a lower heart.
         assert_eq!(legal("AH 7D 8C 9S 10S", "KH", Hearts), "AH 7D 8C 9S 10S");
         // Hearts trumps, AH led: the 2H must be played, any trump will do.
@@ -455,18 +464,15 @@ mod tests {
     }
 
     #[test]
-    fn legal_burns_never_contain_an_ace() {
-        // H3: any card except an ace of any suit, the ace of hearts included.
-        assert_eq!(names(&legal_burns(&cards("AC AD AH AS 5C JK"))), "5C JK");
-        assert_eq!(
-            names(&legal_burns(&cards("2C AH KD QS 10H 7S"))),
-            "2C KD QS 10H 7S"
-        );
-        // Exhaustive over every card: only the four aces are refused.
+    fn legal_burns_refuse_only_the_ace_of_trumps() {
+        let hand = cards("AC AD AH AS 5C JK");
+        assert_eq!(names(&legal_burns(&hand, None)), "AC AD AH AS 5C JK");
+        assert_eq!(names(&legal_burns(&hand, Some(Clubs))), "AD AH AS 5C JK");
+        assert_eq!(names(&legal_burns(&hand, Some(Hearts))), "AC AD AS 5C JK");
+        // Exhaustive over every card: only the ace of trumps is refused.
         let all = crate::card::all_cards();
-        let burnable = legal_burns(&all);
-        assert_eq!(burnable.len(), 49);
-        assert!(burnable.iter().all(|c| !c.is_ace()));
+        let burnable = legal_burns(&all, Some(Spades));
+        assert_eq!(burnable.len(), 52);
         assert!(burnable.contains(&Card::Joker));
     }
 
@@ -477,6 +483,24 @@ mod tests {
             .map(|(i, c)| (i as u8, c))
             .collect();
         trick_winner(&played, trump)
+    }
+
+    #[test]
+    fn plain_heart_led_ace_of_hearts_wins_only_without_a_higher_trump() {
+        // Spades trumps, a plain heart led: the A♥ wins as a trump unless a higher trump
+        // (5, J or Joker) is also played.
+        assert_eq!(winner("9H AH KH QH 2C 3C 4C 6C", Spades), 1);
+        assert_eq!(winner("9H AH KH JK 2C 3C 4C 6C", Spades), 3);
+        assert_eq!(winner("9H AH KH JS 2C 3C 4C 6C", Spades), 3);
+    }
+
+    #[test]
+    fn three_of_diamonds_wins_only_as_the_led_plain_suit_without_trumps() {
+        // Clubs trumps, diamonds led, no trump: the 3D beats the 2D and AD (low in a red plain
+        // suit) and kings of other suits, which do not follow.
+        assert_eq!(winner("3D 2D KS AD KH QS JH QH", Clubs), 0);
+        // The same trick with a trump played: the trump wins.
+        assert_eq!(winner("3D 2D KS AD KH QS JH 2C", Clubs), 7);
     }
 
     #[test]

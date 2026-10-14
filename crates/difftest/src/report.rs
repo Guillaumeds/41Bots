@@ -22,7 +22,8 @@ pub struct Report {
     pub turned_joker: u64,
     /// The Joker, then an ace as the second turned card (step 2c).
     pub joker_then_ace: u64,
-    /// The Joker, then a non-ace whose ace of trumps the dealer holds (step 2d).
+    /// The Joker, then a non-ace whose ace of trumps the dealer holds; the dealer robs at its
+    /// own turn in trick 1 (H4 as amended on 2026-10-14).
     pub joker_dealer_holds_ace: u64,
     /// The card that fixed trumps (the turned card, or the second after a Joker) was the A♥.
     pub turned_ace_hearts: u64,
@@ -30,7 +31,7 @@ pub struct Report {
     pub turned_five_of_trumps: u64,
     /// The card that fixed trumps was an ace other than the A♥.
     pub turned_plain_ace: u64,
-    /// The dealer took a trump-fixing card before trick 1 (steps 2c, 2d, 3).
+    /// The dealer took a turned ace before trick 1 (steps 2c, 3).
     pub dealer_robbed_at_once: u64,
     /// The dealer held the ace of trumps under an ordinary turned card and robbed at their turn.
     pub dealer_robbed_in_turn: u64,
@@ -56,6 +57,8 @@ pub struct Report {
     pub won_by_immediate_bonus: u64,
     /// Games won by reaching 41 with an end-of-hand bonus (per game).
     pub won_by_end_bonus: u64,
+    /// Burns of an ace (a plain ace, or a future ace of trumps burned before trumps were known).
+    pub ace_burned: u64,
     /// Matches won by each team.
     pub match_wins: [u64; 4],
     /// Money won (positive) or lost by each team over all matches.
@@ -116,6 +119,7 @@ impl Report {
         self.immediate_bonus += o.immediate_bonus;
         self.end_of_hand_bonus += o.end_of_hand_bonus;
         self.no_trump_hand += o.no_trump_hand;
+        self.ace_burned += o.ace_burned;
         self.five_game_match += o.five_game_match;
         self.won_by_trick += o.won_by_trick;
         self.won_by_immediate_bonus += o.won_by_immediate_bonus;
@@ -188,9 +192,13 @@ impl Report {
                         self.five_game_match += 1;
                     }
                 }
+                Event::Burned { card, .. } => {
+                    if rank_of(card) == ACE {
+                        self.ace_burned += 1;
+                    }
+                }
                 Event::MatchStart { .. }
                 | Event::Dealt { .. }
-                | Event::Burned { .. }
                 | Event::BurnDone { .. }
                 | Event::ProvedNoAce { .. }
                 | Event::AceUndealt => {}
@@ -219,7 +227,7 @@ impl Report {
                 Some(1),
             ),
             line(
-                "Joker, dealer holds the new ace of trumps",
+                "Joker, dealer holds the new ace",
                 self.joker_dealer_holds_ace,
                 Per::Hand,
                 h,
@@ -298,6 +306,7 @@ impl Report {
                 None,
             ),
             line("five-game match", self.five_game_match, Per::Match, m, None),
+            line("ace burned", self.ace_burned, Per::Hand, h, None),
         ]
     }
 
@@ -357,7 +366,9 @@ impl HandTally {
             r.turned_joker += 1;
             match self.turned.get(1) {
                 Some(&c) if rank_of(c) == ACE => r.joker_then_ace += 1,
-                Some(_) if dealer_at_once => r.joker_dealer_holds_ace += 1,
+                Some(_) if matches!(self.robber, Some((s, _)) if s == self.dealer) => {
+                    r.joker_dealer_holds_ace += 1
+                }
                 _ => {}
             }
         }

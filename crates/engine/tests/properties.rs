@@ -6,11 +6,12 @@
 
 use engine::cards::{ALL_CARDS, Bits, Card, JOKER, Suit, bit, cards, count, has, suit_of};
 use engine::game::{
-    Action, BonusKind, Event, GameEndReason, Match, Phase, Rules, Visibility, transcript,
+    Action, BONUS_FIRST, BONUS_LATER, BonusKind, Event, GameEndReason, Match, Phase, Rules,
+    Visibility, transcript,
 };
 use engine::rng::Rng;
 use engine::rules::{
-    ACES, EffSuit, ace_of_trumps, effective_suit, five_of, is_top_trump, is_trump, plain_mask,
+    EffSuit, ace_of_trumps, effective_suit, five_of, is_top_trump, is_trump, plain_mask,
     plain_rank, trump_mask, trump_rank,
 };
 use proptest::prelude::*;
@@ -55,6 +56,7 @@ struct Checker {
     proved: [bool; 8],
     robber: Option<u8>,
     ace_undealt: bool,
+    pre_trump_burn: Option<Card>,
 }
 
 impl Checker {
@@ -94,11 +96,8 @@ impl Checker {
             proved: [false; 8],
             robber: None,
             ace_undealt: false,
+            pre_trump_burn: None,
         }
-    }
-
-    fn house_rule(&self) -> bool {
-        self.rules.bonus_first == 6 && self.rules.bonus_later == 5
     }
 
     fn check(&mut self, m: &Match) {
@@ -164,6 +163,7 @@ impl Checker {
                 self.proved = [false; 8];
                 self.robber = None;
                 self.ace_undealt = false;
+                self.pre_trump_burn = None;
             }
             Event::Dealt { seat, cards } => {
                 let dealer = self.dealer.unwrap();
@@ -204,7 +204,12 @@ impl Checker {
                 }
             }
             Event::Burned { card, .. } => {
-                assert!(!has(ACES, card), "an ace was burned");
+                if let Some(t) = self.trump {
+                    assert_ne!(card, ace_of_trumps(t), "the ace of trumps was burned");
+                }
+                if self.trump.is_none() {
+                    self.pre_trump_burn = Some(card);
+                }
             }
             Event::BurnDone { seat } => {
                 assert!(matches!(self.prev, Some(Event::Burned { seat: s, .. }) if s == seat));
@@ -246,7 +251,10 @@ impl Checker {
             Event::AceUndealt => {
                 assert_eq!(self.tricks_done, 1);
                 let ace = ace_of_trumps(self.trump.unwrap());
-                assert!(!has(self.dealt, ace) && !self.turned.contains(&ace));
+                assert!(!self.turned.contains(&ace));
+                // A dealt ace can only be out of play if the dealer burned it after a turned
+                // Joker, before trumps were known (H3).
+                assert!(!has(self.dealt, ace) || self.turned.first() == Some(&JOKER));
                 assert!(self.robber.is_none());
                 self.ace_undealt = true;
             }
@@ -293,9 +301,9 @@ impl Checker {
                 let trump = self.trump.unwrap();
                 let t = usize::from(team);
                 let want = if self.bonus_flag[t] {
-                    self.rules.bonus_later
+                    BONUS_LATER
                 } else {
-                    self.rules.bonus_first
+                    BONUS_FIRST
                 };
                 assert_eq!(points, want);
                 match kind {
@@ -392,7 +400,9 @@ impl Checker {
                     assert_eq!(self.tricks_done, 5);
                 }
                 let ace = ace_of_trumps(self.trump.unwrap());
-                let dealt_or_turned = has(self.dealt, ace) || self.turned.contains(&ace);
+                // Not robbed if the dealer burned it after a turned Joker (H3).
+                let dealt_or_turned = (has(self.dealt, ace) || self.turned.contains(&ace))
+                    && self.pre_trump_burn != Some(ace);
                 assert_eq!(
                     self.takes,
                     u32::from(dealt_or_turned),
@@ -434,9 +444,7 @@ impl Checker {
         assert_eq!(m.bonus_taken(), self.bonus_flag);
         for (t, &s) in self.scores.iter().enumerate() {
             assert!(s <= 40, "a non-terminal score exceeds 40");
-            if self.house_rule() {
-                assert_eq!(self.bonus_flag[t], s % 5 == 1, "bonus flag vs score mod 5");
-            }
+            assert_eq!(self.bonus_flag[t], s % 5 == 1, "bonus flag vs score mod 5");
         }
 
         // All 53 cards accounted for, each in exactly one place.
@@ -467,7 +475,6 @@ impl Checker {
         );
         let dealer = m.dealer();
         for (s, &b) in truth.burns.iter().enumerate() {
-            assert_eq!(b & ACES, 0, "a burned ace");
             assert!(count(b) <= if s as u8 == dealer { 2 } else { 1 });
         }
 
@@ -487,7 +494,9 @@ impl Checker {
         match m.phase() {
             Phase::AwaitPlay(s) => assert!(m.legal_mask() & !truth.hands[usize::from(s)] == 0),
             Phase::AwaitBurn(s) => {
-                assert_eq!(m.legal_mask(), truth.hands[usize::from(s)] & !ACES);
+                // Every card but the ace of trumps (unknown during the Joker burn: anything).
+                let ace = self.trump.map_or(0, |t| bit(ace_of_trumps(t)));
+                assert_eq!(m.legal_mask(), truth.hands[usize::from(s)] & !ace);
             }
             Phase::MatchOver => unreachable!(),
         }
@@ -520,10 +529,14 @@ impl Checker {
                     }
                 }
                 if self.proved[s] {
-                    assert!(
-                        !has(hand | truth.burns[s], ace),
-                        "ProvedNoAce on the ace holder"
-                    );
+                    // The dealer may have burned it after a turned Joker, before trumps were
+                    // known (H3); a proved seat never holds it in hand.
+                    let burns = if s == usize::from(dealer) {
+                        0
+                    } else {
+                        truth.burns[s]
+                    };
+                    assert!(!has(hand | burns, ace), "ProvedNoAce on the ace holder");
                 }
             }
             if let Some(r) = self.robber {
@@ -534,7 +547,8 @@ impl Checker {
                 );
             }
             if self.ace_undealt {
-                assert!(has(truth.undealt, ace));
+                // Out of play: undealt, or burned by the dealer before trumps were known.
+                assert!(has(truth.undealt | truth.burns[usize::from(dealer)], ace));
             }
         }
 
@@ -637,8 +651,8 @@ proptest! {
     }
 
     #[test]
-    fn invariants_hold_flat_rule(seed in any::<u64>(), stake in 1i32..100) {
-        let m = play_checked(seed, Rules { stake, ..Rules::FLAT });
+    fn invariants_hold_any_stake(seed in any::<u64>(), stake in 1i32..100) {
+        let m = play_checked(seed, Rules { stake });
         assert_replays(&m);
     }
 
@@ -659,12 +673,7 @@ proptest! {
 #[test]
 fn random_matches_replay_byte_identically() {
     for seed in 0..40u64 {
-        let rules = if seed % 2 == 0 {
-            Rules::HOUSE
-        } else {
-            Rules::FLAT
-        };
-        let m = play_checked(seed, rules);
+        let m = play_checked(seed, Rules::HOUSE);
         assert_replays(&m);
         assert_eq!(
             transcript(&m).lines().count(),
@@ -706,6 +715,7 @@ fn rule_branches_are_reached() {
     let mut by_immediate = 0;
     let mut by_end = 0;
     let mut five_games = 0;
+    let mut ace_burned = 0;
     for seed in 1000..1300u64 {
         let mut m = Match::new(seed, Rules::HOUSE);
         let mut rng = Rng::derive(seed, &[7]);
@@ -746,6 +756,11 @@ fn rule_branches_are_reached() {
                     }
                 }
                 Event::AceUndealt => nobody_robbed += 1,
+                Event::Burned { card, .. }
+                    if engine::cards::rank_of(card) == engine::cards::ACE =>
+                {
+                    ace_burned += 1
+                }
                 Event::Bonus {
                     kind: BonusKind::Immediate,
                     ..
@@ -783,6 +798,7 @@ fn rule_branches_are_reached() {
         ("41 by immediate bonus", by_immediate),
         ("41 by end bonus", by_end),
         ("five-game match", five_games),
+        ("ace burned", ace_burned),
     ];
     println!("{counts:#?}");
     for (what, n) in [
@@ -795,6 +811,7 @@ fn rule_branches_are_reached() {
         ("immediate bonus", immediate),
         ("end bonus", end_bonus),
         ("41 by end bonus", by_end),
+        ("ace burned", ace_burned),
     ] {
         assert!(n > 0, "branch never reached: {what}");
     }
@@ -811,12 +828,7 @@ fn stress_many_matches() {
         .unwrap_or(2000);
     let (mut actions, mut hands) = (0usize, 0u64);
     for seed in 0..n {
-        let rules = if seed % 3 == 0 {
-            Rules::FLAT
-        } else {
-            Rules::HOUSE
-        };
-        let m = play_checked(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), rules);
+        let m = play_checked(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), Rules::HOUSE);
         assert_replays(&m);
         actions += m.actions().len();
         hands += u64::from(m.hand_index()) + 1;

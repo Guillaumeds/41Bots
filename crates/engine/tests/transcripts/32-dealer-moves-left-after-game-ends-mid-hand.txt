@@ -1,8 +1,8 @@
 title: After a game ends in the middle of a hand, the deal still moves one seat to the left (H5)
 story: Hand 1 (seat 5 deals) builds the score: team 0 (seats 0 and 4) reaches 26 (scores 26,5,0,0).
 story: Hand 2 is dealt by seat 6, the next seat to the left. Team 0 wins tricks 1, 2 and 3 and reaches 41 at trick 3; the game ends at once and the rest of the hand is not played (final scores 41,5,0,0).
-story: Hand 3 starts game 2. House rule H5: after a game ends mid-hand the deal moves one seat to the left exactly as after any hand, so seat 7 deals (not seat 6 again, and not the winners).
-story: Seat 7 turns the ace of clubs and, as dealer, robs it at once and burns (it holds no other ace); seat 0, on the dealer's left, then leads trick 1. The transcript stops there.
+story: Hand 3 starts game 2. House rule H5: the deal always moves one seat to the left of the previous dealer after every hand, wherever that hand ended, and carries on across games within the same match (only the first dealer of each match is random). So seat 7 deals (not seat 6 again, and not the winners).
+story: Seat 7 turns the ace of clubs and, as dealer, robs it at once and burns the 10 of spades; seat 0, on the dealer's left, then leads trick 1. The transcript stops there.
 dealer: 5
 # ---- Hand 1 of this file (hand index 0), dealer seat 5: hearts trumps, builds the score ----
 hand 0: 4H 5H 8H QH JK

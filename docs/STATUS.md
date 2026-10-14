@@ -6,7 +6,7 @@
 - Research, design, tech stack and run-operations plan approved (`docs/PLAN.md`).
 - Authoritative rules and house rules recorded (`docs/RULES.md`).
 - Repo skeleton: pinned Rust toolchain, Cargo workspace, CI workflow, `.gitattributes`.
-- **2026-10-13: plan reviewed and amended** (`docs/REVIEW-2026-10-13.md`; amendments at the top of `docs/PLAN.md`). Owner decisions: no ace may ever be burned (H3); think time 8 s / 5 s on tricks 1–2; M3b playable demo; equal tournament mix weights; `bonus_later` switch.
+- **2026-10-13: plan reviewed and amended** (`docs/REVIEW-2026-10-13.md`; amendments at the top of `docs/PLAN.md`). Owner decisions: no ace may ever be burned (H3; withdrawn 2026-10-14); think time 8 s / 5 s on tricks 1–2; M3b playable demo; equal tournament mix weights; `bonus_later` switch.
 
 ## M0 task list (do in order)
 1. **`crates/engine`: deterministic RNG.**
@@ -19,11 +19,11 @@
    - Effective suit, trump order (red/black, hearts = 14 trumps), plain-suit orders.
    - Legal-move generation, covering plain leads, trump leads (the Joker and the A♥ led are trump leads), the reneging test, and rule 18.
    - Trick winner.
-   - Legal burns: **never an ace of any suit** (H3); the taken card and the Joker may be burned.
+   - Legal burns: **any card except the ace of trumps** (rules 21, 24, H3; the 2026-10-13 no-ace rule is withdrawn); plain aces, the taken card and the Joker may be burned.
 3. **`crates/engine`: hand, game and match flow.**
    - Frozen deal convention: deck positions 0–15 two at a time to seats dealer+1 … dealer+8, positions 16–39 three at a time, position 40 turned, 41 the second turned card after a Joker, the rest the undealt pack in order; first dealer = `bounded(8)` from the seeded RNG before the first shuffle; every hand reshuffles all 53.
    - Robbing per RULES H2–H4, with burn decisions as actions and forced takes done automatically; a non-ace-holder is never offered a burn.
-   - Scoring: 5 per trick; best-trump bonus 11 first / 10 later per team per game (`bonus_later` switch: 5 house, 6 flat-11); immediate bonus when the 5 of trumps is played; end-of-hand bonus; no bonus if no trump was played; per-trick check order from the RULES notes.
+   - Scoring: 5 per trick; best-trump bonus 11 first / 10 later per team per game (fixed: +6 first, +5 later; the flat-11 switch was removed on 2026-10-14); immediate bonus when the 5 of trumps is played; end-of-hand bonus; no bonus if no trump was played; per-trick check order from the RULES notes.
    - Game ends the instant a team reaches 41 or more; jink; match = first to 2 games (at most five); next deal always moves left; money settlement (stake configurable). Record a game-end reason (41-by-trick, 41-by-immediate-bonus, 41-by-end-bonus, jink).
    - An event stream with **visibility tags** (public / private to seat s) on every event; each seat's view is derived from the tags. Events carry the incremental hard facts (who has proved they lack the ace of trumps; burn locations and counts; hidden-card count 12 or 13).
    - A `rules_version` field in every record; a test-only constructor for custom deals.
@@ -31,7 +31,7 @@
 5. **Tests.**
    - One test per numbered rule (rules 25, 26, 34, 37–41: assert illegal actions are rejected and forced robs happen).
    - **About 25 named plain-English transcripts**, written before coding and doubling as owner-review material: the 5-of-trumps bonus ending a game mid-hand; 41 reached only by the +6; a second bonus worth 10 while another team's first is 11, with the flag resetting in a new game; no trump played; the only trump being the A♥ or a black 2; a turned 5 or J robbed vs unrobbed; a turned A♥; a turned plain ace; the dealer holding the ace with an ordinary turned card (robs eighth); the ace holder leading trick 1; the A♥ holder not robbing when hearts are not trumps; an ace never burnable (all four aces, by trump suit); the dealer burning the Joker; turned Joker then turned ace (two burns, 11 undealt); turned Joker with the dealer holding the ace; turned Joker then an ordinary card with a non-dealer robbing (two burns); the four rule-17 forcing variants; both rule-18 branches; plain hearts led with the A♥ as a trump; the A♥ led when hearts are not trumps; off-suit never winning; black 2 beats black 10 and red 10 beats red 2; plain ace positions; jink and 41 in one hand counting as one game; two teams at 41 after trick 5 (trick winner wins); a game ending at trick 3 with another team's bonus pending (lost); scores of 45, 46, 47; dealer rotation across games; a five-game match; a non-default stake.
-   - Property tests (proptest): 53 cards always accounted for; every trick has 8 cards in team order A,B,C,D,A,B,C,D; 5 cards per seat at the start of trick 1 after any robs; hidden cards ∈ {12, 13}; burns ∈ {0, 1, 2} (dealer ≤ 2, non-dealer ≤ 1) and never an ace; the ace of trumps robbed exactly once per hand when dealt; each team's bonus flag equals (`score mod 5 == 1`) under the house rule; no non-terminal score exceeds 40; a game lasts at most 7 hands and a match at most 5 games; exactly one game-end reason per game; money across the four teams sums to zero and equals +6/−2 stake units per team; the legal action set is never empty; every random game replays byte-identically from seed plus actions; the tracker's hard facts never exclude the true deal.
+   - Property tests (proptest): 53 cards always accounted for; every trick has 8 cards in team order A,B,C,D,A,B,C,D; 5 cards per seat at the start of trick 1 after any robs; hidden cards ∈ {12, 13}; burns ∈ {0, 1, 2} (dealer ≤ 2, non-dealer ≤ 1); the ace of trumps robbed exactly once per hand when dealt; each team's bonus flag equals (`score mod 5 == 1`) under the house rule; no non-terminal score exceeds 40; a game lasts at most 7 hands and a match at most 5 games; exactly one game-end reason per game; money across the four teams sums to zero and equals +6/−2 stake units per team; the legal action set is never empty; every random game replays byte-identically from seed plus actions; the tracker's hard facts never exclude the true deal.
 6. **`crates/difftest`.** Drives engine and reference with identical random legal actions from the same explicit deck and dealer (the reference must not share the engine's RNG), comparing legal-action sets, trick winners, scores, phases, event streams, seat views, hidden-card and burn counts, and match/money results at every step; run under every rule-switch setting.
    - `cargo test` runs a small count.
    - A `--release` binary takes a game count, reports rule-branch counts and asserts minimum coverage of rare branches (turned Joker ≈ 1 in 53 hands; Joker then turned ace ≈ 0.15%; Joker with the dealer holding the ace ≈ 0.18%; turned A♥ ≈ 1.9%; turned 5 of trumps ≈ 7.5%); also runs on the hand-made deals and on deals seeded to force each branch.
@@ -54,7 +54,31 @@ M1 adds the table manager, the arena (14-way duplicate block, generalised SPRT, 
 - 2026-10-13: Repo initialised from the approved plan. Rust 1.99.0 pinned; Rust 1.99.1 is due 2026-10-15 (x86-64 FFI fix). Bump the pin when it's out.
 - 2026-10-13: Plan reviewed (8 research sweeps, 5 lenses, 3 sceptics per change). Verdict: keep the recipe; re-scope the exact solver (cheap late only), make the match-equity table exact at M1, specify the learning pipeline precisely, add M3b. H3 tightened: no ace may ever be burned. Details in `docs/REVIEW-2026-10-13.md`.
 
+## M1 progress (2026-10-13 night)
+- Committed on `m1-tables`: `crates/tablemgr` (tables, records, protocol, leakage tests), `crates/bots` (random, rules-v1: 56% money vs random), engine block decks + serde feature, `crates/equity` (fixed-point MoneyChance, exact 810k-state match-equity sweep, ~7 s on 4 threads).
+- Match-equity table v0: built from 1M rules-v1 self-play hands (`data/equity/model-rules-v1-1M-seed1.json`); all checks pass (sums, rotation, monotone, flag rule, Monte Carlo |z| ≤ 2.60). The 26 MB `.npy` is rebuilt from the model by `equity build`; its sha256 is in `data/equity/`.
+- **Must fix before untrusted seats (M3b):** (1) the seat seed can be inverted to the match seed — derive it one-way or from a secret; (2) the `end` message carries the full record, revealing the other decks of a duplicate block — send records only after the block, or strip seeds/burns.
+- Next: arena (spec §5), run-ops (spec §7), first vast.ai smoke run, σ_b.
 ## M0 gate result (2026-10-14 00:37 UTC)
 - 10M-match differential gate: 5 shards × 2M matches on GitHub CI (run 38480695319), all PASS, zero engine/reference disagreements.
 - All M0 gate items met **except the owner's reading and approval of the transcripts** (`docs/TRANSCRIPTS.md`, `crates/engine/tests/transcripts/`).
 - 2026-10-14: the owner read and approved the transcripts. **M0 gate fully met.**
+- 2026-10-14: **Owner rule changes** (`RULES_VERSION` 1 → 2; version-1 records are refused):
+  - **H3: the 2026-10-13 "no ace may be burned" rule is withdrawn.** Any card may be burned, aces included (the ace of trumps too), by the dealer and the robber alike. If the dealer burns, after a turned Joker, the card that becomes the ace of trumps, nobody robs and the ace is announced out of play after trick 1 (`AceUndealt` now means "undealt or burned").
+  - **H4: after a turned Joker and an ordinary card, a dealer holding the ace of trumps robs at their own first turn (as the eighth card), not at once.** Only a turned ace (also one after a Joker) is robbed at once. The dealer is no longer known to lack the ace straight after the Joker sequence; they prove it only by playing their first card.
+  - **The `bonus_later` switch is removed:** bonuses are always +6 first, +5 later per partnership per game; the flat-11 variant was rejected. The `Rules` struct now holds only the stake (records, protocol and model JSON lose the two bonus fields).
+  - Wording fixes in RULES rule 17 (every forcing lead also forces all lower trumps), transcripts 19, 20, 22, 24, 26, 32 and `docs/TRANSCRIPTS.md`; transcript 13 now shows an ace being burned; transcript 31 (flat rule) deleted.
+  - Checks: fmt, clippy, all tests, WASM check pass; difftest 100,000 matches seed 1: zero disagreements, PASS (16.4% of hands burn an ace; the "Joker, dealer holds the new ace" branch now robs in turn).
+  - Equity v0 rebuilt from 1M rules-v1 hands (seed 1): all checks pass (Monte Carlo largest |z| 2.52); new table sha256 `00bdc49f…68da` (was `bc7e7293…5ead9a`).
+  - Arena canary: 50 blocks, every block exactly 0. **σ_b (rules-v1 vs random, 200 Block14 blocks): 0.1538 money chance (1.231 stakes), mean +0.2774** (before the rule changes: 0.1501, mean +0.2642).
+- 2026-10-14 (later): **Owner chose "back to the original H3"** (supersedes the H3 line of the entry above): any card may be burned **except the ace of trumps** (rules 21 and 24), so plain aces, the A♥ when hearts are not trumps, the card just taken and the Joker may go. `RULES_VERSION` stays 2 (no version-2 records were ever published).
+  - **Open question for the owner:** after a turned Joker the dealer burns before trumps are known. If that burned card turns out to be the ace of the suit turned next, is that allowed? The engine forbids nothing retroactively: nobody robs, the turned card stays face up, and after trick 1 the ace is announced out of play (`AceUndealt` = "undealt or in the dealer's Joker burn").
+  - Checks: fmt, clippy, all tests, WASM check pass; difftest 100,000 matches seed 1: zero disagreements, PASS (ace burned in 3.9% of hands).
+  - Equity v0 rebuilt (1M rules-v1 hands, seed 1): all checks pass (Monte Carlo largest |z| 2.52); table sha256 `64740dab…6808`.
+  - Arena canary: every block exactly 0. **σ_b (rules-v1 vs random, 200 blocks): 0.1463 money chance (1.170 stakes), mean +0.2606.**
+
+## M1 gate result (2026-10-14)
+- First vast.ai run end to end (GitHub run 38512961545): cheapest ≥16-core on-demand box, 20M-hand equity sweep, DONE uploaded, instance self-destroyed and verified gone; CPU 98.6% (benchmark), 77% (chunk start), 93% (last reading). Cost < $0.01.
+- Table v0 checks pass; σ_b = 0.146 money chance (1.17 stakes) per 14-way block, rules-v1 vs random; canary exactly 0.
+- Leakage and replay tests pass. **M1 gate met.** Open owner question: see the early Joker-burn ace question above.
+- Next: M2 (exact solver) — measurement spike first (PLAN §13).

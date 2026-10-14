@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::cards::parse;
-use crate::rules::{ACES, trump_mask};
+use crate::rules::trump_mask;
 
 // ----- helpers -----
 
@@ -326,7 +326,8 @@ fn build_deck_follows_the_deal_convention() {
 
 #[test]
 fn robber_takes_at_their_own_first_turn_after_seeing_earlier_cards() {
-    // Spades trumps; seat 2 holds all four aces, so may burn only its fifth card or the 7S.
+    // Spades trumps; seat 2 holds all four aces and may burn any of its six cards (H3, amended
+    // 2026-10-14).
     let mut m = game(7, ["", "", "AS AC AD AH 9C", "", "", "", "", ""], "7S");
     assert_eq!(m.phase(), Phase::AwaitPlay(0));
     let before = m.events().len();
@@ -345,12 +346,16 @@ fn robber_takes_at_their_own_first_turn_after_seeing_earlier_cards() {
     assert_eq!(p.table_card, None);
     assert_eq!(p.robber, Some(2));
     assert_eq!(p.turned, vec![(c("7S"), Some(2))]);
-    // No ace may be burned, not even a plain one (H3); the card just taken may be.
-    assert_eq!(m.legal_mask(), set("9C 7S"));
-    for ace in ["AC", "AD", "AH", "AS"] {
-        let err = m.apply(Action::Burn(c(ace))).unwrap_err();
-        assert_eq!(err.reason, "an ace may never be burned (house rule H3)");
-    }
+    // Any card but the ace of trumps (AS) may be burned: plain aces and the card just taken may.
+    assert_eq!(m.legal_mask(), set("AC AD AH 9C 7S"));
+    assert_eq!(
+        m.apply(Action::Burn(c("AS"))).unwrap_err().reason,
+        "the ace of trumps may never be burned (rules 21 and 24)"
+    );
+    assert_eq!(
+        m.apply(Action::Burn(c("2C"))).unwrap_err().reason,
+        "that card is not in the burning player's hand"
+    );
     assert_eq!(
         m.apply(Action::Play(c("9C"))).unwrap_err().reason,
         "a burn is due: the player who took the turned card must burn first"
@@ -440,7 +445,7 @@ fn turned_plain_ace_is_robbed_by_the_dealer_at_once() {
     assert_eq!(p.trump, Some(Suit::Clubs));
     assert_eq!(p.robber, Some(7));
     assert_eq!(p.hand_sizes[7], 6);
-    // The turned ace itself may not be burned.
+    // The turned ace (the ace of trumps) may not be burned (rule 21).
     assert_eq!(m.legal_mask(), set("2D 3D 4D 5D 6D"));
     burn(&mut m, "6D");
     assert_eq!(m.phase(), Phase::AwaitPlay(0));
@@ -460,9 +465,13 @@ fn turned_ace_of_hearts_makes_hearts_trumps_and_is_robbed() {
     assert_eq!(m.phase(), Phase::AwaitBurn(7));
     assert_eq!(m.public().trump, Some(Suit::Hearts));
     assert_eq!(count(trump_mask(Suit::Hearts)), 14);
-    assert!(!has(m.legal_mask(), c("AH")));
-    lowest(&mut m);
+    assert!(
+        !has(m.legal_mask(), c("AH")),
+        "the A♥ is the ace of trumps here"
+    );
+    burn(&mut m, "2D");
     assert_eq!(m.phase(), Phase::AwaitPlay(0));
+    assert_eq!(m.public().robber, Some(7));
 }
 
 // ----- the turned Joker (step 2, rule 24, H4) -----
@@ -489,20 +498,16 @@ fn turned_joker_then_ordinary_card_with_the_ace_undealt() {
     assert_eq!(p.hand_sizes[7], 6);
     assert_eq!(p.hidden_count, 12);
     assert_eq!(count(m.truth().undealt), 12);
-    // Aces of every suit are unburnable before trumps are known; the Joker may be burned.
-    assert_eq!(m.legal_mask(), set("2C 3C 4C JK"));
-    assert!(m.apply(Action::Burn(c("AC"))).is_err());
+    // Any card may be burned before trumps are known, aces and the Joker included.
+    assert_eq!(m.legal_mask(), set("AC AD 2C 3C 4C JK"));
     let before = m.events().len();
     burn(&mut m, "JK");
     assert_eq!(
         log_from(&m, before),
-        [
-            "Burned seat=7 card=JK",
-            "BurnDone seat=7",
-            "Turned card=7S",
-            "ProvedNoAce seat=7",
-        ]
+        ["Burned seat=7 card=JK", "BurnDone seat=7", "Turned card=7S",]
     );
+    // H4 (amended 2026-10-14): the dealer proves nothing until it plays its first card.
+    assert!(!m.public().proved_no_ace[7]);
     let p = m.public();
     assert_eq!(p.trump, Some(Suit::Spades));
     assert_eq!(p.table_card, Some(c("7S")));
@@ -514,8 +519,8 @@ fn turned_joker_then_ordinary_card_with_the_ace_undealt() {
     for _ in 0..8 {
         lowest(&mut m);
     }
-    // The dealer's ProvedNoAce is not repeated when they play.
-    assert_eq!(proved_seats(&m), vec![7, 0, 1, 2, 3, 4, 5, 6]);
+    // Every seat proves it lacks the ace as it plays, the dealer last.
+    assert_eq!(proved_seats(&m), vec![0, 1, 2, 3, 4, 5, 6, 7]);
     assert_eq!(log(&m).last().unwrap(), "AceUndealt");
 }
 
@@ -539,7 +544,7 @@ fn turned_joker_then_ordinary_card_robbed_by_a_non_dealer() {
     assert_eq!(p.turned, vec![(JOKER, Some(7)), (c("7S"), Some(2))]);
     assert_eq!(p.robber, Some(2));
     finish_hand(&mut m);
-    assert_eq!(proved_seats(&m), vec![7, 0, 1]);
+    assert_eq!(proved_seats(&m), vec![0, 1]);
 }
 
 #[test]
@@ -578,21 +583,44 @@ fn turned_joker_then_ace_of_hearts() {
 
 #[test]
 fn turned_joker_with_the_dealer_holding_the_new_ace() {
+    // H4 (amended 2026-10-14): the dealer robs the ordinary card at its own first turn in
+    // trick 1, as the eighth card, after seeing the other seven.
     let mut m = game(7, ["", "", "", "", "", "", "", "AS 2C 3C 4C 5C"], "JK 7S");
     burn(&mut m, "2C");
-    let tail = log(&m);
-    assert_eq!(
-        tail[tail.len() - 2..],
-        ["Turned card=7S", "Took seat=7 card=7S"]
-    );
+    assert_eq!(log(&m).last().unwrap(), "Turned card=7S");
+    assert_eq!(m.phase(), Phase::AwaitPlay(0));
+    for _ in 0..7 {
+        lowest(&mut m);
+    }
+    assert_eq!(log(&m).last().unwrap(), "Took seat=7 card=7S");
     assert_eq!(m.phase(), Phase::AwaitBurn(7));
     assert_eq!(m.legal_mask(), set("3C 4C 5C 7S JK"));
     burn(&mut m, "JK");
-    assert_eq!(m.phase(), Phase::AwaitPlay(0));
+    assert_eq!(m.phase(), Phase::AwaitPlay(7));
     assert_eq!(m.public().robber, Some(7));
     assert_eq!(m.truth().burns[7], set("2C JK"));
     finish_hand(&mut m);
-    assert!(proved_seats(&m).is_empty());
+    assert_eq!(proved_seats(&m), vec![0, 1, 2, 3, 4, 5, 6]);
+}
+
+#[test]
+fn turned_joker_dealer_burns_the_future_ace_of_trumps() {
+    // H3: the dealer burns the AS before trumps are known; the 7S then makes
+    // it the ace of trumps. Nobody holds it, so nobody robs, and after trick 1 the ace is
+    // announced out of play although it is in the dealer's burn, not the undealt pack.
+    let mut m = game(7, ["", "", "", "", "", "", "", "AS 2C 3C 4C 5C"], "JK 7S");
+    burn(&mut m, "AS");
+    assert_eq!(log(&m).last().unwrap(), "Turned card=7S");
+    assert_eq!(m.public().table_card, Some(c("7S")));
+    assert_eq!(m.phase(), Phase::AwaitPlay(0));
+    for _ in 0..8 {
+        lowest(&mut m);
+    }
+    assert_eq!(m.public().robber, None);
+    assert!(m.public().ace_undealt);
+    assert_eq!(log(&m).last().unwrap(), "AceUndealt");
+    assert!(!has(m.truth().undealt, c("AS")));
+    assert_eq!(m.truth().burns[7], set("AS"));
 }
 
 // ----- scoring: the D2 deal, written out card by card -----
@@ -839,36 +867,6 @@ fn trick_reaching_41_wins_even_with_a_bonus_in_the_same_trick() {
             "GameWon team=0 reason=trick scores=46,0,0,0",
         ]
     );
-    // Under the flat rule the later bonus is 6, making 47.
-    let m = d3([36, 0, 0, 0], [true, false, false, false], Rules::FLAT);
-    assert_eq!(
-        after_trick_one(&m)[1..3],
-        [
-            "Bonus team=0 points=6 kind=immediate card=5D",
-            "GameWon team=0 reason=trick scores=47,0,0,0",
-        ]
-    );
-}
-
-#[test]
-fn bonus_later_switch() {
-    // A team's second bonus in a game: 5 under the house rule (a 10-point trick), 6 under the
-    // flat rule (11), while another team's first is 6.
-    let m = d3([11, 11, 0, 0], [true, true, false, false], Rules::HOUSE);
-    assert_eq!(m.scores(), [21, 11, 0, 0]);
-    let m = d3([11, 11, 0, 0], [true, true, false, false], Rules::FLAT);
-    assert_eq!(m.scores(), [22, 11, 0, 0]);
-    let m = d3([0, 11, 0, 0], [false, true, false, false], Rules::HOUSE);
-    assert_eq!(m.scores(), [11, 11, 0, 0]);
-    let custom = Rules {
-        bonus_first: 7,
-        bonus_later: 3,
-        stake: 1,
-    };
-    let m = d3([0; 4], [false; 4], custom);
-    assert_eq!(m.scores(), [12, 0, 0, 0]);
-    let m = d3([12, 0, 0, 0], [true, false, false, false], custom);
-    assert_eq!(m.scores(), [20, 0, 0, 0]);
 }
 
 #[test]
@@ -938,10 +936,7 @@ fn second_game_win_ends_the_match_with_the_money() {
 
 #[test]
 fn money_with_a_non_default_stake() {
-    let rules = Rules {
-        stake: 10,
-        ..Rules::default()
-    };
+    let rules = Rules { stake: 10 };
     let mut m = game_with(
         7,
         ["", "5D KD", "", "", "", "", "", ""],
@@ -1136,8 +1131,9 @@ fn views_show_only_what_each_seat_may_see() {
         assert_eq!(v.public, m.public());
         assert_eq!(v.canonical_events().len(), v.events.len());
     }
-    // The burned cards are hidden and never aces.
-    assert_eq!(count(hidden_cards(&m) & ACES & !m.truth().undealt), 0);
+    // The burned cards are hidden.
+    let burned = m.truth().burns.iter().fold(0, |a, &b| a | b);
+    assert_eq!(hidden_cards(&m) & burned, burned);
 }
 
 #[test]

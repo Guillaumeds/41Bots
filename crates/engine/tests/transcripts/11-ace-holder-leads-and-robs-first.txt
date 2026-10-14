@@ -1,7 +1,7 @@
 title: The ace holder leads trick 1: it robs before leading
 story: Seat 2 deals and turns the 10 of diamonds: diamonds are trumps. Seat 3, the first to play, holds the ace of diamonds.
 story: The ace holder robs at its own first turn (rule 20, H2). For seat 3 that first turn is the lead of trick 1, so before any card is played the engine gives it the 10 of diamonds and asks for a burn.
-story: Seat 3 may burn any of its six cards except the ace (H3): the 2 of clubs, the 10 of diamonds it has just taken, the 9 or king of hearts, or the 7 of spades. It burns the 2 of clubs and then leads the 10 of diamonds.
+story: Seat 3 may burn any of its six cards except the ace of diamonds, the ace of trumps (rule 21, H3); the 10 of diamonds it has just taken may go. It burns the 2 of clubs and then leads the 10 of diamonds.
 story: The rest of the hand is ordinary play; only the robbing order is checked. Final scores of the hand: 0,5,16,10.
 dealer: 2
 # ---- Hand 1 of this file (hand index 0), dealer seat 2: diamonds trumps, seat 3 (first to play) holds the ace of diamonds ----
@@ -20,7 +20,7 @@ undealt: JK JS 6H 9C 2D 4D AH JD AC 3S QH 3C
 = Turned card=10D
 = Took seat=3 card=10D
 # Seat 3, left of the dealer, leads trick 1 and holds the ace of diamonds. Its first turn is the lead, so it robs
-# before leading (H2): it takes the 10 of diamonds and must burn one of its six cards (any card but an ace).
+# before leading (H2): it takes the 10 of diamonds and must burn one of its six cards (any card but the ace of trumps, rule 21, H3).
 phase: AwaitBurn 3
 legal: 2C 10D 9H KH 7S
 > Burn 2C    # seat 3 burns

@@ -54,11 +54,7 @@ pub fn action_rng(seed: u64, match_index: u64) -> Rng {
 
 /// The engine's rule switches in the reference's own type.
 pub fn reference_rules(r: Rules) -> reference::Rules {
-    reference::Rules {
-        bonus_first: r.bonus_first,
-        bonus_later: r.bonus_later,
-        stake: r.stake,
-    }
+    reference::Rules { stake: r.stake }
 }
 
 fn reference_action(a: EAction) -> reference::Action {

@@ -1,5 +1,5 @@
 title: A turned Joker followed by a turned ace: the dealer takes both and burns twice
-story: Seat 6 deals and turns the Joker. The dealer must take it and burn a card at once (rule 24), before trumps are known. It holds the ace of diamonds, which may not be burned (H3); it burns the 2 of clubs.
+story: Seat 6 deals and turns the Joker. The dealer must take it and burn a card at once (rule 24), before trumps are known. It holds the ace of diamonds, which it could burn since trumps are not yet known (H3); it burns the 2 of clubs.
 story: The next card, the ace of spades, is turned: spades are trumps. A turned ace must be robbed by the dealer at once (rule 24, H4), so the dealer takes it too and burns a second card: legal are the 4 of diamonds, 9 of hearts, J of spades and the Joker (never an ace). It burns the 9 of hearts.
 story: The dealer now holds the Joker and the ace of spades among its five cards. There are two burns, 11 cards stay undealt, and 13 cards are hidden in all.
 story: Trick 1 is then led by seat 7 and the hand is played out normally. Final scores of the hand: 0,0,15,16.
@@ -20,17 +20,17 @@ undealt: 9S QS 9C 2D 5D 4S AH AC 2S 5H 3C
 # ======== Play ========
 = Turned card=JK
 = Took seat=6 card=JK
-# The dealer takes the Joker at once and burns (rule 24). Trumps are not yet known; the ace of diamonds may not be burned (H3).
+# The dealer takes the Joker at once and burns (rule 24). Trumps are not yet known; any card may be burned (H3), the ace of diamonds included.
 phase: AwaitBurn 6
-legal: 2C 4D 9H JS JK
+legal: 2C AD 4D 9H JS JK
 > Burn 2C    # seat 6 burns
 = BurnDone seat=6
 = Turned card=AS
 = Took seat=6 card=AS
 # The next card turned is the ace of spades: spades are trumps, and a turned ace is robbed by the dealer at once (rule 24, H4).
-# The dealer burns again. Neither the ace of spades nor the ace of diamonds may be burned; the Joker could be.
+# The dealer burns again. Any card but the ace of spades (now the ace of trumps) may go, the plain ace of diamonds and the Joker included.
 phase: AwaitBurn 6
-legal: 4D 9H JS JK
+legal: AD 4D 9H JS JK
 > Burn 9H    # seat 6 burns
 = BurnDone seat=6
 phase: AwaitPlay 7

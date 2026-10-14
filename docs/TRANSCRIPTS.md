@@ -1,6 +1,6 @@
 # Hand-made transcripts (checkpoint M0)
 
-These 34 files in `crates/engine/tests/transcripts/` are deals written by hand from `docs/RULES.md`, before looking at either program. Each one sets up a situation from the rules, plays it card by card, and states what must happen. Both the engine and the independent reference implementation [a second, deliberately simple copy of the rules, written separately so the two can check each other] will be run against them.
+These 33 files in `crates/engine/tests/transcripts/` are deals written by hand from `docs/RULES.md`, before looking at either program. Each one sets up a situation from the rules, plays it card by card, and states what must happen. Both the engine and the independent reference implementation [a second, deliberately simple copy of the rules, written separately so the two can check each other] will be run against them.
 
 **Your approval of these transcripts is part of the M0 gate** (STATUS task 9, PLAN §13). Both programs are written from the same rules text, so if we both misread a rule, the 10-million-game comparison between them cannot notice. These transcripts are where you can catch that. Where a transcript and a program disagree, the reviewer decides against RULES.md, and the transcript may turn out to be the one that is wrong.
 
@@ -23,33 +23,32 @@ These 34 files in `crates/engine/tests/transcripts/` are deals written by hand f
 | `03-second-bonus-worth-ten-first-still-eleven.txt` | Over three hands, team 1's first bonus is +6 and its second +5. Team 3's first bonus, which comes after team 1's two, is still +6. |
 | `04-bonus-flag-resets-in-new-game.txt` | Team 3 takes its first bonus and wins game 1 by a jink. In game 2 its next bonus is +6 again. |
 | `05-lowly-trumps-take-the-end-bonus.txt` | Only two trumps reach the players. The end bonus goes to the A♥ (spades trumps), and in the next hand to the 2 of clubs over the 10 of clubs. |
-| `06-turned-five-of-trumps-robbed.txt` | The ace holder robs the turned 5 of diamonds at its turn, burns a card (never an ace) and plays the 5, whose bonus counts at once. |
+| `06-turned-five-of-trumps-robbed.txt` | The ace holder robs the turned 5 of diamonds at its turn, burns a card (any card but the ace of trumps; the plain ace of clubs could go) and plays the 5, whose bonus counts at once. |
 | `07-turned-five-of-trumps-not-robbed.txt` | The ace is undealt, so the turned 5 stays on the table all hand. The J's bonus comes only at the end of the hand. |
 | `08-turned-ace-of-hearts.txt` | A turned A♥ makes hearts trumps and the dealer robs at once. In trick 1 the Joker beats the A♥, which beats the king. |
-| `09-turned-plain-ace.txt` | The ace of clubs is turned and the dealer robs at once; its ace of diamonds may not be burned. The A♥ beats the ace of clubs. |
+| `09-turned-plain-ace.txt` | The ace of clubs is turned and the dealer robs at once; any card but the turned ace (the ace of trumps) may be burned, its plain ace of diamonds included. The A♥ beats the ace of clubs. |
 | `10-dealer-holds-ace-robs-as-eighth-card.txt` | The dealer holds the ace and the turned card is ordinary. The other seven play first, then the dealer robs and burns as the eighth card. |
 | `11-ace-holder-leads-and-robs-first.txt` | The first player holds the ace, so it robs and burns before leading. |
 | `12-ace-of-hearts-holder-does-not-rob.txt` | Clubs are trumps, so the A♥ holder is not asked to rob. The ace of clubs holder robs at its turn. |
-| `13-no-ace-is-ever-burnable.txt` | A robber holding all four aces may burn only its two other cards. |
+| `13-a-plain-ace-may-be-burned.txt` | A robber holding all four aces may burn any card except the ace of trumps (rule 21, H3); it burns the plain ace of clubs. |
 | `14-dealer-burns-the-joker.txt` | The dealer takes a turned Joker and burns the Joker itself. Then the A♥ holder robs the next turned card before leading. |
 | `15-joker-then-ace-two-dealer-burns.txt` | The Joker is turned, then the ace of spades. The dealer takes both and burns twice, and 11 cards stay undealt. |
-| `16-joker-then-dealer-holds-new-ace.txt` | The Joker is turned, then the 9 of clubs, and the dealer holds the ace of clubs. The dealer takes the 9 at once and burns again. |
+| `16-joker-then-dealer-holds-new-ace.txt` | The Joker is turned, then the 9 of clubs, and the dealer holds the ace of clubs. The dealer robs the 9 at its own turn, as the eighth card of trick 1 (H4 as amended 2026-10-14), and burns again. |
 | `17-joker-then-ordinary-card-robbed-by-another-seat.txt` | The Joker is turned, then an ordinary card that seat 3 robs at its turn: two burns by two players. |
-| `18-joker-then-ordinary-card-ace-undealt.txt` | The Joker is turned, then an ordinary card, with the ace undealt. The dealer is known at once to lack the ace, and the others show it as they play. |
-| `19-forcing-five-led-and-jack-led.txt` | Rule 17. The J led forces out the Joker and the A♥, but the 5 may be held back. The 5 led forces out every trump. |
-| `20-forcing-joker-led-and-ace-of-hearts-led.txt` | Rule 17. The Joker led forces out the A♥. The A♥ led forces out the ace of trumps, while the 5, J and Joker may be held back. |
+| `18-joker-then-ordinary-card-ace-undealt.txt` | The Joker is turned, then an ordinary card, with the ace undealt. Not robbing at once proves nothing about the dealer; every player, the dealer last, shows it lacks the ace as it plays to trick 1. |
+| `19-forcing-five-led-and-jack-led.txt` | Rule 17. The J led forces out the Joker, the A♥ and every lower trump, but the 5 may be held back. The 5 led forces out every trump. |
+| `20-forcing-joker-led-and-ace-of-hearts-led.txt` | Rule 17. The Joker led forces out the A♥ and every lower trump. The A♥ led forces out the ace of trumps and every lower trump, while the 5, J and Joker may be held back. |
 | `21-rule-18-both-branches.txt` | If every trump you hold may be held back, you may play any card. If even one may not, you must play a trump. |
-| `22-plain-hearts-led-ace-of-hearts-is-not-a-heart.txt` | A plain heart is led. The A♥ holder, with no other heart, may play anything, and the A♥ wins as a trump. |
+| `22-plain-hearts-led-ace-of-hearts-is-not-a-heart.txt` | A plain heart is led. The A♥ holder, with no other heart, may play anything, and the A♥ wins as a trump because no higher trump (5, J or Joker of trumps) is played to that trick. |
 | `23-ace-of-hearts-led-when-hearts-are-not-trumps.txt` | The A♥ led is a trump lead. Nobody has to follow with a heart, and a player holding a low trump must play it, not a heart. |
-| `24-off-suit-never-wins.txt` | The 3 of diamonds wins against kings of other suits and against the 2 and ace of diamonds. |
+| `24-off-suit-never-wins.txt` | Diamonds (a plain suit) are led and nobody plays a trump: the 3 of diamonds wins against kings of other suits (which do not follow) and against the 2 and ace of diamonds. Any trump played would have won. |
 | `25-card-orders-black-two-red-ten-plain-aces.txt` | Among black trumps the 2 beats the 10, and among red trumps the 10 beats the 2. A plain red ace is the lowest card of its suit, and a plain black ace is fourth. |
-| `26-jink.txt` | Team 1 takes all five tricks: a jink. It wins the game with 25 and gets no end bonus. |
+| `26-jink.txt` | Team 1 takes all five tricks: a jink. It counts as 41 and wins the game at once, whatever the points; no end bonus is needed (the game is reported with reason `jink`). |
 | `27-jink-and-41-in-one-hand-count-as-one-game.txt` | A jink that would also have reached 41 with the end bonus counts as one game, and the match goes on. |
 | `28-two-teams-reach-41-after-trick-5.txt` | The trick-5 winner reaches 41 and wins the game. Another team's bonus, which would also have made 41, is lost. |
 | `29-game-ends-at-trick-3-pending-bonus-lost.txt` | A team reaches 41 at trick 3. Another team's end-of-hand bonus, still waiting for the end of the hand, is lost. |
 | `30-final-scores-45-and-46.txt` | A team on 40 takes a trick (45). In the next game, a team on 36 takes the 5-of-trumps trick (46). |
-| `31-final-score-47-under-flat-bonus-rule.txt` | With every bonus worth +6 (the Irish rule switched on), the team on 36 finishes on 47. |
-| `32-dealer-moves-left-after-game-ends-mid-hand.txt` | After a game ends mid-hand, the next seat to the left deals (H5). |
+| `32-dealer-moves-left-after-game-ends-mid-hand.txt` | The deal always moves one seat to the left of the previous dealer after every hand, wherever that hand ended (here a game ended mid-hand), and it carries on across games within the same match; only the first dealer of each match is drawn at random (H5). |
 | `33-five-game-match-with-money.txt` | A five-game match: each team wins one game, then team 0 wins the decider. Money at a stake of 5: team 0 +30, each other team −10. |
 | `34-match-with-stake-two.txt` | A match for a stake of 2: the winners +12, each losing team −4. |
 
