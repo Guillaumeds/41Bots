@@ -80,13 +80,14 @@ def offer_query(a) -> str:
         f"cpu_cores_effective>={a.min_cores}", f"cpu_ram>={a.min_ram_gb}",
         "compute_cap>=600", "compute_cap<1000", "cuda_vers>=12.6",
         f"disk_space>={a.disk_gb}", f"inet_down_cost<={a.max_net_cost}", f"inet_up_cost<={a.max_net_cost}",
-    ])
+    ] + ([f"dph_total<={a.max_dph}"] if a.max_dph else []))
 
 
 def search_offers(a) -> list[dict]:
     # --type on-demand: fixed-price rental only. Interruptible (bid) machines are never used.
     rows = vast("search", "offers", offer_query(a), "--type", "on-demand", "--order", "dph_total", "--limit", "200")
-    return [o for o in (rows or []) if not o.get("is_bid") and o.get("dph_total") and o.get("cpu_cores_effective")]
+    return [o for o in (rows or []) if not o.get("is_bid") and o.get("dph_total") and o.get("cpu_cores_effective")
+            and (not a.max_dph or float(o["dph_total"]) <= a.max_dph)]
 
 
 # ------------------------------------------------------------------ R2 (aws CLI, S3 API)
@@ -182,11 +183,15 @@ def choose(a) -> dict | None:
     have_r2 = all(os.environ.get(n) for n in ("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET", "R2_S3_ENDPOINT"))
     bench = load_bench(have_r2)
     best, ranked = rank(offers, bench, a.premium)
+    if a.cheapest and ranked:
+        # Test runs: the lowest hourly price, whatever its speed.
+        best = min(ranked, key=lambda o: (float(o["dph_total"]), o["id"]))
     log(f"{len(ranked)} on-demand offers with >= {a.min_cores} effective cores; {len(bench)} CPU models benchmarked")
     for o in ranked[:10]:
         log(("  * " if o is best else "    ") + describe(o))
     if best:
-        log(f"chosen (within {a.premium:.0%} of cheapest cost per work, fastest): {describe(best)}")
+        how = "cheapest per hour (--cheapest)" if a.cheapest else f"within {a.premium:.0%} of cheapest cost per work, fastest"
+        log(f"chosen ({how}): {describe(best)}")
     return best
 
 
@@ -298,7 +303,8 @@ def cmd_run(a) -> int:
         sys.exit("launch: no offer matches the filters")
     ncpu = int(best["cpu_cores_effective"])
     dph = float(best["dph_total"])
-    manifest.setdefault("threads", ncpu)
+    # No "threads" here: the runner derives the usable cores from the container's cgroup CPU quota
+    # (vast's cpu_cores_effective is a fraction of the host; NCPU below is recorded for comparison).
     manifest.setdefault("deadline_utc", datetime.fromtimestamp(time.time() + a.max_minutes * 60 - 120, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
     if a.dry_run:
         log("dry run: would upload manifest and create the instance:\n" + json.dumps(manifest, indent=2))
@@ -428,6 +434,8 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("--disk-gb", type=int, default=20)
         s.add_argument("--max-net-cost", type=float, default=0.02, help="max $/GB up or down")
         s.add_argument("--premium", type=float, default=0.20, help="speed premium margin (owner's 20%% rule)")
+        s.add_argument("--max-dph", type=float, default=None, help="max total $/hour for the offer")
+        s.add_argument("--cheapest", action="store_true", help="test runs: take the cheapest $/hour offer, not the best cost per work")
 
     s = sub.add_parser("plan", help="dry run: rank offers and print the choice")
     offer_args(s)

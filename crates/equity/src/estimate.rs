@@ -369,39 +369,119 @@ pub fn estimate_model_parallel(
     seed: u64,
     threads: usize,
 ) -> Result<HandModel, EstimateError> {
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Condvar, Mutex, mpsc};
+
     let threads = threads.max(1);
-    let per_thread: u64 = 4;
-    let mut c = Counter::new(bot_factory.name(), seed);
-    let mut base = 0u64;
-    while c.hands < hands {
-        let remaining = hands - c.hands;
-        // Each thread plays a contiguous run of matches; results are consumed in match order,
-        // so an error counts only if the single-threaded estimate would also have reached it.
-        let results: Vec<Vec<Result<Vec<HandRecord>, EstimateError>>> = std::thread::scope(|s| {
-            let handles: Vec<_> = (0..threads as u64)
-                .map(|t| {
-                    let first = base + t * per_thread;
-                    s.spawn(move || {
-                        (first..first + per_thread)
-                            .map(|i| {
-                                play_match_hands(bot_factory, seed, i, Rules::HOUSE, remaining)
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|h| h.join().expect("an estimate thread panicked"))
-                .collect()
-        });
-        for (i, r) in (base..).zip(results.into_iter().flatten()) {
-            if c.hands >= hands {
-                break;
-            }
-            c.add_match(i, &r?, hands);
-        }
-        base += threads as u64 * per_thread;
+    if threads == 1 {
+        return estimate_model(bot_factory, hands, seed);
     }
+    // Work stealing over fixed-size blocks of consecutive matches: each worker claims the next
+    // block from a shared counter as soon as it finishes one, so no thread waits for a slow
+    // round. The merge consumes blocks strictly in match order, so the result does not depend
+    // on the thread count or on timing. Workers stay at most `WINDOW` blocks ahead of the merge
+    // so memory stays bounded.
+    const BLOCK: u64 = 4;
+    let window = 8 * threads as u64;
+    type Block = Vec<Result<Vec<HandRecord>, EstimateError>>;
+    let next = AtomicU64::new(0);
+    let stop = AtomicBool::new(false);
+    let merged = (Mutex::new(0u64), Condvar::new());
+    let (tx, rx) = mpsc::channel::<(u64, Block)>();
+    let mut c = Counter::new(bot_factory.name(), seed);
+    let mut outcome = Ok(());
+    std::thread::scope(|s| {
+        for _ in 0..threads {
+            let tx = tx.clone();
+            let (next, stop, merged) = (&next, &stop, &merged);
+            s.spawn(move || {
+                loop {
+                    let b = next.fetch_add(1, Ordering::Relaxed);
+                    {
+                        let (lock, cv) = merged;
+                        let mut done = lock.lock().expect("merge lock");
+                        while b >= *done + window && !stop.load(Ordering::Relaxed) {
+                            done = cv.wait(done).expect("merge lock");
+                        }
+                    }
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    // `hands` caps any one match; a match's records are a prefix-stable
+                    // sequence, so the merge's own cap reproduces the serial result.
+                    let block: Block = (b * BLOCK..(b + 1) * BLOCK)
+                        .map(|i| play_match_hands(bot_factory, seed, i, Rules::HOUSE, hands))
+                        .collect();
+                    if tx.send((b, block)).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+        drop(tx);
+        let mut pending: BTreeMap<u64, Block> = BTreeMap::new();
+        let mut want = 0u64;
+        'merge: while c.hands < hands {
+            let Ok((b, block)) = rx.recv() else { break };
+            pending.insert(b, block);
+            while let Some(block) = pending.remove(&want) {
+                for (i, r) in (want * BLOCK..).zip(block) {
+                    if c.hands >= hands {
+                        break 'merge;
+                    }
+                    let recs = match r {
+                        Ok(recs) => recs,
+                        // The serial estimate plays this match capped at the hands still
+                        // needed; replay it that way so an error past the cut does not count.
+                        Err(_) => match play_match_hands(
+                            bot_factory,
+                            seed,
+                            i,
+                            Rules::HOUSE,
+                            hands - c.hands,
+                        ) {
+                            Ok(recs) => recs,
+                            Err(e) => {
+                                outcome = Err(e);
+                                break 'merge;
+                            }
+                        },
+                    };
+                    c.add_match(i, &recs, hands);
+                }
+                want += 1;
+                let (lock, cv) = &merged;
+                *lock.lock().expect("merge lock") = want;
+                cv.notify_all();
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        let (lock, cv) = &merged;
+        drop(lock.lock().expect("merge lock"));
+        cv.notify_all();
+        drop(rx);
+    });
+    outcome?;
     Ok(c.finish())
+}
+
+#[cfg(test)]
+mod parallel_tests {
+    use super::*;
+    use crate::testbots::RandomTestFactory;
+
+    /// The work-stealing merge gives the serial result for any thread count, including counts
+    /// far above the block count and hand totals that end mid-match and mid-block.
+    #[test]
+    fn work_stealing_is_thread_count_independent() {
+        for hands in [1, 37, 2_001] {
+            let m = estimate_model(&RandomTestFactory, hands, 9).expect("legal play");
+            for threads in [2, 4, 7, 64] {
+                let p = estimate_model_parallel(&RandomTestFactory, hands, 9, threads)
+                    .expect("legal play");
+                assert_eq!(p, m, "{hands} hands, {threads} threads");
+            }
+        }
+    }
 }

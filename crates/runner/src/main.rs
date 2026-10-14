@@ -166,6 +166,11 @@ fn hardware() -> Value {
         "x86_64_v3": cpu_is_v3(&flags),
         "cpu_flags": flags,
         "cgroup_cpu_max": read_trim("/sys/fs/cgroup/cpu.max"),
+        "cgroup_v1_cfs_quota_us": read_trim("/sys/fs/cgroup/cpu/cpu.cfs_quota_us"),
+        "cgroup_v1_cfs_period_us": read_trim("/sys/fs/cgroup/cpu/cpu.cfs_period_us"),
+        "cgroup_quota_cores": cgroup_quota_cores(),
+        "usable_cores": usable_cores(),
+        "threads_default": default_threads(),
         "mem_total_kb": mem_total_kb,
         "nvidia_smi": gpu,
         "ncpu_env": std::env::var("NCPU").ok(),
@@ -211,10 +216,124 @@ fn proc_stat() -> Option<(u64, u64)> {
     Some((total - idle, total))
 }
 
+/// Parses a cgroup v2 `cpu.max` line ("max 100000" or "<quota> <period>") into cores.
+fn parse_cpu_max(text: &str) -> Option<f64> {
+    let mut it = text.split_whitespace();
+    let quota = it.next()?;
+    let period: f64 = it.next()?.parse().ok()?;
+    if quota == "max" || period <= 0.0 {
+        return None;
+    }
+    let q: f64 = quota.parse().ok()?;
+    (q > 0.0).then(|| q / period)
+}
+
+/// The container's CPU quota in cores (cgroup v2 `cpu.max`, else v1 CFS quota), if limited.
+/// vast.ai rents a fraction of a host this way, while `/proc/cpuinfo` and `nproc` show every
+/// host core.
+fn cgroup_quota_cores() -> Option<f64> {
+    if let Some(t) = read_trim("/sys/fs/cgroup/cpu.max") {
+        return parse_cpu_max(&t);
+    }
+    let q: f64 = read_trim("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")?
+        .parse()
+        .ok()?;
+    let p: f64 = read_trim("/sys/fs/cgroup/cpu/cpu.cfs_period_us")?
+        .parse()
+        .ok()?;
+    (q > 0.0 && p > 0.0).then(|| q / p)
+}
+
+/// Cores this container can keep busy: the CPUs it may run on (affinity), capped by the cgroup
+/// quota. This is the denominator of `cpu_util_pct`.
+fn usable_cores() -> f64 {
+    let affinity = std::thread::available_parallelism().map_or(1, |n| n.get()) as f64;
+    cgroup_quota_cores().map_or(affinity, |q| q.min(affinity))
+}
+
+/// Worker threads by default: the usable cores, rounded up so a fractional quota is used fully.
+fn default_threads() -> usize {
+    (usable_cores().ceil() as usize).max(1)
+}
+
+/// Clock ticks per second for `/proc/<pid>/stat` times.
+fn clk_tck() -> f64 {
+    Command::new("getconf")
+        .arg("CLK_TCK")
+        .output()
+        .ok()
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse::<f64>()
+                .ok()
+        })
+        .filter(|&x| x > 0.0)
+        .unwrap_or(100.0)
+}
+
+/// (ppid, utime + stime + cutime + cstime in ticks) from a `/proc/<pid>/stat` line.
+fn parse_proc_stat(text: &str) -> Option<(u32, u64)> {
+    let rest = &text[text.rfind(')')? + 1..];
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    // f[0] is field 3 (state), so field n is f[n - 3].
+    let ppid = f.get(1)?.parse().ok()?;
+    let mut t = 0u64;
+    for i in 11..=14 {
+        t += f.get(i)?.parse::<i64>().ok()?.max(0) as u64;
+    }
+    Some((ppid, t))
+}
+
+/// CPU ticks used by the process tree rooted at `root`: every live member's own time plus the
+/// time of children it has already reaped (cutime/cstime), so exited helpers still count.
+fn tree_ticks(root: u32) -> Option<u64> {
+    let mut procs: Vec<(u32, u32, u64)> = Vec::new();
+    for e in fs::read_dir("/proc").ok()?.flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
+            continue;
+        };
+        if let Some((ppid, t)) = fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .as_deref()
+            .and_then(parse_proc_stat)
+        {
+            procs.push((pid, ppid, t));
+        }
+    }
+    procs.iter().find(|p| p.0 == root)?;
+    let mut members = vec![root];
+    let mut i = 0;
+    while i < members.len() {
+        let parent = members[i];
+        members.extend(procs.iter().filter(|p| p.1 == parent).map(|p| p.0));
+        i += 1;
+    }
+    Some(
+        procs
+            .iter()
+            .filter(|p| members.contains(&p.0))
+            .map(|p| p.2)
+            .sum(),
+    )
+}
+
 struct CpuSampler {
     at: Instant,
     cgroup: Option<u64>,
     stat: Option<(u64, u64)>,
+    tree: Option<(u32, u64, Instant)>,
+    tck: f64,
+    cores: f64,
+}
+
+struct CpuSample {
+    /// Chunk process tree CPU time over the interval / (interval x usable cores), percent.
+    tree: Option<f64>,
+    /// Same from the whole container's cgroup usage.
+    cgroup: Option<f64>,
+    /// Host-wide busy share from `/proc/stat` (all host cores; diagnostic only).
+    host: Option<f64>,
 }
 
 impl CpuSampler {
@@ -223,27 +342,53 @@ impl CpuSampler {
             at: Instant::now(),
             cgroup: cgroup_usage_us(),
             stat: proc_stat(),
+            tree: None,
+            tck: clk_tck(),
+            cores: usable_cores(),
         }
     }
 
-    /// (our share of `threads` cores in percent from the cgroup, host busy percent).
-    fn sample(&mut self, threads: usize) -> (Option<f64>, Option<f64>) {
-        let now = Self::new();
-        let wall_us = now.at.duration_since(self.at).as_micros() as f64;
-        let ours = match (self.cgroup, now.cgroup) {
-            (Some(a), Some(b)) if wall_us > 0.0 => {
-                Some(100.0 * (b.saturating_sub(a)) as f64 / (wall_us * threads as f64))
-            }
-            _ => None,
+    /// Starts the process-tree baseline for a newly started chunk, so its first heartbeat
+    /// already measures the tree (the cgroup baseline is left alone).
+    fn prime_tree(&mut self, pid: u32) {
+        self.tree = tree_ticks(pid).map(|t| (pid, t, Instant::now()));
+    }
+
+    /// Cumulative-delta CPU use since the previous sample. `child` is the running chunk process.
+    fn sample(&mut self, child: Option<u32>) -> CpuSample {
+        let at = Instant::now();
+        let cgroup = cgroup_usage_us();
+        let stat = proc_stat();
+        let tree = child.and_then(|pid| Some((pid, tree_ticks(pid)?, at)));
+        let wall_s = at.duration_since(self.at).as_secs_f64();
+        let cores = self.cores;
+        let pct = move |used_s: f64, wall_s: f64| 100.0 * used_s / (wall_s * cores);
+        let out = CpuSample {
+            tree: match (self.tree, tree) {
+                (Some((p0, t0, a0)), Some((p1, t1, a1))) if p0 == p1 && a1 > a0 => Some(pct(
+                    t1.saturating_sub(t0) as f64 / self.tck,
+                    a1.duration_since(a0).as_secs_f64(),
+                )),
+                _ => None,
+            },
+            cgroup: match (self.cgroup, cgroup) {
+                (Some(a), Some(b)) if wall_s > 0.0 => {
+                    Some(pct(b.saturating_sub(a) as f64 / 1e6, wall_s))
+                }
+                _ => None,
+            },
+            host: match (self.stat, stat) {
+                (Some((b0, t0)), Some((b1, t1))) if t1 > t0 => {
+                    Some(100.0 * (b1 - b0) as f64 / (t1 - t0) as f64)
+                }
+                _ => None,
+            },
         };
-        let host = match (self.stat, now.stat) {
-            (Some((b0, t0)), Some((b1, t1))) if t1 > t0 => {
-                Some(100.0 * (b1 - b0) as f64 / (t1 - t0) as f64)
-            }
-            _ => None,
-        };
-        *self = now;
-        (ours, host)
+        self.at = at;
+        self.cgroup = cgroup;
+        self.stat = stat;
+        self.tree = tree;
+        out
     }
 }
 
@@ -260,6 +405,7 @@ struct Ctx {
     seq: u32,
     last_hb: Option<Instant>,
     cpu: CpuSampler,
+    child: Option<u32>,
     phase: String,
     progress: Value,
 }
@@ -298,7 +444,8 @@ impl Ctx {
             return;
         }
         self.last_hb = Some(Instant::now());
-        let (ours, host) = self.cpu.sample(self.threads);
+        let cpu = self.cpu.sample(self.child);
+        let round = |x: Option<f64>| x.map(|x| (x * 10.0).round() / 10.0);
         let elapsed = self.elapsed();
         let hb = json!({
             "run_id": self.run_id,
@@ -308,8 +455,12 @@ impl Ctx {
             "progress": self.progress,
             "elapsed_s": elapsed.round(),
             "threads": self.threads,
-            "cpu_util_pct": ours.map(|x| (x * 10.0).round() / 10.0),
-            "host_cpu_busy_pct": host.map(|x| (x * 10.0).round() / 10.0),
+            "usable_cores": (self.cpu.cores * 100.0).round() / 100.0,
+            // Chunk process tree if one is running, else the container cgroup.
+            "cpu_util_pct": round(cpu.tree.or(cpu.cgroup)),
+            "cpu_util_source": if cpu.tree.is_some() { "process-tree" } else { "cgroup" },
+            "cgroup_cpu_pct": round(cpu.cgroup),
+            "host_cpu_busy_pct": round(cpu.host),
             "est_cost_usd": (elapsed / 3600.0 * self.dph * 10_000.0).round() / 10_000.0,
         });
         match self.write_json("heartbeat.json", &hb) {
@@ -344,6 +495,19 @@ impl Ctx {
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("cannot start {cmd:?}: {e}"))?;
+        self.child = Some(child.id());
+        self.cpu.prime_tree(child.id());
+        let outcome = self.wait_child(&mut child, &cmd, log);
+        self.child = None;
+        outcome
+    }
+
+    fn wait_child(
+        &mut self,
+        child: &mut std::process::Child,
+        cmd: &Command,
+        log: &str,
+    ) -> Result<(), String> {
         loop {
             if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
                 return if status.success() {
@@ -419,20 +583,14 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
         eprintln!("runner: run_id may only use letters, digits, - _ .");
         return ExitCode::from(2);
     }
+    // Threads: the manifest's explicit value, else the usable cores from the cgroup quota (not
+    // NCPU or nproc, which can exceed the quota and oversubscribe).
     let threads = manifest
         .get("threads")
         .and_then(Value::as_u64)
         .map(|t| t as usize)
-        .or_else(|| {
-            std::env::var("NCPU")
-                .ok()?
-                .trim()
-                .parse::<f64>()
-                .ok()
-                .map(|x| x as usize)
-        })
         .filter(|&t| t > 0)
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+        .unwrap_or_else(default_threads);
     let deadline = match manifest.get("deadline_utc").and_then(Value::as_str) {
         None => None,
         Some(s) => match parse_utc(s) {
@@ -473,6 +631,7 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
         seq: 0,
         last_hb: None,
         cpu: CpuSampler::new(),
+        child: None,
         phase: "start".into(),
         progress: Value::Null,
     };
@@ -484,7 +643,8 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
         ctx.seq = s as u32 + 1;
     }
     println!(
-        "runner: run {run_id}, {threads} threads, uploading to {}",
+        "runner: run {run_id}, {threads} threads ({:.2} usable cores), uploading to {}",
+        ctx.cpu.cores,
         ctx.remote.as_deref().unwrap_or("(nowhere)")
     );
 
@@ -717,5 +877,22 @@ mod tests {
             "fpu avx avx2 bmi1 bmi2 fma f16c movbe abm sse4_2"
         ));
         assert!(!cpu_is_v3("fpu avx sse4_2 popcnt"));
+    }
+
+    #[test]
+    fn cgroup_quota_parses() {
+        assert_eq!(parse_cpu_max("max 100000"), None);
+        assert_eq!(parse_cpu_max("4800000 100000"), Some(48.0));
+        assert_eq!(parse_cpu_max("150000 100000"), Some(1.5));
+        assert_eq!(parse_cpu_max("garbage"), None);
+    }
+
+    #[test]
+    fn proc_stat_parses() {
+        let line =
+            "123 (my (odd) name) R 45 123 123 0 -1 4194304 1 0 0 0 700 50 9 1 20 0 5 0 1 2 3";
+        assert_eq!(parse_proc_stat(line), Some((45, 760)));
+        let me = std::process::id();
+        assert!(tree_ticks(me).is_some());
     }
 }
