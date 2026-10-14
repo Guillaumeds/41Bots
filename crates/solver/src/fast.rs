@@ -152,8 +152,49 @@ enum Res {
 /// parallel solve.
 enum Tt<'a> {
     Off,
-    Own(Table),
+    Own(&'a mut Table),
     Shared(&'a SharedTable),
+}
+
+/// Memory kept between exact solves, normally one per thread for a whole run: the
+/// transposition tables of [`solve_fast_with`] and [`solve_fast_par_with`].
+///
+/// Why: a solve's table grows to as much as `tt_mb` megabytes. Allocating it for every solve
+/// (and the operating system zeroing each new page on first touch, then unmapping it on free)
+/// is cheap with a few threads, but with hundreds of threads and short solves the threads queue
+/// on the process's memory map and sit idle. With a `SolveMem` each table is allocated once per
+/// thread and emptied in O(1) between solves (see the `tt` module).
+///
+/// Reuse never changes a result: every solve starts from an empty table of the same starting
+/// size, grown by the same rule, with slot-for-slot the contents a new table would have, so the
+/// answer and every counter equal those of [`solve_fast`] / [`solve_fast_par`] (tested).
+#[derive(Default)]
+pub struct SolveMem {
+    own: Option<Table>,
+    shared: Option<SharedTable>,
+}
+
+impl SolveMem {
+    /// Empty memory (tables are allocated by the first solve that needs them).
+    pub fn new() -> SolveMem {
+        SolveMem::default()
+    }
+
+    /// The sequential solve's table, emptied, capped at `mb` megabytes.
+    fn own(&mut self, mb: usize) -> &mut Table {
+        let t = self.own.get_or_insert_with(|| Table::new(mb));
+        t.reset(mb << 20);
+        t
+    }
+
+    /// The parallel solve's shared table, emptied, of `mb` megabytes for `threads` threads.
+    fn shared(&mut self, mb: usize, threads: usize) -> &SharedTable {
+        let t = self
+            .shared
+            .get_or_insert_with(|| SharedTable::new(mb, threads));
+        t.reset(mb, threads);
+        t
+    }
 }
 
 impl Tt<'_> {
@@ -395,15 +436,28 @@ impl<L: Leaf> Search<'_, L> {
 
 /// Solve a position exactly with the speed-ups switched on in `opts`. The result equals
 /// [`crate::solve`]'s (value, chosen card, every root card's value) under the same tie order;
-/// the counters differ.
+/// the counters differ. The table is allocated for this solve; to solve many positions, keep a
+/// [`SolveMem`] per thread and use [`solve_fast_with`] (identical results).
 pub fn solve_fast<L: Leaf>(pos: &Position, ctx: MatchCtx, leaf: &L, opts: FastOptions) -> Solution {
+    solve_fast_with(pos, ctx, leaf, opts, &mut SolveMem::new())
+}
+
+/// [`solve_fast`] with its table taken from `mem` (kept for the next solve). The result, every
+/// counter included, is exactly [`solve_fast`]'s, whatever `mem` was used for before.
+pub fn solve_fast_with<L: Leaf>(
+    pos: &Position,
+    ctx: MatchCtx,
+    leaf: &L,
+    opts: FastOptions,
+    mem: &mut SolveMem,
+) -> Solution {
     let mut s = Search {
         ctx,
         leaf,
         opts,
         classes: Classes::new(pos.trump),
         tt: if opts.tt {
-            Tt::Own(Table::new(opts.tt_mb))
+            Tt::Own(mem.own(opts.tt_mb))
         } else {
             Tt::Off
         },
@@ -567,7 +621,29 @@ pub fn solve_fast_par<L: Leaf + Sync>(
     threads: usize,
     progress: Option<&ParProgress>,
 ) -> Solution {
-    solve_fast_par_split(
+    solve_fast_par_with(
+        pos,
+        ctx,
+        leaf,
+        opts,
+        threads,
+        progress,
+        &mut SolveMem::new(),
+    )
+}
+
+/// [`solve_fast_par`] with its shared table taken from `mem` (kept for the next solve; the
+/// answer is the same whatever `mem` was used for before).
+pub fn solve_fast_par_with<L: Leaf + Sync>(
+    pos: &Position,
+    ctx: MatchCtx,
+    leaf: &L,
+    opts: FastOptions,
+    threads: usize,
+    progress: Option<&ParProgress>,
+    mem: &mut SolveMem,
+) -> Solution {
+    par_solve(
         pos,
         ctx,
         leaf,
@@ -575,6 +651,7 @@ pub fn solve_fast_par<L: Leaf + Sync>(
         threads,
         PAR_TASKS_PER_THREAD,
         progress,
+        mem,
     )
 }
 
@@ -589,11 +666,34 @@ pub fn solve_fast_par_split<L: Leaf + Sync>(
     tasks_per_thread: usize,
     progress: Option<&ParProgress>,
 ) -> Solution {
+    par_solve(
+        pos,
+        ctx,
+        leaf,
+        opts,
+        threads,
+        tasks_per_thread,
+        progress,
+        &mut SolveMem::new(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn par_solve<L: Leaf + Sync>(
+    pos: &Position,
+    ctx: MatchCtx,
+    leaf: &L,
+    opts: FastOptions,
+    threads: usize,
+    tasks_per_thread: usize,
+    progress: Option<&ParProgress>,
+    mem: &mut SolveMem,
+) -> Solution {
     let threads = threads.max(1);
     let own = ParProgress::default();
     let pr = progress.unwrap_or(&own);
     let start = Instant::now();
-    let shared = SharedTable::new(if opts.tt { opts.tt_mb } else { 1 }, threads);
+    let shared = mem.shared(if opts.tt { opts.tt_mb } else { 1 }, threads);
     let mut exp = Search {
         ctx,
         leaf,
@@ -652,7 +752,7 @@ pub fn solve_fast_par_split<L: Leaf + Sync>(
     let worker_stats: Vec<Stats> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..workers)
             .map(|_| {
-                let (tasks, next, results, shared) = (&tasks, &next, &results, &shared);
+                let (tasks, next, results) = (&tasks, &next, &results);
                 sc.spawn(move || {
                     let mut s = Search {
                         ctx,

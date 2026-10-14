@@ -30,7 +30,7 @@ use engine::rng::Rng;
 use engine::view::SeatView;
 use equity::{MoneyChance, ONE};
 use serde::{Deserialize, Serialize};
-use solver::ParProgress;
+use solver::{ParProgress, SolveMem};
 
 use crate::labels;
 use crate::pimc::{Candidate, Ctx, Method, SearchConfig, aggregate, candidates, world_row};
@@ -401,6 +401,11 @@ pub fn world_rows_batch(
         .filter(|_| threads == 1 && cfg.solve_threads > 1)
         .map(|p| &p.par);
     let work = |tx: mpsc::Sender<()>| {
+        // One solver memory per worker for the whole run: its transposition table is allocated
+        // once and emptied in O(1) between worlds, not allocated, first-touched and freed per
+        // world (with hundreds of threads on short worlds that churn queued the threads on the
+        // kernel's memory map). Values are unchanged (see `SolveMem`).
+        let mut mem = SolveMem::new();
         while !stop.load(Ordering::Relaxed) {
             let k = next.fetch_add(1, Ordering::Relaxed);
             if k >= total {
@@ -420,6 +425,7 @@ pub fn world_rows_batch(
                 ctx,
                 cfg,
                 par,
+                &mut mem,
             );
             let t = t0.elapsed().as_micros() as u64;
             us[j].fetch_add(t, Ordering::Relaxed);
@@ -881,7 +887,7 @@ mod tests {
     use equity::MatchState;
     use solver::FnLeaf;
 
-    use crate::pimc::{SharedLeaf, world_values};
+    use crate::pimc::{SharedLeaf, world_row, world_values};
     use crate::worlds::RejectionSource;
 
     fn leaf() -> Arc<SharedLeaf> {
@@ -907,7 +913,13 @@ mod tests {
         std::env::temp_dir().join(format!("search-measure-{}-{tag}.jsonl", std::process::id()))
     }
 
-    fn run(path: &Path, ds: &[DecisionSpec], job: &WorldsJob, threads: usize) -> Vec<u8> {
+    fn run(
+        path: &Path,
+        ds: &[DecisionSpec],
+        job: &WorldsJob,
+        threads: usize,
+        tt_mb: usize,
+    ) -> Vec<u8> {
         let l = leaf();
         let src = RejectionSource::new();
         let ctx = Ctx {
@@ -917,7 +929,7 @@ mod tests {
         };
         let cfg = SearchConfig {
             threads,
-            tt_mb: 4,
+            tt_mb,
             ..SearchConfig::default()
         };
         worlds_file(path, ds, job, &ctx, &cfg, None, |_, _| {}).expect("runs");
@@ -931,13 +943,19 @@ mod tests {
 
     /// The worlds file is byte-identical on 1, 3 and 8 threads, for exact and rollout PIMC; it
     /// is in batch order (earlier positions first); an interrupted run (torn last line) resumes to
-    /// the same bytes; the rows equal the per-decision `world_values` the bots use.
+    /// the same bytes; the rows equal the per-decision `world_values` the bots use, and the values
+    /// of a new solver memory per world (each worker keeps one for all its worlds; with a 1 MB
+    /// table the trick-3 solves also fill it and replace entries).
     #[test]
     fn worlds_files_thread_independent_and_resumable() {
         let ds = small_set();
-        for (k, method) in [Method::ExactPimc, Method::RolloutPimc]
-            .into_iter()
-            .enumerate()
+        for (k, (method, tt_mb)) in [
+            (Method::ExactPimc, 4),
+            (Method::ExactPimc, 1),
+            (Method::RolloutPimc, 4),
+        ]
+        .into_iter()
+        .enumerate()
         {
             let job = WorldsJob {
                 method,
@@ -950,7 +968,7 @@ mod tests {
             for threads in [1, 3, 8] {
                 let p = tmp(&format!("m{k}-t{threads}"));
                 clean(&p);
-                files.push(run(&p, &ds, &job, threads));
+                files.push(run(&p, &ds, &job, threads, tt_mb));
                 let times: Vec<DecisionTiming> = read_jsonl(&timing_path(&p)).expect("timings");
                 assert_eq!(times.len(), ds.len());
                 clean(&p);
@@ -977,7 +995,7 @@ mod tests {
             part.push('\n');
             part.push_str(&lines[5][..lines[5].len() / 2]);
             std::fs::write(&p, part).expect("write");
-            assert_eq!(run(&p, &ds, &job, 3), files[0], "resumed run");
+            assert_eq!(run(&p, &ds, &job, 3, tt_mb), files[0], "resumed run");
             // A file made with other settings is refused, not mixed.
             let l = leaf();
             let src = RejectionSource::new();
@@ -990,28 +1008,38 @@ mod tests {
             let cfg = SearchConfig::default();
             assert!(worlds_file(&p, &ds, &other, &ctx, &cfg, None, |_, _| {}).is_err());
             clean(&p);
-            // Same values as the per-decision path.
-            for r in rows.iter().take(3) {
+            // Same values as the per-decision path, and as a new solver memory for every world
+            // (the table allocated per solve, as before tables were kept per worker).
+            for (i, r) in rows.iter().enumerate() {
                 let d = ds.iter().find(|d| d.id == r.id).expect("decision");
                 let (_, v, legal) = d.replay();
                 let (_, cands) = candidates(&v, &legal);
                 let cfg = SearchConfig {
-                    tt_mb: 4,
+                    tt_mb,
                     ..SearchConfig::default()
                 };
-                let want: Vec<Vec<[u64; 4]>> = world_values(
-                    &v,
-                    &cands,
-                    method,
-                    job.from,
-                    job.to,
-                    measure_seed(job.seed, job.label, d.id),
-                    &ctx,
-                    &cfg,
-                )
-                .into_iter()
-                .map(|row| row.into_iter().map(|x| x.0).collect())
-                .collect();
+                let dseed = measure_seed(job.seed, job.label, d.id);
+                let worlds = ctx.source.prepare(&v, ctx.rules);
+                let fresh: Vec<Vec<[u64; 4]>> = (job.from..job.to)
+                    .map(|w| {
+                        let mut mem = SolveMem::new();
+                        world_row(
+                            &v, &*worlds, &cands, method, w, dseed, &ctx, &cfg, None, &mut mem,
+                        )
+                        .into_iter()
+                        .map(|x| x.0)
+                        .collect()
+                    })
+                    .collect();
+                assert_eq!(r.rows, fresh, "decision {}: new memory per world", d.id);
+                if i >= 3 {
+                    continue;
+                }
+                let want: Vec<Vec<[u64; 4]>> =
+                    world_values(&v, &cands, method, job.from, job.to, dseed, &ctx, &cfg)
+                        .into_iter()
+                        .map(|row| row.into_iter().map(|x| x.0).collect())
+                        .collect();
                 assert_eq!(r.rows, want);
                 assert_eq!(r.cands, cands);
             }

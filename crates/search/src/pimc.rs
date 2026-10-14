@@ -10,7 +10,9 @@
 //!
 //! Every candidate is valued over the **same** worlds (common random numbers). Worlds are worked
 //! on in parallel into pre-sized slots and averaged in world order with `MoneyChance::mix`, so
-//! the result is byte-identical for any thread count.
+//! the result is byte-identical for any thread count. Each worker thread keeps one
+//! [`SolveMem`] (the solver's transposition tables) for all its worlds instead of allocating a
+//! table per solve; that changes no value (see `SolveMem`).
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -23,7 +25,9 @@ use engine::team_of;
 use engine::view::SeatView;
 use equity::{MatchState, MoneyChance};
 use serde::{Deserialize, Serialize};
-use solver::{FastOptions, Leaf, ParProgress, from_match, solve_fast, solve_fast_par};
+use solver::{
+    FastOptions, Leaf, ParProgress, SolveMem, from_match, solve_fast_par_with, solve_fast_with,
+};
 
 use crate::worlds::{WorldSource, Worlds, rebuild, world_rng};
 
@@ -288,6 +292,7 @@ fn solve(
     ctx: &Ctx,
     cfg: &SearchConfig,
     par: Option<&ParProgress>,
+    mem: &mut SolveMem,
 ) -> Vec<(Card, MoneyChance)> {
     let opts = FastOptions {
         tt_mb: cfg.tt_mb,
@@ -300,9 +305,9 @@ fn solve(
             p.tasks_total.store(0, Ordering::Relaxed);
             p.tasks_done.store(0, Ordering::Relaxed);
         }
-        solve_fast_par(pos, mctx, &leaf, opts, cfg.solve_threads, par)
+        solve_fast_par_with(pos, mctx, &leaf, opts, cfg.solve_threads, par, mem)
     } else {
-        solve_fast(pos, mctx, &leaf, opts)
+        solve_fast_with(pos, mctx, &leaf, opts, mem)
     };
     sol.children
 }
@@ -322,6 +327,7 @@ fn exact_world(
     ctx: &Ctx,
     cfg: &SearchConfig,
     par: Option<&ParProgress>,
+    mem: &mut SolveMem,
 ) -> Vec<MoneyChance> {
     let mut out = vec![MoneyChance::even(); cands.len()];
     let mut i = 0;
@@ -330,7 +336,7 @@ fn exact_world(
             (Action::Play(_), None) => {
                 // One solve values every root card.
                 let (pos, mctx) = solver_position(m, ctx.rules);
-                let ch = solve(&pos, mctx, ctx, cfg, par);
+                let ch = solve(&pos, mctx, ctx, cfg, par, mem);
                 for (j, &(a, _)) in cands.iter().enumerate() {
                     out[j] = pick(&ch, a.card());
                 }
@@ -341,7 +347,7 @@ fn exact_world(
                 let mut mm = m.clone();
                 mm.apply(Action::Burn(b)).expect("legal burn");
                 let (pos, mctx) = solver_position(&mm, ctx.rules);
-                let ch = solve(&pos, mctx, ctx, cfg, par);
+                let ch = solve(&pos, mctx, ctx, cfg, par, mem);
                 while i < cands.len() && cands[i].0 == Action::Burn(b) {
                     out[i] = pick(&ch, cands[i].1.expect("joint"));
                     i += 1;
@@ -361,7 +367,8 @@ fn exact_world(
 
 /// The values of every candidate in world `w` of the decision with seed `dseed` (`worlds`
 /// prepared from `view`). `par` receives the progress of a parallel exact solve
-/// (`solve_threads > 1`); it never changes a value.
+/// (`solve_threads > 1`); it never changes a value. `mem` is the calling thread's solver memory,
+/// kept from world to world (what it held before never changes a value).
 #[allow(clippy::too_many_arguments)]
 pub fn world_row(
     view: &SeatView,
@@ -373,12 +380,13 @@ pub fn world_row(
     ctx: &Ctx,
     cfg: &SearchConfig,
     par: Option<&ParProgress>,
+    mem: &mut SolveMem,
 ) -> Vec<MoneyChance> {
     let world = worlds.sample(&mut world_rng(dseed, w));
     let m = rebuild(view, &world, ctx.rules, dseed ^ w).expect("sampled worlds rebuild");
     match method {
         Method::RolloutPimc => rollout_world(&m, cands, ctx),
-        Method::ExactPimc => exact_world(&m, cands, ctx, cfg, par),
+        Method::ExactPimc => exact_world(&m, cands, ctx, cfg, par, mem),
         Method::Forced => vec![MoneyChance::even(); cands.len()],
     }
 }
@@ -401,13 +409,17 @@ pub fn world_values(
     let slots: Mutex<Vec<Option<Vec<MoneyChance>>>> = Mutex::new(vec![None; n]);
     let next = AtomicUsize::new(0);
     let work = || {
+        // One solver memory per worker thread, kept for all its worlds.
+        let mut mem = SolveMem::new();
         loop {
             let i = next.fetch_add(1, Ordering::Relaxed);
             if i >= n {
                 break;
             }
             let w = from + i as u64;
-            let v = world_row(view, &*worlds, cands, method, w, dseed, ctx, cfg, None);
+            let v = world_row(
+                view, &*worlds, cands, method, w, dseed, ctx, cfg, None, &mut mem,
+            );
             slots.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(v);
         }
     };
