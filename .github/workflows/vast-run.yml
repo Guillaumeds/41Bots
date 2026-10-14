@@ -24,6 +24,10 @@ on:
       image:
         description: "Base image, e.g. ghcr.io/guillaumeds/41bots-base:20261013-abcdef123456"
         required: true
+      cheapest:
+        description: "Pick the lowest $/hour offer (test runs) instead of best cost per unit of work"
+        type: boolean
+        default: true
       dry_run:
         description: "Only search and print the chosen offer; rent nothing"
         type: boolean
@@ -61,13 +65,13 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$DRY_RUN" = "true" ]; then
-            python3 python/launcher/launch.py plan --min-cores "$MIN_CORES"
+            python3 python/launcher/launch.py plan --min-cores "$MIN_CORES" ${{ inputs.cheapest && '--cheapest' || '' }}
             exit 0
           fi
           # A blank run_id gets a timestamp from the launcher.
           MANIFEST=$(python3 -c 'import json,os,sys; t=os.environ["MANIFEST"]; m=json.loads(t if t.lstrip().startswith("{") else open(t).read()); m["run_id"]=m.get("run_id") or "gh-${{ github.run_id }}"; print(json.dumps(m))')
           python3 python/launcher/launch.py run --manifest "$MANIFEST" --min-cores "$MIN_CORES" \
-            --max-minutes "$MAX_MINUTES" --image "$IMAGE" --bin-sha "$BIN_SHA" --state-file instance-id.txt
+            --max-minutes "$MAX_MINUTES" --image "$IMAGE" --bin-sha "$BIN_SHA" --state-file instance-id.txt ${{ inputs.cheapest && '--cheapest' || '' }}
       - name: Safety net - destroy the instance if the job was cancelled or failed
         if: always() && hashFiles('instance-id.txt') != ''
         shell: bash
