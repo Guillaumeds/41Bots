@@ -266,8 +266,14 @@ fn arena_blocks(
         }));
     }
     let scores: Vec<i64> = rows.iter().filter_map(|r| r["score"].as_i64()).collect();
+    // Inputs are stored under their sha256, so the file name records the table (M3-SPEC §8.1).
+    let table = equity.as_deref().and_then(|e| {
+        Path::new(e)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+    });
     let doc = json!({ "a": an, "b": bn, "kind": format!("{kind:?}"), "chunk": index,
-                      "seed": seed, "blocks": rows });
+                      "seed": seed, "equity_sha256": table, "blocks": rows });
     fs::write(
         out.join("blocks.json"),
         serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())? + "\n",
