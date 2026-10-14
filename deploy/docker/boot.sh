@@ -8,6 +8,8 @@
 # Any failure before the runner starts is reported as runs/<RUN_ID>/FAILED and the instance is
 # destroyed, so nothing is left billing.
 set -euo pipefail
+# Never print the environment: it holds the R2 secret and vast logs are fetched into GitHub logs.
+echo "boot: started as $(id -un) on $(hostname) at $(date -u +%FT%TZ)"
 
 : "${RUN_ID:?}" "${BIN_SHA:?}" "${R2_BUCKET:?}" "${RCLONE_CONFIG_R2_TYPE:?}"
 R="r2:${R2_BUCKET}"

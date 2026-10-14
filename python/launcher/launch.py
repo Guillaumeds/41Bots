@@ -56,10 +56,12 @@ def need_env(*names: str) -> None:
 
 # ------------------------------------------------------------------ vast.ai
 
-def vast(*args: str, raw: bool = True, check: bool = True):
+def vast(*args: str, raw: bool = True, check: bool = True, tail: tuple[str, ...] = ()):
+    # `tail` goes last: `--args` (argparse REMAINDER) swallows every token after it.
     cmd = ["vastai", *args, "--api-key", os.environ["VAST_API_KEY"]]
     if raw:
         cmd.append("--raw")
+    cmd.extend(tail)
     p = subprocess.run(cmd, capture_output=True, text=True)
     if check and p.returncode != 0:
         # Never echo the command line: it holds keys.
@@ -218,6 +220,42 @@ def destroy(instance_id: int) -> None:
     log(f"::error::could not destroy instance {instance_id}; destroy it by hand in the vast.ai console")
 
 
+BOOT_PATH = "/usr/local/bin/41bots-boot"
+
+
+def instance_status(instance_id: int) -> dict | None:
+    try:
+        info = vast("show", "instance", str(instance_id))
+    except RuntimeError as e:
+        log(f"show instance failed: {e}")
+        return None
+    return info if isinstance(info, dict) else None
+
+
+def status_line(info: dict | None) -> str:
+    if not info:
+        return "status unknown"
+    msg = str(info.get("status_msg") or "").strip().replace("\n", " ")[:300]
+    return (f"actual_status={info.get('actual_status')} intended_status={info.get('intended_status')} "
+            f"cur_state={info.get('cur_state')} status_msg={msg!r}")
+
+
+def print_logs(instance_id: int, lines: int = 200) -> None:
+    """Print the tail of the container log (and the daemon log) into the GitHub log before destroying."""
+    for label, extra in (("container", ()), ("daemon", ("--daemon-logs",))):
+        try:
+            text = vast("logs", str(instance_id), "--tail", str(lines), *extra, raw=False)
+        except RuntimeError as e:
+            log(f"could not fetch {label} logs: {e}")
+            continue
+        secret = os.environ.get("R2_SECRET_ACCESS_KEY")
+        if secret:
+            text = text.replace(secret, "***")
+        log(f"::group::vast {label} log of instance {instance_id} (last {lines} lines)")
+        print(text.rstrip(), flush=True)
+        log("::endgroup::")
+
+
 def instance_gone(instance_id: int) -> bool:
     try:
         info = vast("show", "instance", str(instance_id))
@@ -262,8 +300,13 @@ def cmd_run(a) -> int:
         return 0
     r2_put(f"runs/{run_id}/manifest.json", json.dumps(manifest, indent=2).encode())
 
+    # Entrypoint ("args") launch mode. Without --args the CLI defaults to the ssh runtype, and vast's
+    # ssh/jupyter modes replace the image's ENTRYPOINT/CMD with their own init, so the boot script
+    # never ran (run 38509301077). --entrypoint names the boot script; an empty --args (must be the
+    # very last token) selects runtype "args". On-demand: never pass --bid_price.
     res = vast("create", "instance", str(best["id"]), "--image", a.image, "--disk", str(a.disk_gb),
-               "--env", instance_env(run_id, ncpu, dph, a.bin_sha), "--label", f"41bots-{run_id}")
+               "--env", instance_env(run_id, ncpu, dph, a.bin_sha), "--label", f"41bots-{run_id}",
+               "--entrypoint", BOOT_PATH, "--cancel-unavail", tail=("--args",))
     instance_id = (res or {}).get("new_contract")
     if not instance_id:
         sys.exit(f"launch: create failed: {res}")
@@ -292,10 +335,11 @@ def cmd_run(a) -> int:
                 if now - created > a.startup_minutes * 60:
                     reason = f"no heartbeat within {a.startup_minutes} minutes of renting"
                     break
-                if instance_gone(instance_id):
+                info = instance_status(instance_id)
+                if instance_gone(instance_id) or (info or {}).get("actual_status") == "exited":
                     reason = "instance stopped before the first heartbeat"
                     break
-                log("waiting for the machine to start (image download and boot)")
+                log(f"waiting for the machine to start (image download and boot): {status_line(info)}")
                 continue
             if now - last_change > HEARTBEAT_STALE_S:
                 reason = "heartbeat missing for 3 minutes"
@@ -318,6 +362,9 @@ def cmd_run(a) -> int:
                 reason = f"max_minutes ({a.max_minutes}) reached"
                 break
     finally:
+        if final != "DONE":
+            log(f"last status before destroy: {status_line(instance_status(instance_id))}")
+            print_logs(instance_id)
         if final:
             # The runner destroys itself after uploading; give it two minutes, then make sure.
             for _ in range(4):

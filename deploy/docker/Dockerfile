@@ -31,4 +31,6 @@ RUN chmod 0755 /usr/local/bin/41bots-boot \
 
 USER app
 WORKDIR /home/app
-CMD ["/usr/local/bin/41bots-boot"]
+# vast.ai must be launched in entrypoint ("args") mode with --entrypoint pointing here; its ssh/jupyter
+# modes replace ENTRYPOINT/CMD with their own init and this script would never run.
+ENTRYPOINT ["/usr/local/bin/41bots-boot"]
