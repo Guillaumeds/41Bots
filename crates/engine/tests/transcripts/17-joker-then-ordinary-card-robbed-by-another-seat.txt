@@ -24,6 +24,7 @@ phase: AwaitBurn 0
 legal: KC 4D 7H 2S QS JK
 > Burn 2S    # seat 0 burns
 = BurnDone seat=0
+burns: 0 JokerTake
 = Turned card=6D
 # The 6 of diamonds is turned: diamonds are trumps. It is not an ace, so it stays on the table; nothing is yet known
 # about the dealer (H4, amended 2026-10-14). Seat 3 holds the ace and will rob at its own turn (H2).
@@ -39,6 +40,7 @@ legal: 8C 6D 6H JH 5S
 > Burn 8C    # seat 3 burns
 = BurnDone seat=3
 phase: AwaitPlay 3
+burns: 0 JokerTake, 3 RobAtTurn
 # Two burns in this hand: the dealer's and seat 3's, each hidden in its own place.
 > Play AD    # seat 3
 > Play 7C    # seat 4

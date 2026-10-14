@@ -22,9 +22,11 @@
 //! Plan `trick1` (`{"solver_spike": {"plan": "trick1"}}`) instead measures how long one exact
 //! trick-1 solve takes with the whole box: after step 1 it solves worlds 0..`worlds` (default
 //! 4; seed 1, the same worlds as the spike's trick-1 runs) **one at a time**, each with the
-//! parallel single-world solve on all usable threads and a shared table of `tt_ram_pct`
-//! (default 70) percent of RAM, with a per-world cap of `cap_secs` (default 3600; a world that
-//! hits it is recorded as "> 60 min" and the next one starts). `trick` (default 1) and
+//! parallel single-world solve on all usable threads and a shared table sized from the
+//! container's memory (`mem.rs`: the largest whose peak fits; `tt_ram_pct` asks for that percent
+//! of RAM instead, lowered with a warning if its peak would not fit), with a per-world cap of
+//! `cap_secs` (default 3600; a world that hits it is recorded as "> 60 min" and the next one
+//! starts). `trick` (default 1) and
 //! `allow_unverified_table` allow a quick plumbing test at trick 3. While a solve runs the CPU
 //! should be near 100%; only its last stretch, when fewer subproblems remain than threads, is
 //! marked `partial_cpu_ok`. Outputs `out/trick1/world-<w>.txt` (the binary's progress and
@@ -40,6 +42,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use crate::mem::{self, Requested, Tables};
 use crate::{Ctx, sibling, unix_now};
 
 /// SHA-256 of the recorded table v0 (rules-v1 bot, 1,000,000 hands, seed 1).
@@ -278,41 +281,96 @@ fn mem_budget_mb() -> u64 {
 
 /// Memory available to this container in MB: RAM, capped by a cgroup v2/v1 limit.
 fn mem_total_mb() -> u64 {
-    let total = fs::read_to_string("/proc/meminfo").ok().and_then(|m| {
-        m.lines()
-            .find(|l| l.starts_with("MemTotal:"))
-            .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
-            .map(|kb| kb / 1024)
-    });
-    let cg = crate::read_trim("/sys/fs/cgroup/memory.max")
-        .or_else(|| crate::read_trim("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(|b| b >> 20);
-    match (total, cg) {
-        (Some(t), Some(c)) => t.min(c),
-        (Some(t), None) => t,
-        (None, Some(c)) => c,
-        (None, None) => 16 * 1024,
-    }
+    mem::Sys::host().limit().mb()
 }
 
 fn sha256_file(p: &Path) -> Result<String, String> {
-    let o = Command::new("sha256sum")
-        .arg(p)
-        .output()
-        .map_err(|e| format!("cannot run sha256sum: {e}"))?;
-    if !o.status.success() {
-        return Err(format!("sha256sum {} failed", p.display()));
-    }
-    String::from_utf8_lossy(&o.stdout)
-        .split_whitespace()
-        .next()
-        .map(str::to_string)
-        .ok_or_else(|| "sha256sum printed nothing".into())
+    crate::bundle::sha256_file(p).map(|(h, _)| h)
 }
 
-/// Step 1: build table v0 and verify it. Returns the table path and its record.
-fn build_table(ctx: &mut Ctx, params: &Value) -> Result<(PathBuf, Value), String> {
+/// The hand-outcome model table v0 is built from (`equity estimate-model --bot rules-v1 --hands
+/// 1000000 --seed 1`), kept in the repository; `equity build` turns it into exactly the recorded
+/// table in seconds (its hash is checked).
+const EQUITY_V0_MODEL: &str = include_str!("../../../data/equity/model-rules-v1-1M-seed1.json");
+
+/// How table v0 was obtained, cheapest first (see [`build_table`]).
+fn verified(table: &Path, want: &str) -> bool {
+    table.is_file() && sha256_file(table).is_ok_and(|h| h == want)
+}
+
+/// Table v0 without the 1,000,000-hand estimate, when the recorded table is asked for and
+/// `params.source` is `"auto"`: (1) the file at `params.path` (a format-2 manifest input);
+/// (2) `inputs/sha256/<recorded hash>` in the remote store (R2), the same key
+/// `launch.py put-input` uses; (3) `equity build` from the model kept in the repository. Each
+/// is accepted only if its SHA-256 is the recorded one. A table built here is put in the remote
+/// store for the next machines. Returns the path and how it was obtained, or `None` (then the
+/// full estimate runs).
+fn quick_table(ctx: &mut Ctx, params: &Value, want: &str) -> Option<(PathBuf, &'static str)> {
+    if let Some(p) = params.get("path").and_then(Value::as_str) {
+        let p = PathBuf::from(p);
+        if verified(&p, want) {
+            return Some((p, "manifest input"));
+        }
+        eprintln!(
+            "runner: equity input {} does not have the recorded sha256; building",
+            p.display()
+        );
+    }
+    let table = ctx.root.join("equity-v0.npy");
+    let key = format!("inputs/sha256/{want}");
+    let store = crate::remote::from_env();
+    if let Some(r) = &store
+        && matches!(r.exists(&key), Ok(true))
+        && r.get(&key, &table).is_ok()
+    {
+        if verified(&table, want) {
+            return Some((table, "remote store"));
+        }
+        eprintln!("runner: {key} does not have the recorded sha256; building");
+    }
+    ctx.set_phase(
+        "chunk",
+        json!({ "step": "equity build (model in the repository)" }),
+    );
+    let dir = ctx.root.join("out").join("equity");
+    fs::create_dir_all(&dir).ok()?;
+    let model = dir.join("outcome.json");
+    fs::write(&model, EQUITY_V0_MODEL).ok()?;
+    let mut c = Command::new(sibling("equity"));
+    c.arg("build")
+        .arg("--model")
+        .arg(&model)
+        .arg("--out")
+        .arg(&table)
+        .args(["--threads", &ctx.threads.to_string()]);
+    if ctx.run_child(c, "equity/equity.log").is_err() || !verified(&table, want) {
+        eprintln!("runner: table from the repository's model failed its check; estimating");
+        return None;
+    }
+    if let Some(r) = &store
+        && !matches!(r.exists(&key), Ok(true))
+        && let Err(e) = r.put(&table, &key, true)
+    {
+        eprintln!("runner: could not share table v0 as {key}: {e}");
+    }
+    Some((table, "built from the repository's model"))
+}
+
+/// Step 1: build table v0 and verify it. Returns the table path and its record. With
+/// `params.source` `"auto"` (the default of `t1bench` and `search_measure`) the recorded table
+/// is first taken ready-made or rebuilt from the stored model ([`quick_table`]); `"estimate"`
+/// (the default of `solver_spike`, which checks that a new CPU type reproduces the table)
+/// always runs the 1,000,000-hand estimate.
+pub(crate) fn build_table(ctx: &mut Ctx, params: &Value) -> Result<(PathBuf, Value), String> {
+    build_table_from(ctx, params, "estimate")
+}
+
+/// [`build_table`] with `default_source` when `params.source` is absent.
+pub(crate) fn build_table_from(
+    ctx: &mut Ctx,
+    params: &Value,
+    default_source: &str,
+) -> Result<(PathBuf, Value), String> {
     let hands = params
         .get("hands")
         .and_then(Value::as_u64)
@@ -326,13 +384,34 @@ fn build_table(ctx: &mut Ctx, params: &Value) -> Result<(PathBuf, Value), String
     if !recorded && !allow {
         return Err("table v0 needs hands=1000000 and seed=1 (or allow_unverified_table)".into());
     }
+    let source = params
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or(default_source);
+    if !["auto", "estimate"].contains(&source) {
+        return Err(format!("table.source {source}: auto or estimate"));
+    }
+    let want = EQUITY_V0_SHA256.trim();
+    let t0 = Instant::now();
+    if recorded
+        && source == "auto"
+        && let Some((table, how)) = quick_table(ctx, params, want)
+    {
+        return Ok((
+            table,
+            json!({
+                "hands": hands, "seed": seed, "sha256": want, "recorded_sha256": want,
+                "matches_recorded": true, "source": how,
+                "seconds": t0.elapsed().as_secs_f64().round(),
+            }),
+        ));
+    }
     let dir = ctx.root.join("out").join("equity");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let model = dir.join("outcome.json");
     // The 76 MB table stays outside out/ (no need to upload it; its hash is recorded).
     let table = ctx.root.join("equity-v0.npy");
     let threads = ctx.threads.to_string();
-    let t0 = Instant::now();
     ctx.set_phase(
         "chunk",
         json!({ "kind": "solver_spike", "step": "equity estimate-model" }),
@@ -357,7 +436,6 @@ fn build_table(ctx: &mut Ctx, params: &Value) -> Result<(PathBuf, Value), String
         .args(["--threads", &threads]);
     ctx.run_child(c, "equity/equity.log")?;
     let got = sha256_file(&table)?;
-    let want = EQUITY_V0_SHA256.trim();
     fs::write(dir.join("equity-v0.sha256"), format!("{got}\n")).map_err(|e| e.to_string())?;
     let matches = got == want;
     if recorded && !matches {
@@ -369,7 +447,8 @@ fn build_table(ctx: &mut Ctx, params: &Value) -> Result<(PathBuf, Value), String
         table,
         json!({
             "hands": hands, "seed": seed, "sha256": got, "recorded_sha256": want,
-            "matches_recorded": matches, "seconds": t0.elapsed().as_secs_f64().round(),
+            "matches_recorded": matches, "source": "estimated on this machine",
+            "seconds": t0.elapsed().as_secs_f64().round(),
         }),
     ))
 }
@@ -540,14 +619,24 @@ fn trick1(ctx: &mut Ctx, params: &Value, table: &str) -> Result<Value, String> {
         .get("cap_secs")
         .and_then(Value::as_u64)
         .unwrap_or(3600);
-    let pct = params
-        .get("tt_ram_pct")
-        .and_then(Value::as_u64)
-        .unwrap_or(70)
-        .clamp(1, 85);
     let threads = ctx.threads;
     let ram = mem_total_mb();
-    let tt_mb = (ram * pct / 100).max(64);
+    // One parallel solve at a time: one shared table on every thread.
+    let requested = match params.get("tt_ram_pct").and_then(Value::as_u64) {
+        Some(pct) => Requested::Mb((ram * pct.clamp(1, 85) / 100).max(64)),
+        None => Requested::Auto,
+    };
+    let tt = mem::plan_here(
+        requested,
+        Tables::Shared {
+            count: 1,
+            solve_threads: threads as u64,
+        },
+        Path::new(table),
+        "solver_spike trick1",
+    );
+    let tt_mb = tt.tt_mb;
+    let warnings: Vec<&String> = tt.warning.iter().collect();
     let dir = ctx.root.join("out").join("trick1");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let mut recs = Vec::new();
@@ -605,6 +694,7 @@ fn trick1(ctx: &mut Ctx, params: &Value, table: &str) -> Result<Value, String> {
             ctx.progress = json!({
                 "kind": "solver_spike", "step": "trick1", "world": w, "worlds": worlds,
                 "elapsed_s": t0.elapsed().as_secs(), "solve_threads": threads, "tt_mb": tt_mb,
+                "warnings": warnings,
                 "last_progress": prog.as_deref().map(fields_json),
                 "partial_cpu_ok": tail,
             });
@@ -638,10 +728,14 @@ fn trick1(ctx: &mut Ctx, params: &Value, table: &str) -> Result<Value, String> {
         ctx.write_json(
             "out/trick1/results.json",
             &json!({ "trick": trick, "seed": 1, "solve_threads": threads, "ram_mb": ram,
-                "tt_mb": tt_mb, "cap_secs": cap, "worlds": recs }),
+                "tt_mb": tt_mb, "tt": tt.record, "warnings": warnings,
+                "cap_secs": cap, "worlds": recs }),
         )?;
     }
-    Ok(json!({ "trick": trick, "solve_threads": threads, "tt_mb": tt_mb, "worlds": recs }))
+    Ok(
+        json!({ "trick": trick, "solve_threads": threads, "tt_mb": tt_mb, "tt": tt.record,
+               "warnings": warnings, "worlds": recs }),
+    )
 }
 
 pub(crate) fn chunk(ctx: &mut Ctx, params: &Value) -> Result<Value, String> {
@@ -649,7 +743,9 @@ pub(crate) fn chunk(ctx: &mut Ctx, params: &Value) -> Result<Value, String> {
     if plan == "trick1" {
         let (table, equity) = build_table(ctx, params)?;
         let r = trick1(ctx, params, &table.to_string_lossy())?;
-        return Ok(json!({ "plan": plan, "equity": equity, "trick1": r }));
+        return Ok(
+            json!({ "plan": plan, "equity": equity, "warnings": r["warnings"], "trick1": r }),
+        );
     }
     let identity = params
         .get("identity")

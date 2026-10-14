@@ -18,8 +18,10 @@ use engine::team_of;
 use equity::{MatchState, MoneyChance};
 use solver::denial::forced_denial;
 use solver::equiv::Classes;
+use solver::fast::FAST_TT_SLOT_BYTES;
 use solver::{
-    FastOptions, Leaf, Options, Position, Solution, Step, TieOrder, from_match, solve, solve_fast,
+    FastOptions, Leaf, Options, Position, Solution, SolveMem, Step, TieOrder, from_match, solve,
+    solve_fast, solve_fast_with,
 };
 
 fn same(a: &Solution, b: &Solution, what: &str) {
@@ -121,6 +123,58 @@ fn tiny_table_forces_replacement_without_changing_answers() {
         same(&naive, &tiny, &format!("tiny table seed {seed}"));
         assert!(tiny.stats.tt_replaced > 0 || tiny.stats.tt_entries <= 4);
     }
+}
+
+/// One [`SolveMem`] kept across many different solves (other positions and tricks, table caps
+/// with and without replacement, both tie orders, switch combinations, and solves stopped by
+/// the time cap) gives exactly what a new table gives: the same values and chosen card, and the
+/// same counters (nodes, table probes, hits, entries, replacements, bytes), so the table's
+/// contents matched a new table's throughout.
+#[test]
+fn reused_solve_memory_gives_identical_solutions_and_counters() {
+    let mut mem = SolveMem::new();
+    let (mut replaced, mut grown) = (false, false);
+    for seed in 0..6 {
+        for (k, extra) in [(3, 0), (4, 2), (3, 5), (5, 1), (2, 7)] {
+            let m = position_mid(seed, k, extra);
+            let (pos, ctx, pending) = from_match(&m).expect("position");
+            if pending.is_some() {
+                continue;
+            }
+            for (tt_mb, order, bits) in [
+                (0, TieOrder::Ascending, 15),
+                (1, TieOrder::Descending, 11),
+                (1, TieOrder::Ascending, 15),
+                (64, TieOrder::Ascending, 11),
+            ] {
+                let opts = FastOptions {
+                    order,
+                    tt_mb,
+                    ..FastOptions::default()
+                }
+                .combo(bits);
+                let what = format!("seed {seed} trick {k}+{extra} tt {tt_mb} {order:?}");
+                let new = solve_fast(&pos, ctx, &leaf(), opts);
+                let reused = solve_fast_with(&pos, ctx, &leaf(), opts, &mut mem);
+                assert!(!new.timed_out, "{what}");
+                assert_eq!(new, reused, "{what}");
+                replaced |= new.stats.tt_replaced > 0;
+                // More than the 16 buckets of 8 slots every solve starts with.
+                grown |= new.stats.tt_bytes > 16 * 8 * FAST_TT_SLOT_BYTES as u64;
+                // A solve stopped by its time cap leaves a partly filled table behind.
+                let stopped = FastOptions {
+                    time_cap_ms: Some(0),
+                    ..opts
+                };
+                let a = solve_fast_with(&pos, ctx, &leaf(), stopped, &mut mem);
+                assert!(a.timed_out || a.stats.nodes < 0x1000, "{what}: time cap");
+            }
+        }
+    }
+    assert!(
+        replaced && grown,
+        "the sample exercises replacement and growth"
+    );
 }
 
 // ---------- (a) engine parity on random play-outs ----------

@@ -1,22 +1,30 @@
-//! `runner`: executes one chunk of a run manifest (docs/M1-SPEC.md section 7).
+//! `runner`: executes a run manifest on one machine.
 //!
 //! ```text
 //! runner run <manifest.json> [--work-dir DIR]
 //! runner hardware
 //! ```
 //!
-//! Steps: record the hardware, run the micro-benchmark, run the chunk while writing a heartbeat
-//! every 30 s, write outputs then `DONE` (or `FAILED`), upload everything to R2 with rclone, and,
-//! when `CONTAINER_ID` and `CONTAINER_API_KEY` are set, destroy this vast.ai instance last.
-//!
-//! The chunk work itself is done by the sibling release binaries (`difftest`, `equity`, `solver-spike`,
-//! `solver-identity`, later `arena`) found next to this executable, so the runner links no game code.
-//!
+//! **Format 1** (docs/M1-SPEC.md section 7; no `format` key): one chunk. Steps: record the
+//! hardware, run the micro-benchmark, run the chunk while writing a heartbeat every 30 s, write
+//! outputs then `DONE` (or `FAILED`), upload everything to R2 with rclone, and, on vast.ai
+//! (`CONTAINER_ID` set), ask vast.ai to destroy this instance last (see [`self_destroy`]; the
+//! launcher destroys it too, and is the mechanism that does not depend on this machine).
 //! R2 layout under the manifest's `out` prefix (default `runs/<run_id>`):
 //! `hardware.json`, `benchmark.json`, `heartbeat/<seq:06>.json` (versioned, never overwritten),
 //! `out/...` (immutable), `result.json`, and `DONE` or `FAILED` uploaded last.
 //! Uploads are skipped (with a notice) when `RCLONE_CONFIG_R2_TYPE` is unset, so the same
-//! manifest runs on the laptop.
+//! manifest runs on the laptop; `RUNNER_REMOTE_DIR` makes a local directory the remote (tests).
+//! A stop request (SIGTERM/SIGINT/SIGHUP, the launcher's `<out>/STOP`, a local `STOP` file, or
+//! the deadline) ends the chunk, uploads `out/` with whatever it finished and writes `FAILED`
+//! with `stopped` and the file list (`stop.rs`).
+//!
+//! **Format 2** (`"format": 2`, docs/M3-SPEC.md section 7): several prioritised streams of
+//! chunks, a deadline, a versioned done-list and resume after a lost machine; see `v2.rs`.
+//!
+//! The chunk work itself is done by the sibling release binaries (`difftest`, `equity`,
+//! `solver-spike`, `solver-identity`, `search`) found next to this executable; `arena_blocks`
+//! chunks play in-process through `arena` and `search` (the bot registry).
 
 use std::fs;
 use std::io::Write;
@@ -26,15 +34,25 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
+mod bundle;
+mod measure;
+mod mem;
+mod remote;
+mod sched;
 mod spike;
+mod stop;
+mod t1bench;
+mod v2;
 
 const USAGE: &str = "usage:
   runner run <manifest.json> [--work-dir DIR]
+  runner chunk <spec.json>        (internal: one format-2 chunk, started by `runner run`)
   runner hardware";
 
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(30);
 
 fn main() -> ExitCode {
+    stop::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("run") if args.len() >= 2 => {
@@ -51,6 +69,7 @@ fn main() -> ExitCode {
             }
             run(Path::new(&args[1]), &work)
         }
+        Some("chunk") if args.len() == 2 => v2::worker(Path::new(&args[1])),
         Some("hardware") => {
             println!(
                 "{}",
@@ -178,6 +197,10 @@ fn hardware() -> Value {
         "ncpu_env": std::env::var("NCPU").ok(),
         "dph_env": std::env::var("DPH").ok(),
         "vast_container_id": std::env::var("CONTAINER_ID").ok(),
+        // Which destroy keys are present (never their values).
+        "vast_destroy_keys": DESTROY_KEYS.iter()
+            .filter(|k| std::env::var(k).is_ok_and(|v| !v.is_empty()))
+            .collect::<Vec<_>>(),
         "bin_sha": std::env::var("BIN_SHA").ok(),
         "bin_build": std::env::var("BIN_BUILD").ok(),
     })
@@ -399,7 +422,11 @@ impl CpuSampler {
 struct Ctx {
     run_id: String,
     root: PathBuf,
-    remote: Option<String>,
+    /// Where child-process logs go (`out/` for format 1; outside the bundle for format 2).
+    logs: PathBuf,
+    /// Format 1's remote store and its key prefix (`runs/<run_id>` unless the manifest says).
+    remote: Option<Box<dyn remote::Remote>>,
+    prefix: String,
     threads: usize,
     dph: f64,
     start: Instant,
@@ -413,6 +440,28 @@ struct Ctx {
 }
 
 impl Ctx {
+    /// A context with no uploads and no deadline, rooted at `root` (format-2 chunk workers and
+    /// the start-up benchmark); child logs go to `root/logs`, outside the bundled `root/out`.
+    fn local(run_id: &str, root: &Path, threads: usize) -> Ctx {
+        Ctx {
+            run_id: run_id.to_string(),
+            root: root.to_path_buf(),
+            logs: root.join("logs"),
+            remote: None,
+            prefix: format!("runs/{run_id}"),
+            threads,
+            dph: 0.0,
+            start: Instant::now(),
+            deadline: None,
+            seq: 0,
+            last_hb: None,
+            cpu: CpuSampler::new(),
+            child: None,
+            phase: "chunk".into(),
+            progress: Value::Null,
+        }
+    }
+
     fn elapsed(&self) -> f64 {
         self.start.elapsed().as_secs_f64()
     }
@@ -427,18 +476,26 @@ impl Ctx {
         Ok(p)
     }
 
-    /// `rclone copyto` one file to `<remote>/<rel>`; failures are logged, never fatal.
+    /// Uploads one file to `<prefix>/<rel>`; failures are logged, never fatal.
     fn upload_file(&self, local: &Path, rel: &str, immutable: bool) -> bool {
         let Some(remote) = &self.remote else {
             return true;
         };
-        let mut c = Command::new("rclone");
-        c.args(["copyto", "--s3-no-check-bucket", "--retries", "5"]);
-        if immutable {
-            c.arg("--immutable");
+        match remote.put(local, &format!("{}/{rel}", self.prefix), immutable) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("runner: upload {rel}: {e}");
+                false
+            }
         }
-        c.arg(local).arg(format!("{remote}/{rel}"));
-        rclone(c)
+    }
+
+    /// The run's stop requests: a signal, the launcher's `STOP` object, a local `STOP` file.
+    fn poll_stop(&self) {
+        stop::poll(
+            self.remote.as_deref().map(|r| (r, self.prefix.as_str())),
+            &self.root,
+        );
     }
 
     fn heartbeat(&mut self, force: bool) {
@@ -446,6 +503,7 @@ impl Ctx {
             return;
         }
         self.last_hb = Some(Instant::now());
+        self.poll_stop();
         let cpu = self.cpu.sample(self.child);
         let round = |x: Option<f64>| x.map(|x| (x * 10.0).round() / 10.0);
         let elapsed = self.elapsed();
@@ -482,10 +540,26 @@ impl Ctx {
     }
 
     /// Runs a child process to completion, heartbeating meanwhile and killing it at the deadline.
-    /// Its stdout and stderr are appended to `out/<log>`.
-    fn run_child(&mut self, mut cmd: Command, log: &str) -> Result<(), String> {
-        let log_path = self.root.join("out").join(log);
-        fs::create_dir_all(self.root.join("out")).map_err(|e| e.to_string())?;
+    /// Its stdout and stderr are appended to `<logs>/<log>` (`out/` in format 1).
+    fn run_child(&mut self, cmd: Command, log: &str) -> Result<(), String> {
+        self.run_child_with(cmd, log, &mut |_| {})
+    }
+
+    /// [`Ctx::run_child`], calling `poll` every half second before the heartbeat check, so it can
+    /// update `progress` from the child's own progress file.
+    fn run_child_with(
+        &mut self,
+        mut cmd: Command,
+        log: &str,
+        poll: &mut dyn FnMut(&mut Ctx),
+    ) -> Result<(), String> {
+        if let Some(why) = stop::requested() {
+            return Err(format!("stopped before {log}: {why}"));
+        }
+        let log_path = self.logs.join(log);
+        if let Some(d) = log_path.parent() {
+            fs::create_dir_all(d).map_err(|e| e.to_string())?;
+        }
         let f = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -499,7 +573,7 @@ impl Ctx {
             .map_err(|e| format!("cannot start {cmd:?}: {e}"))?;
         self.child = Some(child.id());
         self.cpu.prime_tree(child.id());
-        let outcome = self.wait_child(&mut child, &cmd, log);
+        let outcome = self.wait_child(&mut child, &cmd, log, poll);
         self.child = None;
         outcome
     }
@@ -509,36 +583,40 @@ impl Ctx {
         child: &mut std::process::Child,
         cmd: &Command,
         log: &str,
+        poll: &mut dyn FnMut(&mut Ctx),
     ) -> Result<(), String> {
         loop {
+            poll(self);
+            if let Some(why) = stop::requested() {
+                // Whatever the child finished is already in its files (they are written as each
+                // piece finishes); the run uploads them next.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("stopped: {why}"));
+            }
             if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
                 return if status.success() {
                     Ok(())
                 } else {
-                    Err(format!("{cmd:?} exited with {status} (see out/{log})"))
+                    Err(format!(
+                        "{cmd:?} exited with {status} (see {})",
+                        self.logs.join(log).display()
+                    ))
                 };
             }
             if self.deadline.is_some_and(|d| unix_now() >= d) {
+                stop::request("the manifest's deadline_utc was reached");
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err("deadline reached; chunk killed".into());
             }
+            if v2::orphaned() {
+                let _ = child.kill();
+                let _ = child.wait();
+                std::process::exit(3);
+            }
             self.heartbeat(false);
-            std::thread::sleep(Duration::from_millis(500));
-        }
-    }
-}
-
-fn rclone(mut c: Command) -> bool {
-    match c.stdin(Stdio::null()).status() {
-        Ok(s) if s.success() => true,
-        Ok(s) => {
-            eprintln!("runner: rclone failed ({s}): {c:?}");
-            false
-        }
-        Err(e) => {
-            eprintln!("runner: cannot run rclone: {e}");
-            false
+            std::thread::sleep(Duration::from_millis(200));
         }
     }
 }
@@ -546,7 +624,10 @@ fn rclone(mut c: Command) -> bool {
 fn sibling(name: &str) -> PathBuf {
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join(name)))
+        .and_then(|p| {
+            p.parent()
+                .map(|d| d.join(format!("{name}{}", std::env::consts::EXE_SUFFIX)))
+        })
         .filter(|p| p.exists())
         .unwrap_or_else(|| PathBuf::from(name))
 }
@@ -573,6 +654,14 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    match sched::format_of(&manifest) {
+        Ok(1) => {}
+        Ok(_) => return v2::run(&manifest, work),
+        Err(e) => {
+            eprintln!("runner: {e}");
+            return ExitCode::from(2);
+        }
+    }
     let Some(run_id) = manifest.get("run_id").and_then(Value::as_str) else {
         eprintln!("runner: manifest needs a `run_id`");
         return ExitCode::from(2);
@@ -608,21 +697,20 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
         .and_then(Value::as_str)
         .map(|s| s.trim_matches('/').to_string())
         .unwrap_or_else(|| format!("runs/{run_id}"));
-    let remote = match (
-        std::env::var("RCLONE_CONFIG_R2_TYPE"),
-        std::env::var("R2_BUCKET"),
-    ) {
-        (Ok(_), Ok(bucket)) if !bucket.is_empty() => Some(format!("r2:{bucket}/{out}")),
-        _ => {
-            println!("runner: RCLONE_CONFIG_R2_TYPE or R2_BUCKET unset: local run, no uploads");
-            None
-        }
-    };
+    let remote = remote::from_env();
+    if remote.is_none() {
+        println!(
+            "runner: RCLONE_CONFIG_R2_TYPE or R2_BUCKET unset (and no RUNNER_REMOTE_DIR): local \
+             run, no uploads"
+        );
+    }
     let root = work.join(run_id);
     let mut ctx = Ctx {
         run_id: run_id.to_string(),
+        logs: root.join("out"),
         root,
         remote,
+        prefix: out,
         threads,
         dph: std::env::var("DPH")
             .ok()
@@ -647,44 +735,62 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
     println!(
         "runner: run {run_id}, {threads} threads ({:.2} usable cores), uploading to {}",
         ctx.cpu.cores,
-        ctx.remote.as_deref().unwrap_or("(nowhere)")
+        ctx.remote
+            .as_ref()
+            .map_or("(nowhere)".to_string(), |r| format!(
+                "{}/{}",
+                r.describe(),
+                ctx.prefix
+            ))
     );
 
     let outcome = steps(&mut ctx, &manifest);
     let ok = outcome.is_ok();
     let marker = if ok { "DONE" } else { "FAILED" };
+    // A stopped run (signal, the launcher's STOP, the deadline) keeps everything it finished:
+    // the whole out/ is uploaded below, and the marker lists it.
+    let stopped = stop::requested();
+    let outputs: Vec<Value> = bundle::list_files(&ctx.root.join("out"))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|rel| {
+            let n = fs::metadata(ctx.root.join("out").join(&rel)).map_or(0, |m| m.len());
+            json!({ "path": format!("out/{rel}"), "bytes": n })
+        })
+        .collect();
     let marker_body = json!({
         "utc": utc_string(unix_now()),
         "elapsed_s": ctx.elapsed().round(),
         "error": outcome.as_ref().err(),
+        "stopped": stopped,
+        "partial": !ok,
+        "outputs": outputs,
     });
-    ctx.set_phase(if ok { "uploading" } else { "failed" }, Value::Null);
+    ctx.set_phase(
+        if ok {
+            "uploading"
+        } else if stopped.is_some() {
+            "stopped"
+        } else {
+            "failed"
+        },
+        Value::Null,
+    );
     let _ = ctx.write_json(marker, &marker_body);
     let mut uploaded = true;
-    if let Some(remote) = ctx.remote.clone() {
+    if let Some(remote) = &ctx.remote {
         for f in ["hardware.json", "benchmark.json", "result.json"] {
             let p = ctx.root.join(f);
             if p.exists() {
                 uploaded &= ctx.upload_file(&p, f, false);
             }
         }
-        let mut c = Command::new("rclone");
-        c.args([
-            "copy",
-            "--s3-no-check-bucket",
-            "--immutable",
-            "--retries",
-            "5",
-        ])
-        .arg(ctx.root.join("out"))
-        .arg(format!("{remote}/out"));
-        uploaded &= !ctx.root.join("out").exists() || rclone(c);
-        let mut c = Command::new("rclone");
-        c.args(["check", "--one-way"])
-            .arg(ctx.root.join("out"))
-            .arg(format!("{remote}/out"));
-        uploaded &= !ctx.root.join("out").exists() || rclone(c);
-        // The marker goes last: a DONE in R2 means every output is already there.
+        if let Err(e) = remote.put_dir(&ctx.root.join("out"), &format!("{}/out", ctx.prefix), true)
+        {
+            eprintln!("runner: upload out/: {e}");
+            uploaded = false;
+        }
+        // The marker goes last: a DONE (or FAILED) in R2 means every output is already there.
         let p = ctx.root.join(marker);
         uploaded &= ctx.upload_file(&p, marker, false);
     }
@@ -703,25 +809,89 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
     }
 }
 
+/// The keys tried to destroy this instance, in order: the per-instance key vast.ai injects
+/// (documented as able to start, stop or destroy only this instance), then the destroy-only key
+/// the launcher creates for the run and passes with `--env` (`python/launcher/launch.py`).
+const DESTROY_KEYS: [&str; 2] = ["CONTAINER_API_KEY", "VAST_DESTROY_KEY"];
+
+/// Asks vast.ai to destroy this instance, as the very last step. Nothing to do off vast.ai
+/// (`CONTAINER_ID` unset). Each key goes to `vastai` through its `VAST_API_KEY` environment
+/// variable, never on a command line, and only the API's error line is printed (`vastai`'s own
+/// hints print a key's last characters). In the runs of 2026-10-14 vast.ai answered the injected
+/// key with `401 Invalid user key`; the launcher's key, then the launcher's own destroy (on
+/// `DONE`/`FAILED`, a stale heartbeat or its time limit) and `vast-cleanup.yml` cover that.
 fn self_destroy() {
-    let (Ok(id), Ok(key)) = (
-        std::env::var("CONTAINER_ID"),
-        std::env::var("CONTAINER_API_KEY"),
-    ) else {
+    let Some(id) = std::env::var("CONTAINER_ID").ok().filter(|v| !v.is_empty()) else {
         return;
     };
-    if id.is_empty() || key.is_empty() {
-        return;
-    }
     println!("runner: destroying vast.ai instance {id}");
     let _ = std::io::stdout().flush();
-    let status = Command::new("vastai")
-        .args(["destroy", "instance", &id, "-y", "--api-key", &key])
-        .stdin(Stdio::null())
-        .status();
-    if !matches!(status, Ok(s) if s.success()) {
-        eprintln!("runner: self-destroy failed ({status:?}); the launcher will destroy it");
+    let mut tried = false;
+    for name in DESTROY_KEYS {
+        let Some(key) = std::env::var(name).ok().filter(|v| !v.is_empty()) else {
+            continue;
+        };
+        tried = true;
+        let out = Command::new("vastai")
+            .args(["destroy", "instance", &id, "-y"])
+            .env("VAST_API_KEY", &key)
+            .env("VASTAI_NO_UPDATE_CHECK", "1")
+            .stdin(Stdio::null())
+            .output();
+        let outcome = match out {
+            Ok(o) => destroy_outcome(
+                &format!(
+                    "{}\n{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                ),
+                &id,
+                &key,
+            ),
+            Err(e) => Err(format!("cannot run vastai: {e}")),
+        };
+        match outcome {
+            Ok(()) => {
+                println!("runner: vast.ai accepted the destroy of instance {id} ({name})");
+                let _ = std::io::stdout().flush();
+                return;
+            }
+            Err(why) => eprintln!("runner: self-destroy with {name} refused: {why}"),
+        }
     }
+    if !tried {
+        eprintln!("runner: no destroy key set ({})", DESTROY_KEYS.join(", "));
+    }
+    eprintln!(
+        "runner: instance {id} could not destroy itself; the launcher destroys it when it sees \
+         DONE or FAILED (python/launcher/launch.py), and vast-cleanup.yml destroys any 41bots- \
+         instance left after 2 hours. With neither running, destroy it in the vast.ai console."
+    );
+}
+
+/// Whether `vastai destroy instance <id>` succeeded, from what it printed: vastai 1.8.3 exits
+/// with 0 even when the API refuses, and prints `destroying instance <id>.` only on success.
+/// A refusal is reduced to the API's error line, with `key` masked should it appear.
+fn destroy_outcome(text: &str, id: &str, key: &str) -> Result<(), String> {
+    let ok = format!("destroying instance {id}.");
+    if text.lines().any(|l| l.trim() == ok) {
+        return Ok(());
+    }
+    let why = text
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("Failed with error"))
+        .or_else(|| text.lines().map(str::trim).find(|l| !l.is_empty()))
+        .unwrap_or("vastai printed nothing");
+    let mut why = why.chars().take(200).collect::<String>();
+    if !key.is_empty() {
+        why = why.replace(key, "***");
+    }
+    // vastai's hint lines name a key's last characters; never pass one on.
+    if why.contains("ends in") {
+        why = "vastai refused (details withheld: they name the key)".into();
+    }
+    Err(why)
 }
 
 fn steps(ctx: &mut Ctx, manifest: &Value) -> Result<(), String> {
@@ -749,7 +919,21 @@ fn steps(ctx: &mut Ctx, manifest: &Value) -> Result<(), String> {
         .ok_or("`chunk` must be an object with exactly one kind, e.g. {\"difftest\": {...}}")?;
     ctx.set_phase("chunk", json!({ "kind": kind }));
     let t0 = Instant::now();
-    let mut result = match kind.as_str() {
+    let mut result = run_kind(ctx, kind, params)?;
+    let secs = t0.elapsed().as_secs_f64();
+    if let Some(o) = result.as_object_mut() {
+        o.insert("kind".into(), json!(kind));
+        o.insert("seconds".into(), json!((secs * 10.0).round() / 10.0));
+        o.insert("threads".into(), json!(ctx.threads));
+        o.insert("dph".into(), json!(ctx.dph));
+    }
+    ctx.write_json("result.json", &result)?;
+    Ok(())
+}
+
+/// Runs one chunk of an existing (format-1) kind; also used by format-2 workers.
+fn run_kind(ctx: &mut Ctx, kind: &str, params: &Value) -> Result<Value, String> {
+    Ok(match kind {
         "difftest" => {
             let matches = num(params, "matches")?;
             let seed = num(params, "seed")?;
@@ -809,20 +993,13 @@ fn steps(ctx: &mut Ctx, manifest: &Value) -> Result<(), String> {
             benchmark(ctx, s)?
         }
         "solver_spike" => spike::chunk(ctx, params)?,
+        "search_measure" => measure::chunk(ctx, params)?,
+        "t1bench" => t1bench::chunk(ctx, params)?,
         "arena_block" => {
             return Err("arena_block chunks need the arena binary (not built yet)".into());
         }
         other => return Err(format!("unknown chunk kind `{other}`")),
-    };
-    let secs = t0.elapsed().as_secs_f64();
-    if let Some(o) = result.as_object_mut() {
-        o.insert("kind".into(), json!(kind));
-        o.insert("seconds".into(), json!((secs * 10.0).round() / 10.0));
-        o.insert("threads".into(), json!(ctx.threads));
-        o.insert("dph".into(), json!(ctx.dph));
-    }
-    ctx.write_json("result.json", &result)?;
-    Ok(())
+    })
 }
 
 /// Runs growing `difftest` batches for about `secs` seconds on all threads.
@@ -888,6 +1065,33 @@ mod tests {
         assert_eq!(parse_cpu_max("4800000 100000"), Some(48.0));
         assert_eq!(parse_cpu_max("150000 100000"), Some(1.5));
         assert_eq!(parse_cpu_max("garbage"), None);
+    }
+
+    #[test]
+    fn destroy_outcome_reads_vastai() {
+        let key = "0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            destroy_outcome("destroying instance 4242.\n\n", "4242", key),
+            Ok(())
+        );
+        // vastai 1.8.3 refusing the injected key (with exit status 0).
+        let refused = format!(
+            "\nFailed with error 401: Invalid user key\n  Sent key from $VAST_API_KEY (ends in ...{}). Update the env var with a new key.\n",
+            &key[28..]
+        );
+        let e = destroy_outcome(&refused, "4242", key).expect_err("refused");
+        assert_eq!(e, "Failed with error 401: Invalid user key");
+        // Another instance's confirmation is not this one's.
+        assert!(destroy_outcome("destroying instance 42.", "4242", key).is_err());
+        // Unknown output: its first line, the key masked, never a key suffix.
+        let e = destroy_outcome(&format!("odd {key} answer"), "4242", key).expect_err("odd");
+        assert_eq!(e, "odd *** answer");
+        let e = destroy_outcome("Sent key (ends in ...cdef)", "4242", key).expect_err("hint");
+        assert!(!e.contains("cdef"), "{e}");
+        assert_eq!(
+            destroy_outcome("", "4242", key),
+            Err("vastai printed nothing".into())
+        );
     }
 
     #[test]

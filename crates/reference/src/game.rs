@@ -75,6 +75,10 @@ pub struct Public {
     pub joker_turned: bool,
     pub hand_sizes: [u8; 8],
     pub burn_counts: [u8; 8],
+    /// Every burn of this hand in order: the seat and the kind of burn (`joker_take`: the
+    /// dealer's burn after taking a turned Joker; `ace_rob_at_once`: the dealer's burn after
+    /// robbing a turned ace; `rob_at_turn`: a robber's burn at their first turn in trick 1).
+    pub burn_order: Vec<(u8, &'static str)>,
     /// Undealt cards plus burned cards.
     pub hidden_count: u8,
     /// Every card played to a trick this hand, sorted.
@@ -174,6 +178,8 @@ pub struct Match {
     deck: Vec<Card>,
     hands: [Vec<Card>; 8],
     burns: [Vec<Card>; 8],
+    /// Every burn of this hand in order: the seat and why it burned, as a word.
+    burn_log: Vec<(u8, &'static str)>,
     undealt: Vec<Card>,
     trump: Option<Suit>,
     table_card: Option<Card>,
@@ -216,6 +222,7 @@ impl Match {
             deck: Vec::new(),
             hands: Default::default(),
             burns: Default::default(),
+            burn_log: Vec::new(),
             undealt: Vec::new(),
             trump: None,
             table_card: None,
@@ -393,6 +400,7 @@ impl Match {
             joker_turned: self.joker_turned,
             hand_sizes,
             burn_counts,
+            burn_order: self.burn_log.clone(),
             hidden_count: (self.undealt.len() + burned_total) as u8,
             played: sorted_indices(&self.played),
             trick_no: self.trick_no,
@@ -509,6 +517,7 @@ impl Match {
         self.deck = deck;
         self.hands = Default::default();
         self.burns = Default::default();
+        self.burn_log = Vec::new();
         self.undealt = Vec::new();
         self.trump = None;
         self.table_card = None;
@@ -608,14 +617,17 @@ impl Match {
         let card = Card::from_index(action.card()).expect("legal actions hold real cards");
         match (self.waiting, action) {
             (Waiting::DealerJokerBurn, Action::Burn(_)) => {
+                self.burn_log.push((self.dealer, "joker_take"));
                 self.burn(self.dealer, card);
                 self.after_joker_burn();
             }
             (Waiting::DealerRobBurn, Action::Burn(_)) => {
+                self.burn_log.push((self.dealer, "ace_rob_at_once"));
                 self.burn(self.dealer, card);
                 self.start_trick_one();
             }
             (Waiting::RobberBurn(seat), Action::Burn(_)) => {
+                self.burn_log.push((seat, "rob_at_turn"));
                 self.burn(seat, card);
                 self.waiting = Waiting::Play(seat);
             }

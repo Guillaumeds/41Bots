@@ -122,10 +122,10 @@ fn top_level_keys(json: &str) -> Vec<String> {
 fn the_record_carries_versions_and_the_spec_fields_in_order() {
     let r = &some_records()[1];
     assert_eq!(r.format_version, FORMAT_VERSION);
-    assert_eq!(FORMAT_VERSION, 1);
+    assert_eq!(FORMAT_VERSION, 2);
     assert_eq!(r.rules_version, RULES_VERSION);
     let json = r.to_json();
-    assert!(json.starts_with(r#"{"format_version":1,"rules_version":2,"rules":{"#));
+    assert!(json.starts_with(r#"{"format_version":2,"rules_version":2,"rules":{"#));
     assert_eq!(
         top_level_keys(&json),
         [
@@ -251,8 +251,12 @@ fn verify_catches_a_tampered_record() {
     assert!(matches!(r.replay(), Err(RecordError::RulesVersion(_))));
 
     let mut r = good.clone();
-    r.format_version = 2;
-    assert!(matches!(r.replay(), Err(RecordError::FormatVersion(2))));
+    r.format_version = 3;
+    assert!(matches!(r.replay(), Err(RecordError::FormatVersion(3))));
+    // Format-1 records (no mid-match start) still read and replay (docs/M3-SPEC.md §2.1).
+    let mut r = good.clone();
+    r.format_version = 1;
+    assert!(r.replay().is_ok());
 
     let mut r = good.clone();
     r.block = Some(BlockSpec {
@@ -265,4 +269,63 @@ fn verify_catches_a_tampered_record() {
     let mut r = good.clone();
     r.seed += 1;
     assert!(r.verify().is_err());
+}
+
+/// A match started mid-way with `Match::from_hand_start` records its start state and deck
+/// (format 2, docs/M3-SPEC.md §2.1), round-trips through JSON, replays and verifies; tampering
+/// with the start is caught.
+#[test]
+fn a_record_starting_mid_match_replays() {
+    use engine::game::{HandStartState, Match};
+    let start = HandStartState {
+        dealer: 5,
+        scores: [16, 30, 0, 25],
+        bonus_taken: [true, false, false, false],
+        games_won: [1, 0, 1, 0],
+        hand_index: 17,
+        game_index: 2,
+    };
+    for seed in 0..6u64 {
+        let mut deck: [u8; 53] = core::array::from_fn(|i| i as u8);
+        engine::rng::Rng::new(seed).shuffle(&mut deck);
+        let mut m = Match::from_hand_start(start, deck, seed, Rules::HOUSE).unwrap();
+        let mut i = 0u64;
+        while m.phase() != Phase::MatchOver {
+            let legal = m.legal_actions();
+            m.apply(legal[((i * 31 + seed) % legal.len() as u64) as usize])
+                .unwrap();
+            i += 1;
+        }
+        let bots: [String; 8] = core::array::from_fn(|_| "random".to_string());
+        let r = MatchRecord::from_match_started(&m, seed, start, deck, bots).unwrap();
+        assert_eq!(r.first_dealer, 5);
+        // The timeline continues from the start state's scores and games.
+        let first = &r.public_timeline[0];
+        assert!(
+            first
+                .games_won
+                .iter()
+                .zip(start.games_won)
+                .all(|(&a, b)| a >= b)
+        );
+        if first.game_index == start.game_index {
+            assert!(first.scores.iter().zip(start.scores).all(|(&a, b)| a >= b));
+        }
+        let back = MatchRecord::from_json(&r.to_json()).unwrap();
+        assert_eq!(back, r);
+        back.verify().unwrap();
+        assert_eq!(back.replay().unwrap().money(), m.money());
+
+        let mut bad = r.clone();
+        bad.start_deck = None;
+        assert!(matches!(bad.replay(), Err(RecordError::BadStart(None))));
+        let mut bad = r.clone();
+        bad.start.as_mut().unwrap().scores[1] = 41;
+        assert!(matches!(bad.replay(), Err(RecordError::BadStart(Some(_)))));
+        // Without its start the record is another match.
+        let mut bad = r.clone();
+        bad.start = None;
+        bad.start_deck = None;
+        assert!(bad.verify().is_err());
+    }
 }

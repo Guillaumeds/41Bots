@@ -12,7 +12,8 @@
 //!   the first action): `= <canonical event>` lines form an in-order subsequence of the public
 //!   events produced by that action; `scores:`, `phase:`, `legal:` (the exact legal cards, in
 //!   card-index order) and `result:` (`game team=<n> reason=<r>` or
-//!   `match team=<n> money=<a>,<b>,<c>,<d>`).
+//!   `match team=<n> money=<a>,<b>,<c>,<d>`), and `burns:` (the public burn order,
+//!   `none` or `<seat> <kind>, …`).
 //!
 //! A disagreement is a finding for the reviewer: the engine or the transcript may be the one
 //! that is wrong, and RULES.md decides.
@@ -22,6 +23,7 @@ use std::path::{Path, PathBuf};
 
 use engine::cards::{Card, DECK_SIZE, JOKER, name, parse};
 use engine::game::{Action, Event, Match, Phase, Rules, Visibility, transcript, transcript_full};
+use engine::view::BurnKind;
 
 const SEATS: usize = 8;
 const HAND_SIZE: usize = 5;
@@ -102,6 +104,7 @@ enum Expect {
     Scores([u8; 4]),
     Phase(Phase),
     Legal(Vec<Card>),
+    Burns(Vec<(u8, BurnKind)>),
     Game { team: u8, reason: String },
     MatchWon { team: u8, money: [i32; 4] },
 }
@@ -213,6 +216,7 @@ fn parse_line(t: &mut Transcript, line_no: usize, line: &str) -> Result<(), Stri
         ["scores"] if !then => expect(t, line_no, Expect::Scores(parse_scores(value)?))?,
         ["phase"] if !then => expect(t, line_no, Expect::Phase(parse_phase(value)?))?,
         ["legal"] if !then => expect(t, line_no, Expect::Legal(parse_cards(value)?))?,
+        ["burns"] if !then => expect(t, line_no, Expect::Burns(parse_burns(value)?))?,
         ["result"] if !then => expect(t, line_no, parse_result(value)?)?,
         _ => return Err("unknown directive".into()),
     }
@@ -333,6 +337,31 @@ fn parse_money(s: &str) -> Result<[i32; 4], String> {
     parts
         .try_into()
         .map_err(|_| format!("`{s}` is not four amounts a,b,c,d"))
+}
+
+/// `burns: none` or `burns: <seat> <kind>, <seat> <kind>` with kinds `JokerTake`,
+/// `AceRobAtOnce` and `RobAtTurn`: the public `burn_order` (docs/M3-SPEC.md §2.2).
+fn parse_burns(s: &str) -> Result<Vec<(u8, BurnKind)>, String> {
+    if s.trim() == "none" {
+        return Ok(Vec::new());
+    }
+    s.split(',')
+        .map(|item| {
+            let words: Vec<&str> = item.split_whitespace().collect();
+            match words[..] {
+                [seat, kind] => {
+                    let kind = match kind {
+                        "JokerTake" => BurnKind::JokerTake,
+                        "AceRobAtOnce" => BurnKind::AceRobAtOnce,
+                        "RobAtTurn" => BurnKind::RobAtTurn,
+                        _ => return Err(format!("unknown burn kind `{kind}`")),
+                    };
+                    Ok((parse_seat(seat)?, kind))
+                }
+                _ => Err("a burn is `<seat> <kind>`".into()),
+            }
+        })
+        .collect()
 }
 
 fn parse_phase(s: &str) -> Result<Phase, String> {
@@ -670,6 +699,10 @@ fn check_step(
                         cards_text(want)
                     )
                 })
+            }
+            Expect::Burns(want) => {
+                let actual = m.public().burn_order;
+                (actual != *want).then(|| format!("burn order is {actual:?}, expected {want:?}"))
             }
             Expect::Game { team, reason } => {
                 let won = new_events.iter().rev().find_map(|(_, e)| match e {

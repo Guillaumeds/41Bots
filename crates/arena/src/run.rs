@@ -43,22 +43,8 @@ pub struct RunConfig {
 }
 
 fn factory(name: &str) -> Result<Box<dyn BotFactory + Send + Sync>, String> {
-    // The registry's factories are stateless unit structs; rebuild per thread to stay Send-free.
-    bots::factory(name)
-        .map(|_| Box::new(Named(name.to_string())) as Box<dyn BotFactory + Send + Sync>)
-        .ok_or_else(|| format!("unknown bot `{name}` (known: {})", bots::names().join(", ")))
-}
-
-/// A factory by registry name that is `Send + Sync`.
-struct Named(String);
-
-impl BotFactory for Named {
-    fn name(&self) -> &str {
-        &self.0
-    }
-    fn build(&self) -> Box<dyn bot::Bot> {
-        bots::factory(&self.0).expect("checked name").build()
-    }
+    // The registry (M3-SPEC §8.1): PIMC bots by name, falling back to `bots`.
+    search::factory(name).ok_or_else(|| search::bot::factory_error(name))
 }
 
 /// Play blocks `0, 1, …` of `cfg` until `max_blocks` or until `visit` returns `false`, calling

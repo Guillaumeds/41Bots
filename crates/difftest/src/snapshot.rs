@@ -7,7 +7,7 @@
 
 use engine::cards::{Bits, cards, name};
 use engine::game::{Action as EAction, Match as EMatch, Phase as EPhase};
-use engine::view::{PublicState, SeatView};
+use engine::view::{BurnKind, PublicState, SeatView};
 
 /// Seats at the table.
 pub const SEATS: usize = 8;
@@ -80,6 +80,8 @@ pub struct PublicSnap {
     pub joker_turned: bool,
     pub hand_sizes: [u8; 8],
     pub burn_counts: [u8; 8],
+    /// Seat and kind word (`joker_take`, `ace_rob_at_once`, `rob_at_turn`) of every burn.
+    pub burn_order: Vec<(u8, &'static str)>,
     pub hidden_count: u8,
     /// Sorted.
     pub played: Vec<u8>,
@@ -163,6 +165,14 @@ fn reference_phase(p: reference::Phase) -> SnapPhase {
     }
 }
 
+fn burn_kind_word(k: BurnKind) -> &'static str {
+    match k {
+        BurnKind::JokerTake => "joker_take",
+        BurnKind::AceRobAtOnce => "ace_rob_at_once",
+        BurnKind::RobAtTurn => "rob_at_turn",
+    }
+}
+
 impl PublicSnap {
     fn from_engine(p: &PublicState) -> PublicSnap {
         PublicSnap {
@@ -180,6 +190,11 @@ impl PublicSnap {
             joker_turned: p.joker_turned,
             hand_sizes: p.hand_sizes,
             burn_counts: p.burn_counts,
+            burn_order: p
+                .burn_order
+                .iter()
+                .map(|&(s, k)| (s, burn_kind_word(k)))
+                .collect(),
             hidden_count: p.hidden_count,
             played: bits_sorted(p.played),
             trick_no: p.trick_no,
@@ -211,6 +226,7 @@ impl PublicSnap {
             joker_turned: p.joker_turned,
             hand_sizes: p.hand_sizes,
             burn_counts: p.burn_counts,
+            burn_order: p.burn_order,
             hidden_count: p.hidden_count,
             played: sorted(p.played),
             trick_no: p.trick_no,
@@ -324,6 +340,14 @@ impl State {
             ("public.joker_turned".into(), p.joker_turned.to_string()),
             ("public.hand_sizes".into(), list_text(&p.hand_sizes)),
             ("public.burn_counts".into(), list_text(&p.burn_counts)),
+            (
+                "public.burn_order".into(),
+                p.burn_order
+                    .iter()
+                    .map(|(s, k)| format!("{s}:{k}"))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
             ("public.hidden_count".into(), p.hidden_count.to_string()),
             ("public.played".into(), cards_text(&p.played)),
             ("public.trick_no".into(), p.trick_no.to_string()),

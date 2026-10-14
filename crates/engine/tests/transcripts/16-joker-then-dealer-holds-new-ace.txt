@@ -25,6 +25,7 @@ phase: AwaitBurn 7
 legal: AC 3D QD AH 8S JK
 > Burn 8S    # seat 7 burns
 = BurnDone seat=7
+burns: 7 JokerTake
 = Turned card=9C
 # The 9 of clubs is turned: clubs are trumps. The dealer holds the ace of clubs, but after a turned Joker only a turned
 # ace is robbed at once (H4, amended 2026-10-14): the dealer robs at its own first turn, as the eighth card of trick 1.
@@ -42,6 +43,7 @@ legal: 9C 3D QD AH JK
 > Burn JK    # seat 7 burns
 = BurnDone seat=7
 phase: AwaitPlay 7
+burns: 7 JokerTake, 7 RobAtTurn
 # This time the dealer burns the Joker it took, then plays its first card.
 > Play 3D    # seat 7
 = TrickWon trick=1 seat=3 team=3 points=5

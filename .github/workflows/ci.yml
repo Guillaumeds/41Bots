@@ -45,6 +45,14 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Runner resume and stop tests (M3-SPEC 7.4, 13.1 item 11; release binaries)
+        shell: bash
+        run: |
+          cargo build --release -p runner -p search -p equity -p difftest
+          RUNNER_TEST_BIN_DIR=target/release cargo test --release -p runner --test resume_identity --test stop_partial -- --ignored
+      - name: Launcher tests (simulated vast.ai and R2)
+        if: runner.os == 'Linux'
+        run: python3 -m unittest discover -s python/launcher -p "test_*.py"
       - name: Build engine with serde
         run: cargo build -p engine --features serde
       - name: Reference crate must not depend on the engine
@@ -74,6 +82,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build engine for wasm32
         run: cargo build -p engine --target wasm32-unknown-unknown --release
+      - name: Build the belief crate for wasm32 (M3b runs the world generator in a Worker)
+        run: cargo build -p belief --target wasm32-unknown-unknown --release
       - name: Native vs wasm result hash
         if: hashFiles('tools/wasm_check.sh') != ''
         run: bash tools/wasm_check.sh
