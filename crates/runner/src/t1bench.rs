@@ -6,11 +6,11 @@
 //!
 //! ```json
 //! { "t1bench": { "dph": 1.25, "configs": ["16x", "8x", "32x", "4x", "auto", "1xall"],
-//!                "budget_s": 240, "cap_s": 120, "late_cap_s": 45, "lead_cap_s": 120,
+//!                "budget_s": 240, "cap_s": 120, "late_cap_s": 45, "lead_cap_s": 150,
 //!                "stop_ratio": 1.5 } }
 //! ```
 //! Every field is optional; the measured solving takes at most `budget_s + 2 × late_cap_s +
-//! lead_cap_s` (7.5 minutes by default), much less on big machines. Steps:
+//! lead_cap_s` (8 minutes by default), much less on big machines. Steps:
 //! 1. Table v0 (`table.source` `"auto"`: a format-2 input, else `inputs/sha256/<recorded hash>`
 //!    in R2, else rebuilt from the model in the repository in seconds; hash-checked), and the
 //!    stratified trick-1 decision set (`count` 32, `seed` 1: the yardstick's own).
@@ -24,8 +24,11 @@
 //! 3. The late set (128 worlds at positions 7–8) with one thread per world (`"<T>x1"`), then
 //!    with the best mid configuration, each capped at `late_cap_s`.
 //! 4. The lead set (one world at each of positions 1–3) once with `lead_config` (default
-//!    `"auto"`: each of these big worlds on many threads), capped at `lead_cap_s`: their node
-//!    counts scale every configuration to the real position mix.
+//!    `"3x"`: all three at once on a third of the threads each, so a huge leader world does not
+//!    hold up the others), capped at `lead_cap_s`: their node counts scale every configuration
+//!    to the real position mix (a world stopped at the cap counts as a lower bound). These
+//!    counts belong to the game, not the machine: `position_nodes` (8 mean node counts, e.g.
+//!    from the yardstick run or an earlier bench) replaces them and skips this step.
 //! 5. `out/t1bench/results.json` (`search::t1bench::analyse`) and `out/t1bench/summary.txt`
 //!    (plain English): per run, worlds per hour for the real position mix, CPU use, peak memory,
 //!    table fill and dollars per 1000 worlds at `dph` (default: the launcher's `DPH`); the best
@@ -316,20 +319,33 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
             late_occ.map(|o| o * stop_ratio),
         )?;
     }
-    // The big positions once, for their node counts.
+    // The big positions once, three at once (a huge leader world does not hold up the other
+    // two), for their node counts; not needed when the node counts are given.
+    let position_nodes: Option<[f64; 8]> = match p.get("position_nodes") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            serde_json::from_value(v.clone())
+                .map_err(|_| "t1bench: position_nodes must be 8 numbers (positions 1-8)")?,
+        ),
+    };
     let lead_cfg = p
         .get("lead_config")
         .and_then(Value::as_str)
-        .unwrap_or("auto")
+        .unwrap_or("3x")
         .to_string();
-    b.run(
-        ctx,
-        &format!("lead-{lead_cfg}"),
-        &lead_cfg,
-        &lead,
-        f(p, "lead_cap_s", 120.0),
-        None,
-    )?;
+    if position_nodes.is_some() && p.get("lead_set").is_none() {
+        b.skipped
+            .push(json!({ "run": "lead", "why": "position_nodes given" }));
+    } else {
+        b.run(
+            ctx,
+            &format!("lead-{lead_cfg}"),
+            &lead_cfg,
+            &lead,
+            f(p, "lead_cap_s", 150.0),
+            None,
+        )?;
+    }
     // Analysis.
     let hw = hardware();
     let params = AnalyseParams {
@@ -353,6 +369,7 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         cpu_model: hw["cpu_model"].as_str().unwrap_or("").to_string(),
         mem_gb: mem::Sys::host().limit().mb() as f64 / 1024.0,
         mid_set: mid.clone(),
+        position_nodes,
     };
     let mut a = analyse(&b.runs, &params);
     a["table"] = table_rec.clone();

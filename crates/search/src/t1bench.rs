@@ -511,6 +511,9 @@ pub struct AnalyseParams {
     pub mem_gb: f64,
     /// The ranking set: the best single configuration is chosen among the runs on it.
     pub mid_set: String,
+    /// Mean solver nodes of a world at each position, measured elsewhere (e.g. from the
+    /// yardstick run); used instead of this bench's own when given.
+    pub position_nodes: Option<[f64; 8]>,
 }
 
 impl Default for AnalyseParams {
@@ -524,6 +527,7 @@ impl Default for AnalyseParams {
             cpu_model: String::new(),
             mem_gb: 0.0,
             mid_set: MID_SET.to_string(),
+            position_nodes: None,
         }
     }
 }
@@ -634,23 +638,54 @@ pub fn analyse(runs: &[BenchRun], p: &AnalyseParams) -> Value {
     for &(pos, nodes) in nodes_of.values() {
         by_pos.entry(pos).or_default().push(nodes as f64);
     }
-    // Positions without a finished world: from the nearest measured one at the model's ratio
-    // (2.257 per position), flagged.
+    // Worlds stopped before the end: their nodes so far are a lower bound.
+    let mut partial_of: BTreeMap<(u64, u64), (u8, u64)> = BTreeMap::new();
+    for w in runs
+        .iter()
+        .flat_map(|r| &r.worlds)
+        .filter(|w| w.started && !w.finished && !nodes_of.contains_key(&(w.id, w.world)))
+    {
+        let e = partial_of
+            .entry((w.id, w.world))
+            .or_insert((w.position, w.nodes));
+        e.1 = e.1.max(w.nodes);
+    }
+    let mut lower: BTreeMap<u8, Vec<f64>> = BTreeMap::new();
+    for &(pos, nodes) in partial_of.values() {
+        lower.entry(pos).or_default().push(nodes as f64);
+    }
+    // Node cost per position: given (`position_nodes`, e.g. from the yardstick run: the ratios
+    // between positions are the game's, not the machine's), else measured (finished worlds),
+    // else the nearest measured position scaled by the plan's default cost profile, raised to the
+    // stopped worlds' lower bound if that is higher.
     let measured: BTreeMap<u8, f64> = by_pos
         .iter()
         .filter_map(|(&pos, v)| mean(v).map(|m| (pos, m)))
         .collect();
-    let model_ratio = AutoParams::default().position_ratio;
-    let node_cost: Vec<Option<(f64, bool)>> = (0..8u8)
+    let shape = AutoParams::default()
+        .t1_costs_s
+        .unwrap_or([5000.0, 2000.0, 700.0, 200.0, 60.0, 16.0, 20.0, 25.0]);
+    let node_source: Vec<Option<(f64, &str)>> = (0..8u8)
         .map(|pos| {
+            if let Some(g) = &p.position_nodes {
+                return Some((g[usize::from(pos)], "given"));
+            }
             if let Some(&m) = measured.get(&pos) {
-                return Some((m, true));
+                return Some((m, "measured"));
             }
             let (&q, &m) = measured
                 .iter()
                 .min_by_key(|(q, _)| (i16::from(**q) - i16::from(pos)).abs())?;
-            Some((m * model_ratio.powi(i32::from(q) - i32::from(pos)), false))
+            let est = m * shape[usize::from(pos)] / shape[usize::from(q)].max(1e-9);
+            match lower.get(&pos).and_then(|v| mean(v)) {
+                Some(lb) if lb > est => Some((lb, "lower bound (stopped worlds)")),
+                _ => Some((est, "scaled from the nearest measured position")),
+            }
         })
+        .collect();
+    let node_cost: Vec<Option<(f64, bool)>> = node_source
+        .iter()
+        .map(|x| x.map(|(n, s)| (n, s == "measured")))
         .collect();
     let mut run_rows = Vec::new();
     // Per run: occupancy per position (measured, or extrapolated by nodes).
@@ -799,8 +834,9 @@ pub fn analyse(runs: &[BenchRun], p: &AnalyseParams) -> Value {
         "ok": mismatches.is_empty(),
         "identity": { "worlds_compared": compared, "mismatches": mismatches },
         "machine": { "threads": p.threads, "dph": p.dph, "cpu_model": p.cpu_model, "mem_gb": p.mem_gb },
-        "position_nodes": node_cost.iter().enumerate().map(|(i, x)| json!({
-            "position": i + 1, "mean_nodes": x.map(|(n, _)| n.round()), "measured": x.map(|(_, m)| m) })).collect::<Vec<_>>(),
+        "position_nodes": node_source.iter().enumerate().map(|(i, x)| json!({
+            "position": i + 1, "mean_nodes": x.map(|(n, _)| n.round()),
+            "source": x.map(|(_, s)| s) })).collect::<Vec<_>>(),
         "runs": run_rows,
         "best_config": best_run.as_ref().map(|(n, x, complete)| json!({
             "name": n, "mix_worlds_per_hour": x.round(), "complete": complete,
@@ -1095,6 +1131,33 @@ mod tests {
         let text = summary_text(&res, &p);
         assert!(text.contains("byte-identical"), "{text}");
         assert!(text.contains("Best single configuration: b"), "{text}");
+        // A leader world stopped at the cap: its nodes so far are a lower bound, used when above
+        // the estimate scaled from the nearest measured position; given counts replace both.
+        let mut lead = run("lead", LEAD_SET, vec![world(100, 0, 0, 8, 5.0, 1 << 40, 0)]);
+        lead.worlds[0].finished = false;
+        lead.worlds[0].values = None;
+        let res = analyse(&[a.clone(), b.clone(), lead.clone()], &p);
+        assert_eq!(
+            res["position_nodes"][0]["source"],
+            json!("lower bound (stopped worlds)")
+        );
+        assert_eq!(
+            res["position_nodes"][0]["mean_nodes"],
+            json!(f64::from(1u32 << 31) * 512.0)
+        );
+        assert_eq!(
+            res["position_nodes"][2]["source"],
+            json!("measured"),
+            "{}",
+            res["position_nodes"]
+        );
+        let given = AnalyseParams {
+            position_nodes: Some([8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]),
+            ..p.clone()
+        };
+        let res = analyse(&[a.clone(), b.clone(), lead], &given);
+        assert_eq!(res["position_nodes"][0]["source"], json!("given"));
+        assert_eq!(res["position_nodes"][7]["mean_nodes"], json!(1.0));
         // A disagreement fails loudly.
         let mut bad = b.clone();
         bad.worlds[0].values = Some(vec![[8, 0, 0, 0]]);

@@ -61,9 +61,11 @@ pub struct AutoParams {
     /// The cost ratio from one position in the trick to the next, for those tricks.
     pub position_ratio: f64,
     /// Trick-1 thread-seconds per world by position (0 = leader). Default: one-thread solves on
-    /// the 4-vCPU Xeon (2026-10-14: positions 4, 6, 7, 8 measured at about 200, 16, 20, 25 s; the
-    /// leader from the M2 worlds' nodes, about 2000 s; positions 2–3 and 5 interpolated). The
-    /// trick-1 bench prints measured ones (`suggested_auto_params`).
+    /// the 4-vCPU Xeon (2026-10-14: positions 4, 6, 7, 8 measured at about 200, 16, 20, 25 s);
+    /// the leader from run m3-agree-t1-b (about 72 leader worlds an hour on 448 threads as
+    /// 4 × 112, so about 22,000 thread-seconds each at 112 threads), taken as 5000 s on one
+    /// thread; positions 2–3 and 5 interpolated. The trick-1 bench prints measured ones
+    /// (`suggested_auto_params`).
     pub t1_costs_s: Option<[f64; 8]>,
     /// The table (MB) a leader's world is expected to need per trick, scaled by position like
     /// the cost, for tricks without a per-position table below; a world whose share of the
@@ -86,9 +88,9 @@ pub struct AutoParams {
 impl Default for AutoParams {
     fn default() -> Self {
         AutoParams {
-            leader_cost_s: [0.0, 2000.0, 3.0, 0.01, 0.0005, 0.0001],
+            leader_cost_s: [0.0, 5000.0, 3.0, 0.01, 0.0005, 0.0001],
             position_ratio: 2.257,
-            t1_costs_s: Some([2000.0, 1200.0, 700.0, 250.0, 60.0, 16.0, 20.0, 25.0]),
+            t1_costs_s: Some([5000.0, 2000.0, 700.0, 200.0, 60.0, 16.0, 20.0, 25.0]),
             leader_table_mb: [0.0, 8192.0, 256.0, 4.0, 1.0, 1.0],
             t1_table_mb: Some([8192.0, 4096.0, 2048.0, 1024.0, 256.0, 128.0, 128.0, 128.0]),
             target_s: None,
@@ -503,7 +505,7 @@ mod tests {
         // the smallest.
         let ideal = pl.expected_s / (4.0 * 384.0);
         assert!((pl.target_s - ideal.clamp(p.target_min_s, p.target_max_s)).abs() < 1e-9);
-        let tiny = plan_auto(&tasks[..2], 384, budget, &p);
+        let tiny = plan_auto(&tasks[tasks.len() - 2..], 384, budget, &p);
         assert_eq!(tiny.target_s, p.target_min_s);
         // Tricks 3–4 are cheap: everything on one thread.
         let late: Vec<PlanTask> = (0..8)
