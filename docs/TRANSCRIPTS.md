@@ -23,14 +23,14 @@ These 33 files in `crates/engine/tests/transcripts/` are deals written by hand f
 | `03-second-bonus-worth-ten-first-still-eleven.txt` | Over three hands, team 1's first bonus is +6 and its second +5. Team 3's first bonus, which comes after team 1's two, is still +6. |
 | `04-bonus-flag-resets-in-new-game.txt` | Team 3 takes its first bonus and wins game 1 by a jink. In game 2 its next bonus is +6 again. |
 | `05-lowly-trumps-take-the-end-bonus.txt` | Only two trumps reach the players. The end bonus goes to the A♥ (spades trumps), and in the next hand to the 2 of clubs over the 10 of clubs. |
-| `06-turned-five-of-trumps-robbed.txt` | The ace holder robs the turned 5 of diamonds at its turn, burns a card (any card may go, aces included) and plays the 5, whose bonus counts at once. |
+| `06-turned-five-of-trumps-robbed.txt` | The ace holder robs the turned 5 of diamonds at its turn, burns a card (any card but the ace of trumps; the plain ace of clubs could go) and plays the 5, whose bonus counts at once. |
 | `07-turned-five-of-trumps-not-robbed.txt` | The ace is undealt, so the turned 5 stays on the table all hand. The J's bonus comes only at the end of the hand. |
 | `08-turned-ace-of-hearts.txt` | A turned A♥ makes hearts trumps and the dealer robs at once. In trick 1 the Joker beats the A♥, which beats the king. |
-| `09-turned-plain-ace.txt` | The ace of clubs is turned and the dealer robs at once; any card may be burned, its ace of diamonds and the turned ace included. The A♥ beats the ace of clubs. |
+| `09-turned-plain-ace.txt` | The ace of clubs is turned and the dealer robs at once; any card but the turned ace (the ace of trumps) may be burned, its plain ace of diamonds included. The A♥ beats the ace of clubs. |
 | `10-dealer-holds-ace-robs-as-eighth-card.txt` | The dealer holds the ace and the turned card is ordinary. The other seven play first, then the dealer robs and burns as the eighth card. |
 | `11-ace-holder-leads-and-robs-first.txt` | The first player holds the ace, so it robs and burns before leading. |
 | `12-ace-of-hearts-holder-does-not-rob.txt` | Clubs are trumps, so the A♥ holder is not asked to rob. The ace of clubs holder robs at its turn. |
-| `13-an-ace-may-be-burned.txt` | A robber holding all four aces may burn any of its six cards (H3 as amended 2026-10-14); it burns the ace of clubs. |
+| `13-a-plain-ace-may-be-burned.txt` | A robber holding all four aces may burn any card except the ace of trumps (rule 21, H3); it burns the plain ace of clubs. |
 | `14-dealer-burns-the-joker.txt` | The dealer takes a turned Joker and burns the Joker itself. Then the A♥ holder robs the next turned card before leading. |
 | `15-joker-then-ace-two-dealer-burns.txt` | The Joker is turned, then the ace of spades. The dealer takes both and burns twice, and 11 cards stay undealt. |
 | `16-joker-then-dealer-holds-new-ace.txt` | The Joker is turned, then the 9 of clubs, and the dealer holds the ace of clubs. The dealer robs the 9 at its own turn, as the eighth card of trick 1 (H4 as amended 2026-10-14), and burns again. |

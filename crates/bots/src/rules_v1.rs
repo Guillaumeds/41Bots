@@ -6,9 +6,9 @@
 //! 1. **Burn** ([`Rule::Burn`]): burn a plain (non-trump) card if possible: the lowest plain rank,
 //!    then the suit the hand holds fewest plain cards of, then the lowest card index. With no
 //!    plain card to burn, burn the lowest trump. A trump this seat took this hand (the robbed
-//!    card, or the Joker the dealer took) is never burned unless nothing else may be. Any card is
-//!    a legal burn (house rule H3, amended 2026-10-14), so aces are eligible by plain rank order
-//!    like any other card (a red plain ace is the lowest card of its suit). While trumps are
+//!    card, or the Joker the dealer took) is never burned unless nothing else may be. Any card but
+//!    the ace of trumps is a legal burn (rule 21, H3), so plain aces are eligible by plain rank
+//!    order like any other card (a red plain ace is the lowest card of its suit). While trumps are
 //!    unknown (the dealer's burn after a turned Joker), only the Joker and the ace of hearts
 //!    count as trumps.
 //! 2. **Clinch defence** ([`Rule::ClinchDefence`], following only): if another team T would

@@ -1,5 +1,5 @@
 title: A turned Joker, and the dealer holds the ace of the new trump suit: it robs the second card at its own turn
-story: Seat 7 deals and turns the Joker. The dealer takes it and burns at once (rule 24): it holds the ace of clubs and the A♥, which it could burn (H3); it burns the 8 of spades.
+story: Seat 7 deals and turns the Joker. The dealer takes it and burns at once (rule 24): it holds the ace of clubs and the A♥, which it could burn since trumps are not yet known (H3); it burns the 8 of spades.
 story: The next card, the 9 of clubs, is turned: clubs are trumps. The dealer holds the ace of clubs, the ace of trumps, so it robs the 9 at its own first turn in trick 1, as the eighth card, after seeing the other seven (H2, H4 as amended 2026-10-14), and burns again; it burns the Joker.
 story: So the dealer burns twice, the 9 of clubs is taken into its hand, and nobody else robs. Seat 0 leads trick 1 as usual; the dealer takes the 9 only when its turn comes.
 story: The rest of the hand is ordinary play. Final scores of the hand: 5,0,5,21.
@@ -20,7 +20,7 @@ undealt: 10S QS 10C 2D 5D 4S 3H 2C 2S 7H 3C
 # ======== Play ========
 = Turned card=JK
 = Took seat=7 card=JK
-# The dealer takes the Joker at once and burns. Any card may be burned (H3), the ace of clubs and the A♥ included.
+# The dealer takes the Joker at once and burns. Trumps are not known yet, so any card may be burned (H3), the ace of clubs and the A♥ included.
 phase: AwaitBurn 7
 legal: AC 3D QD AH 8S JK
 > Burn 8S    # seat 7 burns
@@ -38,7 +38,7 @@ phase: AwaitPlay 0
 > Play AD    # seat 6
 = Took seat=7 card=9C
 phase: AwaitBurn 7
-legal: AC 9C 3D QD AH JK
+legal: 9C 3D QD AH JK
 > Burn JK    # seat 7 burns
 = BurnDone seat=7
 phase: AwaitPlay 7

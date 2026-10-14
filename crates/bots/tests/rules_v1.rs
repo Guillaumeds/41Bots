@@ -134,8 +134,8 @@ fn burn_robber_never_burns_the_taken_trump() {
 
 #[test]
 fn burn_a_plain_ace_by_plain_rank_order() {
-    // Aces may be burned (house rule H3 as amended on 2026-10-14). The red plain ace is the
-    // lowest plain card of its suit, so the robber holding AD and AC burns the AD.
+    // Plain aces may be burned (only the ace of trumps may not, rule 21, H3). The red plain ace
+    // is the lowest plain card of its suit, so the robber holding AD and AC burns the AD.
     let mut m = one_hand(7, ["AS KS 4S AD AC", "", "", "", "", "", "", ""], "10S");
     assert_eq!(m.phase(), Phase::AwaitBurn(0));
     assert_eq!(names(m.truth().hands[0]), names(set("AS KS 4S AD AC 10S")));

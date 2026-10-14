@@ -61,12 +61,12 @@ pub struct PublicState {
     /// Whether the 5 of trumps has been played this hand.
     pub five_played: bool,
     /// The seat that robbed (took a turned card other than the Joker), so holds or held the ace of
-    /// trumps or took the turned ace (it may since have burned it, H3).
+    /// trumps or took the turned ace.
     pub robber: Option<u8>,
     /// Seats that have shown they do not hold the ace of trumps this hand.
     pub proved_no_ace: [bool; 8],
     /// Whether everyone has played to trick 1 without a rob, proving the ace of trumps out of play:
-    /// undealt, or in the dealer's burn after a turned Joker (any card may be burned, H3).
+    /// undealt, or in the dealer's burn after a turned Joker (made before trumps were known, H3).
     pub ace_undealt: bool,
 }
 

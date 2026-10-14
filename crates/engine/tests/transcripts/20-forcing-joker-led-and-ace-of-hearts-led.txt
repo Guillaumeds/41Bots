@@ -106,7 +106,7 @@ legal: 6D 8D KD 6H JK
 = Took seat=7 card=7C
 # Seat 7 holds the ace of clubs and robs now: it takes the 7 of clubs and burns it straight back (the taken card may be burned).
 phase: AwaitBurn 7
-legal: AC 7C QH 4S JS KS
+legal: 7C QH 4S JS KS
 > Burn 7C    # seat 7 burns
 = BurnDone seat=7
 # Seat 7's only trump is now the ace of clubs, which ranks below the A♥: it is forced out.

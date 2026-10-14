@@ -169,10 +169,15 @@ pub fn legal_plays(hand: Bits, led: Option<Card>, trump: Suit) -> Bits {
     }
 }
 
-/// Legal cards to burn from a hand: any card at all, aces and the Joker included (H3, as
-/// amended by the owner on 2026-10-14).
-pub const fn legal_burns(hand: Bits) -> Bits {
-    hand
+/// Legal cards to burn from a hand: any card except the ace of trumps (rules 21 and 24, H3).
+/// Plain aces, the A♥ when hearts are not trumps, the Joker and the card just taken may all be
+/// burned. While trumps are unknown (the dealer's burn after a turned Joker) nothing is
+/// forbidden.
+pub const fn legal_burns(hand: Bits, trump: Option<Suit>) -> Bits {
+    match trump {
+        Some(t) => hand & !bit(ace_of_trumps(t)),
+        None => hand,
+    }
 }
 
 /// Which of the played cards wins the trick (rule 19). `plays` are in play order; the first led.
@@ -324,7 +329,15 @@ mod tests {
     #[test]
     fn any_card_may_be_burned() {
         let hand = set("AC AD AH AS JK 2C");
-        assert_eq!(legal_burns(hand), hand);
+        assert_eq!(legal_burns(hand, None), hand);
+        assert_eq!(
+            names(legal_burns(hand, Some(Suit::Spades))),
+            "AC 2C AD AH JK"
+        );
+        assert_eq!(
+            names(legal_burns(hand, Some(Suit::Hearts))),
+            "AC 2C AD AS JK"
+        );
     }
 
     fn win(plays: &str, t: Suit) -> usize {

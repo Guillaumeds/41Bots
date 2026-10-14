@@ -204,6 +204,9 @@ impl Checker {
                 }
             }
             Event::Burned { card, .. } => {
+                if let Some(t) = self.trump {
+                    assert_ne!(card, ace_of_trumps(t), "the ace of trumps was burned");
+                }
                 if self.trump.is_none() {
                     self.pre_trump_burn = Some(card);
                 }
@@ -250,7 +253,7 @@ impl Checker {
                 let ace = ace_of_trumps(self.trump.unwrap());
                 assert!(!self.turned.contains(&ace));
                 // A dealt ace can only be out of play if the dealer burned it after a turned
-                // Joker, before trumps were known (H3 as amended 2026-10-14).
+                // Joker, before trumps were known (H3).
                 assert!(!has(self.dealt, ace) || self.turned.first() == Some(&JOKER));
                 assert!(self.robber.is_none());
                 self.ace_undealt = true;
@@ -397,7 +400,7 @@ impl Checker {
                     assert_eq!(self.tricks_done, 5);
                 }
                 let ace = ace_of_trumps(self.trump.unwrap());
-                // Not robbed if the dealer burned it after a turned Joker (H3, 2026-10-14).
+                // Not robbed if the dealer burned it after a turned Joker (H3).
                 let dealt_or_turned = (has(self.dealt, ace) || self.turned.contains(&ace))
                     && self.pre_trump_burn != Some(ace);
                 assert_eq!(
@@ -491,7 +494,9 @@ impl Checker {
         match m.phase() {
             Phase::AwaitPlay(s) => assert!(m.legal_mask() & !truth.hands[usize::from(s)] == 0),
             Phase::AwaitBurn(s) => {
-                assert_eq!(m.legal_mask(), truth.hands[usize::from(s)]);
+                // Every card but the ace of trumps (unknown during the Joker burn: anything).
+                let ace = self.trump.map_or(0, |t| bit(ace_of_trumps(t)));
+                assert_eq!(m.legal_mask(), truth.hands[usize::from(s)] & !ace);
             }
             Phase::MatchOver => unreachable!(),
         }
@@ -525,7 +530,7 @@ impl Checker {
                 }
                 if self.proved[s] {
                     // The dealer may have burned it after a turned Joker, before trumps were
-                    // known (H3, amended 2026-10-14); a proved seat never holds it in hand.
+                    // known (H3); a proved seat never holds it in hand.
                     let burns = if s == usize::from(dealer) {
                         0
                     } else {
@@ -537,10 +542,7 @@ impl Checker {
             if let Some(r) = self.robber {
                 let played_it = self.played.contains(&(r, ace));
                 assert!(
-                    has(
-                        truth.hands[usize::from(r)] | truth.burns[usize::from(r)],
-                        ace
-                    ) || played_it,
+                    has(truth.hands[usize::from(r)], ace) || played_it,
                     "robber fact broken"
                 );
             }

@@ -1470,15 +1470,18 @@ fn rule_20_ace_holder_robs_before_first_card() {
 /// Rule 21: "The ace of trumps itself may not be burned. Nobody sees the burned card, but
 /// everyone now knows that player holds the ace of trumps."
 ///
-/// House rule H3 (amended by the owner on 2026-10-14) overrides the first sentence: any card may
-/// be burned, the ace of trumps included. Only the burner's view shows the burned card; every
-/// view shows who robbed.
+/// The burn may be any card but the ace of trumps (H3); only the burner's view shows the burned
+/// card; every view shows who robbed.
 #[test]
-fn rule_21_burn_is_hidden_rob_is_public() {
+fn rule_21_ace_of_trumps_never_burned_rob_is_public() {
     let mut m = robber_deal();
     lowest(&mut m);
     lowest(&mut m);
-    assert_legal(&m, "2D 3D 4D 5D AS 7S");
+    assert_legal(&m, "2D 3D 4D 5D 7S");
+    assert_eq!(
+        refused(&mut m, Action::Burn(c("AS"))),
+        "the ace of trumps may never be burned (rules 21 and 24)"
+    );
     burn(&mut m, "3D");
     for seat in 0..8u8 {
         let v = m.view(seat);
@@ -1528,8 +1531,9 @@ fn rule_22_turned_ace_dealer_robs_at_once() {
     assert!(p.trick_cards.is_empty());
     assert_eq!(p.trump, Some(Suit::Clubs));
     assert_eq!(p.robber, Some(7));
-    // Any of the six cards may be burned, the turned ace included (H3, amended 2026-10-14).
-    assert_legal(&m, "AC 2D 3D 4D 5D 6D");
+    // The turned ace is now the ace of trumps: it may not be burned.
+    assert_legal(&m, "2D 3D 4D 5D 6D");
+    refused(&mut m, Action::Burn(c("AC")));
     burn(&mut m, "6D");
     assert_eq!(
         log_from(&m, l.len()),
@@ -1618,7 +1622,8 @@ fn rule_24_turned_joker_dealer_takes_and_burns() {
     assert_eq!(l[l.len() - 2..], ["Turned card=AD", "Took seat=7 card=AD"]);
     assert_eq!(m.phase(), Phase::AwaitBurn(7));
     assert_eq!(m.public().trick_no, 0);
-    assert_legal(&m, "2C 3C 4C 5C 6C AD");
+    assert_legal(&m, "2C 3C 4C 5C 6C");
+    refused(&mut m, Action::Burn(c("AD")));
     burn(&mut m, "6C");
     assert_eq!(m.phase(), Phase::AwaitPlay(0));
     assert_eq!(m.truth().burns[7], set("JK 6C"));
@@ -1636,7 +1641,7 @@ fn rule_24_turned_joker_dealer_takes_and_burns() {
     }
     assert_eq!(last_event(&m), "Took seat=7 card=7S");
     assert_eq!(m.phase(), Phase::AwaitBurn(7));
-    assert_legal(&m, "AS 3C 4C 5C 7S JK");
+    assert_legal(&m, "3C 4C 5C 7S JK");
     burn(&mut m, "JK");
     assert_eq!(m.phase(), Phase::AwaitPlay(7));
 
@@ -2347,42 +2352,42 @@ fn house_h2_rob_at_own_first_turn_in_trick_one() {
     assert_eq!(m.public().trick_cards, vec![(0, c("AS"))]);
 }
 
-/// H3: "Burn choice (amended by the owner on 2026-10-14). Any card may be burned, aces of every
-/// suit included, the ace of trumps included. This applies to every burn: the dealer's after
-/// taking a turned Joker (made before the next card is turned, so before trumps are known), the
-/// dealer's after robbing a turned ace, and the robber's. The card just taken (the turned card, or
-/// the Joker for the dealer) may be burned."
+/// H3: "Burn choice. Any card may be burned except the ace of trumps (rules 21 and 24), including
+/// plain aces, the card just taken and the Joker. The dealer's first burn after a turned Joker
+/// comes before trumps are known, so nothing is forbidden there."
 ///
-/// Each kind of burn with all four aces in hand: all six cards may be burned, aces included.
+/// Each kind of burn with four aces in hand: only the ace of trumps is refused.
 #[test]
-fn house_h3_any_card_may_be_burned() {
-    // The dealer's burn after a turned Joker, then its rob of the A♥ turned next (hearts trumps).
+fn house_h3_only_the_ace_of_trumps_is_never_burned() {
+    // The dealer's burn after a turned Joker (trumps unknown: anything), then its rob of the A♥
+    // turned next (hearts trumps: the A♥ is the ace of trumps).
     let mut m = game(7, ["", "", "", "", "", "", "", "AC AD AS 2C 3C"], "JK AH");
     assert_eq!(m.public().trump, None);
     assert_legal(&m, "AC 2C 3C AD AS JK");
     burn(&mut m, "AD");
     assert_eq!(last_event(&m), "Took seat=7 card=AH");
     assert_eq!(m.phase(), Phase::AwaitBurn(7));
-    assert_legal(&m, "AC 2C 3C AH AS JK");
-    burn(&mut m, "AH"); // the ace of trumps itself
-    assert_eq!(m.truth().burns[7], set("AD AH"));
-    assert_eq!(m.public().robber, Some(7));
-    // The dealer's burn after robbing a turned ace: the turned ace itself may go.
+    assert_legal(&m, "AC 2C 3C AS JK");
+    refused(&mut m, Action::Burn(c("AH")));
+    burn(&mut m, "AC"); // a plain ace
+    assert_eq!(m.truth().burns[7], set("AC AD"));
+    // The dealer's burn after robbing a turned ace: the turned ace may not go, other aces may.
     let mut m = game(7, ["", "", "", "", "", "", "", "AD AH AS 2C 3C"], "AC");
-    assert_legal(&m, "AC 2C 3C AD AH AS");
-    burn(&mut m, "AC");
+    assert_legal(&m, "2C 3C AD AH AS");
+    burn(&mut m, "AH");
     assert_eq!(m.phase(), Phase::AwaitPlay(0));
-    // The robber's burn: any card, a plain ace included.
+    // The robber's burn: any card but the ace of trumps, a plain ace included.
     let mut m = game(7, ["", "", "AS AC AD AH 9C", "", "", "", "", ""], "7S");
     lowest(&mut m);
     lowest(&mut m);
-    assert_legal(&m, "AS AC AD AH 9C 7S");
+    assert_legal(&m, "AC 9C AD AH 7S");
     burn(&mut m, "AD");
     assert_eq!(hand(&m, 2), set("AS AC AH 9C 7S"));
 }
 
-/// The dealer burns the card that becomes the ace of trumps before trumps are known (H3): nobody
-/// can rob the new card, and after trick 1 the ace is announced out of play.
+/// The dealer burns, before trumps are known, the card that the next turned card makes the ace of
+/// trumps: nothing forbids it retroactively (open question for the owner, see STATUS). Nobody can
+/// rob the new card, and after trick 1 the ace is announced out of play.
 #[test]
 fn house_h3_dealer_burns_the_future_ace_of_trumps() {
     let mut m = game(7, ["", "", "", "", "", "", "", "AS 2C 3C 4C 5C"], "JK 7S");

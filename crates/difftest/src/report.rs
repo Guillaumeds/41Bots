@@ -57,7 +57,7 @@ pub struct Report {
     pub won_by_immediate_bonus: u64,
     /// Games won by reaching 41 with an end-of-hand bonus (per game).
     pub won_by_end_bonus: u64,
-    /// Burns of an ace of any suit (legal since the owner's 2026-10-14 amendment to H3).
+    /// Burns of an ace (a plain ace, or a future ace of trumps burned before trumps were known).
     pub ace_burned: u64,
     /// Matches won by each team.
     pub match_wins: [u64; 4],

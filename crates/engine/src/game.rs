@@ -22,7 +22,8 @@ use std::sync::Arc;
 
 /// Version of the rules this engine implements. Every game record carries it; it is bumped
 /// whenever an owner answer changes the engine (RULES.md, "Records"). Version 2 (2026-10-14):
-/// the owner withdrew the "no ace may be burned" amendment to H3 (any card may be burned); after a
+/// the owner withdrew the "no ace may be burned" amendment to H3 (any card but the ace of trumps
+/// may be burned, as rules 21 and 24 say); after a
 /// turned Joker and an ordinary card, a dealer holding the ace of trumps robs at their own turn
 /// (H4); the `bonus_later` switch was removed (bonuses are always 6 then 5).
 pub const RULES_VERSION: u32 = 2;
@@ -241,7 +242,7 @@ pub enum Event {
     },
     /// Everyone played to trick 1 without a rob: the ace of trumps is out of play, in the undealt
     /// pack or (after a turned Joker) in the dealer's first burn, made before trumps were known
-    /// (house rule H3 allows burning any card since 2026-10-14). The name is kept for stability.
+    /// (nothing is forbidden then, H3). The name is kept for stability.
     AceUndealt,
     /// A trick is complete.
     TrickWon {
@@ -676,7 +677,7 @@ impl Match {
     /// The cards the seat to act may burn or play (empty once the match is over).
     pub fn legal_mask(&self) -> Bits {
         match self.phase {
-            Phase::AwaitBurn(s) => legal_burns(self.truth.hands[usize::from(s)]),
+            Phase::AwaitBurn(s) => legal_burns(self.truth.hands[usize::from(s)], self.hand.trump),
             Phase::AwaitPlay(s) => match self.hand.trump {
                 Some(trump) => legal_plays(
                     self.truth.hands[usize::from(s)],
@@ -828,8 +829,8 @@ impl Match {
                 if !has(hand, c) {
                     return reject("that card is not in the burning player's hand");
                 }
-                if !has(legal_burns(hand), c) {
-                    return reject("that card may not be burned");
+                if !has(legal_burns(hand, self.hand.trump), c) {
+                    return reject("the ace of trumps may never be burned (rules 21 and 24)");
                 }
                 self.actions.push(action);
                 self.burn(seat, c);

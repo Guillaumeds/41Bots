@@ -121,8 +121,8 @@ fn dealer_holding_the_ace_robs_as_the_eighth_card_of_trick_1() {
     assert!(!m.public().proved_no_ace[3]);
     assert_eq!(public_events(&m).last().unwrap(), "Took seat=3 card=2S");
     assert_eq!(m.public().hand_sizes[3], 6);
-    // Burns: any of the six cards, the ace of trumps included (H3, amended 2026-10-14).
-    assert_eq!(legal_burn_names(&m), "2D 3D QH KH AS 2S");
+    // Burns: everything but the ace of spades, the ace of trumps (rule 21, H3).
+    assert_eq!(legal_burn_names(&m), "2D 3D QH KH 2S");
     m.apply(Action::Burn(idx("2S"))).unwrap();
     assert_eq!(m.phase(), Phase::AwaitPlay(3));
     assert_eq!(m.public().robber, Some(3));
@@ -164,8 +164,9 @@ fn robber_robs_at_own_first_turn_in_trick_1() {
     assert_eq!(m.public().robber, Some(2));
     assert_eq!(m.public().table_card, None);
     assert_eq!(m.public().turned, vec![(idx("9H"), Some(2))]);
-    // H3 (amended 2026-10-14): any card may be burned, aces included.
-    assert_eq!(legal_burn_names(&m), "QC KC AD 2D AH 9H");
+    // Any card but the ace of trumps (the A♥ here) may be burned; the plain AD may.
+    assert_eq!(legal_burn_names(&m), "QC KC AD 2D 9H");
+    assert!(m.apply(Action::Burn(idx("AH"))).is_err());
     assert!(m.apply(Action::Play(idx("QC"))).is_err());
 
     m.apply(Action::Burn(idx("9H"))).unwrap();
@@ -246,10 +247,10 @@ fn dealer_takes_a_turned_ace_at_once() {
     assert_eq!(p.table_card, None);
     assert_eq!(p.turned, vec![(idx("AD"), Some(5))]);
     assert_eq!(p.hand_sizes[5], 6);
-    // Any of the six cards may be burned, the turned ace and the dealer's other ace included.
+    // The turned ace (ace of trumps) may not be burned; the dealer's plain ace of clubs may.
     let burns = legal_burn_names(&m);
-    assert!(burns.contains("AD") && burns.contains("AC"));
-    assert_eq!(burns.split(' ').count(), 6);
+    assert!(!burns.contains("AD") && burns.contains("AC"));
+    assert_eq!(burns.split(' ').count(), 5);
 
     act_first(&mut m);
     let p = m.public();
@@ -272,10 +273,10 @@ fn turned_ace_of_hearts_makes_hearts_trumps_and_is_robbed() {
     assert_eq!(m.public().trump, Some(2));
     assert_eq!(m.phase(), Phase::AwaitBurn(0));
     assert!(m.hand(0).contains(&idx("AH")));
-    // The turned A♥ (the ace of trumps) may itself be burned (H3, amended 2026-10-14).
-    assert!(legal_burn_names(&m).contains("AH"));
-    m.apply(Action::Burn(idx("AH"))).unwrap();
-    assert_eq!(m.burns(0), vec![idx("AH")]);
+    // The turned A♥ is the ace of trumps: it may not be burned.
+    assert!(!legal_burn_names(&m).contains("AH"));
+    assert!(m.apply(Action::Burn(idx("AH"))).is_err());
+    act_first(&mut m);
     assert_eq!(m.public().robber, Some(0));
     assert_eq!(m.phase(), Phase::AwaitPlay(1));
 }
@@ -302,7 +303,7 @@ fn turned_joker_then_ordinary_card_with_ace_undealt() {
     assert_eq!(p.table_card, None);
     assert_eq!(p.hand_sizes[2], 6);
     assert_eq!(p.hidden_count, 12); // the 7C is still face down in the pack
-    // H3 (amended 2026-10-14): any card may be burned before trumps are known, aces and
+    // H3: any card may be burned before trumps are known, aces and
     // the Joker itself included.
     let burns = legal_burn_names(&m);
     assert!(burns.contains("AD"));
@@ -353,7 +354,7 @@ fn turned_joker_then_ace_dealer_robs_twice() {
     assert_eq!(p.trump, Some(3));
     assert_eq!(p.robber, Some(2));
     assert_eq!(p.turned, vec![(52, Some(2)), (idx("AS"), Some(2))]);
-    assert!(legal_burn_names(&m).contains("AS"));
+    assert!(!legal_burn_names(&m).contains("AS"));
     act_first(&mut m); // second burn
     let p = m.public();
     assert_eq!(p.phase, Phase::AwaitPlay(3));
@@ -381,7 +382,7 @@ fn turned_joker_dealer_holding_new_ace_of_trumps_robs_at_own_turn() {
     assert_eq!(m.public().trick_cards.len(), 7);
     assert_eq!(public_events(&m).last().unwrap(), "Took seat=2 card=7C");
     assert_eq!(m.public().robber, Some(2));
-    assert!(legal_burn_names(&m).contains("AC"));
+    assert!(!legal_burn_names(&m).contains("AC"));
     assert!(legal_burn_names(&m).contains("7C"));
     m.apply(Action::Burn(idx("7C"))).unwrap();
     assert_eq!(m.phase(), Phase::AwaitPlay(2));
@@ -392,7 +393,7 @@ fn turned_joker_dealer_holding_new_ace_of_trumps_robs_at_own_turn() {
 
 #[test]
 fn turned_joker_dealer_burns_the_future_ace_of_trumps() {
-    // H3 (amended 2026-10-14): the dealer burns the AC before trumps are known; the 7C then makes
+    // H3: the dealer burns the AC before trumps are known; the 7C then makes
     // it the ace of trumps. Nobody holds it, so nobody robs: the 7C stays on the table and,
     // after trick 1, the ace is announced out of play (it is in the dealer's burn, not undealt).
     let d = deck(2, ["", "", "AC", "", "", "", "", ""], "JK 7C", "");
@@ -465,6 +466,7 @@ fn illegal_actions_are_rejected_and_change_nothing() {
     let snapshot = |m: &Match| (m.public(), m.events.len(), m.hand(0), m.burns(0));
     let before = snapshot(&m);
     assert!(m.apply(Action::Play(idx("2C"))).is_err()); // a burn is due
+    assert!(m.apply(Action::Burn(idx("AC"))).is_err()); // the ace of trumps (rule 21)
     assert!(m.apply(Action::Burn(idx("AD"))).is_err()); // not seat 0's card
     assert!(m.apply(Action::Burn(53)).is_err()); // not a card
     assert_eq!(snapshot(&m), before);
@@ -769,7 +771,7 @@ fn jink_wins_the_game_whatever_the_score() {
     let mut m = Match::new(7, Rules::default());
     m.start_hand(&jink_deck(7, 0));
     assert_eq!(m.phase(), Phase::AwaitBurn(0));
-    assert_eq!(legal_burn_names(&m), "AC 3C 5C JC AH JK");
+    assert_eq!(legal_burn_names(&m), "3C 5C JC AH JK");
     while !m.needs_deck() {
         jink_policy(&mut m);
     }

@@ -339,14 +339,14 @@ impl Match {
             Waiting::Deck | Waiting::MatchOver => Vec::new(),
             Waiting::DealerJokerBurn | Waiting::DealerRobBurn => {
                 let hand = &self.hands[self.dealer as usize];
-                order::legal_burns(hand)
+                order::legal_burns(hand, self.trump)
                     .into_iter()
                     .map(|c| Action::Burn(c.index()))
                     .collect()
             }
             Waiting::RobberBurn(seat) => {
                 let hand = &self.hands[seat as usize];
-                order::legal_burns(hand)
+                order::legal_burns(hand, self.trump)
                     .into_iter()
                     .map(|c| Action::Burn(c.index()))
                     .collect()
@@ -639,7 +639,9 @@ impl Match {
             (Phase::AwaitBurn(_), Action::Play(_)) => "a burn is required first",
             (Phase::AwaitPlay(_), Action::Burn(_)) => "no burn is due now",
             _ if !in_hand => "the card is not in the hand of the seat to act",
-            (Phase::AwaitBurn(_), Action::Burn(_)) => "that card may not be burned",
+            (Phase::AwaitBurn(_), Action::Burn(_)) => {
+                "the ace of trumps may not be burned (rule 21)"
+            }
             _ => "the card does not follow suit or the trump-lead rules (rules 14-18)",
         }
     }
@@ -763,8 +765,8 @@ impl Match {
         }
 
         // After trick 1, nobody robbing means the ace of trumps is out of play: undealt, or
-        // burned by the dealer after a turned Joker, before trumps were known (H3 lets any card
-        // be burned since 2026-10-14).
+        // burned by the dealer after a turned Joker, before trumps were known (nothing is
+        // forbidden then, H3).
         if self.trick_no == 1 && self.robber.is_none() {
             let ace = order::ace_of_trumps(trump);
             let dealer = self.dealer;

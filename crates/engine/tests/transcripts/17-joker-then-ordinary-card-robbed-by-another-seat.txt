@@ -35,7 +35,7 @@ phase: AwaitPlay 1
 = ProvedNoAce seat=2
 = Took seat=3 card=6D
 phase: AwaitBurn 3
-legal: 8C AD 6D 6H JH 5S
+legal: 8C 6D 6H JH 5S
 > Burn 8C    # seat 3 burns
 = BurnDone seat=3
 phase: AwaitPlay 3

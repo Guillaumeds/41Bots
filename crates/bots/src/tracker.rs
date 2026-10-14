@@ -89,8 +89,9 @@ impl Tracker {
     /// Could `seat` hold the ace of trumps now? For this seat, whether it is in the hand. For
     /// another seat: never once it has been played or is known undealt; only the robber after a
     /// rob; otherwise any seat that has not proved it lacks it (a seat still to play its first
-    /// card of trick 1). The robber may have burned it (house rule H3 allows any burn since
-    /// 2026-10-14), so "could hold" stays a possibility, never a certainty.
+    /// card of trick 1). The ace of trumps can never be burned once trumps are known (rule 21,
+    /// H3); only the dealer's burn after a turned Joker, made before trumps are known, can hold
+    /// it, and then nobody robs.
     pub fn could_hold_ace(&self, seat: u8) -> bool {
         let Some(t) = self.trump else {
             return false;

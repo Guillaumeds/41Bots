@@ -19,7 +19,7 @@
    - Effective suit, trump order (red/black, hearts = 14 trumps), plain-suit orders.
    - Legal-move generation, covering plain leads, trump leads (the Joker and the A♥ led are trump leads), the reneging test, and rule 18.
    - Trick winner.
-   - Legal burns: **any card, aces included** (H3 as amended 2026-10-14; the 2026-10-13 no-ace rule is withdrawn); the taken card and the Joker may be burned.
+   - Legal burns: **any card except the ace of trumps** (rules 21, 24, H3; the 2026-10-13 no-ace rule is withdrawn); plain aces, the taken card and the Joker may be burned.
 3. **`crates/engine`: hand, game and match flow.**
    - Frozen deal convention: deck positions 0–15 two at a time to seats dealer+1 … dealer+8, positions 16–39 three at a time, position 40 turned, 41 the second turned card after a Joker, the rest the undealt pack in order; first dealer = `bounded(8)` from the seeded RNG before the first shuffle; every hand reshuffles all 53.
    - Robbing per RULES H2–H4, with burn decisions as actions and forced takes done automatically; a non-ace-holder is never offered a burn.
@@ -71,3 +71,8 @@ M1 adds the table manager, the arena (14-way duplicate block, generalised SPRT, 
   - Checks: fmt, clippy, all tests, WASM check pass; difftest 100,000 matches seed 1: zero disagreements, PASS (16.4% of hands burn an ace; the "Joker, dealer holds the new ace" branch now robs in turn).
   - Equity v0 rebuilt from 1M rules-v1 hands (seed 1): all checks pass (Monte Carlo largest |z| 2.52); new table sha256 `00bdc49f…68da` (was `bc7e7293…5ead9a`).
   - Arena canary: 50 blocks, every block exactly 0. **σ_b (rules-v1 vs random, 200 Block14 blocks): 0.1538 money chance (1.231 stakes), mean +0.2774** (before the rule changes: 0.1501, mean +0.2642).
+- 2026-10-14 (later): **Owner chose "back to the original H3"** (supersedes the H3 line of the entry above): any card may be burned **except the ace of trumps** (rules 21 and 24), so plain aces, the A♥ when hearts are not trumps, the card just taken and the Joker may go. `RULES_VERSION` stays 2 (no version-2 records were ever published).
+  - **Open question for the owner:** after a turned Joker the dealer burns before trumps are known. If that burned card turns out to be the ace of the suit turned next, is that allowed? The engine forbids nothing retroactively: nobody robs, the turned card stays face up, and after trick 1 the ace is announced out of play (`AceUndealt` = "undealt or in the dealer's Joker burn").
+  - Checks: fmt, clippy, all tests, WASM check pass; difftest 100,000 matches seed 1: zero disagreements, PASS (ace burned in 3.9% of hands).
+  - Equity v0 rebuilt (1M rules-v1 hands, seed 1): all checks pass (Monte Carlo largest |z| 2.52); table sha256 `64740dab…6808`.
+  - Arena canary: every block exactly 0. **σ_b (rules-v1 vs random, 200 blocks): 0.1463 money chance (1.170 stakes), mean +0.2606.**

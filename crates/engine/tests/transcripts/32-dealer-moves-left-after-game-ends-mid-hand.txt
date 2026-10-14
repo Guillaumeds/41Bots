@@ -139,7 +139,7 @@ scores: 0,0,0,0
 = Turned card=AC
 = Took seat=7 card=AC
 phase: AwaitBurn 7
-legal: AC 2C 4D 6H 8S 10S
+legal: 2C 4D 6H 8S 10S
 > Burn 10S    # seat 7 burns
 = BurnDone seat=7
 phase: AwaitPlay 0

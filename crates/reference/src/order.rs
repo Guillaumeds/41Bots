@@ -228,10 +228,13 @@ pub fn legal_plays(hand: &[Card], led: Option<Card>, trump: Suit) -> Vec<Card> {
     }
 }
 
-/// The cards of `hand` that may be burned: every card, aces and the Joker included (H3, as
-/// amended by the owner on 2026-10-14).
-pub fn legal_burns(hand: &[Card]) -> Vec<Card> {
-    hand.to_vec()
+/// The cards of `hand` that may be burned: every card except the ace of trumps (rules 21, 24,
+/// H3). Before trumps are known (the Joker burn) every card may go.
+pub fn legal_burns(hand: &[Card], trump: Option<Suit>) -> Vec<Card> {
+    hand.iter()
+        .copied()
+        .filter(|&card| trump.is_none_or(|t| card != ace_of_trumps(t)))
+        .collect()
 }
 
 /// The seat that wins a trick given as `(seat, card)` in play order (rule 19):
@@ -461,16 +464,15 @@ mod tests {
     }
 
     #[test]
-    fn legal_burns_allow_every_card() {
-        // H3 (amended 2026-10-14): any card, aces of every suit included.
-        assert_eq!(
-            names(&legal_burns(&cards("AC AD AH AS 5C JK"))),
-            "AC AD AH AS 5C JK"
-        );
-        // Exhaustive over every card: nothing is refused.
+    fn legal_burns_refuse_only_the_ace_of_trumps() {
+        let hand = cards("AC AD AH AS 5C JK");
+        assert_eq!(names(&legal_burns(&hand, None)), "AC AD AH AS 5C JK");
+        assert_eq!(names(&legal_burns(&hand, Some(Clubs))), "AD AH AS 5C JK");
+        assert_eq!(names(&legal_burns(&hand, Some(Hearts))), "AC AD AS 5C JK");
+        // Exhaustive over every card: only the ace of trumps is refused.
         let all = crate::card::all_cards();
-        let burnable = legal_burns(&all);
-        assert_eq!(burnable.len(), 53);
+        let burnable = legal_burns(&all, Some(Spades));
+        assert_eq!(burnable.len(), 52);
         assert!(burnable.contains(&Card::Joker));
     }
 

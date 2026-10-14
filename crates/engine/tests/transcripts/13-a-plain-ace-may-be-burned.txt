@@ -1,7 +1,7 @@
-title: Any ace may be burned: a robber holding all four aces burns the ace of clubs
+title: A plain ace may be burned, never the ace of trumps: a robber holding all four aces burns the ace of clubs
 story: Seat 0 deals and turns the 7 of diamonds: diamonds are trumps. Seat 2 holds all four aces (ace of diamonds, ace of hearts, ace of clubs, ace of spades) and the 9 of clubs.
 story: Seat 1 leads trick 1 without robbing. At seat 2's turn it must rob, because it holds the ace of diamonds: it takes the 7 of diamonds and must burn one of its six cards.
-story: House rule H3 (as amended by the owner on 2026-10-14): any card may be burned, aces included. All six cards are legal burns: the four aces, the 9 of clubs and the 7 of diamonds it has just taken.
+story: Rule 21 and house rule H3: any card except the ace of trumps may be burned. So the legal burns are the ace of clubs, A♥ and ace of spades (none is the ace of trumps when diamonds are trumps), the 9 of clubs and the 7 of diamonds it has just taken; never the ace of diamonds.
 story: Seat 2 burns the ace of clubs, plays the ace of spades to trick 1, and seat 3 wins the trick with the 4 of diamonds. The transcript stops there.
 dealer: 0
 # ---- Hand 1 of this file (hand index 0), dealer seat 0: diamonds trumps; seat 2 holds all four aces ----
@@ -24,9 +24,9 @@ phase: AwaitPlay 1
 = ProvedNoAce seat=1
 = Took seat=2 card=7D
 # Seat 2 holds the ace of diamonds (the ace of trumps) and must rob: it takes the 7 of diamonds and now holds six cards,
-# four of them aces. Any of the six may be burned (H3, amended 2026-10-14): the aces, the 9 of clubs and the 7 of diamonds.
+# four of them aces. Any card except the ace of diamonds, the ace of trumps, may be burned (rule 21, H3).
 phase: AwaitBurn 2
-legal: AC 9C AD 7D AH AS
+legal: AC 9C 7D AH AS
 > Burn AC    # seat 2 burns
 = BurnDone seat=2
 phase: AwaitPlay 2

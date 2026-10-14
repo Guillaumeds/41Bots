@@ -1,7 +1,7 @@
 title: When hearts are not trumps, the holder of the A♥ does not rob: only the ace of the trump suit robs
 story: Seat 3 deals and turns the 6 of clubs: clubs are trumps, so the ace of trumps is the ace of clubs, held by seat 7. Seat 4, first to play, holds the ace of hearts.
 story: The A♥ is a trump in every hand (rule 7), but it is only the ace of trumps when hearts are trumps. So seat 4 is not asked to rob: it simply leads (the king of diamonds), and in doing so proves it lacks the ace of clubs.
-story: Seats 5 and 6 also play without robbing. At seat 7's turn it takes the 6 of clubs and burns one card (the 8 of clubs; any card may be burned), then plays.
+story: Seats 5 and 6 also play without robbing. At seat 7's turn it takes the 6 of clubs and burns one card (the 8 of clubs; any card but the ace of trumps may be burned), then plays.
 story: Only the robbing is checked; the rest of the hand is ordinary play. Final scores of the hand: 5,0,5,21.
 dealer: 3
 # ---- Hand 1 of this file (hand index 0), dealer seat 3: clubs trumps; seat 4 holds the A♥, seat 7 the ace of clubs ----
@@ -32,9 +32,9 @@ legal: 4D KD AH 8H 3S
 > Play KC    # seat 6
 = ProvedNoAce seat=6
 = Took seat=7 card=6C
-# Seat 7 holds the ace of clubs: at its turn it takes the 6 of clubs and burns (any card may go, H3).
+# Seat 7 holds the ace of clubs: at its turn it takes the 6 of clubs and burns (any card but the ace of trumps, rule 21, H3).
 phase: AwaitBurn 7
-legal: AC 6C 8C 9C AD QD
+legal: 6C 8C 9C AD QD
 > Burn 8C    # seat 7 burns
 = BurnDone seat=7
 phase: AwaitPlay 7
