@@ -96,3 +96,6 @@ M1 adds the table manager, the arena (14-way duplicate block, generalised SPRT, 
 - Optimised solver identical to the naive solver (0 mismatches on the Xeon and on an AMD EPYC 7502); pruning on/off identical; brute force on 1–3-card endgames passes; costs published for both CPU types (`docs/M2-SPIKE.md`). **M2 gate met.**
 - Follow-up in progress: a multi-core single-world solve to measure the true trick-1 duration on a high-core machine (owner request).
 - Next: M3 (card tracker, suit-length-matrix world generator, PIMC teacher: exact from trick 3, rollout-PIMC with the rules bot at tricks 1–2; pre-registered PIMC-suitability measurement; full runner).
+
+- 2026-10-14: owner answered the Joker-burn question (the dealer's burn after a turned Joker may turn out to be the ace of trumps: legal, a poor play; RULES H3). No longer open.
+- M3 started: spec `docs/M3-SPEC.md` on branch `m3-pimc`.

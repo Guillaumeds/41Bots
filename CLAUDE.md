@@ -16,7 +16,7 @@ You are building the strongest possible bots for the 8-player card game **41** (
 - **Proven methods only.** Every component must trace to the research in PLAN §2–4. When two proven options compete, duplicate tournaments with SPRT decide (PLAN §9). Don't invent.
 - **Quality first.** Save compute only through engineering that gives identical answers (PLAN §10), never by playing worse.
 - **The exact solver is cheap late in the hand only.** Exact open-hand solves are the default from trick 3; tricks 1–2 use measured world counts or policy rollouts. Never budget on "millisecond per world" assumptions (PLAN amendments A2–A4).
-- **Money chances are fixed-point from M1** (u32 per team in units of 2^-32, u64 accumulators, index-ordered reductions), so solver, teacher and tournament results are byte-identical across machines, thread counts and WASM. Floats live only inside the network forward pass.
+- **Money chances are fixed-point from M1** (u64 per team in units of 2^-32 summing exactly to 2^32, u64/u128 accumulators, index-ordered reductions), so solver, teacher and tournament results are byte-identical across machines, thread counts and WASM. Floats live only inside the network forward pass.
 - **The rules must be exact.** Every numbered rule gets tests. Illegal actions are impossible (H1).
 
 ## Engineering rules
