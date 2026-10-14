@@ -490,3 +490,4 @@ The yardstick is for **measuring only, not training**. Its size is set by measur
 3. **Trick 2:** 1,000 decisions at the plateau N, costing under $1.
 4. **Trick 1:** cost = decisions × N × measured seconds per deal. The 384-core EPYC measured 7–140 s per deal, about $0.28 per decision at N = 20. **The trick-1 set is priced with the owner before it runs.**
 5. **Repeatability:** re-solve 20 decisions with fresh deals at the chosen N. The chosen card must match in at least 95% of them, or N is raised.
+6. **Position in the trick (owner, 2026-10-14).** The plateau N is measured and set **per trick and per position in the trick** (1st to 8th to play). The leader of trick 1 has the most unknowns; the 8th player has seen 7 cards. Decisions are stratified equally across positions. Positions may be pooled into pairs (1–2, 3–4, 5–6, 7–8) only if their plateaus agree within one doubling step. Time per deal is also reported per position.
