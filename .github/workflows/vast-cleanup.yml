@@ -1,0 +1,45 @@
+# Destroy vast.ai instances labelled "41bots-" that are older than the 2-hour cap or exited.
+# Safety net in case a run leaves a machine billing. Owner-approved hourly schedule (2026-10-14).
+name: vast-cleanup
+on:
+  workflow_dispatch:
+    inputs:
+      all:
+        description: "Destroy every 41bots- instance regardless of age"
+        type: boolean
+        default: false
+  schedule:
+    - cron: "17 * * * *"
+permissions:
+  contents: read
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install vastai
+        run: pip install vastai==1.8.3
+      - name: Destroy stale labelled instances
+        env:
+          VAST_API_KEY: ${{ secrets.VAST_API_KEY }}
+          ALL: ${{ inputs.all || false }}
+        run: |
+          set -euo pipefail
+          vastai show instances --raw --api-key "$VAST_API_KEY" > inst.json
+          python3 - <<'PY' > ids.txt
+          import json, os, time
+          now = time.time()
+          everything = os.environ.get("ALL") == "true"
+          for i in json.load(open("inst.json")):
+              label = i.get("label") or ""
+              age = now - float(i.get("start_date") or now)
+              if label.startswith("41bots-") and (everything or age > 7200 or i.get("actual_status") in ("exited", "offline")):
+                  print(i["id"])
+          PY
+          if [ ! -s ids.txt ]; then echo "nothing to destroy"; exit 0; fi
+          while read -r id; do
+            echo "destroying $id"
+            vastai destroy instance "$id" -y --api-key "$VAST_API_KEY"
+          done < ids.txt
+          sleep 10
+          vastai show instances --api-key "$VAST_API_KEY"
