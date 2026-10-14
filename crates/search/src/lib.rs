@@ -8,12 +8,15 @@
 //! - [`bot`]: the `pimc-v0` / `pimc-teacher` bots, the robber's joint (burn, first card)
 //!   decision, and the bot registry used by `arena`.
 //! - [`measure`]: stratified decision sets and the early-trick yardstick measurements (§13.1).
+//! - [`curves`]: N-curves from saved per-world values: money loss against N, power-law fits,
+//!   held-out checks and the N each scenario needs (§13.1 item 10).
 //! - [`teacher`]: teacher hands and their output files (§5.10).
 //!
 //! Everything that scores is fixed point ([`equity::MoneyChance`]); floats appear in reports
 //! only.
 
 pub mod bot;
+pub mod curves;
 pub mod measure;
 pub mod pimc;
 pub mod teacher;

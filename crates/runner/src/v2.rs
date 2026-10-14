@@ -27,7 +27,8 @@
 //! - `suitability`, `agree`, `belief_bench`: `search <kind with - for _> --seed <seed>
 //!   [--hands <params.hands_per_chunk>] [--equity <input>] [params.args…] --out out/`;
 //! - `difftest`, `equity_sweep`: as in format 1 with `seed` = the chunk seed;
-//! - `benchmark`, `solver_spike`, `search_measure`: as in format 1, params unchanged.
+//! - `benchmark`, `solver_spike`, `search_measure`: as in format 1, params unchanged, except
+//!   that `search_measure`'s `params.ids_input` names an input whose path becomes `params.ids`.
 //!
 //! The equity input is `inputs.equity` (or the input named by `params.equity_input`).
 //!
@@ -185,6 +186,16 @@ fn worker_inner(spec_path: &Path) -> Result<(), String> {
                 && let Some(o) = p.as_object_mut()
             {
                 o.insert("seed".into(), json!(seed));
+            }
+            // `search_measure` may take its decision-id list as a manifest input.
+            if kind == "search_measure"
+                && let Some(name) = params.get("ids_input").and_then(Value::as_str)
+                && let Some(o) = p.as_object_mut()
+            {
+                let path = inputs
+                    .get(name)
+                    .ok_or_else(|| format!("search_measure needs input `{name}` (ids_input)"))?;
+                o.insert("ids".into(), json!(path));
             }
             let mut r = run_kind(&mut ctx, &kind, &p)?;
             if let Some(o) = r.as_object_mut() {

@@ -1,15 +1,22 @@
 //! `search`: the M3 PIMC measurement and teacher tools (docs/M3-SPEC.md §5.8–5.10, §13.1).
 //!
 //! ```text
-//! search decisions --trick T --count N --out FILE [--seed S] [--start-hands H]
+//! search decisions --trick T --count N --out FILE [--seed S] [--start-hands H] [--allow-uneven]
 //! search worlds    --decisions FILE --method exact|rollout --to N --out FILE
 //!                  [--from-world A] [--label L] [--seed S] [--first I] [--last J]
-//!                  [--threads K] [--solve-threads K] [--tt-mb M] --equity TABLE
-//!                  [--progress FILE]
-//! search agree     --worlds FILE [--grid 10,20,40,80,160,320] [--json FILE]
-//! search score     --yardstick FILE --n N --method FILE:N [--method FILE:N …]
+//!                  [--ids 3,17,42 | --ids FILE] [--threads K] [--solve-threads K] [--tt-mb M]
+//!                  --equity TABLE [--progress FILE]
+//! search agree     --worlds FILE [--worlds FILE …] [--grid 10,20,40,80,160,320] [--json FILE]
+//! search curves    --worlds FILE [--worlds FILE …] [--grid 10,20,…|10:320:10] [--m M]
+//!                  [--splits 400] [--boot 1000] [--seed 1] [--ids …]
+//!                  [--thresholds 0.0001,0.00005,0.00002] [--min-cell 10] [--threads K]
+//!                  [--method exact] [--label 1] [--json FILE]
+//! search score     --yardstick FILE --n N --method FILE:N [--method FILE:N …] [--json FILE]
+//!                  [--boot 1000] [--seed 1]
 //! search teacher   --hands N --out DIR --equity TABLE [--seed S] [--config NAME] [--start-hands H]
 //! ```
+//! `decisions` stratifies equally over the 4 strata and 8 positions, so `--count` must be a
+//! multiple of 32 (`--allow-uneven` overrides); it prints the position × stratum table it made.
 //! `worlds` and `teacher` take `--source belief|rejection`: the world generator, by default
 //! `crates/belief`'s counted uniform sampler (which also records each decision's exact world
 //! count); `rejection` is the engine-based oracle (same distribution, no counts).
@@ -19,9 +26,15 @@
 //! so an interrupted chunk resumes. The file is byte-identical for any thread count; timings go to
 //! `<out>.times.jsonl`. `--progress FILE` is rewritten every 2 s with the counts done (for the
 //! runner's heartbeat). Exact worlds are the yardstick (label 1); a method's own worlds use
-//! another label. `agree` reports per trick, per position in the trick (§13.1 item 6), per
-//! match-state stratum and per log2 world-count band (item 8) and per hand-type band (item 9);
-//! `score` per position and stratum.
+//! another label. `--ids` restricts the run to chosen decisions; with `--from-world A` (A = the
+//! worlds already saved) it extends them: the new worlds are appended as new records (to the same
+//! file or another), and `agree`, `curves` and `score` join every record of a decision, so they
+//! see exactly the rows one longer run would have written (§13.1 item 10).
+//! `agree` reports N against 2N on the grid, per trick, per position in the trick (§13.1 item 6),
+//! per match-state stratum and per log2 world-count band (item 8) and per hand-type band (item 9);
+//! `curves` turns the saved rows into money-loss curves on a fine N grid, with power-law fits,
+//! held-out checks and the N needed per money-loss threshold (item 10, `search::curves`);
+//! `score` reports per position and stratum.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -31,10 +44,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use search::bot::{PimcFactory, PimcSpec, load_equity};
+use search::curves::{CurveParams, N_CAP, TrickReport, analyse, score_groups};
 use search::measure::{
     BatchProgress, DecisionSpec, DecisionTiming, WorldRows, WorldsJob, agreement_curve,
-    build_decisions, collect_starts, paired, read_jsonl, score, stratum_of, summarise, timing_path,
-    worlds_file,
+    build_decisions, collect_starts, paired, parse_ids, read_jsonl, read_worlds, score, stratum_of,
+    summarise, timing_path, worlds_file,
 };
 use search::pimc::{Ctx, Method, SearchConfig, SharedLeaf};
 use search::teacher::{decisions_npy, teacher_deck, teacher_hand};
@@ -66,6 +80,9 @@ impl Args {
     fn req(&self, k: &str) -> Result<&str, String> {
         self.get(k).ok_or_else(|| format!("missing {k}"))
     }
+    fn has(&self, k: &str) -> bool {
+        self.0.iter().any(|a| a == k)
+    }
 }
 
 /// `--source belief|rejection` (default `belief`): the world generator.
@@ -87,11 +104,13 @@ fn main() -> ExitCode {
         Some("decisions") => decisions(&a),
         Some("worlds") => worlds(&a),
         Some("agree") => agree(&a),
+        Some("curves") => curves(&a),
         Some("score") => score_cmd(&a),
         Some("teacher") => teacher(&a),
-        _ => {
-            Err("usage: search decisions|worlds|agree|score|teacher … (see the source docs)".into())
-        }
+        _ => Err(
+            "usage: search decisions|worlds|agree|curves|score|teacher … (see the source docs)"
+                .into(),
+        ),
     };
     match r {
         Ok(()) => ExitCode::SUCCESS,
@@ -102,12 +121,48 @@ fn main() -> ExitCode {
     }
 }
 
+/// Decisions per stratified block: 4 strata × 8 positions.
+const BLOCK: u64 = 32;
+
 fn decisions(a: &Args) -> Result<(), String> {
     let trick = a.num("--trick", 2)? as u8;
-    let count = a.num("--count", 200)?;
+    let count = a.num("--count", 7 * BLOCK)?;
     let seed = a.num("--seed", 1)?;
+    if count % BLOCK != 0 && !a.has("--allow-uneven") {
+        let (lo, hi) = (count / BLOCK * BLOCK, (count / BLOCK + 1) * BLOCK);
+        let use_ = if lo == 0 {
+            hi.to_string()
+        } else {
+            format!("{lo} or {hi}")
+        };
+        return Err(format!(
+            "--count {count} is not a multiple of {BLOCK}: decision i is stratum i mod 4 at \
+             position (i / 4) mod 8, so positions and strata would not be covered equally \
+             (use {use_}, or pass --allow-uneven)"
+        ));
+    }
     let starts = collect_starts(a.num("--start-hands", 20_000)?, seed);
     let ds = build_decisions(trick, count, seed, &starts);
+    let mut cells = [[0usize; 4]; 8];
+    for d in &ds {
+        cells[usize::from(d.position)][usize::from(d.stratum - 1)] += 1;
+    }
+    println!(
+        "trick {trick}: {} decisions by position (rows) and stratum (columns)",
+        ds.len()
+    );
+    println!("        S1    S2    S3    S4  total");
+    for (p, row) in cells.iter().enumerate() {
+        println!(
+            "pos{}  {:>4}  {:>4}  {:>4}  {:>4}  {:>5}",
+            p + 1,
+            row[0],
+            row[1],
+            row[2],
+            row[3],
+            row.iter().sum::<usize>()
+        );
+    }
     let mut out = String::new();
     for d in &ds {
         out.push_str(&serde_json::to_string(d).map_err(|e| e.to_string())?);
@@ -185,9 +240,16 @@ fn worlds(a: &Args) -> Result<(), String> {
         to,
     };
     let (first, last) = (a.num("--first", 0)?, a.num("--last", u64::MAX)?);
+    let ids = a.get("--ids").map(parse_ids).transpose()?;
+    if let Some(ids) = &ids
+        && let Some(x) = ids.iter().find(|&&i| !ds.iter().any(|d| d.id == i))
+    {
+        return Err(format!("--ids: decision {x} is not in the decisions file"));
+    }
     let ds: Vec<DecisionSpec> = ds
         .into_iter()
         .filter(|d| d.id >= first && d.id <= last)
+        .filter(|d| ids.as_ref().is_none_or(|ids| ids.contains(&d.id)))
         .collect();
     let out = Path::new(a.req("--out")?);
     let progress_path = a.get("--progress").map(PathBuf::from);
@@ -242,25 +304,69 @@ fn worlds(a: &Args) -> Result<(), String> {
     Ok(())
 }
 
-fn grid(a: &Args) -> Result<Vec<usize>, String> {
-    a.get("--grid")
-        .unwrap_or("10,20,40,80,160,320")
-        .split(',')
-        .map(|x| x.parse().map_err(|_| format!("bad grid {x}")))
+/// `--grid`: a list (`10,20,40`) or a range `start:end:step` (`10:320:10`).
+fn parse_grid(s: &str) -> Result<Vec<usize>, String> {
+    let bad = || format!("bad grid {s}");
+    if s.contains(':') {
+        let p: Vec<usize> = s
+            .split(':')
+            .map(|x| x.trim().parse().map_err(|_| bad()))
+            .collect::<Result<_, _>>()?;
+        let [a, b, step] = p[..] else {
+            return Err(bad());
+        };
+        if step == 0 || a == 0 {
+            return Err(bad());
+        }
+        return Ok((a..=b).step_by(step).collect());
+    }
+    s.split(',')
+        .map(|x| x.trim().parse().map_err(|_| bad()))
         .collect()
+}
+
+fn grid(a: &Args) -> Result<Vec<usize>, String> {
+    parse_grid(a.get("--grid").unwrap_or("10,20,40,80,160,320"))
+}
+
+/// Every `--worlds` file, merged (extension records joined to the earlier worlds), restricted to
+/// `--ids` when given.
+fn worlds_args(a: &Args) -> Result<Vec<WorldRows>, String> {
+    let paths: Vec<&Path> = a.all("--worlds").into_iter().map(Path::new).collect();
+    if paths.is_empty() {
+        return Err("missing --worlds".into());
+    }
+    let (rows, warnings) = read_worlds(&paths)?;
+    for w in warnings {
+        eprintln!("warning: {w}");
+    }
+    let ids = a.get("--ids").map(parse_ids).transpose()?;
+    Ok(rows
+        .into_iter()
+        .filter(|r| ids.as_ref().is_none_or(|ids| ids.contains(&r.id)))
+        .collect())
 }
 
 /// The fewest decisions a reported cell should have (§13.1 item 8).
 const MIN_CELL: usize = 25;
 
 fn agree(a: &Args) -> Result<(), String> {
-    let path = a.req("--worlds")?;
-    let rows: Vec<WorldRows> = read_lines(path)?;
-    // Timings (the last record per decision), when the timing file is there.
+    let rows = worlds_args(a)?;
+    // Timings, when the timing files are there: per decision, summed over its records (an
+    // extension adds a record).
     let mut times: BTreeMap<u64, DecisionTiming> = BTreeMap::new();
-    if let Ok(ts) = read_jsonl::<DecisionTiming>(&timing_path(Path::new(path))) {
-        for t in ts {
-            times.insert(t.id, t);
+    for path in a.all("--worlds") {
+        if let Ok(ts) = read_jsonl::<DecisionTiming>(&timing_path(Path::new(path))) {
+            for t in ts {
+                times
+                    .entry(t.id)
+                    .and_modify(|x| {
+                        x.worlds += t.worlds;
+                        x.world_us += t.world_us;
+                        x.max_world_us = x.max_world_us.max(t.max_world_us);
+                    })
+                    .or_insert(t);
+            }
         }
     }
     let g = grid(a)?;
@@ -381,14 +487,199 @@ fn agree(a: &Args) -> Result<(), String> {
     Ok(())
 }
 
+/// A money chance as a percentage for the text report.
+fn pct(x: f64) -> String {
+    if x.is_finite() {
+        format!("{:.4}%", 100.0 * x)
+    } else {
+        "n/a".into()
+    }
+}
+
+/// A predicted N for the text report.
+fn n_text(x: f64) -> String {
+    if !x.is_finite() {
+        "n/a".into()
+    } else if x >= N_CAP * 0.999 {
+        "never".into()
+    } else if x > 1e6 {
+        format!(">{:.0e}", 1e6)
+    } else {
+        format!("{x:.0}")
+    }
+}
+
+fn print_trick(t: &TrickReport) {
+    println!(
+        "== trick {}: {} decisions ({} with fewer than {} worlds left out), M = {} worlds, \
+         reference K = {}, fit on N <= {}; {} splits, {} bootstrap replicates, seed {}",
+        t.trick,
+        t.decisions,
+        t.dropped,
+        t.worlds,
+        t.worlds,
+        t.k,
+        t.fit_max,
+        t.splits,
+        t.boots,
+        t.seed
+    );
+    match &t.b {
+        Some(b) => println!(
+            "shared exponent b = {:.3} [95%: {:.3}, {:.3}]; half-data fit b = {}",
+            b.v,
+            b.lo,
+            b.hi,
+            t.b_half.map_or("n/a".into(), |x| format!(
+                "{:.3} [{:.3}, {:.3}]",
+                x.v, x.lo, x.hi
+            ))
+        ),
+        None => println!("shared exponent b: no fit (too few points)"),
+    }
+    println!(
+        "b fitted on N up to: {}",
+        t.b_by_range
+            .iter()
+            .map(|(n, b)| format!("{n}: {b:.3}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!(
+        "held-out check ({} < N < {}, all + positions): {}/{} predictions inside the measured 95% \
+         band; mean predicted/measured = {:.2}",
+        t.fit_max,
+        t.k,
+        t.heldout_inside.0,
+        t.heldout_inside.1,
+        t.heldout_log_ratio.exp()
+    );
+    println!(
+        "extrapolation check (first {} worlds predict the {}-world curve, N < {}): {}/{} inside; \
+         mean predicted/measured = {:.2}",
+        t.worlds / 2,
+        t.worlds,
+        t.k,
+        t.half_inside.0,
+        t.half_inside.1,
+        t.half_log_ratio.exp()
+    );
+    let at = |g: &search::curves::GroupReport, n: usize| {
+        t.grid
+            .iter()
+            .position(|&x| x == n)
+            .and_then(|i| g.cv.mean.get(i).copied())
+            .map_or("-".into(), pct)
+    };
+    let quarter = t.fit_max / 2;
+    print!(
+        "{:<22} {:>4} {:>10} {:>10} {:>10} {:>11} {:>22}",
+        "group",
+        "dec",
+        format!("cv({})", t.grid.first().copied().unwrap_or(0)),
+        format!("cv({quarter})"),
+        format!("cv({})", t.fit_max),
+        "a",
+        "free b [95%]"
+    );
+    for th in &t.thresholds {
+        print!(" {:>24}", format!("N({}) [95%]", pct(*th)));
+    }
+    println!();
+    for g in &t.groups {
+        print!(
+            "{:<22} {:>4} {:>10} {:>10} {:>10} {:>11} {:>22}",
+            format!("{}{}", g.name, if g.enough { "" } else { "*" }),
+            g.decisions,
+            at(g, t.grid.first().copied().unwrap_or(0)),
+            at(g, quarter),
+            at(g, t.fit_max),
+            g.a.map_or("n/a".into(), |a| format!("{:.3e}", a.v)),
+            g.free_b.map_or(String::new(), |b| format!(
+                "{:.2} [{:.2}, {:.2}]",
+                b.v, b.lo, b.hi
+            ))
+        );
+        for e in &g.n_for {
+            print!(
+                " {:>24}",
+                format!("{} [{}, {}]", n_text(e.v), n_text(e.lo), n_text(e.hi))
+            );
+        }
+        println!();
+    }
+    println!(
+        "(* fewer than {} decisions; cv(N) = measured L(N) - L({}), money chance)",
+        search::curves::ENOUGH,
+        t.k
+    );
+}
+
+fn curves(a: &Args) -> Result<(), String> {
+    let t0 = Instant::now();
+    let method = a.get("--method").unwrap_or("exact");
+    let label = a.num("--label", 1)?;
+    let rows: Vec<WorldRows> = worlds_args(a)?
+        .into_iter()
+        .filter(|r| r.method == method && r.label == label)
+        .collect();
+    if rows.is_empty() {
+        return Err(format!(
+            "no {method} label {label} records in the --worlds files"
+        ));
+    }
+    let d = CurveParams::default();
+    let p = CurveParams {
+        grid: a
+            .get("--grid")
+            .map_or(Ok((1..=1000).map(|i| 10 * i).collect()), parse_grid)?,
+        worlds: a
+            .get("--m")
+            .map(|_| a.num("--m", 0))
+            .transpose()?
+            .map(|m| m as usize),
+        splits: a.num("--splits", d.splits)?,
+        boots: a.num("--boot", d.boots)?,
+        seed: a.num("--seed", d.seed)?,
+        thresholds: match a.get("--thresholds") {
+            Some(s) => s
+                .split(',')
+                .map(|x| x.trim().parse().map_err(|_| format!("bad threshold {x}")))
+                .collect::<Result<_, _>>()?,
+            None => d.thresholds,
+        },
+        min_cell: a.num("--min-cell", d.min_cell as u64)? as usize,
+        threads: a.num(
+            "--threads",
+            std::thread::available_parallelism().map_or(1, |n| n.get()) as u64,
+        )? as usize,
+    };
+    let reports = analyse(&rows, &p);
+    for t in &reports {
+        print_trick(t);
+    }
+    if let Some(path) = a.get("--json") {
+        let v = serde_json::json!({
+            "method": method, "label": label,
+            "files": a.all("--worlds"),
+            "tricks": reports,
+        });
+        std::fs::write(path, serde_json::to_string(&v).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    }
+    eprintln!("curves: done in {:.1} s", t0.elapsed().as_secs_f64());
+    Ok(())
+}
+
 fn score_cmd(a: &Args) -> Result<(), String> {
-    let yard: Vec<WorldRows> = read_lines(a.req("--yardstick")?)?;
+    let (yard, _) = read_worlds(&[Path::new(a.req("--yardstick")?)])?;
     let n = a.num("--n", 80)? as usize;
     let mut scored = Vec::new();
+    let mut reports = Vec::new();
     for m in a.all("--method") {
         let (path, nm) = m.rsplit_once(':').ok_or("--method FILE:N")?;
         let nm: usize = nm.parse().map_err(|_| "--method FILE:N")?;
-        let rows: Vec<WorldRows> = read_lines(path)?;
+        let (rows, _) = read_worlds(&[Path::new(path)])?;
         let s = score(&yard, n, &rows, nm);
         let sum = summarise(&s);
         println!(
@@ -417,8 +708,20 @@ fn score_cmd(a: &Args) -> Result<(), String> {
                 ps.mean_loss.1
             );
         }
+        if a.get("--json").is_some() {
+            reports.push(score_groups(
+                m,
+                &yard,
+                n,
+                &rows,
+                nm,
+                a.num("--boot", 1000)?,
+                a.num("--seed", 1)?,
+            ));
+        }
         scored.push((m.to_string(), s));
     }
+    let mut pairs = Vec::new();
     for i in 0..scored.len() {
         for j in i + 1..scored.len() {
             let p = paired(&scored[i].1, &scored[j].1);
@@ -428,7 +731,14 @@ fn score_cmd(a: &Args) -> Result<(), String> {
                 scored[j].0,
                 serde_json::to_string(&p).map_err(|e| e.to_string())?
             );
+            pairs.push(serde_json::json!({ "a": scored[i].0, "b": scored[j].0, "paired": p }));
         }
+    }
+    if let Some(path) = a.get("--json") {
+        let v = serde_json::json!({ "yardstick": a.req("--yardstick")?, "n_ref": n,
+                                    "methods": reports, "paired": pairs });
+        std::fs::write(path, serde_json::to_string(&v).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }

@@ -145,6 +145,28 @@ impl MoneyChance {
         Self::mix_core(terms.iter().copied())
     }
 
+    /// The plain average of `n` money chances whose per-team totals are `totals`: exactly
+    /// [`MoneyChance::mix`] of those `n` values with weight 1 each, computed from the totals
+    /// alone (so a running sum over worlds can be averaged at any prefix without re-adding).
+    /// Totals fit `u64` for any `n < 2^32`.
+    ///
+    /// # Panics
+    /// If `n` is zero or the totals do not sum to exactly `n · ONE`.
+    pub fn mean_of_totals(totals: [u64; 4], n: u64) -> Self {
+        assert!(n > 0, "the mean of no values");
+        let s: u128 = totals.iter().map(|&x| u128::from(x)).sum();
+        assert_eq!(
+            s,
+            u128::from(n) * u128::from(ONE),
+            "totals of money chances"
+        );
+        let q = totals.map(|x| x / n);
+        let r = totals.map(|x| u128::from(x % n));
+        let v = MoneyChance(largest_remainder(q, r, ONE));
+        v.check();
+        v
+    }
+
     fn mix_core(terms: impl Iterator<Item = (u128, MoneyChance)>) -> Self {
         let mut num = [0u128; 4];
         let mut den: u128 = 0;
@@ -325,6 +347,29 @@ mod tests {
                 let fl = (num / den) as u64;
                 assert!(m.0[t] == fl || m.0[t] == fl + 1);
             }
+        }
+    }
+
+    #[test]
+    fn mean_of_totals_equals_mix_with_unit_weights() {
+        let mut rng = Rng::derive(41, &[0x3019]);
+        for _ in 0..2_000 {
+            let n = 1 + rng.bounded(40) as usize;
+            let vals: Vec<MoneyChance> = (0..n)
+                .map(|_| {
+                    // Some shares zero, never all of them.
+                    MoneyChance::from_weights(core::array::from_fn(|t| match rng.bounded(3) {
+                        0 => u128::from(t == 0),
+                        _ => u128::from(rng.next_u64() >> rng.bounded(64)) + 1,
+                    }))
+                })
+                .collect();
+            let terms: Vec<(u64, MoneyChance)> = vals.iter().map(|&c| (1, c)).collect();
+            let totals: [u64; 4] = core::array::from_fn(|t| vals.iter().map(|c| c.0[t]).sum());
+            assert_eq!(
+                MoneyChance::mean_of_totals(totals, n as u64),
+                MoneyChance::mix(&terms)
+            );
         }
     }
 

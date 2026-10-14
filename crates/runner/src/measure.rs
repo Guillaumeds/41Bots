@@ -3,17 +3,27 @@
 //! binary.
 //!
 //! ```json
-//! { "search_measure": { "trick": 2, "count": 200, "seed": 1, "to": 320,
-//!     "first": 0, "last": 199, "grid": "10,20,40,80,160,320",
+//! { "search_measure": { "trick": 2, "count": 224, "seed": 1, "to": 320,
+//!     "first": 0, "last": 223, "grid": "10,20,40,80,160,320",
 //!     "solve_threads": 1, "worlds_at_once": 1, "tt_mb": 256, "start_hands": 20000,
 //!     "methods": [ { "method": "rollout", "label": 2, "to": 64 } ],
 //!     "table": { "hands": 1000000, "seed": 1 } } }
 //! ```
 //! Steps: build and verify equity table v0; `search decisions` (stratified per stratum and per
-//! position in the trick); `search worlds --method exact` for decisions `first..=last` up to `to`
-//! worlds (label 1, nested sets; resumable); `search agree` (per trick, position, position pair,
-//! stratum, world-count band and hand-type band); then each listed method's worlds and
-//! `search score` against the yardstick at the largest grid N available.
+//! position in the trick; `count` a multiple of 32 unless `"allow_uneven": true`);
+//! `search worlds --method exact` for decisions `first..=last` up to `to` worlds (label 1, nested
+//! sets; resumable); `search agree` (N against 2N on `grid`, per trick, position, position pair,
+//! stratum, world-count band and hand-type band); `search curves` (money-loss curves on `grid`,
+//! which may be fine, e.g. `"10:320:10"`; writes `curves-t<trick>.json`); then each listed
+//! method's worlds and `search score` against the yardstick at the largest grid N available.
+//!
+//! Targeted extension (docs/M3-SPEC.md §13.1 item 10): `"ids"` (a list of decision ids, a string
+//! `"3,17,42"`, or the path of a file of ids; in format 2, `"ids_input"` names a manifest input
+//! holding the file) restricts the exact worlds to those decisions, and `"from"` (default 0) sets
+//! the first world. With `from > 0` the step only values worlds `from..to` into
+//! `exact-t<trick>-w<from>-<to>.jsonl` (same decision set and seed as the first run, so the rows
+//! continue it exactly) and skips the analysis steps: run `search agree` / `search curves` with
+//! `--worlds` on the first run's file and this one, which they join.
 //!
 //! Scheduling: `search worlds` puts every (decision, world) task of the step in one work queue,
 //! longest expected first, on all threads, so no thread waits for another decision's slow world.
@@ -41,6 +51,43 @@ const TAIL_SHARE_OK: f64 = 0.15;
 
 fn n(p: &Value, k: &str, d: u64) -> u64 {
     p.get(k).and_then(Value::as_u64).unwrap_or(d)
+}
+
+/// `params.ids` as a `search --ids` argument: a list of numbers, or a string (a list or a path).
+fn ids_arg(p: &Value) -> Result<Option<String>, String> {
+    match p.get("ids") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(Value::Array(a)) => a
+            .iter()
+            .map(|x| {
+                x.as_u64()
+                    .map(|v| v.to_string())
+                    .ok_or_else(|| "params.ids: decision ids are whole numbers".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|v| Some(v.join(","))),
+        Some(_) => Err("params.ids: a list of ids, \"3,17,42\" or a file path".into()),
+    }
+}
+
+/// The largest N of a grid (`10,20,40` or `start:end:step`) not above `to`.
+fn grid_max(grid: &str, to: u64) -> u64 {
+    let vals: Vec<u64> = if grid.contains(':') {
+        let p: Vec<u64> = grid
+            .split(':')
+            .filter_map(|x| x.trim().parse().ok())
+            .collect();
+        match p[..] {
+            [a, b, s] if s > 0 && a > 0 => (a..=b).step_by(s as usize).collect(),
+            _ => Vec::new(),
+        }
+    } else {
+        grid.split(',')
+            .filter_map(|x| x.trim().parse().ok())
+            .collect()
+    };
+    vals.into_iter().filter(|&x| x <= to).max().unwrap_or(to)
 }
 
 /// Run one `search worlds` step, with its progress in the heartbeat.
@@ -105,9 +152,14 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
     let out = ctx.root.join("out").join("measure");
     fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     let trick = n(p, "trick", 2);
-    let count = n(p, "count", 200);
+    let count = n(p, "count", 224);
     let seed = n(p, "seed", 1);
     let to = n(p, "to", 320);
+    let from = n(p, "from", 0);
+    if from >= to {
+        return Err(format!("search_measure: from {from} must be below to {to}"));
+    }
+    let ids = ids_arg(p)?;
     let solve_threads = n(p, "solve_threads", 1).max(1);
     let threads = if solve_threads > 1 {
         n(p, "worlds_at_once", 1).max(1)
@@ -126,14 +178,21 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         .args(["--start-hands", &n(p, "start_hands", 20_000).to_string()])
         .arg("--out")
         .arg(&dec);
+    if p.get("allow_uneven")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        c.arg("--allow-uneven");
+    }
     ctx.set_phase(
         "chunk",
         json!({ "kind": "search_measure", "step": "decisions" }),
     );
     ctx.run_child(c, "measure/search.log")?;
-    let worlds = |label: u64, method: &str, to: u64, file: &std::path::Path| {
+    let worlds = |label: u64, method: &str, from: u64, to: u64, file: &std::path::Path| {
         let mut c = Command::new(sibling("search"));
         c.args(["worlds", "--method", method, "--to", &to.to_string()])
+            .args(["--from-world", &from.to_string()])
             .args(["--label", &label.to_string(), "--seed", &seed.to_string()])
             .args(["--first", &n(p, "first", 0).to_string()])
             .args(["--last", &n(p, "last", count.saturating_sub(1)).to_string()])
@@ -146,19 +205,37 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
             .arg(&table)
             .arg("--out")
             .arg(file);
+        if let Some(ids) = &ids {
+            c.args(["--ids", ids]);
+        }
         c
     };
     let progress_file = ctx.root.join("worlds-progress.json");
-    let yard = out.join(format!("exact-t{trick}-n{to}.jsonl"));
+    let yard = if from == 0 {
+        out.join(format!("exact-t{trick}-n{to}.jsonl"))
+    } else {
+        out.join(format!("exact-t{trick}-w{from}-{to}.jsonl"))
+    };
     run_worlds(
         ctx,
-        worlds(1, "exact", to, &yard),
+        worlds(1, "exact", from, to, &yard),
         "exact worlds",
         to,
         threads,
         solve_threads,
         &progress_file,
     )?;
+    let base = json!({ "trick": trick, "count": count, "seed": seed, "from": from, "to": to,
+                       "ids": ids, "grid": grid, "solve_threads": solve_threads,
+                       "worlds_threads": threads, "table": table_rec });
+    if from > 0 {
+        // An extension: the analysis needs the earlier worlds too, so it is run where both
+        // files are (`search agree|curves --worlds <first run> --worlds <this>`).
+        let mut r = base;
+        r["methods"] = json!([]);
+        r["extension"] = json!(true);
+        return Ok(r);
+    }
     let mut c = Command::new(sibling("search"));
     c.arg("agree")
         .arg("--worlds")
@@ -171,12 +248,20 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         json!({ "kind": "search_measure", "step": "agree" }),
     );
     ctx.run_child(c, "measure/agree.log")?;
-    let n_ref = grid
-        .split(',')
-        .filter_map(|x| x.parse::<u64>().ok())
-        .filter(|&x| x <= to)
-        .max()
-        .unwrap_or(to);
+    let mut c = Command::new(sibling("search"));
+    c.arg("curves")
+        .arg("--worlds")
+        .arg(&yard)
+        .args(["--grid", &grid])
+        .args(["--threads", &ctx.threads.to_string()])
+        .arg("--json")
+        .arg(out.join(format!("curves-t{trick}.json")));
+    ctx.set_phase(
+        "chunk",
+        json!({ "kind": "search_measure", "step": "curves" }),
+    );
+    ctx.run_child(c, "measure/curves.log")?;
+    let n_ref = grid_max(&grid, to);
     let mut methods = Vec::new();
     for (i, m) in p
         .get("methods")
@@ -192,7 +277,7 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         let f = out.join(format!("{method}-t{trick}-l{label}-n{mto}.jsonl"));
         run_worlds(
             ctx,
-            worlds(label, method, mto, &f),
+            worlds(label, method, 0, mto, &f),
             &format!("method {i} ({method}) worlds"),
             mto,
             threads,
@@ -216,16 +301,33 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         );
         ctx.run_child(c, "measure/score.log")?;
     }
-    Ok(
-        json!({ "trick": trick, "count": count, "seed": seed, "to": to, "grid": grid,
-               "solve_threads": solve_threads, "worlds_threads": threads, "table": table_rec,
-               "methods": methods }),
-    )
+    let mut r = base;
+    r["methods"] = json!(methods);
+    Ok(r)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ids_and_grids() {
+        assert_eq!(ids_arg(&json!({})).expect("none"), None);
+        assert_eq!(
+            ids_arg(&json!({ "ids": [3, 17, 42] })).expect("list"),
+            Some("3,17,42".into())
+        );
+        assert_eq!(
+            ids_arg(&json!({ "ids": "ids.txt" })).expect("path"),
+            Some("ids.txt".into())
+        );
+        assert!(ids_arg(&json!({ "ids": [1.5] })).is_err());
+        assert!(ids_arg(&json!({ "ids": 7 })).is_err());
+        assert_eq!(grid_max("10,20,40,80,160,320", 320), 320);
+        assert_eq!(grid_max("10,20,40,80,160,320", 200), 160);
+        assert_eq!(grid_max("10:320:10", 155), 150);
+        assert_eq!(grid_max("bad", 64), 64);
+    }
 
     #[test]
     fn tails() {

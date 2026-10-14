@@ -560,10 +560,16 @@ pub fn timing_path(out: &Path) -> PathBuf {
 
 /// The `search worlds` step: value decisions `ds` by `job` into the JSON-lines file `out`, one
 /// line per decision in batch order, resuming from what `out` already holds (decisions already
-/// there are skipped; a torn last line is dropped and redone). The file is byte-identical for any
-/// thread count, and whether or not the run was interrupted and resumed. Timings are appended to
-/// [`timing_path`]`(out)`. `on_done` sees each decision as it is written (for logs). Returns the
-/// number of decisions valued by this call.
+/// there with this job's worlds are skipped; a torn last line is dropped and redone). The file is
+/// byte-identical for any thread count, and whether or not the run was interrupted and resumed.
+/// Timings are appended to [`timing_path`]`(out)`. `on_done` sees each decision as it is written
+/// (for logs). Returns the number of decisions valued by this call.
+///
+/// Extension (§13.1 item 10): records of the same method and label for other world ranges may
+/// already be in `out` (or in other files). A job with `from` at the end of an earlier range
+/// appends its worlds as new records, which [`merge_rows`] joins to the earlier ones, so the
+/// result is exactly what one longer run would have written (world `w` of a decision depends
+/// only on the seed, label, decision and `w`).
 pub fn worlds_file(
     out: &Path,
     ds: &[DecisionSpec],
@@ -579,21 +585,29 @@ pub fn worlds_file(
         Vec::new()
     };
     let nw = job.to - job.from;
-    if let Some(r) = done.iter().find(|r| {
-        r.method != method_name(job.method)
-            || r.label != job.label
-            || r.from != job.from
-            || r.rows.len() as u64 != nw
-    }) {
+    let mine = |r: &WorldRows| r.method == method_name(job.method) && r.label == job.label;
+    if let Some(r) = done.iter().find(|r| !mine(r)) {
         return Err(format!(
-            "{}: decision {} was made with other settings ({} label {} worlds {}..{}); \
-             use another output file",
+            "{}: decision {} was made with other settings ({} label {}); use another output file",
             out.display(),
             r.id,
             r.method,
             r.label,
+        ));
+    }
+    if let Some(r) = done
+        .iter()
+        .find(|r| r.from == job.from && r.rows.len() as u64 != nw)
+    {
+        let end = r.from + r.rows.len() as u64;
+        return Err(format!(
+            "{}: decision {} already has worlds {}..{end}; to add worlds, run with \
+             --from-world {end} --to {} (the new worlds are appended as records that \
+             agree/curves merge), or use another output file",
+            out.display(),
+            r.id,
             r.from,
-            r.from + r.rows.len() as u64
+            job.to
         ));
     }
     // Rewrite the file without a torn line, then append.
@@ -614,7 +628,7 @@ pub fn worlds_file(
     let mut ft = open(&timing_path(out))?;
     let todo: Vec<DecisionSpec> = ds
         .iter()
-        .filter(|d| !done.iter().any(|r| r.id == d.id))
+        .filter(|d| !done.iter().any(|r| r.id == d.id && r.from == job.from))
         .cloned()
         .collect();
     if let Some(p) = progress {
@@ -637,6 +651,106 @@ pub fn worlds_file(
         Ok(())
     })?;
     Ok(n)
+}
+
+/// Join the records of one or more worlds files (§13.1 item 10): records of the same decision,
+/// method and label whose world ranges continue or overlap each other become one record holding
+/// every world from the first on, so N worlds are always the first N. Decisions keep the order in
+/// which they first appear. Overlapping worlds must hold identical values (the same worlds valued
+/// twice); otherwise the files were made with different seeds and this is an error. A range that
+/// leaves a gap is left out, with a warning.
+pub fn merge_rows(recs: Vec<WorldRows>) -> Result<(Vec<WorldRows>, Vec<String>), String> {
+    type Key = (u64, String, u64);
+    let mut order: Vec<Key> = Vec::new();
+    let mut parts: std::collections::BTreeMap<Key, Vec<WorldRows>> = Default::default();
+    for r in recs {
+        let k = (r.id, r.method.clone(), r.label);
+        let e = parts.entry(k.clone()).or_default();
+        if e.is_empty() {
+            order.push(k);
+        }
+        e.push(r);
+    }
+    let mut out = Vec::new();
+    let mut warnings = Vec::new();
+    for k in order {
+        let mut segs = parts.remove(&k).expect("key listed");
+        segs.sort_by_key(|r| (r.from, Reverse(r.rows.len())));
+        let mut it = segs.into_iter();
+        let mut cur = it.next().expect("at least one record");
+        for s in it {
+            let end = cur.from + cur.rows.len() as u64;
+            if s.from > end {
+                warnings.push(format!(
+                    "decision {} ({} label {}): worlds {}..{} left out (worlds {end}..{} are missing)",
+                    s.id,
+                    s.method,
+                    s.label,
+                    s.from,
+                    s.from + s.rows.len() as u64,
+                    s.from
+                ));
+                continue;
+            }
+            if s.cands != cur.cands || s.team != cur.team || s.trick != cur.trick {
+                return Err(format!(
+                    "decision {}: records disagree on the decision itself (other decision set?)",
+                    s.id
+                ));
+            }
+            let skip = (end - s.from) as usize;
+            let overlap = skip.min(s.rows.len());
+            let at = (s.from - cur.from) as usize;
+            if s.rows[..overlap] != cur.rows[at..at + overlap] {
+                return Err(format!(
+                    "decision {} ({} label {}): worlds {}..{} were valued twice with different \
+                     values (files made with different seeds?)",
+                    s.id,
+                    s.method,
+                    s.label,
+                    s.from,
+                    s.from + overlap as u64
+                ));
+            }
+            cur.rows.extend_from_slice(&s.rows[overlap..]);
+        }
+        out.push(cur);
+    }
+    Ok((out, warnings))
+}
+
+/// Read and merge one or more worlds files ([`merge_rows`]).
+pub fn read_worlds(paths: &[&Path]) -> Result<(Vec<WorldRows>, Vec<String>), String> {
+    let mut all = Vec::new();
+    for p in paths {
+        all.extend(read_jsonl::<WorldRows>(p)?);
+    }
+    merge_rows(all)
+}
+
+/// Decision ids from `--ids`: a list (`3,17,42`) or the name of a file holding ids separated by
+/// commas, spaces or new lines (`#` starts a comment).
+pub fn parse_ids(arg: &str) -> Result<Vec<u64>, String> {
+    let list = |s: &str| -> Result<Vec<u64>, String> {
+        s.split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|t| !t.is_empty())
+            .map(|t| t.parse().map_err(|_| format!("--ids: not an id: {t}")))
+            .collect()
+    };
+    if !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == ',' || c == ' ')
+    {
+        return list(arg);
+    }
+    let text = std::fs::read_to_string(arg).map_err(|e| format!("--ids {arg}: {e}"))?;
+    let body: String = text
+        .lines()
+        .map(|l| l.split('#').next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    list(&body)
 }
 
 fn mc(v: [u64; 4]) -> MoneyChance {
@@ -685,15 +799,34 @@ pub struct CurveStep {
     pub plateau_ok: bool,
 }
 
-/// The agreement curve over nested world sets `grid` (each decision needs `max(grid)` worlds),
-/// and the plateau N (§13.1): the smallest N where doubling changes the chosen card in under 1%
-/// of decisions and changes the mean chosen-card value by under 0.001. The value condition is
+/// The steps of the agreement curve on a grid: every N whose double is also in the grid, paired
+/// with it (a doubling grid such as 10,20,40,… and a fine one such as 10,20,30,… both work);
+/// consecutive grid values when no N has its double in the grid.
+pub fn curve_steps(grid: &[usize]) -> Vec<(usize, usize)> {
+    let mut g = grid.to_vec();
+    g.sort_unstable();
+    g.dedup();
+    let doubling: Vec<(usize, usize)> = g
+        .iter()
+        .filter(|&&n| g.binary_search(&(2 * n)).is_ok())
+        .map(|&n| (n, 2 * n))
+        .collect();
+    if doubling.is_empty() {
+        g.windows(2).map(|w| (w[0], w[1])).collect()
+    } else {
+        doubling
+    }
+}
+
+/// The agreement curve over nested world sets on `grid` ([`curve_steps`]: N against 2N), and the
+/// plateau N (§13.1): the smallest N where doubling changes the chosen card in under 1% of
+/// decisions and changes the mean chosen-card value by under 0.001. The value condition is
 /// applied to both readings, the literal one (difference of the means) and the loss of the
-/// N-world choice under the 2N-world values, so cancellation cannot hide a change.
+/// N-world choice under the 2N-world values, so cancellation cannot hide a change. A step uses
+/// the decisions with at least 2N worlds.
 pub fn agreement_curve(rows: &[WorldRows], grid: &[usize]) -> (Vec<CurveStep>, Option<usize>) {
     let mut steps = Vec::new();
-    for w in grid.windows(2) {
-        let (n, n2) = (w[0], w[1]);
+    for (n, n2) in curve_steps(grid) {
         let use_: Vec<&WorldRows> = rows.iter().filter(|r| r.rows.len() >= n2).collect();
         if use_.is_empty() {
             continue;
@@ -1044,6 +1177,129 @@ mod tests {
                 assert_eq!(r.cands, cands);
             }
         }
+    }
+
+    /// Extending chosen decisions (`--ids` with `--from-world`) appends records that
+    /// [`merge_rows`] joins into exactly the rows one longer run writes, whether the extension
+    /// goes into the same file or another; re-running it adds nothing; a longer job over the first
+    /// range is refused; overlapping records must agree and gaps are reported.
+    #[test]
+    fn extending_worlds_equals_one_longer_run() {
+        let ds: Vec<DecisionSpec> = small_set()
+            .into_iter()
+            .filter(|d| d.trick == 4)
+            .take(6)
+            .collect();
+        let job = |from, to| WorldsJob {
+            method: Method::ExactPimc,
+            label: 1,
+            seed: 7,
+            from,
+            to,
+        };
+        let long = tmp("ext-long");
+        clean(&long);
+        run(&long, &ds, &job(0, 8), 2, 4);
+        let (want, warn) = read_worlds(&[&long]).expect("reads");
+        assert!(warn.is_empty() && want.len() == ds.len());
+        let pick: Vec<DecisionSpec> = vec![ds[1].clone(), ds[4].clone()];
+        let picked = |id: u64| pick.iter().any(|d| d.id == id);
+        // Into the same file.
+        let base = tmp("ext-base");
+        clean(&base);
+        run(&base, &ds, &job(0, 4), 2, 4);
+        let once = run(&base, &pick, &job(4, 8), 3, 4);
+        assert_eq!(
+            run(&base, &pick, &job(4, 8), 1, 4),
+            once,
+            "re-running adds nothing"
+        );
+        let (got, warn) = read_worlds(&[&base]).expect("reads");
+        assert!(warn.is_empty());
+        assert_eq!(got.len(), ds.len());
+        for r in &got {
+            let w = want.iter().find(|w| w.id == r.id).expect("same decisions");
+            if picked(r.id) {
+                assert_eq!(r, w, "decision {}: extended = one longer run", r.id);
+            } else {
+                assert_eq!(r.rows[..], w.rows[..4]);
+            }
+        }
+        // Into another file.
+        let base2 = tmp("ext-base2");
+        let ext = tmp("ext-more");
+        clean(&base2);
+        clean(&ext);
+        run(&base2, &ds, &job(0, 4), 1, 4);
+        run(&ext, &pick, &job(4, 8), 2, 4);
+        assert_eq!(read_worlds(&[&base2, &ext]).expect("reads").0, got);
+        assert_eq!(
+            read_worlds(&[&ext, &base2]).expect("reads").0.len(),
+            ds.len()
+        );
+        // `agree` sees the extended rows: the 4→8 step uses exactly the extended decisions.
+        let (steps, _) = agreement_curve(&got, &[4, 8]);
+        assert_eq!(steps[0].decisions, pick.len());
+        // A longer job over the saved range is refused (extend with --from-world instead).
+        let l = leaf();
+        let src = RejectionSource::new();
+        let ctx = Ctx {
+            leaf: &*l,
+            source: &src,
+            rules: Rules::HOUSE,
+        };
+        let e = worlds_file(
+            &base2,
+            &ds,
+            &job(0, 8),
+            &ctx,
+            &SearchConfig::default(),
+            None,
+            |_, _| {},
+        )
+        .expect_err("refused");
+        assert!(e.contains("--from-world 4"), "{e}");
+        // Overlapping records join when they agree; a conflict or a gap is reported.
+        let w = &want[0];
+        let seg = |from: usize, to: usize| WorldRows {
+            from: from as u64,
+            rows: w.rows[from..to].to_vec(),
+            ..w.clone()
+        };
+        let (m, _) = merge_rows(vec![seg(3, 8), seg(0, 5)]).expect("joins");
+        assert_eq!(m, vec![w.clone()]);
+        let mut bad = seg(3, 8);
+        bad.rows[0] = bad.rows[1].clone();
+        if bad.rows[0] != w.rows[3] {
+            assert!(merge_rows(vec![seg(0, 5), bad]).is_err());
+        }
+        let (m, warn) = merge_rows(vec![seg(0, 3), seg(5, 8)]).expect("gap");
+        assert_eq!(m[0].rows.len(), 3);
+        assert_eq!(warn.len(), 1);
+        for p in [&long, &base, &base2, &ext] {
+            clean(p);
+        }
+    }
+
+    #[test]
+    fn ids_and_steps() {
+        assert_eq!(parse_ids("3,17, 42").expect("list"), vec![3, 17, 42]);
+        let p = tmp("ids");
+        std::fs::write(&p, "# chosen\n3 17\n42,7 # hard\n").expect("write");
+        assert_eq!(
+            parse_ids(p.to_str().expect("utf8")).expect("file"),
+            vec![3, 17, 42, 7]
+        );
+        let _ = std::fs::remove_file(&p);
+        assert!(parse_ids("no-such-file").is_err());
+        let doubling = [10, 20, 40, 80];
+        assert_eq!(curve_steps(&doubling), vec![(10, 20), (20, 40), (40, 80)]);
+        let fine: Vec<usize> = (1..=8).map(|i| 10 * i).collect();
+        assert_eq!(
+            curve_steps(&fine),
+            vec![(10, 20), (20, 40), (30, 60), (40, 80)]
+        );
+        assert_eq!(curve_steps(&[10, 30, 50]), vec![(10, 30), (30, 50)]);
     }
 
     #[test]
