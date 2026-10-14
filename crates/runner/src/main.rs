@@ -26,6 +26,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
+mod measure;
 mod spike;
 
 const USAGE: &str = "usage:
@@ -809,6 +810,7 @@ fn steps(ctx: &mut Ctx, manifest: &Value) -> Result<(), String> {
             benchmark(ctx, s)?
         }
         "solver_spike" => spike::chunk(ctx, params)?,
+        "search_measure" => measure::chunk(ctx, params)?,
         "arena_block" => {
             return Err("arena_block chunks need the arena binary (not built yet)".into());
         }

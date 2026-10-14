@@ -1444,5 +1444,8 @@ fn capitalise(s: &str) -> String {
     }
 }
 
+mod hand_start;
+pub use hand_start::{HandStartState, StateError, current_hand_start_of};
+
 #[cfg(test)]
 mod tests;

@@ -69,6 +69,10 @@ impl Flags {
                 f.positional.push(a.clone());
             }
         }
+        if let Some(p) = f.get("equity") {
+            // The equity table for PIMC bots (M3-SPEC §8.1); else FORTYONE_EQUITY.
+            search::bot::set_equity_path(p);
+        }
         Ok(f)
     }
     fn get(&self, k: &str) -> Option<&str> {

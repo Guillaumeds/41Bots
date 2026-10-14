@@ -39,6 +39,8 @@ You are building the strongest possible bots for the 8-player card game **41** (
   - `cargo fmt --all`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace`
+- **Where compute runs (owner, 2026-10-14):** this VM is for building and testing. Any measurement or calculation expected to take more than about 5 minutes here runs on vast.ai (on-demand, through the runner), not locally.
+- **Times for the owner:** give clock times in Mauritius time (UTC+4).
 - **Cloud sessions:**
   - The VM has 4 vCPU and 16 GB RAM, and commands time out after ≤10 min.
   - Run long jobs (such as 10M differential games) as `--release` binaries with a size argument, or leave them for vast.ai or CI. Unit tests stay fast.

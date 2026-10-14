@@ -99,3 +99,4 @@ M1 adds the table manager, the arena (14-way duplicate block, generalised SPRT, 
 
 - 2026-10-14: owner answered the Joker-burn question (the dealer's burn after a turned Joker may turn out to be the ace of trumps: legal, a poor play; RULES H3). No longer open.
 - M3 started: spec `docs/M3-SPEC.md` on branch `m3-pimc`.
+- 2026-10-14: owner approved the M3 gate bar (≥2 points more match wins, test for 6), the 25% near-clinch teacher stratum, and ~€5 of M3 rented compute.
