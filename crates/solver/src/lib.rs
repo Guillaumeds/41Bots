@@ -1,8 +1,10 @@
 //! Exact open-hand ("all cards face up") max^n solver for 41, scored in money chance
 //! (PLAN §6.7 and amendment A2).
 //!
-//! This is the **M2 measurement spike**: a deliberately naive, obviously-correct solver with no
-//! pruning, no move ordering and no equivalent cards. It exists to *measure* costs (nodes, time,
+//! Two solvers live here. [`solve`] is the **M2 measurement spike**: a deliberately naive,
+//! obviously-correct solver with no pruning, no move ordering and no equivalent cards; it stays
+//! as the reference. [`solve_fast`] (module [`fast`]) is the optimised solver, gated to give
+//! identical answers (see that module). The rest of this text describes the naive solver. It exists to *measure* costs (nodes, time,
 //! memory, ties) before any optimisation is designed. An optional plain transposition table [a
 //! memory of positions already solved] keyed at trick boundaries can be switched on; it must give
 //! identical values.
@@ -28,6 +30,15 @@
 //! for the root-flip measurement.
 //!
 //! Everything is whole-number: values are [`MoneyChance`] (units of 2^-32, summing to exactly 1).
+
+pub mod denial;
+pub mod equiv;
+pub mod fast;
+mod tt;
+pub mod worlds;
+
+pub use fast::{FastOptions, solve_fast};
+pub use worlds::sample_world;
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -128,6 +139,15 @@ pub struct Stats {
     pub tt_hits: u64,
     /// Positions stored in the table at the end.
     pub tt_entries: u64,
+    /// Optimised solver only: table entries overwritten by the replacement policy.
+    pub tt_replaced: u64,
+    /// Optimised solver only: nodes stopped early by shallow pruning (plus nodes stopped because
+    /// the mover's team already had a certain win).
+    pub cutoffs: u64,
+    /// Optimised solver only: legal cards not searched because an equivalent card was.
+    pub equiv_skipped: u64,
+    /// Optimised solver only: bytes allocated by the transposition table at the end.
+    pub tt_bytes: u64,
 }
 
 /// The result of a root solve.
@@ -176,7 +196,9 @@ pub fn from_match(m: &Match) -> Result<(Position, MatchCtx, Option<u8>), FromMat
     }
     let mut hand = InHand::start_with_flags(p.scores, p.bonus_taken);
     hand.tricks = p.tricks_won;
-    hand.five_played = p.five_played;
+    // `InHand::five_played` means "the 5 was in a *completed* trick" (its bonus is scored when
+    // its trick is won); the engine's public flag is set as soon as the 5 hits the table.
+    hand.five_played = p.five_played && !p.trick_cards.iter().any(|&(_, c)| c == five_of(trump));
     hand.tricks_done = p.trick_winners.len() as u8;
     let pending = if p.trick_no == 1 && p.robber.is_none() && p.table_card.is_some() {
         let ace = ace_of_trumps(trump);
@@ -204,7 +226,65 @@ pub fn from_match(m: &Match) -> Result<(Position, MatchCtx, Option<u8>), FromMat
     ))
 }
 
+/// What one card leads to (see [`Position::play`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    /// The hand goes on from this position.
+    Next(Position),
+    /// The game ends at once: this team won it.
+    GameWon(u8),
+    /// The hand is over without a game end, with these scores (after the end-of-hand bonus).
+    HandOver([u8; 4]),
+}
+
 impl Position {
+    /// The position after the seat to act plays `c` (which must be legal): the trick is
+    /// completed and scored when it is the eighth card. Used by the optimised solver; the naive
+    /// solver keeps its own copy of these few lines, and both are parity-tested against the
+    /// engine.
+    pub fn play(&self, c: Card) -> Step {
+        let seat = self.to_act();
+        let mut q = *self;
+        q.hands[usize::from(seat)] &= !bit(c);
+        q.trick[usize::from(q.n_played)] = c;
+        q.n_played += 1;
+        let r = trump_rank(c, q.trump);
+        if r > 0 && q.best.is_none_or(|(b, _)| r > b) {
+            q.best = Some((r, team_of(seat)));
+        }
+        if usize::from(q.n_played) < SEATS {
+            return Step::Next(q);
+        }
+        let w = trick_winner(&q.trick, q.trump);
+        let winner = (q.leader + w as u8) % SEATS as u8;
+        let five_here = q.trick.contains(&five_of(q.trump));
+        match q
+            .hand
+            .play_trick(team_of(winner), five_here, Scoring::HOUSE)
+        {
+            AfterTrick::GameWon(t, _) => Step::GameWon(t),
+            AfterTrick::Next(h) => {
+                q.hand = h;
+                q.leader = winner;
+                q.n_played = 0;
+                Step::Next(q)
+            }
+            AfterTrick::TricksDone(h) => match h.finish(q.best.map(|(_, t)| t), Scoring::HOUSE) {
+                AfterHand::GameWon(t, _) => Step::GameWon(t),
+                AfterHand::HandOver(s) => Step::HandOver(s),
+            },
+        }
+    }
+
+    /// Every card still in a hand or on the table in the current trick.
+    pub fn live(&self) -> Bits {
+        let mut live = self.hands.iter().fold(0, |a, &h| a | h);
+        for &c in &self.trick[..usize::from(self.n_played)] {
+            live |= bit(c);
+        }
+        live
+    }
+
     /// The seat to play next.
     pub fn to_act(&self) -> u8 {
         (self.leader + self.n_played) % SEATS as u8
@@ -262,7 +342,7 @@ struct Search<'a, L: Leaf> {
 }
 
 /// The cards of a set in the tie order.
-fn ordered(set: Bits, order: TieOrder) -> impl Iterator<Item = Card> {
+pub(crate) fn ordered(set: Bits, order: TieOrder) -> impl Iterator<Item = Card> {
     let mut s = set;
     core::iter::from_fn(move || {
         if s == 0 {
@@ -442,4 +522,9 @@ pub fn solve<L: Leaf>(pos: &Position, ctx: MatchCtx, leaf: &L, opts: Options) ->
         stats: s.stats,
         timed_out: false,
     }
+}
+
+/// The index (in play order) of the card currently winning a partial trick (rule 19).
+pub(crate) fn trick_winner_index(plays: &[Card], trump: Suit) -> usize {
+    trick_winner(plays, trump)
 }

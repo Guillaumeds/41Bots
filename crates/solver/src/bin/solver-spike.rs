@@ -5,7 +5,13 @@
 //! ```text
 //! solver-spike --table equity-v0.npy --trick K --worlds N [--seed S] [--tt on|off]
 //!              [--cap-ms MS] [--threads T] [--flip] [--first W]
+//!              [--solver naive|fast] [--switches BITS] [--tt-mb MB]
 //! ```
+//!
+//! `--solver fast` uses the optimised solver; `--switches` picks its speed-ups (bit 0 table,
+//! 1 equivalent cards, 2 move ordering, 3 pruning; default 11 = the solver's defaults: all
+//! but move ordering) and `--tt-mb` its table cap.
+//! The same `--seed` gives the same worlds for both solvers.
 //!
 //! Worlds are numbered; world `i` uses `Rng::derive(seed, [i])`, so a run can be split into
 //! chunks with `--first`. Random play-forward: skip 0–3 whole hands (to vary the match state),
@@ -15,12 +21,10 @@
 
 use std::time::Instant;
 
-use engine::cards::{Bits, Card, bit, cards};
-use engine::game::{Action, Match, Phase, Rules};
-use engine::rng::Rng;
-use engine::rules::legal_burns;
 use equity::EquityTable;
-use solver::{Options, Position, TT_ENTRY_BYTES, TieOrder, from_match, solve};
+use solver::{
+    FastOptions, Options, Solution, TT_ENTRY_BYTES, TieOrder, sample_world, solve, solve_fast,
+};
 
 struct Args {
     table: String,
@@ -32,6 +36,9 @@ struct Args {
     cap_ms: Option<u64>,
     threads: usize,
     flip: bool,
+    fast: bool,
+    switches: u8,
+    tt_mb: usize,
 }
 
 fn parse_args() -> Args {
@@ -45,6 +52,9 @@ fn parse_args() -> Args {
         cap_ms: None,
         threads: 1,
         flip: false,
+        fast: false,
+        switches: 11,
+        tt_mb: 256,
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -59,6 +69,9 @@ fn parse_args() -> Args {
             "--tt" => a.tt = val() == "on",
             "--cap-ms" => a.cap_ms = Some(val().parse().expect("--cap-ms")),
             "--threads" => a.threads = val().parse().expect("--threads"),
+            "--solver" => a.fast = val() == "fast",
+            "--switches" => a.switches = val().parse().expect("--switches"),
+            "--tt-mb" => a.tt_mb = val().parse().expect("--tt-mb"),
             "--flip" => {
                 a.flip = true;
                 i += 1;
@@ -71,48 +84,6 @@ fn parse_args() -> Args {
     assert!(!a.table.is_empty(), "--table is required");
     assert!((1..=5).contains(&a.trick), "--trick must be 1..=5");
     a
-}
-
-fn pick(rng: &mut Rng, set: Bits) -> Card {
-    let all: Vec<Card> = cards(set).collect();
-    all[rng.bounded(all.len() as u64) as usize]
-}
-
-/// Play random legal actions until the start of trick `k` (robbing resolved); returns the solver
-/// position, context and root seat relative to the dealer.
-fn sample(seed: u64, k: u8, world: u64) -> (Position, solver::MatchCtx, u8) {
-    let mut rng = Rng::derive(seed, &[world]);
-    let mut m = Match::new(rng.next_u64(), Rules::HOUSE);
-    let skip = rng.bounded(4) as u32;
-    loop {
-        if m.phase() == Phase::MatchOver {
-            m = Match::new(rng.next_u64(), Rules::HOUSE);
-            continue;
-        }
-        let p = m.public();
-        let at_start = p.trick_no == k && p.trick_cards.is_empty() && m.hand_index() >= skip;
-        if at_start {
-            match m.phase() {
-                // The trick-1 leader robs before leading: burn at random, then solve.
-                Phase::AwaitBurn(_) if k == 1 => {}
-                Phase::AwaitPlay(_) => {
-                    let (mut pos, ctx, pending) = from_match(&m).expect("awaiting a play");
-                    if let Some(s) = pending {
-                        let table = p.table_card.expect("turned card on the table");
-                        let h = pos.hands[usize::from(s)] | bit(table);
-                        let burn = pick(&mut rng, legal_burns(h, p.trump));
-                        pos.hands[usize::from(s)] = h & !bit(burn);
-                    }
-                    let rel = (pos.leader + 8 - m.dealer()) % 8;
-                    return (pos, ctx, rel);
-                }
-                _ => {}
-            }
-        }
-        let acts = m.legal_actions();
-        let a: Action = acts[rng.bounded(acts.len() as u64) as usize];
-        m.apply(a).expect("legal");
-    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -131,29 +102,35 @@ struct Rec {
     timed_out: bool,
     flipped: Option<bool>,
     value_changed: Option<bool>,
+    cutoffs: u64,
+    equiv_skipped: u64,
+    replaced: u64,
+    tt_bytes: u64,
 }
 
 fn run_world(a: &Args, table: &EquityTable, w: u64) -> Rec {
-    let (pos, ctx, rel) = sample(a.seed, a.trick, w);
+    let (pos, ctx, rel) = sample_world(a.seed, a.trick, w, 0);
     let opts = Options {
         tt: a.tt,
         order: TieOrder::Ascending,
         time_cap_ms: a.cap_ms,
     };
+    let fopts = FastOptions {
+        tt_mb: a.tt_mb,
+        time_cap_ms: a.cap_ms,
+        ..FastOptions::default().combo(a.switches)
+    };
+    let run = |order: TieOrder| -> Solution {
+        if a.fast {
+            solve_fast(&pos, ctx, table, FastOptions { order, ..fopts })
+        } else {
+            solve(&pos, ctx, table, Options { order, ..opts })
+        }
+    };
     let t0 = Instant::now();
-    let sol = solve(&pos, ctx, table, opts);
+    let sol = run(TieOrder::Ascending);
     let ms = t0.elapsed().as_secs_f64() * 1e3;
-    let rev = (a.flip && !sol.timed_out).then(|| {
-        solve(
-            &pos,
-            ctx,
-            table,
-            Options {
-                order: TieOrder::Descending,
-                ..opts
-            },
-        )
-    });
+    let rev = (a.flip && !sol.timed_out).then(|| run(TieOrder::Descending));
     let flipped = rev.as_ref().map(|r| r.best != sol.best);
     let value_changed = rev.as_ref().map(|r| r.value != sol.value);
     Rec {
@@ -171,6 +148,10 @@ fn run_world(a: &Args, table: &EquityTable, w: u64) -> Rec {
         timed_out: sol.timed_out,
         flipped,
         value_changed,
+        cutoffs: sol.stats.cutoffs,
+        equiv_skipped: sol.stats.equiv_skipped,
+        replaced: sol.stats.tt_replaced,
+        tt_bytes: sol.stats.tt_bytes,
     }
 }
 
@@ -260,8 +241,25 @@ fn main() {
         .filter(|r| r.value_changed == Some(true))
         .count();
     println!(
-        "summary\ttrick={} worlds={} tt={} cap_ms={:?} threads={} wall_s={:.1}",
-        a.trick, a.worlds, a.tt, a.cap_ms, a.threads, wall
+        "summary\ttrick={} worlds={} solver={} switches={} tt={} cap_ms={:?} threads={} wall_s={:.1}",
+        a.trick,
+        a.worlds,
+        if a.fast { "fast" } else { "naive" },
+        a.switches,
+        a.tt,
+        a.cap_ms,
+        a.threads,
+        wall
+    );
+    let sum = |f: fn(&&Rec) -> u64| done.iter().map(f).sum::<u64>();
+    let max_bytes = done.iter().map(|r| r.tt_bytes).max().unwrap_or(0);
+    println!(
+        "summary\tcutoffs={} equiv_skipped={} tt_replaced={} fast_tt_max_mb={:.1} nodes_total={}",
+        sum(|r| r.cutoffs),
+        sum(|r| r.equiv_skipped),
+        sum(|r| r.replaced),
+        max_bytes as f64 / 1048576.0,
+        sum(|r| r.nodes)
     );
     println!(
         "summary\tsolved={} timeouts={} ms_median={:.3} ms_p90={:.3} ms_max={:.3} nodes_median={:.0} nodes_p90={:.0} nodes_max={:.0}",

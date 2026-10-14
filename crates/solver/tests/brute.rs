@@ -6,114 +6,62 @@
 //! game-end checks are the reference, not `equity::hand`). It uses the same backup rule and tie
 //! order (the mover's team entry is maximised; the lowest card index wins ties).
 
-use engine::cards::Card;
-use engine::game::{Action, Match, Phase, Rules};
-use engine::rng::Rng;
+mod common;
+
+use common::{brute, leaf, position_at, tie_leaf};
+use engine::game::Action;
 use engine::team_of;
 use equity::{MatchState, MoneyChance, ONE};
-use solver::{FnLeaf, Leaf, Options, TieOrder, from_match, solve};
-
-/// A deterministic, arbitrary leaf table: weights from a hash of the state (not rotation-symmetric
-/// on purpose, so any mix-up of teams or dealers shows).
-fn fake_value(s: &MatchState) -> MoneyChance {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s
-        .scores
-        .iter()
-        .chain(&s.games)
-        .chain(core::iter::once(&s.dealer_team))
-    {
-        h = (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01B3);
-    }
-    let w: [u128; 4] = core::array::from_fn(|t| u128::from((h >> (16 * t)) & 0xFFFF) + 1);
-    MoneyChance::from_weights(w)
-}
-
-fn leaf() -> FnLeaf<fn(&MatchState) -> MoneyChance> {
-    FnLeaf(fake_value)
-}
-
-/// Play random legal actions from a seeded match until the start of trick `k` (k >= 2).
-fn position_at(seed: u64, k: u8) -> Match {
-    let mut rng = Rng::new(seed);
-    let mut m = Match::new(rng.next_u64(), Rules::HOUSE);
-    let skip = rng.bounded(3) as u32;
-    loop {
-        if m.phase() == Phase::MatchOver {
-            m = Match::new(rng.next_u64(), Rules::HOUSE);
-            continue;
-        }
-        let p = m.public();
-        if p.trick_no == k
-            && p.trick_cards.is_empty()
-            && m.hand_index() >= skip
-            && matches!(m.phase(), Phase::AwaitPlay(_))
-        {
-            return m;
-        }
-        let acts = m.legal_actions();
-        m.apply(acts[rng.bounded(acts.len() as u64) as usize])
-            .expect("legal");
-    }
-}
-
-/// The brute-force max^n value by engine clones.
-fn brute<L: Leaf>(m: &Match, hand0: u32, leaf: &L) -> MoneyChance {
-    if m.phase() == Phase::MatchOver {
-        let w = (0..4u8)
-            .find(|&t| m.games_won()[usize::from(t)] >= 2)
-            .expect("a winner");
-        return MoneyChance::certain(w);
-    }
-    if m.hand_index() != hand0 {
-        return leaf.value(&MatchState {
-            scores: m.scores(),
-            games: m.games_won(),
-            dealer_team: m.dealer() % 4,
-        });
-    }
-    let Phase::AwaitPlay(seat) = m.phase() else {
-        panic!("no burns after trick 1")
-    };
-    let team = team_of(seat);
-    let mut cards: Vec<Card> = m.legal_actions().iter().map(|a| a.card()).collect();
-    cards.sort_unstable();
-    let mut best: Option<MoneyChance> = None;
-    for c in cards {
-        let mut n = m.clone();
-        n.apply(Action::Play(c)).expect("legal");
-        let v = brute(&n, hand0, leaf);
-        if best.is_none_or(|b| v.get(team) > b.get(team)) {
-            best = Some(v);
-        }
-    }
-    best.expect("legal set is never empty")
-}
+use solver::{FastOptions, FnLeaf, Options, TieOrder, from_match, solve, solve_fast};
 
 fn check_against_brute(k: u8, seeds: core::ops::Range<u64>) {
-    let l = leaf();
+    // The tie-heavy table only on the cheap endgames (the engine brute force is slow at trick 3).
+    let leaves = if k >= 4 {
+        vec![leaf(), tie_leaf()]
+    } else {
+        vec![leaf()]
+    };
+    for (li, l) in leaves.iter().enumerate() {
+        check_against_brute_with(k, seeds.clone(), l, li);
+    }
+}
+
+fn check_against_brute_with(k: u8, seeds: core::ops::Range<u64>, l: &common::L, li: usize) {
     for seed in seeds {
         let m = position_at(seed, k);
         let (pos, ctx, pending) = from_match(&m).expect("position");
         assert!(pending.is_none());
-        let want = brute(&m, m.hand_index(), &l);
+        let want = brute(&m, m.hand_index(), l);
         for tt in [false, true] {
             let got = solve(
                 &pos,
                 ctx,
-                &l,
+                l,
                 Options {
                     tt,
                     ..Options::default()
                 },
             );
-            assert_eq!(got.value, Some(want), "seed {seed} trick {k} tt {tt}");
+            assert_eq!(
+                got.value,
+                Some(want),
+                "seed {seed} trick {k} tt {tt} leaf {li}"
+            );
             // Each root child's value equals the brute-force value after that card.
             for &(c, v) in &got.children {
                 let mut n = m.clone();
                 n.apply(Action::Play(c)).expect("legal");
-                assert_eq!(v, brute(&n, m.hand_index(), &l), "seed {seed} child {c}");
+                assert_eq!(v, brute(&n, m.hand_index(), l), "seed {seed} child {c}");
             }
+        }
+        // The optimised solver, every switch combination, also matches the brute force.
+        for bits in 0..16 {
+            let got = solve_fast(&pos, ctx, l, FastOptions::default().combo(bits));
+            assert_eq!(
+                got.value,
+                Some(want),
+                "seed {seed} trick {k} combo {bits} leaf {li}"
+            );
         }
     }
 }

@@ -1,7 +1,7 @@
 [package]
 name = "solver"
 version = "0.1.0"
-description = "Exact open-hand max^n solver scored in money chance (M2 measurement spike: naive, no pruning)"
+description = "Exact open-hand max^n solver scored in money chance: the naive reference and the optimised solver (M2)"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -17,3 +17,7 @@ path = "src/bin/solver-spike.rs"
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "solver-identity"
+path = "src/bin/solver-identity.rs"
