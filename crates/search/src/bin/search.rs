@@ -10,7 +10,7 @@
 //! search bench-t1  --mode fill|prod --decisions FILE --equity TABLE --json OUT --threads T
 //!                  [--window-s 240] [--tt-mb 512 (fill)] [--tt-budget-mb B]
 //!                  [--worlds-per-decision 800] [--sched-json …] (prod) [--seed 1] [--label 1]
-//!                  [--usable-cores C] [--min-cpu-pct 80] [--ramp-s 20] [--busy-streak-s 10]
+//!                  [--usable-cores C] [--min-cpu-pct 80] [--ramp-s 20] [--busy-streak-s 10] [--min-busy-pct 95]
 //!                  [--cpu-interval-s 30] [--no-guard] [--sample-ms 1000]
 //!                  [--progress FILE] [--stop-file FILE]
 //! search agree     --worlds FILE [--worlds FILE …] [--grid 10,20,40,80,160,320] [--json FILE]
@@ -421,6 +421,7 @@ fn bench_t1(a: &Args) -> Result<(), String> {
         min_cpu_pct: float(a, "--min-cpu-pct", d.min_cpu_pct)?,
         cpu_interval_s: float(a, "--cpu-interval-s", d.cpu_interval_s)?,
         busy_streak_s: float(a, "--busy-streak-s", d.busy_streak_s)?,
+        min_busy_pct: float(a, "--min-busy-pct", d.min_busy_pct)?,
         usable_cores: float(a, "--usable-cores", d.usable_cores)?,
     };
     // `--no-guard` keeps the usable cores (for the CPU share) but never stops the window.

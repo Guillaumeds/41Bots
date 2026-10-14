@@ -28,8 +28,9 @@
 //!
 //! **Guard** ([`Guard`]): from `ramp_s` (20 s) into the window, it stops the window at once when
 //! the process's CPU over the last `cpu_interval_s` (30 s; counted from half the ramp on) is
-//! below `min_cpu_pct` of the usable cores, or when fewer than `T` threads have been working for
-//! more than `busy_streak_s` (10 s) in a row. The reason is recorded and the runner ends the
+//! below `min_cpu_pct` of the usable cores, or when fewer than `min_busy_pct` (95%) of the `T`
+//! threads have been working for more than `busy_streak_s` (10 s) in a row (the tolerance lets the
+//! production plan leave a few threads unassigned, e.g. 9 worlds × 42 threads on 384). The reason is recorded and the runner ends the
 //! chunk FAILED (`crates/runner/src/t1bench.rs`).
 //!
 //! **Analysis** ([`analyse`], [`summary_text`]): per window nodes per second for the machine and
@@ -108,8 +109,11 @@ pub struct Guard {
     pub min_cpu_pct: f64,
     /// The CPU is measured over this many seconds back (the heartbeat interval).
     pub cpu_interval_s: f64,
-    /// Fewer than `T` threads working for more than this many seconds in a row stops the window.
+    /// Fewer than `min_busy_pct` of the `T` threads working for more than this many seconds in a
+    /// row stops the window.
     pub busy_streak_s: f64,
+    /// The share of the `T` threads, in percent, that must be working (rounded up to whole threads).
+    pub min_busy_pct: f64,
     /// The cores the process may use (the CPU percentage's denominator).
     pub usable_cores: f64,
 }
@@ -121,6 +125,7 @@ impl Default for Guard {
             min_cpu_pct: 80.0,
             cpu_interval_s: 30.0,
             busy_streak_s: 10.0,
+            min_busy_pct: 95.0,
             usable_cores: std::thread::available_parallelism().map_or(1.0, |n| n.get() as f64),
         }
     }
@@ -129,7 +134,7 @@ impl Default for Guard {
 /// The guard's memory between samples.
 #[derive(Clone, Debug, Default)]
 pub struct GuardState {
-    /// When the current run of samples with fewer than `T` threads working began.
+    /// When the current run of samples with too few threads working began.
     low_since: Option<f64>,
 }
 
@@ -148,7 +153,8 @@ impl Guard {
             st.low_since = None;
             return None;
         }
-        if (s.busy as usize) < t {
+        let need = ((self.min_busy_pct.clamp(0.0, 100.0) / 100.0) * t as f64).ceil() as usize;
+        if (s.busy as usize) < need.clamp(1, t.max(1)) {
             let since = *st.low_since.get_or_insert(s.t);
             if s.t - since > self.busy_streak_s {
                 return Some(format!(
@@ -1378,8 +1384,8 @@ mod tests {
         }
     }
 
-    /// The guard: nothing during the ramp; fewer threads working than `T` for more than the
-    /// streak stops; a short dip does not; low CPU over the interval stops.
+    /// The guard: nothing during the ramp; fewer than 95% of the `T` threads working for more
+    /// than the streak stops; a short dip does not; low CPU over the interval stops.
     #[test]
     fn guard_rules() {
         let g = Guard {
@@ -1387,6 +1393,7 @@ mod tests {
             min_cpu_pct: 80.0,
             cpu_interval_s: 30.0,
             busy_streak_s: 10.0,
+            min_busy_pct: 95.0,
             usable_cores: 4.0,
         };
         let run = |busy: &dyn Fn(f64) -> u64, cores_used: f64| -> Option<(f64, String)> {
@@ -1425,6 +1432,23 @@ mod tests {
         let mut st = GuardState::default();
         let v = vec![sample(0.0, 0, 0.0), sample(25.0, 4, 0.0)];
         assert_eq!(off.check(&mut st, &v, Mode::Prod, 4), None);
+        // 384 threads: the production plan's 9 worlds × 42 threads (378 working) pass; 364 (just
+        // under 95%) for over the streak do not.
+        let wide = Guard {
+            min_cpu_pct: 0.0,
+            ..g.clone()
+        };
+        let streak = |busy: u64| {
+            let mut st = GuardState::default();
+            let mut v = vec![sample(0.0, 0, 0.0)];
+            (1..=60).find_map(|i| {
+                v.push(sample(f64::from(i), busy, 0.0));
+                wide.check(&mut st, &v, Mode::Prod, 384)
+            })
+        };
+        assert_eq!(streak(378), None);
+        assert_eq!(streak(365), None);
+        assert!(streak(364).is_some_and(|r| r.starts_with("idle threads: only 364 of 384")));
     }
 
     fn leaf() -> Arc<SharedLeaf> {
@@ -1547,6 +1571,7 @@ mod tests {
             ramp_s: 1.0,
             min_cpu_pct: 0.0,
             busy_streak_s: 1.0,
+            min_busy_pct: 95.0,
             ..Guard::default()
         });
         let t0 = Instant::now();
