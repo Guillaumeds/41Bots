@@ -422,6 +422,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "solver"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "equity",
+]
+
+[[package]]
 name = "syn"
 version = "3.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,19 @@
+[package]
+name = "solver"
+version = "0.1.0"
+description = "Exact open-hand max^n solver scored in money chance (M2 measurement spike: naive, no pruning)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+engine = { path = "../engine" }
+equity = { path = "../equity" }
+
+[[bin]]
+name = "solver-spike"
+path = "src/bin/solver-spike.rs"
+
+[lints]
+workspace = true

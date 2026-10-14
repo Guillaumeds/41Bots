@@ -82,3 +82,8 @@ M1 adds the table manager, the arena (14-way duplicate block, generalised SPRT, 
 - Table v0 checks pass; σ_b = 0.146 money chance (1.17 stakes) per 14-way block, rules-v1 vs random; canary exactly 0.
 - Leakage and replay tests pass. **M1 gate met.** Open owner question: see the early Joker-burn ace question above.
 - Next: M2 (exact solver) — measurement spike first (PLAN §13).
+
+## M2 progress (2026-10-14)
+- **Measurement spike done** (`crates/solver`, binary `solver-spike`, results in `docs/M2-SPIKE.md`): naive exact max^n in money chance, optional plain transposition table; matches an engine-driven brute force on 1-, 2-, 3-card endgames; table on = off.
+- Naive costs on the 4-vCPU Xeon: trick 3 median 18 ms (p90 55 ms) with the table; trick 2 median 9 s, 7% over 60 s, 365 MB; trick 1 never finished in 60 s. 82–85% of decisions have tied best cards; reversing the tie order never changed a root value at tricks 3–4.
+- Next: equivalent cards, Sturtevant pruning (on = off under the tie order), move ordering; repeat the spike on a second CPU type (vast.ai EPYC) for the M2 gate.
