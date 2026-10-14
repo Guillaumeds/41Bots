@@ -892,7 +892,11 @@ mod tests {
         let line =
             "123 (my (odd) name) R 45 123 123 0 -1 4194304 1 0 0 0 700 50 9 1 20 0 5 0 1 2 3";
         assert_eq!(parse_proc_stat(line), Some((45, 760)));
-        let me = std::process::id();
-        assert!(tree_ticks(me).is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tree_ticks_reads_own_process() {
+        assert!(tree_ticks(std::process::id()).is_some());
     }
 }
