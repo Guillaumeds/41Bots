@@ -820,7 +820,7 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("--min-cores", type=int, default=16)
         s.add_argument("--min-ram-gb", type=int, default=32)
         s.add_argument("--disk-gb", type=int, default=20)
-        s.add_argument("--max-net-cost", type=float, default=0.02, help="max $/GB up or down")
+        s.add_argument("--max-net-cost", type=float, default=0.10, help="max $/GB up or down (owner 2026-10-14: 0.10; our traffic is tiny)")
         s.add_argument("--premium", type=float, default=0.20, help="speed premium margin (owner's 20%% rule)")
         s.add_argument("--max-dph", type=float, default=None, help="max total $/hour for the offer")
         s.add_argument("--cpu-match", default="", help="regex the offer's CPU name must match (e.g. EPYC)")
