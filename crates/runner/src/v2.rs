@@ -14,6 +14,10 @@
 //! chunk's bundle depends only on its seed and parameters, so a redone chunk reproduces the same
 //! bytes and the same key.
 //!
+//! Warnings a running chunk puts in its own heartbeat (`progress.warnings`, e.g. a transposition
+//! table size lowered to fit memory) appear in the run's heartbeat as `<stream>/<index>: …`
+//! while it runs, on stderr once, and in `final-manifest.json` (`warnings`).
+//!
 //! End: every listed output is checked in the remote, `merged.json` (the deterministic merged
 //! report) is uploaded, then `final-manifest.json` (git commit, image, build, seeds, threads,
 //! versions), then `DONE` (or `FAILED`), then the instance destroys itself (M1 behaviour).
@@ -326,6 +330,10 @@ struct Run {
     partial_ok: bool,
     /// Kinds whose chunk-size note has been printed.
     noted: BTreeSet<String>,
+    /// Warnings of the chunks running now (`<stream>/<index>: …`), for the heartbeat.
+    warnings: Vec<String>,
+    /// Every warning seen this session, for the final manifest.
+    warned: BTreeSet<String>,
 }
 
 fn compact_utc() -> String {
@@ -397,6 +405,8 @@ pub fn run(manifest: &Value, work: &Path) -> ExitCode {
             .unwrap_or(0.0),
         partial_ok: false,
         noted: BTreeSet::new(),
+        warnings: Vec::new(),
+        warned: BTreeSet::new(),
     };
     let outcome = r.go();
     let ok = outcome.is_ok();
@@ -787,6 +797,21 @@ impl Run {
             // Free threads with nothing to start (the tail, or a deadline cut-off), or a chunk
             // that says so itself: partial CPU use is expected.
             self.partial_ok = used < self.threads || running.iter().any(|r| chunk_partial(&r.dir));
+            let warnings: Vec<String> = running
+                .iter()
+                .flat_map(|r| {
+                    let name = &self.m.streams[r.stream].name;
+                    chunk_warnings(&r.dir)
+                        .into_iter()
+                        .map(move |w| format!("{name}/{}: {w}", r.index))
+                })
+                .collect();
+            for w in &warnings {
+                if self.warned.insert(w.clone()) {
+                    eprintln!("runner: WARNING: chunk {w}");
+                }
+            }
+            self.warnings = warnings;
             // Reap finished workers in a fixed order.
             let mut i = 0;
             while i < running.len() {
@@ -830,6 +855,7 @@ impl Run {
             std::thread::sleep(Duration::from_millis(100));
         }
         self.partial_ok = false;
+        self.warnings.clear();
         match error {
             Some(e) => Err(e),
             None => Ok(()),
@@ -895,7 +921,7 @@ impl Run {
             "run_id": self.m.run_id, "seq": self.hb_seq, "utc": utc_string(unix_now()),
             "phase": phase,
             "progress": { "queue": self.queue(), "entries": self.entries.len(),
-                          "partial_cpu_ok": self.partial_ok },
+                          "partial_cpu_ok": self.partial_ok, "warnings": self.warnings },
             "elapsed_s": elapsed.round(), "threads": self.threads,
             "usable_cores": (self.cpu.cores * 100.0).round() / 100.0,
             "cpu_util_pct": round(cpu.cgroup), "cpu_util_source": "cgroup",
@@ -987,6 +1013,7 @@ impl Run {
             "inputs": self.m.inputs.iter().map(|(n, h)| json!({ "name": n, "sha256": h })).collect::<Vec<_>>(),
             "chunk_seeds": seeds,
             "done_list_seq": self.done_seq.saturating_sub(1),
+            "warnings": self.warned,
             "utc": utc_string(unix_now()),
         })
     }
@@ -1000,6 +1027,22 @@ fn chunk_partial(dir: &Path) -> bool {
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .and_then(|v| v["progress"]["partial_cpu_ok"].as_bool())
         .unwrap_or(false)
+}
+
+/// The warnings a running chunk's own heartbeat lists (`progress.warnings`).
+fn chunk_warnings(dir: &Path) -> Vec<String> {
+    fs::read_to_string(dir.join("heartbeat.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| {
+            v["progress"]["warnings"].as_array().map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
 }
 
 /// The last `n` lines of a log file.

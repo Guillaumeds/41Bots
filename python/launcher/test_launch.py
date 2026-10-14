@@ -32,6 +32,10 @@ class World:
         self.next_id = 100
         self.hb_seq = 0
         self.created_on: list[int] = []
+        self.envs: list[str] = []  # the --env string of each created instance
+        self.key_answer = "api-key created {'id': 77, 'key': 'dk-0123456789abcdef', 'permissions': {'api': {}}}"
+        self.keys: dict[int, str] = {}  # destroy-only keys alive in the account
+        self.deleted_keys: list[int] = []
 
     # ---- clock
     def time(self) -> float:
@@ -81,7 +85,19 @@ class World:
             self.next_id += 1
             self.instances[iid] = {"alive": True, "polls": 0, "script": self.scripts.pop(0), "offer": oid}
             self.created_on.append(oid)
-            return {"success": True, "new_contract": iid}
+            self.envs.append(args[args.index("--env") + 1])
+            return {"success": True, "new_contract": iid, "instance_api_key": "ik-secret"}
+        if cmd == ("create", "api-key"):
+            with open(args[args.index("--permission_file") + 1]) as fh:
+                perm = json.load(fh)
+            assert perm == {"api": {"instance_write": {"api.instance.destroy": {}}}}, perm
+            assert args[args.index("--name") + 1] == f"41bots-destroy-{RUN}"
+            self.keys[77] = "dk-0123456789abcdef"
+            return self.key_answer
+        if cmd == ("delete", "api-key"):
+            self.keys.pop(int(args[2]), None)
+            self.deleted_keys.append(int(args[2]))
+            return "{'success': True}"
         if cmd == ("show", "instance"):
             inst = self.instances.get(int(args[2]))
             if not inst or not inst["alive"]:
@@ -213,6 +229,44 @@ class LauncherTest(unittest.TestCase):
     def test_redact(self):
         os.environ["R2_SECRET_ACCESS_KEY"] = "s3cr3t"
         self.assertEqual(launch.redact("key s3cr3t here"), "key *** here")
+
+    def test_destroy_key_is_passed_and_deleted(self):
+        w = World([offer(1, 11, 1.0), offer(2, 12, 1.5)], ["die:2", "done:1"])
+        launch.SECRETS.clear()
+        code, _ = self.run_launch(w, {"format": 2, "run_id": RUN, "run_seed": 1, "streams": []})
+        self.assertEqual(code, 0)
+        # Every machine of the run (the replacement too) gets the key; it is deleted at the end.
+        self.assertEqual(len(w.envs), 2)
+        self.assertTrue(all("-e VAST_DESTROY_KEY=dk-0123456789abcdef" in e for e in w.envs))
+        self.assertEqual((w.keys, w.deleted_keys), ({}, [77]))
+        # It is redacted from anything logged.
+        self.assertEqual(launch.redact("x dk-0123456789abcdef y"), "x *** y")
+        launch.SECRETS.clear()
+
+    def test_run_goes_ahead_without_a_destroy_key(self):
+        w = World([offer(1, 11, 1.0)], ["done:1"])
+        w.key_answer = "An unexpected error occurred: 400 Client Error: Bad Request for url: https://x/api/v0/auth/apikeys/"
+        code, _ = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 10, "seed": 1}}})
+        self.assertEqual(code, 0)
+        self.assertNotIn("VAST_DESTROY_KEY", w.envs[0])
+        self.assertEqual(w.deleted_keys, [])
+        # --no-destroy-key: no key asked for at all.
+        w = World([offer(1, 11, 1.0)], ["done:1"])
+        w.key_answer = "unused"
+        code, _ = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 10, "seed": 1}}},
+                                  "--no-destroy-key")
+        self.assertEqual((code, w.keys), (0, {}))
+        self.assertNotIn("VAST_DESTROY_KEY", w.envs[0])
+
+    def test_parse_created_key(self):
+        p = launch.parse_created_key
+        self.assertEqual(p("api-key created {'id': 5, 'key': 'abc123', 'permissions': {'api': {}}}\n"),
+                         {"id": 5, "key": "abc123"})
+        self.assertEqual(p('api-key created {"id": 5, "key": "abc123", "permissions": false}'),
+                         {"id": 5, "key": "abc123"})
+        self.assertIsNone(p("An unexpected error occurred: 400 Client Error"))
+        self.assertIsNone(p("api-key created {'id': 5}"))
+        self.assertIsNone(p("api-key created {'id': 5, 'key': 'has space'}"))
 
 
 @contextlib.contextmanager

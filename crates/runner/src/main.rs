@@ -7,8 +7,9 @@
 //!
 //! **Format 1** (docs/M1-SPEC.md section 7; no `format` key): one chunk. Steps: record the
 //! hardware, run the micro-benchmark, run the chunk while writing a heartbeat every 30 s, write
-//! outputs then `DONE` (or `FAILED`), upload everything to R2 with rclone, and, when
-//! `CONTAINER_ID` and `CONTAINER_API_KEY` are set, destroy this vast.ai instance last.
+//! outputs then `DONE` (or `FAILED`), upload everything to R2 with rclone, and, on vast.ai
+//! (`CONTAINER_ID` set), ask vast.ai to destroy this instance last (see [`self_destroy`]; the
+//! launcher destroys it too, and is the mechanism that does not depend on this machine).
 //! R2 layout under the manifest's `out` prefix (default `runs/<run_id>`):
 //! `hardware.json`, `benchmark.json`, `heartbeat/<seq:06>.json` (versioned, never overwritten),
 //! `out/...` (immutable), `result.json`, and `DONE` or `FAILED` uploaded last.
@@ -32,6 +33,7 @@ use serde_json::{Value, json};
 
 mod bundle;
 mod measure;
+mod mem;
 mod remote;
 mod sched;
 mod spike;
@@ -189,6 +191,10 @@ fn hardware() -> Value {
         "ncpu_env": std::env::var("NCPU").ok(),
         "dph_env": std::env::var("DPH").ok(),
         "vast_container_id": std::env::var("CONTAINER_ID").ok(),
+        // Which destroy keys are present (never their values).
+        "vast_destroy_keys": DESTROY_KEYS.iter()
+            .filter(|k| std::env::var(k).is_ok_and(|v| !v.is_empty()))
+            .collect::<Vec<_>>(),
         "bin_sha": std::env::var("BIN_SHA").ok(),
         "bin_build": std::env::var("BIN_BUILD").ok(),
     })
@@ -772,25 +778,89 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
     }
 }
 
+/// The keys tried to destroy this instance, in order: the per-instance key vast.ai injects
+/// (documented as able to start, stop or destroy only this instance), then the destroy-only key
+/// the launcher creates for the run and passes with `--env` (`python/launcher/launch.py`).
+const DESTROY_KEYS: [&str; 2] = ["CONTAINER_API_KEY", "VAST_DESTROY_KEY"];
+
+/// Asks vast.ai to destroy this instance, as the very last step. Nothing to do off vast.ai
+/// (`CONTAINER_ID` unset). Each key goes to `vastai` through its `VAST_API_KEY` environment
+/// variable, never on a command line, and only the API's error line is printed (`vastai`'s own
+/// hints print a key's last characters). In the runs of 2026-10-14 vast.ai answered the injected
+/// key with `401 Invalid user key`; the launcher's key, then the launcher's own destroy (on
+/// `DONE`/`FAILED`, a stale heartbeat or its time limit) and `vast-cleanup.yml` cover that.
 fn self_destroy() {
-    let (Ok(id), Ok(key)) = (
-        std::env::var("CONTAINER_ID"),
-        std::env::var("CONTAINER_API_KEY"),
-    ) else {
+    let Some(id) = std::env::var("CONTAINER_ID").ok().filter(|v| !v.is_empty()) else {
         return;
     };
-    if id.is_empty() || key.is_empty() {
-        return;
-    }
     println!("runner: destroying vast.ai instance {id}");
     let _ = std::io::stdout().flush();
-    let status = Command::new("vastai")
-        .args(["destroy", "instance", &id, "-y", "--api-key", &key])
-        .stdin(Stdio::null())
-        .status();
-    if !matches!(status, Ok(s) if s.success()) {
-        eprintln!("runner: self-destroy failed ({status:?}); the launcher will destroy it");
+    let mut tried = false;
+    for name in DESTROY_KEYS {
+        let Some(key) = std::env::var(name).ok().filter(|v| !v.is_empty()) else {
+            continue;
+        };
+        tried = true;
+        let out = Command::new("vastai")
+            .args(["destroy", "instance", &id, "-y"])
+            .env("VAST_API_KEY", &key)
+            .env("VASTAI_NO_UPDATE_CHECK", "1")
+            .stdin(Stdio::null())
+            .output();
+        let outcome = match out {
+            Ok(o) => destroy_outcome(
+                &format!(
+                    "{}\n{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                ),
+                &id,
+                &key,
+            ),
+            Err(e) => Err(format!("cannot run vastai: {e}")),
+        };
+        match outcome {
+            Ok(()) => {
+                println!("runner: vast.ai accepted the destroy of instance {id} ({name})");
+                let _ = std::io::stdout().flush();
+                return;
+            }
+            Err(why) => eprintln!("runner: self-destroy with {name} refused: {why}"),
+        }
     }
+    if !tried {
+        eprintln!("runner: no destroy key set ({})", DESTROY_KEYS.join(", "));
+    }
+    eprintln!(
+        "runner: instance {id} could not destroy itself; the launcher destroys it when it sees \
+         DONE or FAILED (python/launcher/launch.py), and vast-cleanup.yml destroys any 41bots- \
+         instance left after 2 hours. With neither running, destroy it in the vast.ai console."
+    );
+}
+
+/// Whether `vastai destroy instance <id>` succeeded, from what it printed: vastai 1.8.3 exits
+/// with 0 even when the API refuses, and prints `destroying instance <id>.` only on success.
+/// A refusal is reduced to the API's error line, with `key` masked should it appear.
+fn destroy_outcome(text: &str, id: &str, key: &str) -> Result<(), String> {
+    let ok = format!("destroying instance {id}.");
+    if text.lines().any(|l| l.trim() == ok) {
+        return Ok(());
+    }
+    let why = text
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("Failed with error"))
+        .or_else(|| text.lines().map(str::trim).find(|l| !l.is_empty()))
+        .unwrap_or("vastai printed nothing");
+    let mut why = why.chars().take(200).collect::<String>();
+    if !key.is_empty() {
+        why = why.replace(key, "***");
+    }
+    // vastai's hint lines name a key's last characters; never pass one on.
+    if why.contains("ends in") {
+        why = "vastai refused (details withheld: they name the key)".into();
+    }
+    Err(why)
 }
 
 fn steps(ctx: &mut Ctx, manifest: &Value) -> Result<(), String> {
@@ -963,6 +1033,33 @@ mod tests {
         assert_eq!(parse_cpu_max("4800000 100000"), Some(48.0));
         assert_eq!(parse_cpu_max("150000 100000"), Some(1.5));
         assert_eq!(parse_cpu_max("garbage"), None);
+    }
+
+    #[test]
+    fn destroy_outcome_reads_vastai() {
+        let key = "0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            destroy_outcome("destroying instance 4242.\n\n", "4242", key),
+            Ok(())
+        );
+        // vastai 1.8.3 refusing the injected key (with exit status 0).
+        let refused = format!(
+            "\nFailed with error 401: Invalid user key\n  Sent key from $VAST_API_KEY (ends in ...{}). Update the env var with a new key.\n",
+            &key[28..]
+        );
+        let e = destroy_outcome(&refused, "4242", key).expect_err("refused");
+        assert_eq!(e, "Failed with error 401: Invalid user key");
+        // Another instance's confirmation is not this one's.
+        assert!(destroy_outcome("destroying instance 42.", "4242", key).is_err());
+        // Unknown output: its first line, the key masked, never a key suffix.
+        let e = destroy_outcome(&format!("odd {key} answer"), "4242", key).expect_err("odd");
+        assert_eq!(e, "odd *** answer");
+        let e = destroy_outcome("Sent key (ends in ...cdef)", "4242", key).expect_err("hint");
+        assert!(!e.contains("cdef"), "{e}");
+        assert_eq!(
+            destroy_outcome("", "4242", key),
+            Err("vastai printed nothing".into())
+        );
     }
 
     #[test]

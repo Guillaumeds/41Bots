@@ -92,3 +92,7 @@ jobs:
         if: always() && hashFiles('instance-id.txt') != ''
         shell: bash
         run: python3 python/launcher/launch.py destroy "$(cat instance-id.txt)" || true
+      - name: Safety net - delete the run's destroy-only API key if the launcher did not
+        if: always() && hashFiles('instance-id.txt.destroy-key') != ''
+        shell: bash
+        run: python3 python/launcher/launch.py delete-key "$(cat instance-id.txt.destroy-key)" || true

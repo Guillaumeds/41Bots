@@ -442,6 +442,7 @@ dependencies = [
  "search",
  "serde_json",
  "sha2",
+ "solver",
  "zstd",
 ]
 

@@ -146,6 +146,66 @@ fn max_buckets_of(bytes: usize) -> u64 {
     ((bytes / SLOT_BYTES / WAYS) as u64).max(1)
 }
 
+/// Memory of one table, in bytes, from the growth rule ([`Table::put`], [`Table::grow`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TableMemory {
+    /// What the table holds once grown to its cap, and keeps between solves.
+    pub cap: usize,
+    /// The most it can make the process hold: every block of its growth chain at once. Each
+    /// growth step reallocates the slot vector to the new size; unless the allocator extends the
+    /// block in place, the old block and the new one are both held while the slots are copied,
+    /// and the old block, though freed, may stay resident (glibc keeps freed blocks below its
+    /// mmap threshold in its heap for reuse). The chain is the start size doubled while below
+    /// the cap (the last of these, `old` buckets, is at least half the cap), then the cap, so
+    /// the peak is `cap + old + old/2 + … + start` = `cap + 2·old − start`: about 2 × cap when
+    /// the cap is an exact doubling of the start size, up to just under 3 × cap. It depends on
+    /// the growth rule only, never on the allocator, so no allocator can exceed it; glibc in
+    /// practice stays well below (blocks of 32 MiB and more are moved by `mremap`, not copied).
+    pub peak: usize,
+}
+
+impl TableMemory {
+    /// `peak / cap` (1 when the table never grows).
+    pub fn peak_factor(&self) -> f64 {
+        if self.cap == 0 {
+            1.0
+        } else {
+            self.peak as f64 / self.cap as f64
+        }
+    }
+}
+
+/// The memory of a [`Table`] capped at about `bytes` bytes ([`Table::with_bytes`]).
+pub fn table_memory(bytes: usize) -> TableMemory {
+    let max = max_buckets_of(bytes);
+    let mut b = max.min(START_BUCKETS);
+    let mut peak = b;
+    // The growth steps in order: b → min(2b, max) while below the cap; every block counted.
+    while b < max {
+        b = (b * 2).min(max);
+        peak += b;
+    }
+    let slot = WAYS * SLOT_BYTES;
+    TableMemory {
+        cap: max as usize * slot,
+        peak: peak as usize * slot,
+    }
+}
+
+/// The memory of a [`SharedTable`] of `mb` megabytes for `threads` threads
+/// ([`SharedTable::new`]): every shard is a [`Table`], each counted at its own cap and peak (a
+/// shard's old blocks may stay resident after it grows, so all shards can be at their peak at
+/// once), plus the shard locks.
+pub fn shared_table_memory(mb: usize, threads: usize) -> TableMemory {
+    let (n, per) = shard_layout(mb, threads);
+    let shard = table_memory(per);
+    let locks = n * core::mem::size_of::<Mutex<Table>>();
+    TableMemory {
+        cap: n * shard.cap + locks,
+        peak: n * shard.peak + locks,
+    }
+}
+
 /// The first slot of the bucket of `hash` in a table of `buckets` buckets. Multiply-shift range
 /// reduction (no modulo bias concerns: placement only); with more buckets a key's bucket index
 /// never decreases.
@@ -661,6 +721,64 @@ mod tests {
                 &format!("wrap round {r}"),
             );
             assert!(t.entries > 0);
+        }
+    }
+
+    /// [`table_memory`] against the table itself: filled past its cap, the blocks its slot
+    /// vector actually held (each capacity it had) sum to `peak`, and it ends holding `cap`.
+    #[test]
+    fn table_memory_matches_the_growth_chain() {
+        let mut rng = Rng::new(17);
+        let keys = universe(&mut rng, 20_000);
+        for &cap in &CAPS {
+            for extra in [0, SLOT_BYTES / 2] {
+                let bytes = cap * WAYS * SLOT_BYTES + extra;
+                let m = table_memory(bytes);
+                let mut t = Table::with_bytes(bytes);
+                let mut blocks = vec![t.slots.capacity()];
+                for (i, k) in keys.iter().enumerate() {
+                    t.put(*k, MoneyChance([i as u64, 0, 0, 0]));
+                    if t.slots.capacity() != *blocks.last().expect("one block") {
+                        blocks.push(t.slots.capacity());
+                    }
+                }
+                assert_eq!(t.bytes(), m.cap, "cap {cap}: grown to the cap");
+                assert_eq!(
+                    t.slots.capacity() * SLOT_BYTES,
+                    m.cap,
+                    "cap {cap}: no spare"
+                );
+                assert_eq!(
+                    blocks.iter().sum::<usize>() * SLOT_BYTES,
+                    m.peak,
+                    "cap {cap}: blocks {blocks:?}"
+                );
+            }
+        }
+        // The factor: 1 without growth, about 2 at an exact doubling, under 3 just above one.
+        assert_eq!(table_memory(16 * WAYS * SLOT_BYTES).peak_factor(), 1.0);
+        let f = |b: usize| table_memory(b * WAYS * SLOT_BYTES).peak_factor();
+        assert!((f(1024) - (1024.0 + 2.0 * 512.0 - 16.0) / 1024.0).abs() < 1e-12);
+        assert!((f(1025) - (1025.0 + 2.0 * 1024.0 - 16.0) / 1025.0).abs() < 1e-12);
+        assert!(f(1025) < 3.0 && f(1024) < 2.0);
+    }
+
+    /// [`shared_table_memory`] against a shared table filled until every shard is at its cap.
+    #[test]
+    fn shared_table_memory_matches_a_full_table() {
+        let mut rng = Rng::new(23);
+        let keys = universe(&mut rng, 60_000);
+        for (mb, threads) in [(1, 1), (2, 3), (3, 2)] {
+            let s = SharedTable::new(mb, threads);
+            for (i, k) in keys.iter().enumerate() {
+                s.put(*k, MoneyChance([i as u64, 0, 0, 0]));
+            }
+            let m = shared_table_memory(mb, threads);
+            let (n, per) = shard_layout(mb, threads);
+            let locks = n * core::mem::size_of::<Mutex<Table>>();
+            assert_eq!(s.bytes() + locks, m.cap, "{mb} MB, {threads} threads");
+            assert_eq!(m.peak, n * table_memory(per).peak + locks);
+            assert!(m.cap <= (mb << 20) + locks && m.peak > m.cap);
         }
     }
 

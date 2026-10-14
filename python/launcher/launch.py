@@ -32,11 +32,26 @@ Rules applied:
   done-list. At most 3 replacements per run, then it stops and reports. A format-2 manifest's
   `inputs` (sha256 content hashes) must already be in R2 at inputs/sha256/<hex> (`put-input`);
   the launcher checks before renting anything.
+- Destroying: the launcher always destroys the instance itself (on DONE/FAILED, a stale
+  heartbeat, a dead instance or --max-minutes), and vast-cleanup.yml destroys any 41bots-
+  instance left after 2 hours: that is the mechanism that does not depend on the machine. The
+  machine also tries to destroy itself last. vast.ai documents a per-instance key in
+  CONTAINER_API_KEY that "can only start, stop, or destroy that specific instance"
+  (docs.vast.ai/api-reference/hello-world), but in args launch mode it answered that key with
+  "401: Invalid user key" (2026-10-14). So for each run the launcher also creates an API key
+  limited to destroying instances (vast.ai scoped keys, docs.vast.ai/api-reference/permissions;
+  the instance id is not known before the create call, so it cannot be limited to the one
+  instance), passes it as VAST_DESTROY_KEY with --env, and deletes it when the run ends. If
+  vast.ai refuses to create it, the run goes ahead without it. The key never appears in logs.
+  A host that reads it could only destroy the account's instances while the run lasts (no
+  renting, no billing, no reading); --no-destroy-key leaves it out.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
+import contextlib
 import hashlib
 import json
 import os
@@ -68,13 +83,22 @@ def need_env(*names: str) -> None:
 
 # ------------------------------------------------------------------ vast.ai
 
+# Keys the launcher created during this process (the run's destroy-only key), redacted like the
+# environment's.
+SECRETS: list[str] = []
+
+
 def redact(text: str) -> str:
     """Removes every credential the launcher holds from text that will be logged."""
-    for k in ("VAST_API_KEY", "R2_SECRET_ACCESS_KEY", "R2_ACCESS_KEY_ID"):
-        v = os.environ.get(k)
+    for v in [os.environ.get(k) for k in ("VAST_API_KEY", "R2_SECRET_ACCESS_KEY", "R2_ACCESS_KEY_ID")] + SECRETS:
         if v:
             text = text.replace(v, "***")
     return text
+
+
+def fingerprint(secret: str) -> str:
+    """A short SHA-256 prefix to tell keys apart in logs without showing them."""
+    return hashlib.sha256(secret.encode()).hexdigest()[:12]
 
 
 LAST_VAST_OUTPUT = ""
@@ -241,7 +265,7 @@ def choose(a) -> dict | None:
 
 # ------------------------------------------------------------------ run
 
-def instance_env(run_id: str, ncpu: int, dph: float, bin_sha: str, image: str = "") -> str:
+def instance_env(run_id: str, ncpu: int, dph: float, bin_sha: str, image: str = "", destroy_key: str = "") -> str:
     kv = {
         "RUN_ID": run_id, "NCPU": str(ncpu), "DPH": f"{dph:.5f}", "BIN_SHA": bin_sha,
         "R2_BUCKET": os.environ["R2_BUCKET"], "R2_S3_ENDPOINT": os.environ["R2_S3_ENDPOINT"],
@@ -254,6 +278,8 @@ def instance_env(run_id: str, ncpu: int, dph: float, bin_sha: str, image: str = 
     # Recorded in the run's final manifest; left out if vast's --env cannot carry it (a digest's @).
     if image and re.fullmatch(r"[A-Za-z0-9_.:/+=-]*", image):
         kv["IMAGE"] = image
+    if destroy_key:
+        kv["VAST_DESTROY_KEY"] = destroy_key
     for k, v in kv.items():
         if not re.fullmatch(r"[A-Za-z0-9_.:/+=-]*", v):
             sys.exit(f"launch: environment value for {k} has characters vast's --env cannot carry")
@@ -275,6 +301,75 @@ def destroy(instance_id: int) -> None:
             log(f"destroy attempt {attempt + 1} failed: {e}")
             time.sleep(10)
     log(f"::error::could not destroy instance {instance_id}; destroy it by hand in the vast.ai console")
+
+
+# The run's destroy-only key: the destroy endpoint and nothing else (no reads, no creating
+# instances, no billing). Format: docs.vast.ai/api-reference/permissions ("api" → category →
+# endpoint → optional constraints; the instance id is unknown before the create call).
+DESTROY_KEY_PERMISSIONS = {"api": {"instance_write": {"api.instance.destroy": {}}}}
+KEY_CHARS = r"[A-Za-z0-9_.:/+=-]+"
+
+
+def parse_created_key(out: str) -> dict | None:
+    """The {"id", "key"} of a `vastai create api-key` answer: vastai 1.8.3 prints
+    `api-key created <the API's JSON as a Python dict>` (fields id, key, permissions)."""
+    m = re.search(r"api-key created (\{.*\})", out, re.DOTALL)
+    if not m:
+        return None
+    try:
+        d = ast.literal_eval(m.group(1))
+    except (ValueError, SyntaxError):
+        try:
+            d = json.loads(m.group(1))
+        except ValueError:
+            return None
+    if not isinstance(d, dict) or not isinstance(d.get("id"), int) or not isinstance(d.get("key"), str):
+        return None
+    if not re.fullmatch(KEY_CHARS, d["key"]):
+        return None
+    return {"id": d["id"], "key": d["key"]}
+
+
+def create_destroy_key(run_id: str) -> dict | None:
+    """Creates the run's destroy-only key ({"id", "key"}), or None (logged) if vast.ai refuses."""
+    global LAST_VAST_OUTPUT
+    name = f"41bots-destroy-{run_id}"
+    out, err = "", ""
+    with tempfile.TemporaryDirectory() as d:
+        perm = os.path.join(d, "destroy-only.json")
+        with open(perm, "w") as fh:
+            json.dump(DESTROY_KEY_PERMISSIONS, fh)
+        try:
+            out = vast("create", "api-key", "--name", name, "--permission_file", perm, raw=False) or ""
+        except RuntimeError as e:
+            err = str(e)
+    LAST_VAST_OUTPUT = ""  # it may hold the new key
+    created = parse_created_key(out)
+    if created:
+        SECRETS.append(created["key"])
+        log(f"created destroy-only API key {created['id']} ({name}, sha256 {fingerprint(created['key'])}) for the run's machines")
+        return created
+    if "api-key created" in out:
+        why = f"vast created a key but its answer could not be read; delete the key named {name} in the vast.ai console"
+    else:
+        # vastai prints the API error (no key in it) on one line; never echo anything else.
+        why = err or next((ln.strip() for ln in out.splitlines() if "rror" in ln), "no answer")
+    log(f"::warning::no destroy-only key for this run ({redact(why)[:300]}); machines can only be destroyed by the launcher")
+    return None
+
+
+def delete_destroy_key(key_id: int) -> None:
+    try:
+        out = vast("delete", "api-key", str(key_id), raw=False) or ""
+        # vastai prints the API's answer (exit status 0 even on a refusal).
+        ok = not any(s in out for s in ("Failed with error", "rror", "'success': False", '"success": false'))
+    except RuntimeError as e:
+        out, ok = str(e), False
+    if ok:
+        log(f"deleted destroy-only API key {key_id}")
+    else:
+        log(f"::warning::could not delete destroy-only API key {key_id} ({redact(out.strip())[:200]}); "
+            f"delete it in the vast.ai console (it can only destroy instances)")
 
 
 BOOT_PATH = "/usr/local/bin/41bots-boot"
@@ -382,6 +477,26 @@ def cmd_run(a) -> int:
     run_start = time.time()
     attempts: list[dict] = []
     cpu_samples: list[float] = []
+    dkey = None if a.no_destroy_key else create_destroy_key(run_id)
+    a.destroy_key = dkey["key"] if dkey else ""
+    if dkey and a.state_file:
+        # For the workflow's cleanup step, should this process not reach its own deletion.
+        with open(f"{a.state_file}.destroy-key", "w") as fh:
+            fh.write(str(dkey["id"]))
+    try:
+        final, reason = rent_and_watch(a, run_id, best, resumable, run_start, attempts, cpu_samples)
+    finally:
+        if dkey:
+            delete_destroy_key(dkey["id"])
+            if a.state_file:
+                with contextlib.suppress(OSError):
+                    os.remove(f"{a.state_file}.destroy-key")
+    return report_run(a, run_id, resumable, run_start, attempts, cpu_samples, final, reason)
+
+
+def rent_and_watch(a, run_id: str, best: dict | None, resumable: bool, run_start: float,
+                   attempts: list[dict], cpu_samples: list[float]) -> tuple[str, str]:
+    """Rents, watches and destroys machines until the run ends; returns (DONE/FAILED or "", reason)."""
     final, reason = "", ""
     while True:
         best, instance_id = rent(a, run_id, best)
@@ -422,7 +537,11 @@ def cmd_run(a) -> int:
         a.exclude_machines.add(best.get("machine_id", best.get("id")))
         best = None
         log(f"replacement {len(attempts)} of {MAX_REPLACEMENTS}: renting another machine; it resumes from the done-list")
+    return final, reason
 
+
+def report_run(a, run_id: str, resumable: bool, run_start: float, attempts: list[dict],
+               cpu_samples: list[float], final: str, reason: str) -> int:
     log(f"run ended: {reason}")
     if not attempts:
         return 1
@@ -501,13 +620,18 @@ def create_instance(a, best: dict, run_id: str, ncpu: int, dph: float) -> int | 
     # ssh/jupyter modes replace the image's ENTRYPOINT/CMD with their own init, so the boot script
     # never ran (run 38509301077). --entrypoint names the boot script; an empty --args (must be the
     # very last token) selects runtype "args". On-demand: never pass --bid_price.
+    env = instance_env(run_id, ncpu, dph, a.bin_sha, a.image, getattr(a, "destroy_key", ""))
     res = vast("create", "instance", str(best["id"]), "--image", a.image, "--disk", str(a.disk_gb),
-               "--env", instance_env(run_id, ncpu, dph, a.bin_sha, a.image), "--label", f"41bots-{run_id}",
+               "--env", env, "--label", f"41bots-{run_id}",
                "--entrypoint", BOOT_PATH, "--cancel-unavail", tail=("--args",))
     instance_id = res.get("new_contract") if isinstance(res, dict) else None
     if not instance_id:
         return None
-    log(f"created instance {instance_id} on offer {best['id']} for run {run_id}")
+    # The per-instance key vast.ai injects as CONTAINER_API_KEY; the boot script logs the same
+    # fingerprint of the key it receives, so a mismatch shows in the container log.
+    ikey = res.get("instance_api_key") if isinstance(res, dict) else None
+    ikey_note = f"per-instance key sha256 {fingerprint(ikey)}" if ikey else "no per-instance key returned"
+    log(f"created instance {instance_id} on offer {best['id']} for run {run_id} ({ikey_note})")
     if a.state_file:
         # Always the live instance, so the workflow's cleanup step destroys the right one.
         with open(a.state_file, "w") as fh:
@@ -519,6 +643,7 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
           cpu_samples: list[float]) -> tuple[str, str, bool]:
     """Watch one instance. Returns (DONE/FAILED or "", reason, whether a replacement may resume)."""
     low_since, last_key, last_change = None, None, created
+    warned: set[str] = set()
     # Heartbeats of an earlier machine of this run do not count as this one's.
     first_key, _ = latest_heartbeat(run_id)
     while True:
@@ -551,6 +676,11 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
         if cpu is None:
             cpu = hb.get("host_cpu_busy_pct")
         log(f"heartbeat {hb.get('seq')}: phase {hb.get('phase')}, cpu {cpu}%, elapsed {hb.get('elapsed_s')} s, est ${hb.get('est_cost_usd')}")
+        # Warnings the runner reports (e.g. a transposition table lowered to fit memory), once each.
+        for w in (hb.get("progress") or {}).get("warnings") or []:
+            if isinstance(w, str) and w not in warned:
+                warned.add(w)
+                log(f"::warning::runner: {redact(w)[:500]}")
         # A chunk may declare a stretch of deliberately partial CPU use (e.g. the solver
         # measurement, which times single-thread solves); the low-CPU rule skips it.
         partial_ok = bool((hb.get("progress") or {}).get("partial_cpu_ok"))
@@ -593,6 +723,12 @@ def cmd_destroy(a) -> int:
     return 0
 
 
+def cmd_delete_key(a) -> int:
+    need_env("VAST_API_KEY")
+    delete_destroy_key(int(a.key_id))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -623,6 +759,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--startup-minutes", type=int, default=15)
     s.add_argument("--state-file", help="write the instance id here (for a cleanup step)")
     s.add_argument("--dry-run", action="store_true", help="choose the offer, but create nothing")
+    s.add_argument("--no-destroy-key", action="store_true",
+                   help="do not create the run's destroy-only key (machines are then destroyed by the launcher only)")
     s.set_defaults(fn=cmd_run)
     s = sub.add_parser("put-input", help="upload a manifest input to R2 by content hash")
     s.add_argument("file")
@@ -630,6 +768,9 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("destroy", help="destroy one instance")
     s.add_argument("instance_id")
     s.set_defaults(fn=cmd_destroy)
+    s = sub.add_parser("delete-key", help="delete one API key by id (a run's destroy-only key)")
+    s.add_argument("key_id")
+    s.set_defaults(fn=cmd_delete_key)
     a = p.parse_args(argv)
     return a.fn(a)
 

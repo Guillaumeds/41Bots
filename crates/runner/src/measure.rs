@@ -5,7 +5,7 @@
 //! ```json
 //! { "search_measure": { "trick": 2, "count": 224, "seed": 1, "to": 320,
 //!     "first": 0, "last": 223, "grid": "10,20,40,80,160,320",
-//!     "solve_threads": 1, "worlds_at_once": 1, "tt_mb": 256, "start_hands": 20000,
+//!     "solve_threads": 1, "worlds_at_once": 1, "tt_mb": "auto", "start_hands": 20000,
 //!     "methods": [ { "method": "rollout", "label": 2, "to": 64 } ],
 //!     "table": { "hands": 1000000, "seed": 1 } } }
 //! ```
@@ -25,6 +25,13 @@
 //! continue it exactly) and skips the analysis steps: run `search agree` / `search curves` with
 //! `--worlds` on the first run's file and this one, which they join.
 //!
+//! Table size: `tt_mb` absent or `"auto"` sizes the solver's transposition tables from the
+//! container's memory (see `mem.rs`): one table per world solved at once (`worlds_at_once` shared
+//! tables with `solve_threads > 1`, else one per thread), each counted at its peak. An explicit
+//! `tt_mb` whose tables could exhaust memory is lowered to the largest size that fits, with a
+//! warning in the heartbeat (`progress.warnings`), in `result.json` (`warnings`, and the whole
+//! calculation under `tt`) and on stderr. The size changes speed only, never a value.
+//!
 //! Scheduling: `search worlds` puts every (decision, world) task of the step in one work queue,
 //! longest expected first, on all threads, so no thread waits for another decision's slow world.
 //! With `solve_threads > 1` (trick 1) each exact world is solved by `solve_fast_par` on that many
@@ -42,6 +49,7 @@ use std::process::Command;
 
 use serde_json::{Value, json};
 
+use crate::mem::{self, Requested, Tables};
 use crate::spike::build_table;
 use crate::{Ctx, sibling};
 
@@ -91,6 +99,7 @@ fn grid_max(grid: &str, to: u64) -> u64 {
 }
 
 /// Run one `search worlds` step, with its progress in the heartbeat.
+#[allow(clippy::too_many_arguments)]
 fn run_worlds(
     ctx: &mut Ctx,
     mut c: Command,
@@ -98,13 +107,16 @@ fn run_worlds(
     n_worlds: u64,
     threads: u64,
     solve_threads: u64,
+    tt: &mem::Plan,
     progress_file: &Path,
 ) -> Result<(), String> {
     let _ = fs::remove_file(progress_file);
     c.arg("--progress").arg(progress_file);
+    let warnings: Vec<&String> = tt.warning.iter().collect();
     ctx.set_phase(
         "chunk",
-        json!({ "kind": "search_measure", "step": step, "n": n_worlds }),
+        json!({ "kind": "search_measure", "step": step, "n": n_worlds,
+                "tt_mb": tt.tt_mb, "warnings": warnings }),
     );
     let (mut seq, mut polls, mut tail_polls) = (ctx.seq, 0u64, 0u64);
     let step = step.to_string();
@@ -129,6 +141,7 @@ fn run_worlds(
             "par_tasks_done": g("par_tasks_done"), "par_tasks_total": g("par_tasks_total"),
             "tail_share": (share * 100.0).round() / 100.0,
             "partial_cpu_ok": share >= TAIL_SHARE_OK,
+            "tt_mb": tt.tt_mb, "warnings": warnings,
         });
     })
 }
@@ -166,6 +179,21 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
     } else {
         ctx.threads as u64
     };
+    // One table per worker of `search worlds`, kept between its worlds.
+    let tables = if solve_threads > 1 {
+        Tables::Shared {
+            count: threads,
+            solve_threads,
+        }
+    } else {
+        Tables::Own { count: threads }
+    };
+    let tt = mem::plan_here(
+        Requested::from_param(p, "tt_mb")?,
+        tables,
+        &table,
+        "search_measure",
+    );
     let grid = p
         .get("grid")
         .and_then(Value::as_str)
@@ -198,7 +226,7 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
             .args(["--last", &n(p, "last", count.saturating_sub(1)).to_string()])
             .args(["--threads", &threads.to_string()])
             .args(["--solve-threads", &solve_threads.to_string()])
-            .args(["--tt-mb", &n(p, "tt_mb", 256).to_string()])
+            .args(["--tt-mb", &tt.tt_mb.to_string()])
             .arg("--decisions")
             .arg(&dec)
             .arg("--equity")
@@ -223,11 +251,13 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         to,
         threads,
         solve_threads,
+        &tt,
         &progress_file,
     )?;
     let base = json!({ "trick": trick, "count": count, "seed": seed, "from": from, "to": to,
                        "ids": ids, "grid": grid, "solve_threads": solve_threads,
-                       "worlds_threads": threads, "table": table_rec });
+                       "worlds_threads": threads, "table": table_rec,
+                       "tt": tt.record, "warnings": tt.warning.iter().collect::<Vec<_>>() });
     if from > 0 {
         // An extension: the analysis needs the earlier worlds too, so it is run where both
         // files are (`search agree|curves --worlds <first run> --worlds <this>`).
@@ -282,6 +312,7 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
             mto,
             threads,
             solve_threads,
+            &tt,
             &progress_file,
         )?;
         methods.push(format!("{}:{mto}", f.display()));

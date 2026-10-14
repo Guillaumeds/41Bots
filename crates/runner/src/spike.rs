@@ -22,9 +22,11 @@
 //! Plan `trick1` (`{"solver_spike": {"plan": "trick1"}}`) instead measures how long one exact
 //! trick-1 solve takes with the whole box: after step 1 it solves worlds 0..`worlds` (default
 //! 4; seed 1, the same worlds as the spike's trick-1 runs) **one at a time**, each with the
-//! parallel single-world solve on all usable threads and a shared table of `tt_ram_pct`
-//! (default 70) percent of RAM, with a per-world cap of `cap_secs` (default 3600; a world that
-//! hits it is recorded as "> 60 min" and the next one starts). `trick` (default 1) and
+//! parallel single-world solve on all usable threads and a shared table sized from the
+//! container's memory (`mem.rs`: the largest whose peak fits; `tt_ram_pct` asks for that percent
+//! of RAM instead, lowered with a warning if its peak would not fit), with a per-world cap of
+//! `cap_secs` (default 3600; a world that hits it is recorded as "> 60 min" and the next one
+//! starts). `trick` (default 1) and
 //! `allow_unverified_table` allow a quick plumbing test at trick 3. While a solve runs the CPU
 //! should be near 100%; only its last stretch, when fewer subproblems remain than threads, is
 //! marked `partial_cpu_ok`. Outputs `out/trick1/world-<w>.txt` (the binary's progress and
@@ -40,6 +42,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use crate::mem::{self, Requested, Tables};
 use crate::{Ctx, sibling, unix_now};
 
 /// SHA-256 of the recorded table v0 (rules-v1 bot, 1,000,000 hands, seed 1).
@@ -278,22 +281,7 @@ fn mem_budget_mb() -> u64 {
 
 /// Memory available to this container in MB: RAM, capped by a cgroup v2/v1 limit.
 fn mem_total_mb() -> u64 {
-    let total = fs::read_to_string("/proc/meminfo").ok().and_then(|m| {
-        m.lines()
-            .find(|l| l.starts_with("MemTotal:"))
-            .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
-            .map(|kb| kb / 1024)
-    });
-    let cg = crate::read_trim("/sys/fs/cgroup/memory.max")
-        .or_else(|| crate::read_trim("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(|b| b >> 20);
-    match (total, cg) {
-        (Some(t), Some(c)) => t.min(c),
-        (Some(t), None) => t,
-        (None, Some(c)) => c,
-        (None, None) => 16 * 1024,
-    }
+    mem::Sys::host().limit().mb()
 }
 
 fn sha256_file(p: &Path) -> Result<String, String> {
@@ -540,14 +528,24 @@ fn trick1(ctx: &mut Ctx, params: &Value, table: &str) -> Result<Value, String> {
         .get("cap_secs")
         .and_then(Value::as_u64)
         .unwrap_or(3600);
-    let pct = params
-        .get("tt_ram_pct")
-        .and_then(Value::as_u64)
-        .unwrap_or(70)
-        .clamp(1, 85);
     let threads = ctx.threads;
     let ram = mem_total_mb();
-    let tt_mb = (ram * pct / 100).max(64);
+    // One parallel solve at a time: one shared table on every thread.
+    let requested = match params.get("tt_ram_pct").and_then(Value::as_u64) {
+        Some(pct) => Requested::Mb((ram * pct.clamp(1, 85) / 100).max(64)),
+        None => Requested::Auto,
+    };
+    let tt = mem::plan_here(
+        requested,
+        Tables::Shared {
+            count: 1,
+            solve_threads: threads as u64,
+        },
+        Path::new(table),
+        "solver_spike trick1",
+    );
+    let tt_mb = tt.tt_mb;
+    let warnings: Vec<&String> = tt.warning.iter().collect();
     let dir = ctx.root.join("out").join("trick1");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let mut recs = Vec::new();
@@ -605,6 +603,7 @@ fn trick1(ctx: &mut Ctx, params: &Value, table: &str) -> Result<Value, String> {
             ctx.progress = json!({
                 "kind": "solver_spike", "step": "trick1", "world": w, "worlds": worlds,
                 "elapsed_s": t0.elapsed().as_secs(), "solve_threads": threads, "tt_mb": tt_mb,
+                "warnings": warnings,
                 "last_progress": prog.as_deref().map(fields_json),
                 "partial_cpu_ok": tail,
             });
@@ -638,10 +637,14 @@ fn trick1(ctx: &mut Ctx, params: &Value, table: &str) -> Result<Value, String> {
         ctx.write_json(
             "out/trick1/results.json",
             &json!({ "trick": trick, "seed": 1, "solve_threads": threads, "ram_mb": ram,
-                "tt_mb": tt_mb, "cap_secs": cap, "worlds": recs }),
+                "tt_mb": tt_mb, "tt": tt.record, "warnings": warnings,
+                "cap_secs": cap, "worlds": recs }),
         )?;
     }
-    Ok(json!({ "trick": trick, "solve_threads": threads, "tt_mb": tt_mb, "worlds": recs }))
+    Ok(
+        json!({ "trick": trick, "solve_threads": threads, "tt_mb": tt_mb, "tt": tt.record,
+               "warnings": warnings, "worlds": recs }),
+    )
 }
 
 pub(crate) fn chunk(ctx: &mut Ctx, params: &Value) -> Result<Value, String> {
@@ -649,7 +652,9 @@ pub(crate) fn chunk(ctx: &mut Ctx, params: &Value) -> Result<Value, String> {
     if plan == "trick1" {
         let (table, equity) = build_table(ctx, params)?;
         let r = trick1(ctx, params, &table.to_string_lossy())?;
-        return Ok(json!({ "plan": plan, "equity": equity, "trick1": r }));
+        return Ok(
+            json!({ "plan": plan, "equity": equity, "warnings": r["warnings"], "trick1": r }),
+        );
     }
     let identity = params
         .get("identity")

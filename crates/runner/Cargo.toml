@@ -9,13 +9,15 @@ publish.workspace = true
 
 # Most chunk kinds run in the sibling release binaries as child processes. The runner links
 # `engine` (chunk seeds by `Rng::derive`), `arena` (the sequential-test decision over the finished
-# prefix, and the `arena_blocks` worker) and `search` (its bot registry, so `pimc-*` bots play in
-# `arena_blocks`), so each of those stays one implementation.
+# prefix, and the `arena_blocks` worker), `search` (its bot registry, so `pimc-*` bots play in
+# `arena_blocks`) and `solver` (its transposition tables' memory model, to size them), so each of
+# those stays one implementation.
 [dependencies]
 serde_json = "1"
 engine = { path = "../engine" }
 arena = { path = "../arena" }
 search = { path = "../search" }
+solver = { path = "../solver" }
 sha2 = "0.11.1"
 zstd = { version = "0.14.2", default-features = false }
 
