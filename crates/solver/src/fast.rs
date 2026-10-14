@@ -55,6 +55,8 @@
 //! setting, so per the plan ("prune only where provably safe") it is left out; shallow pruning
 //! plus the certain-win stop is what is used.
 
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use engine::cards::{Bits, Card, bit};
@@ -63,7 +65,7 @@ use engine::team_of;
 use equity::{MatchState, MoneyChance, ONE};
 
 use crate::equiv::Classes;
-use crate::tt::{SLOT_BYTES, Table, TtKey};
+use crate::tt::{SLOT_BYTES, SharedTable, Table, TtKey};
 use crate::{Leaf, MatchCtx, Position, Solution, Stats, Step, TieOrder, ordered};
 
 /// Switches of the optimised solver. Every combination gives identical answers (tested). On by
@@ -146,15 +148,62 @@ enum Res {
     Abort,
 }
 
+/// The transposition table a search uses: none, its own, or one shared by the threads of a
+/// parallel solve.
+enum Tt<'a> {
+    Off,
+    Own(Table),
+    Shared(&'a SharedTable),
+}
+
+impl Tt<'_> {
+    fn on(&self) -> bool {
+        !matches!(self, Tt::Off)
+    }
+
+    fn get(&self, k: &TtKey) -> Option<MoneyChance> {
+        match self {
+            Tt::Off => None,
+            Tt::Own(t) => t.get(k),
+            Tt::Shared(t) => t.get(k),
+        }
+    }
+
+    fn put(&mut self, k: TtKey, v: MoneyChance) {
+        match self {
+            Tt::Off => {}
+            Tt::Own(t) => t.put(k, v),
+            Tt::Shared(t) => t.put(k, v),
+        }
+    }
+}
+
+/// Live counters of a parallel solve, readable from another thread while it runs (for progress
+/// lines). They are diagnostics only and never affect an answer.
+#[derive(Debug, Default)]
+pub struct ParProgress {
+    /// Nodes searched so far (updated every 4096 nodes per thread).
+    pub nodes: AtomicU64,
+    /// Entries in the shared table.
+    pub tt_entries: AtomicU64,
+    /// Subproblems finished, and their total (set once the split is made).
+    pub tasks_done: AtomicU64,
+    /// Total subproblems.
+    pub tasks_total: AtomicU64,
+    /// Set to stop the solve early (it then reports a timeout); also set by the time cap.
+    pub abort: AtomicBool,
+}
+
 struct Search<'a, L: Leaf> {
     ctx: MatchCtx,
     leaf: &'a L,
     opts: FastOptions,
     classes: Classes,
-    tt: Option<Table>,
+    tt: Tt<'a>,
     stats: Stats,
     start: Instant,
     aborted: bool,
+    par: Option<(&'a ParProgress, &'a SharedTable)>,
 }
 
 /// The position of a card in the tie order (smaller = earlier).
@@ -259,19 +308,30 @@ impl<L: Leaf> Search<'_, L> {
 
     fn node(&mut self, p: &Position, cut: Option<Cut>) -> Res {
         self.stats.nodes += 1;
-        if self.stats.nodes & 0xFFF == 0
-            && let Some(cap) = self.opts.time_cap_ms
-            && self.start.elapsed().as_millis() as u64 >= cap
-        {
-            self.aborted = true;
+        if self.stats.nodes & 0xFFF == 0 {
+            if let Some(cap) = self.opts.time_cap_ms
+                && self.start.elapsed().as_millis() as u64 >= cap
+            {
+                self.aborted = true;
+            }
+            if let Some((pr, tt)) = self.par {
+                pr.nodes.fetch_add(0x1000, Ordering::Relaxed);
+                pr.tt_entries.store(tt.entries(), Ordering::Relaxed);
+                if self.aborted {
+                    pr.abort.store(true, Ordering::Relaxed);
+                }
+                if pr.abort.load(Ordering::Relaxed) {
+                    self.aborted = true;
+                }
+            }
         }
         if self.aborted {
             return Res::Abort;
         }
-        let key = (self.tt.is_some() && p.n_played == 0).then(|| TtKey::of(p));
-        if let (Some(k), Some(tt)) = (&key, &self.tt) {
+        let key = (self.tt.on() && p.n_played == 0).then(|| TtKey::of(p));
+        if let Some(k) = &key {
             self.stats.tt_probes += 1;
-            if let Some(v) = tt.get(k) {
+            if let Some(v) = self.tt.get(k) {
                 self.stats.tt_hits += 1;
                 return Res::Exact(v);
             }
@@ -326,8 +386,8 @@ impl<L: Leaf> Search<'_, L> {
             // bound.
             unreachable!("the first card is always searched exactly");
         };
-        if let (Some(k), Some(tt)) = (key, &mut self.tt) {
-            tt.put(k, v);
+        if let Some(k) = key {
+            self.tt.put(k, v);
         }
         Res::Exact(v)
     }
@@ -342,34 +402,19 @@ pub fn solve_fast<L: Leaf>(pos: &Position, ctx: MatchCtx, leaf: &L, opts: FastOp
         leaf,
         opts,
         classes: Classes::new(pos.trump),
-        tt: opts.tt.then(|| Table::new(opts.tt_mb)),
+        tt: if opts.tt {
+            Tt::Own(Table::new(opts.tt_mb))
+        } else {
+            Tt::Off
+        },
         stats: Stats::default(),
         start: Instant::now(),
         aborted: false,
+        par: None,
     };
     s.stats.nodes += 1;
-    let seat = pos.to_act();
-    let team = team_of(seat);
-    let hand = pos.hands[usize::from(seat)];
-    let legal = pos.legal();
-    // Root: every legal card gets its exact value; equivalent cards share one search.
-    let mut groups = [0 as Bits; 16];
-    let ng = if opts.equiv {
-        s.classes.groups(hand, pos.live(), &mut groups)
-    } else {
-        let mut n = 0;
-        for c in ordered(hand, opts.order) {
-            groups[n] = bit(c);
-            n += 1;
-        }
-        n
-    };
     let mut values: Vec<(Card, MoneyChance)> = Vec::new();
-    for &g in &groups[..ng] {
-        let l = g & legal;
-        if l == 0 {
-            continue;
-        }
+    for l in root_groups(pos, &s.classes, opts) {
         let rep = ordered(l, opts.order).next().expect("non-empty");
         match s.child(pos, rep, None) {
             Res::Exact(v) => {
@@ -380,19 +425,65 @@ pub fn solve_fast<L: Leaf>(pos: &Position, ctx: MatchCtx, leaf: &L, opts: FastOp
             }
             Res::Cut => unreachable!("the root passes no bound"),
             Res::Abort => {
-                s.stats.tt_entries = s.tt.as_ref().map_or(0, |t| t.entries);
-                return Solution {
-                    value: None,
-                    best: None,
-                    children: Vec::new(),
-                    root_tied: 0,
-                    stats: s.stats,
-                    timed_out: true,
-                };
+                if let Tt::Own(t) = &s.tt {
+                    s.stats.tt_entries = t.entries;
+                }
+                return timed_out(s.stats);
             }
         }
     }
-    values.sort_by_key(|&(c, _)| canon(c, opts.order));
+    if let Tt::Own(t) = &s.tt {
+        s.stats.tt_entries = t.entries;
+        s.stats.tt_replaced = t.replaced;
+        s.stats.tt_bytes = t.bytes() as u64;
+    }
+    finish(values, team_of(pos.to_act()), opts.order, s.stats)
+}
+
+fn timed_out(stats: Stats) -> Solution {
+    Solution {
+        value: None,
+        best: None,
+        children: Vec::new(),
+        root_tied: 0,
+        stats,
+        timed_out: true,
+    }
+}
+
+/// The root's legal cards in groups of equivalent cards (one card per group without the
+/// equivalent-card switch), each group searched once through its first card in the tie order.
+fn root_groups(pos: &Position, classes: &Classes, opts: FastOptions) -> Vec<Bits> {
+    let seat = pos.to_act();
+    let hand = pos.hands[usize::from(seat)];
+    let legal = pos.legal();
+    let mut groups = [0 as Bits; 16];
+    let ng = if opts.equiv {
+        classes.groups(hand, pos.live(), &mut groups)
+    } else {
+        let mut n = 0;
+        for c in ordered(hand, opts.order) {
+            groups[n] = bit(c);
+            n += 1;
+        }
+        n
+    };
+    groups[..ng]
+        .iter()
+        .map(|&g| g & legal)
+        .filter(|&l| l != 0)
+        .collect()
+}
+
+/// The root decision: the best value for the root mover's team, the first card in the tie order
+/// among equals.
+fn finish(
+    mut values: Vec<(Card, MoneyChance)>,
+    team: u8,
+    order: TieOrder,
+    stats: Stats,
+) -> Solution {
+    values.sort_by_key(|&(c, _)| canon(c, order));
     let mut best = 0usize;
     for (i, (_, v)) in values.iter().enumerate() {
         if v.get(team) > values[best].1.get(team) {
@@ -401,19 +492,258 @@ pub fn solve_fast<L: Leaf>(pos: &Position, ctx: MatchCtx, leaf: &L, opts: FastOp
     }
     let top = values[best].1.get(team);
     let root_tied = values.iter().filter(|(_, v)| v.get(team) == top).count() as u32;
-    if let Some(t) = &s.tt {
-        s.stats.tt_entries = t.entries;
-        s.stats.tt_replaced = t.replaced;
-        s.stats.tt_bytes = t.bytes() as u64;
-    }
     Solution {
         value: Some(values[best].1),
         best: Some(values[best].0),
         children: values,
         root_tied,
-        stats: s.stats,
+        stats,
         timed_out: false,
     }
+}
+
+/// A node of the top of the tree that a parallel solve splits off.
+enum PNode {
+    /// A finished line (the game or hand ended).
+    Done(MoneyChance),
+    /// A subproblem, solved by one thread.
+    Task(Position),
+    /// Expanded here: the mover's team and each searched card (tie-order position, node).
+    Inner { team: u8, kids: Vec<(u8, usize)> },
+}
+
+/// Subproblems per thread the split aims for (more than one so that threads that finish early
+/// take more work: subtrees differ in size by orders of magnitude).
+pub const PAR_TASKS_PER_THREAD: usize = 16;
+
+/// Expand the open position `q` by one card `c`: a finished line is valued now, an open
+/// position joins the frontier. Returns the new node's index.
+fn par_push<L: Leaf>(
+    nodes: &mut Vec<PNode>,
+    frontier: &mut Vec<usize>,
+    exp: &mut Search<'_, L>,
+    q: &Position,
+    c: Card,
+) -> usize {
+    let n = match q.play(c) {
+        Step::Next(r) => {
+            frontier.push(nodes.len());
+            PNode::Task(r)
+        }
+        Step::GameWon(t) => PNode::Done(exp.game_won(t)),
+        Step::HandOver(sc) => PNode::Done(exp.hand_over(sc)),
+    };
+    nodes.push(n);
+    nodes.len() - 1
+}
+
+fn unpoison<T>(r: std::sync::LockResult<T>) -> T {
+    r.unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// [`solve_fast`] on `threads` threads, for one position. The result (value, chosen card, every
+/// root card's value) is exactly [`solve_fast`]'s; only the counters and the time differ.
+///
+/// How: the top of the tree is expanded ply by ply, with the same cards per node as the
+/// sequential search (equivalent cards and all), until there are at least
+/// [`PAR_TASKS_PER_THREAD`] × `threads` open positions (or 16 plies). The open positions are
+/// numbered in that expansion order; each thread repeatedly takes the next unsolved one and
+/// solves it exactly with the sequential search (no bound from above, so it returns the exact
+/// value). All threads share one transposition table ([`crate::tt::SharedTable`]), which only
+/// ever holds exact values, so what it holds when changes the speed, never a value. The expanded
+/// top is then valued bottom-up with the sequential rule: the best value for the mover's team,
+/// the first card in the tie order among equals. Which cards are searched at a node does not
+/// change its value (equivalent cards have equal values; pruning only skips cards that cannot be
+/// chosen), so the top's values equal the sequential search's, and the root decides exactly as
+/// [`solve_fast`] does.
+///
+/// `opts.tt_mb` is the shared table's total size. `progress`, if given, is updated while the
+/// solve runs; setting its `abort` flag stops the solve, which then reports a timeout.
+pub fn solve_fast_par<L: Leaf + Sync>(
+    pos: &Position,
+    ctx: MatchCtx,
+    leaf: &L,
+    opts: FastOptions,
+    threads: usize,
+    progress: Option<&ParProgress>,
+) -> Solution {
+    solve_fast_par_split(
+        pos,
+        ctx,
+        leaf,
+        opts,
+        threads,
+        PAR_TASKS_PER_THREAD,
+        progress,
+    )
+}
+
+/// [`solve_fast_par`] aiming for `tasks_per_thread` subproblems per thread instead of
+/// [`PAR_TASKS_PER_THREAD`] (a finer split balances the load better; the answer is the same).
+pub fn solve_fast_par_split<L: Leaf + Sync>(
+    pos: &Position,
+    ctx: MatchCtx,
+    leaf: &L,
+    opts: FastOptions,
+    threads: usize,
+    tasks_per_thread: usize,
+    progress: Option<&ParProgress>,
+) -> Solution {
+    let threads = threads.max(1);
+    let own = ParProgress::default();
+    let pr = progress.unwrap_or(&own);
+    let start = Instant::now();
+    let shared = SharedTable::new(if opts.tt { opts.tt_mb } else { 1 }, threads);
+    let mut exp = Search {
+        ctx,
+        leaf,
+        opts,
+        classes: Classes::new(pos.trump),
+        tt: Tt::Off,
+        stats: Stats::default(),
+        start,
+        aborted: false,
+        par: None,
+    };
+    exp.stats.nodes += 1;
+    let mut nodes: Vec<PNode> = Vec::new();
+    let mut frontier: Vec<usize> = Vec::new();
+    // The root's groups of equivalent legal cards, each searched through its first card.
+    let mut root: Vec<(Bits, usize)> = Vec::new();
+    for l in root_groups(pos, &exp.classes, opts) {
+        let rep = ordered(l, opts.order).next().expect("non-empty");
+        let i = par_push(&mut nodes, &mut frontier, &mut exp, pos, rep);
+        root.push((l, i));
+        exp.stats.equiv_skipped += u64::from(l.count_ones() - 1);
+    }
+    let target = tasks_per_thread.max(1) * threads;
+    let mut depth = 1;
+    while !frontier.is_empty() && frontier.len() < target && depth < 16 {
+        depth += 1;
+        for i in core::mem::take(&mut frontier) {
+            let PNode::Task(q) = nodes[i] else {
+                unreachable!("the frontier holds open positions only")
+            };
+            exp.stats.nodes += 1;
+            let team = team_of(q.to_act());
+            let mut cards = [0 as Card; 16];
+            let n = exp.candidates(&q, &mut cards);
+            let mut kids = Vec::with_capacity(n);
+            for &c in &cards[..n] {
+                let k = par_push(&mut nodes, &mut frontier, &mut exp, &q, c);
+                kids.push((canon(c, opts.order), k));
+            }
+            nodes[i] = PNode::Inner { team, kids };
+        }
+    }
+    let tasks: Vec<(usize, Position)> = frontier
+        .iter()
+        .map(|&i| match nodes[i] {
+            PNode::Task(q) => (i, q),
+            _ => unreachable!("the frontier holds open positions only"),
+        })
+        .collect();
+    pr.tasks_total.store(tasks.len() as u64, Ordering::Relaxed);
+    let next = AtomicUsize::new(0);
+    let results: Vec<Mutex<Option<MoneyChance>>> =
+        (0..tasks.len()).map(|_| Mutex::new(None)).collect();
+    let workers = threads.min(tasks.len()).max(1);
+    let mut stats = exp.stats;
+    let worker_stats: Vec<Stats> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..workers)
+            .map(|_| {
+                let (tasks, next, results, shared) = (&tasks, &next, &results, &shared);
+                sc.spawn(move || {
+                    let mut s = Search {
+                        ctx,
+                        leaf,
+                        opts,
+                        classes: Classes::new(pos.trump),
+                        tt: if opts.tt { Tt::Shared(shared) } else { Tt::Off },
+                        stats: Stats::default(),
+                        start,
+                        aborted: false,
+                        par: Some((pr, shared)),
+                    };
+                    loop {
+                        let k = next.fetch_add(1, Ordering::Relaxed);
+                        if k >= tasks.len() || pr.abort.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        match s.node(&tasks[k].1, None) {
+                            Res::Exact(v) => {
+                                *unpoison(results[k].lock()) = Some(v);
+                                pr.tasks_done.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Res::Cut => unreachable!("a subproblem gets no bound"),
+                            Res::Abort => {
+                                pr.abort.store(true, Ordering::Relaxed);
+                                break;
+                            }
+                        }
+                    }
+                    s.stats
+                })
+            })
+            .collect();
+        hs.into_iter()
+            .map(|h| h.join().expect("solver thread panicked"))
+            .collect()
+    });
+    for w in &worker_stats {
+        stats.nodes += w.nodes;
+        stats.leaves += w.leaves;
+        stats.decision_nodes += w.decision_nodes;
+        stats.tied_nodes += w.tied_nodes;
+        stats.tt_probes += w.tt_probes;
+        stats.tt_hits += w.tt_hits;
+        stats.cutoffs += w.cutoffs;
+        stats.equiv_skipped += w.equiv_skipped;
+    }
+    if opts.tt {
+        stats.tt_entries = shared.entries();
+        stats.tt_replaced = shared.replaced();
+        stats.tt_bytes = shared.bytes() as u64;
+    }
+    let mut val: Vec<Option<MoneyChance>> = nodes
+        .iter()
+        .map(|n| match n {
+            PNode::Done(v) => Some(*v),
+            _ => None,
+        })
+        .collect();
+    for ((i, _), r) in tasks.iter().zip(results) {
+        val[*i] = unpoison(r.into_inner());
+        if val[*i].is_none() {
+            return timed_out(stats);
+        }
+    }
+    // Children always come after their parent in the expansion order.
+    for i in (0..nodes.len()).rev() {
+        if let PNode::Inner { team, kids } = &nodes[i] {
+            let t = *team;
+            let mut best: Option<(MoneyChance, u8)> = None;
+            for &(cc, k) in kids {
+                let v = val[k].expect("children are valued before parents");
+                let better = match best {
+                    None => true,
+                    Some((b, bc)) => v.get(t) > b.get(t) || (v.get(t) == b.get(t) && cc < bc),
+                };
+                if better {
+                    best = Some((v, cc));
+                }
+            }
+            val[i] = best.map(|(v, _)| v);
+        }
+    }
+    let mut values: Vec<(Card, MoneyChance)> = Vec::new();
+    for (l, i) in root {
+        let v = val[i].expect("every root card is valued");
+        for c in ordered(l, opts.order) {
+            values.push((c, v));
+        }
+    }
+    finish(values, team_of(pos.to_act()), opts.order, stats)
 }
 
 /// Bytes per transposition slot of the optimised solver.

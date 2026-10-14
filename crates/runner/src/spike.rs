@@ -19,6 +19,17 @@
 //! 3. Run `solver-identity` (all 16 switch combinations, both tie orders, real table) on all
 //!    threads; any difference fails the chunk.
 //!
+//! Plan `trick1` (`{"solver_spike": {"plan": "trick1"}}`) instead measures how long one exact
+//! trick-1 solve takes with the whole box: after step 1 it solves worlds 0..`worlds` (default
+//! 4; seed 1, the same worlds as the spike's trick-1 runs) **one at a time**, each with the
+//! parallel single-world solve on all usable threads and a shared table of `tt_ram_pct`
+//! (default 70) percent of RAM, with a per-world cap of `cap_secs` (default 3600; a world that
+//! hits it is recorded as "> 60 min" and the next one starts). `trick` (default 1) and
+//! `allow_unverified_table` allow a quick plumbing test at trick 3. While a solve runs the CPU
+//! should be near 100%; only its last stretch, when fewer subproblems remain than threads, is
+//! marked `partial_cpu_ok`. Outputs `out/trick1/world-<w>.txt` (the binary's progress and
+//! result lines) and `out/trick1/results.json`.
+//!
 //! Outputs: `out/spike/<job>.txt` (the binaries' own output), `out/spike/jobs.json`,
 //! `out/identity/<job>.txt`, `out/equity/outcome.json`, `out/equity/equity-v0.sha256`.
 
@@ -260,8 +271,13 @@ fn identity_runs(size: &str) -> Result<Vec<(u8, u64)>, String> {
     })
 }
 
-/// Memory available to this container in MB: RAM, capped by a cgroup v2/v1 limit.
+/// Memory available to this container in MB, times 4/5.
 fn mem_budget_mb() -> u64 {
+    mem_total_mb() * 4 / 5
+}
+
+/// Memory available to this container in MB: RAM, capped by a cgroup v2/v1 limit.
+fn mem_total_mb() -> u64 {
     let total = fs::read_to_string("/proc/meminfo").ok().and_then(|m| {
         m.lines()
             .find(|l| l.starts_with("MemTotal:"))
@@ -272,13 +288,12 @@ fn mem_budget_mb() -> u64 {
         .or_else(|| crate::read_trim("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
         .and_then(|s| s.parse::<u64>().ok())
         .map(|b| b >> 20);
-    let m = match (total, cg) {
+    match (total, cg) {
         (Some(t), Some(c)) => t.min(c),
         (Some(t), None) => t,
         (None, Some(c)) => c,
         (None, None) => 16 * 1024,
-    };
-    m * 4 / 5
+    }
 }
 
 fn sha256_file(p: &Path) -> Result<String, String> {
@@ -481,8 +496,161 @@ fn run_pool(
     }
 }
 
+/// The `key=value` fields of the last line of `text` starting with `tag` and a tab.
+fn last_fields(text: &str, tag: &str) -> Option<Vec<(String, String)>> {
+    let line = text
+        .lines()
+        .rev()
+        .find(|l| l.starts_with(tag) && l.as_bytes().get(tag.len()) == Some(&b'\t'))?;
+    Some(
+        line.split('\t')
+            .skip(1)
+            .flat_map(|f| f.split(' '))
+            .filter_map(|kv| kv.split_once('='))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+    )
+}
+
+fn field<'a>(f: &'a [(String, String)], k: &str) -> Option<&'a str> {
+    f.iter().find(|(a, _)| a == k).map(|(_, v)| v.as_str())
+}
+
+/// JSON of a `key=value` list: whole numbers and decimals as numbers, the rest as strings.
+fn fields_json(f: &[(String, String)]) -> Value {
+    let mut m = serde_json::Map::new();
+    for (k, v) in f {
+        let j = if let Ok(n) = v.parse::<u64>() {
+            json!(n)
+        } else if let Ok(x) = v.parse::<f64>() {
+            json!(x)
+        } else {
+            json!(v)
+        };
+        m.insert(k.clone(), j);
+    }
+    Value::Object(m)
+}
+
+/// Plan `trick1`: one world at a time, each on every usable thread (see the module text).
+fn trick1(ctx: &mut Ctx, params: &Value, table: &str) -> Result<Value, String> {
+    let trick = params.get("trick").and_then(Value::as_u64).unwrap_or(1);
+    let worlds = params.get("worlds").and_then(Value::as_u64).unwrap_or(4);
+    let cap = params
+        .get("cap_secs")
+        .and_then(Value::as_u64)
+        .unwrap_or(3600);
+    let pct = params
+        .get("tt_ram_pct")
+        .and_then(Value::as_u64)
+        .unwrap_or(70)
+        .clamp(1, 85);
+    let threads = ctx.threads;
+    let ram = mem_total_mb();
+    let tt_mb = (ram * pct / 100).max(64);
+    let dir = ctx.root.join("out").join("trick1");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut recs = Vec::new();
+    for w in 0..worlds {
+        let name = format!("world-{w}.txt");
+        let path = dir.join(&name);
+        let mut c = Command::new(sibling("solver-spike"));
+        c.args(["--table", table, "--solver", "fast"])
+            .args(["--trick", &trick.to_string(), "--seed", "1"])
+            .args(["--first", &w.to_string(), "--worlds", "1"])
+            .args(["--solve-threads", &threads.to_string()])
+            .args(["--tt-mb", &tt_mb.to_string()])
+            .args(["--cap-secs", &cap.to_string(), "--progress-secs", "60"]);
+        let f = fs::File::create(&path).map_err(|e| e.to_string())?;
+        let f2 = f.try_clone().map_err(|e| e.to_string())?;
+        c.stdin(Stdio::null()).stdout(f).stderr(f2);
+        let mut child = c
+            .spawn()
+            .map_err(|e| format!("cannot start solver-spike: {e}"))?;
+        ctx.child = Some(child.id());
+        ctx.cpu.prime_tree(child.id());
+        let t0 = Instant::now();
+        // The solver stops itself at the cap; this hard stop is a safety net 5 minutes later.
+        let hard = Duration::from_secs(cap + 300);
+        let mut killed = None;
+        let status = loop {
+            if let Some(st) = child.try_wait().map_err(|e| e.to_string())? {
+                break Some(st);
+            }
+            if cap > 0 && t0.elapsed() >= hard {
+                killed = Some("hard wall cap");
+            } else if ctx.deadline.is_some_and(|d| unix_now() >= d) {
+                killed = Some("deadline");
+            }
+            if killed.is_some() {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            let text = fs::read_to_string(&path).unwrap_or_default();
+            let prog = last_fields(&text, "progress");
+            let num = |k: &str| {
+                prog.as_deref().and_then(|p| field(p, k)).and_then(|v| {
+                    v.split('/')
+                        .map(str::parse::<u64>)
+                        .collect::<Result<Vec<_>, _>>()
+                        .ok()
+                })
+            };
+            let tasks = num("tasks_done");
+            // The last subproblems: fewer left than threads, so some threads are idle.
+            let tail = tasks
+                .as_deref()
+                .is_some_and(|t| t.len() == 2 && t[1] > 0 && t[1] - t[0] < threads as u64);
+            ctx.progress = json!({
+                "kind": "solver_spike", "step": "trick1", "world": w, "worlds": worlds,
+                "elapsed_s": t0.elapsed().as_secs(), "solve_threads": threads, "tt_mb": tt_mb,
+                "last_progress": prog.as_deref().map(fields_json),
+                "partial_cpu_ok": tail,
+            });
+            ctx.heartbeat(false);
+            std::thread::sleep(Duration::from_millis(500));
+        };
+        ctx.child = None;
+        let wall = t0.elapsed().as_secs_f64();
+        let text = fs::read_to_string(&path).unwrap_or_default();
+        let res = last_fields(&text, "par_world");
+        let timed_out = killed.is_some()
+            || res
+                .as_deref()
+                .and_then(|r| field(r, "timed_out"))
+                .is_none_or(|v| v != "0");
+        if killed.is_none() && !status.is_some_and(|s| s.success()) {
+            return Err(format!(
+                "solver-spike failed on world {w} (see out/trick1/{name})"
+            ));
+        }
+        let limit = if cap.is_multiple_of(60) {
+            format!("> {} min", cap / 60)
+        } else {
+            format!("> {cap} s")
+        };
+        recs.push(json!({
+            "world": w, "wall_s": (wall * 10.0).round() / 10.0, "timed_out": timed_out,
+            "result": if timed_out { limit.clone() } else { "solved".into() },
+            "killed": killed, "solver": res.as_deref().map(fields_json),
+        }));
+        ctx.write_json(
+            "out/trick1/results.json",
+            &json!({ "trick": trick, "seed": 1, "solve_threads": threads, "ram_mb": ram,
+                "tt_mb": tt_mb, "cap_secs": cap, "worlds": recs }),
+        )?;
+    }
+    Ok(json!({ "trick": trick, "solve_threads": threads, "tt_mb": tt_mb, "worlds": recs }))
+}
+
 pub(crate) fn chunk(ctx: &mut Ctx, params: &Value) -> Result<Value, String> {
     let plan = params.get("plan").and_then(Value::as_str).unwrap_or("xeon");
+    if plan == "trick1" {
+        let (table, equity) = build_table(ctx, params)?;
+        let r = trick1(ctx, params, &table.to_string_lossy())?;
+        return Ok(json!({ "plan": plan, "equity": equity, "trick1": r }));
+    }
     let identity = params
         .get("identity")
         .and_then(Value::as_str)
@@ -528,4 +696,23 @@ pub(crate) fn chunk(ctx: &mut Ctx, params: &Value) -> Result<Value, String> {
         "plan": plan, "identity": identity, "concurrent": concurrent, "equity": equity,
         "spike_jobs": spike.len(), "identity_runs": ident,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_the_last_tagged_line() {
+        let text = "par\ttrick=1\nprogress\tworld=0 nodes=5 tasks_done=3/9\n\
+                    progress\tworld=0 nodes=9 tasks_done=7/9\n\
+                    par_world\ttrick=1 secs=1.5 value=0.5,0.5 best=13\n";
+        let p = last_fields(text, "progress").expect("progress line");
+        assert_eq!(field(&p, "tasks_done"), Some("7/9"));
+        let r = fields_json(&last_fields(text, "par_world").expect("result line"));
+        assert_eq!(r["secs"], json!(1.5));
+        assert_eq!(r["best"], json!(13));
+        assert_eq!(r["value"], json!("0.5,0.5"));
+        assert!(last_fields(text, "par_worlds").is_none());
+    }
 }
