@@ -23,9 +23,9 @@ use engine::team_of;
 use engine::view::SeatView;
 use equity::{MatchState, MoneyChance};
 use serde::{Deserialize, Serialize};
-use solver::{FastOptions, Leaf, from_match, solve_fast, solve_fast_par};
+use solver::{FastOptions, Leaf, ParProgress, from_match, solve_fast, solve_fast_par};
 
-use crate::worlds::{WorldSource, rebuild, world_rng};
+use crate::worlds::{WorldSource, Worlds, rebuild, world_rng};
 
 /// A leaf evaluator shared between threads.
 pub type SharedLeaf = dyn Leaf + Send + Sync;
@@ -287,6 +287,7 @@ fn solve(
     mctx: solver::MatchCtx,
     ctx: &Ctx,
     cfg: &SearchConfig,
+    par: Option<&ParProgress>,
 ) -> Vec<(Card, MoneyChance)> {
     let opts = FastOptions {
         tt_mb: cfg.tt_mb,
@@ -294,7 +295,12 @@ fn solve(
     };
     let leaf = DynLeaf(ctx.leaf);
     let sol = if cfg.solve_threads > 1 {
-        solve_fast_par(pos, mctx, &leaf, opts, cfg.solve_threads, None)
+        // The progress counters describe the solve now running (read by progress reports only).
+        if let Some(p) = par {
+            p.tasks_total.store(0, Ordering::Relaxed);
+            p.tasks_done.store(0, Ordering::Relaxed);
+        }
+        solve_fast_par(pos, mctx, &leaf, opts, cfg.solve_threads, par)
     } else {
         solve_fast(pos, mctx, &leaf, opts)
     };
@@ -310,7 +316,13 @@ fn pick(children: &[(Card, MoneyChance)], c: Card) -> MoneyChance {
 }
 
 /// The exact value of every candidate in one rebuilt world.
-fn exact_world(m: &Match, cands: &[Candidate], ctx: &Ctx, cfg: &SearchConfig) -> Vec<MoneyChance> {
+fn exact_world(
+    m: &Match,
+    cands: &[Candidate],
+    ctx: &Ctx,
+    cfg: &SearchConfig,
+    par: Option<&ParProgress>,
+) -> Vec<MoneyChance> {
     let mut out = vec![MoneyChance::even(); cands.len()];
     let mut i = 0;
     while i < cands.len() {
@@ -318,7 +330,7 @@ fn exact_world(m: &Match, cands: &[Candidate], ctx: &Ctx, cfg: &SearchConfig) ->
             (Action::Play(_), None) => {
                 // One solve values every root card.
                 let (pos, mctx) = solver_position(m, ctx.rules);
-                let ch = solve(&pos, mctx, ctx, cfg);
+                let ch = solve(&pos, mctx, ctx, cfg, par);
                 for (j, &(a, _)) in cands.iter().enumerate() {
                     out[j] = pick(&ch, a.card());
                 }
@@ -329,7 +341,7 @@ fn exact_world(m: &Match, cands: &[Candidate], ctx: &Ctx, cfg: &SearchConfig) ->
                 let mut mm = m.clone();
                 mm.apply(Action::Burn(b)).expect("legal burn");
                 let (pos, mctx) = solver_position(&mm, ctx.rules);
-                let ch = solve(&pos, mctx, ctx, cfg);
+                let ch = solve(&pos, mctx, ctx, cfg, par);
                 while i < cands.len() && cands[i].0 == Action::Burn(b) {
                     out[i] = pick(&ch, cands[i].1.expect("joint"));
                     i += 1;
@@ -345,6 +357,30 @@ fn exact_world(m: &Match, cands: &[Candidate], ctx: &Ctx, cfg: &SearchConfig) ->
         }
     }
     out
+}
+
+/// The values of every candidate in world `w` of the decision with seed `dseed` (`worlds`
+/// prepared from `view`). `par` receives the progress of a parallel exact solve
+/// (`solve_threads > 1`); it never changes a value.
+#[allow(clippy::too_many_arguments)]
+pub fn world_row(
+    view: &SeatView,
+    worlds: &dyn Worlds,
+    cands: &[Candidate],
+    method: Method,
+    w: u64,
+    dseed: u64,
+    ctx: &Ctx,
+    cfg: &SearchConfig,
+    par: Option<&ParProgress>,
+) -> Vec<MoneyChance> {
+    let world = worlds.sample(&mut world_rng(dseed, w));
+    let m = rebuild(view, &world, ctx.rules, dseed ^ w).expect("sampled worlds rebuild");
+    match method {
+        Method::RolloutPimc => rollout_world(&m, cands, ctx),
+        Method::ExactPimc => exact_world(&m, cands, ctx, cfg, par),
+        Method::Forced => vec![MoneyChance::even(); cands.len()],
+    }
 }
 
 /// The values of every candidate in worlds `from..to` of the decision with seed `dseed`, one row
@@ -371,13 +407,7 @@ pub fn world_values(
                 break;
             }
             let w = from + i as u64;
-            let world = worlds.sample(&mut world_rng(dseed, w));
-            let m = rebuild(view, &world, ctx.rules, dseed ^ w).expect("sampled worlds rebuild");
-            let v = match method {
-                Method::RolloutPimc => rollout_world(&m, cands, ctx),
-                Method::ExactPimc => exact_world(&m, cands, ctx, cfg),
-                Method::Forced => vec![MoneyChance::even(); cands.len()],
-            };
+            let v = world_row(view, &*worlds, cands, method, w, dseed, ctx, cfg, None);
             slots.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(v);
         }
     };

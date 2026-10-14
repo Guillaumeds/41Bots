@@ -5,23 +5,35 @@
 //! 1. [`build_decisions`]: decisions at one trick, sampled from `rules-v1` self-play hands that
 //!    start from stratified match states (S1–S4, a quarter each). Stored as (start state, deck,
 //!    actions so far, seat) so they replay exactly.
-//! 2. [`world_rows`]: per decision, the value of every candidate in worlds `from..to` by one method
-//!    (exact PIMC or rollout-PIMC). World `w` of decision `d` under label `L` is drawn from
-//!    `Rng::derive(dseed, &[WORLD, w])` with `dseed = Rng::derive(seed, &[AGREE, L, d])`, so world
-//!    sets are nested (N worlds are the first N of 2N) and a chunk can be redone identically.
+//! 2. [`world_rows_batch`] / [`worlds_file`]: per decision, the value of every candidate in worlds
+//!    `from..to` by one method (exact PIMC or rollout-PIMC). World `w` of decision `d` under label
+//!    `L` is drawn from `Rng::derive(dseed, &[WORLD, w])` with
+//!    `dseed = Rng::derive(seed, &[AGREE, L, d])`, so world sets are nested (N worlds are the first
+//!    N of 2N) and a chunk can be redone identically. All (decision, world) tasks of a run share
+//!    one work queue (see [`world_rows_batch`]), so no thread waits for another decision's slow
+//!    world; the output file is byte-identical for any thread count.
 //! 3. [`agreement_curve`]: the plateau rule of §13.1 on nested world sets.
 //! 4. [`score`]: a method against the yardstick (exact PIMC at the plateau N): agreement, mean
 //!    money-chance loss, loss distribution, and paired comparisons with confidence intervals.
 
-use engine::cards::DECK_SIZE;
+use std::cmp::Reverse;
+use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::time::Instant;
+
+use engine::cards::{Bits, DECK_SIZE, JOKER, Suit, bit, count};
 use engine::game::{Action, HandStartState, Match, Phase, Rules};
 use engine::rng::Rng;
 use engine::view::SeatView;
 use equity::{MoneyChance, ONE};
 use serde::{Deserialize, Serialize};
+use solver::ParProgress;
 
 use crate::labels;
-use crate::pimc::{Candidate, Ctx, Method, SearchConfig, aggregate, candidates, world_values};
+use crate::pimc::{Candidate, Ctx, Method, SearchConfig, aggregate, candidates, world_row};
 
 /// The four strata of start states (§5.10).
 pub fn stratum_of(s: &HandStartState) -> u8 {
@@ -86,6 +98,59 @@ pub struct DecisionSpec {
     pub seat: u8,
     /// Position in the trick: cards already played to it (0 = leader … 7 = eighth to play).
     pub position: u8,
+    /// The deciding seat's hand type at the decision (§13.1 item 9); `None` before trumps are
+    /// known, and in sets made before the field existed.
+    #[serde(default)]
+    pub hand_type: Option<HandType>,
+}
+
+/// A hand's type, from the cards its holder can see (docs/M3-SPEC.md §13.1 item 9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandType {
+    /// Trumps held (the trump suit, the Joker and the A♥).
+    pub trumps: u8,
+    /// Top trumps held: the 5 and J of trumps, the Joker, the A♥ and the ace of trumps (four
+    /// cards when hearts are trumps).
+    pub top_trumps: u8,
+    /// Cards in the longest plain (non-trump) suit.
+    pub longest_plain: u8,
+}
+
+impl HandType {
+    /// The bands reported by `search agree`: trumps 0, 1, 2, 3+; top trumps 0, 1, 2+; longest
+    /// plain suit 0–1, 2, 3+ (each band named by its smallest value).
+    pub fn bands(&self) -> [u8; 3] {
+        [
+            self.trumps.min(3),
+            self.top_trumps.min(2),
+            self.longest_plain.clamp(1, 3),
+        ]
+    }
+}
+
+/// The hand type of the cards `hand` with trump suit `trump`.
+pub fn hand_type(hand: Bits, trump: Suit) -> HandType {
+    use engine::rules::{ACE_HEARTS, ace_of_trumps, five_of, jack_of, plain_mask, trump_mask};
+    let top = bit(five_of(trump))
+        | bit(jack_of(trump))
+        | bit(JOKER)
+        | bit(ACE_HEARTS)
+        | bit(ace_of_trumps(trump));
+    HandType {
+        trumps: count(hand & trump_mask(trump)),
+        top_trumps: count(hand & top),
+        longest_plain: Suit::ALL
+            .iter()
+            .filter(|&&s| s != trump)
+            .map(|&s| count(hand & plain_mask(s, trump)))
+            .max()
+            .unwrap_or(0),
+    }
+}
+
+/// The deciding seat's hand type in a view, once trumps are known.
+pub fn view_hand_type(v: &SeatView) -> Option<HandType> {
+    v.public.trump.map(|t| hand_type(v.hand, t))
 }
 
 impl DecisionSpec {
@@ -124,7 +189,7 @@ pub fn build_decisions(
             rng.shuffle(&mut deck);
             let mut m = Match::from_hand_start(start, deck, 0, Rules::HOUSE).expect("valid");
             let h = m.hand_index();
-            let mut nodes: Vec<(Vec<Action>, u8)> = Vec::new();
+            let mut nodes: Vec<(Vec<Action>, u8, Option<HandType>)> = Vec::new();
             while m.phase() != Phase::MatchOver && m.hand_index() == h {
                 let seat = m.to_act().expect("to act");
                 let v = m.view(seat);
@@ -133,7 +198,7 @@ pub fn build_decisions(
                     && v.public.trick_cards.len() == pos
                     && candidates(&v, &legal).1.len() >= 2
                 {
-                    nodes.push((m.actions().to_vec(), seat));
+                    nodes.push((m.actions().to_vec(), seat, view_hand_type(&v)));
                 }
                 if v.public.trick_no > trick {
                     break;
@@ -144,7 +209,8 @@ pub fn build_decisions(
             if nodes.is_empty() {
                 continue;
             }
-            let (actions, seat) = nodes.swap_remove(rng.bounded(nodes.len() as u64) as usize);
+            let (actions, seat, hand_type) =
+                nodes.swap_remove(rng.bounded(nodes.len() as u64) as usize);
             out.push(DecisionSpec {
                 id: i,
                 trick,
@@ -154,6 +220,7 @@ pub fn build_decisions(
                 actions,
                 seat,
                 position: pos as u8,
+                hand_type,
             });
             break;
         }
@@ -167,7 +234,9 @@ pub fn measure_seed(seed: u64, label: u64, id: u64) -> u64 {
     Rng::derive(seed, &[labels::AGREE, label, id]).next_u64()
 }
 
-/// Per-world candidate values of one decision.
+/// Per-world candidate values of one decision. Everything in it is a pure function of the
+/// decision and the job, so files of these are byte-identical for any thread count (timings go
+/// to a separate [`DecisionTiming`] file).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorldRows {
     /// The decision's id.
@@ -190,11 +259,249 @@ pub struct WorldRows {
     pub cands: Vec<Candidate>,
     /// One row per world (from `from`), each the candidates' values (four u64 per value).
     pub rows: Vec<Vec<[u64; 4]>>,
-    /// Wall time of the whole decision, in milliseconds (reports only).
-    pub ms: u64,
+    /// floor(log2) of the exact number of worlds consistent with the decider's view, when the
+    /// world source can count them (`None` with the rejection sampler: needs `crates/belief`).
+    #[serde(default)]
+    pub log2_worlds: Option<u32>,
+    /// The deciding seat's hand type (§13.1 item 9), once trumps are known.
+    #[serde(default)]
+    pub hand_type: Option<HandType>,
 }
 
-/// Value every candidate of `d` in worlds `from..to` by `method`.
+/// How long one decision's worlds took (reports only; never part of a result).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionTiming {
+    /// The decision's id.
+    pub id: u64,
+    /// The trick.
+    pub trick: u8,
+    /// Position in the trick (0 = leader).
+    pub position: u8,
+    /// `exact` or `rollout`.
+    pub method: String,
+    /// World label.
+    pub label: u64,
+    /// Worlds valued.
+    pub worlds: u64,
+    /// Sum over its worlds of the time to value one world, in microseconds (one worker thread;
+    /// with `solve_threads > 1`, the wall time of the parallel solves).
+    pub world_us: u64,
+    /// The slowest world, in microseconds.
+    pub max_world_us: u64,
+}
+
+/// One worlds job: which worlds of every decision, valued by which method.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorldsJob {
+    /// Exact or rollout PIMC.
+    pub method: Method,
+    /// World label (1 = yardstick).
+    pub label: u64,
+    /// Master seed.
+    pub seed: u64,
+    /// First world.
+    pub from: u64,
+    /// One past the last world.
+    pub to: u64,
+}
+
+/// The name a method is recorded under.
+pub fn method_name(m: Method) -> &'static str {
+    match m {
+        Method::ExactPimc => "exact",
+        Method::RolloutPimc => "rollout",
+        Method::Forced => "forced",
+    }
+}
+
+/// Live counters of a [`world_rows_batch`] run, for progress reports only.
+#[derive(Debug, Default)]
+pub struct BatchProgress {
+    /// Decisions in the run (including ones already done before a resume).
+    pub decisions_total: AtomicU64,
+    /// Decisions finished and handed to the sink.
+    pub decisions_done: AtomicU64,
+    /// (decision, world) tasks in the run (including ones already done before a resume).
+    pub worlds_total: AtomicU64,
+    /// Tasks finished.
+    pub worlds_done: AtomicU64,
+    /// Worker threads in use.
+    pub threads: AtomicU64,
+    /// The parallel exact solve now running, when one worker runs `solve_fast_par`
+    /// (`threads == 1`, `solve_threads > 1`): its subproblems done and total.
+    pub par: ParProgress,
+}
+
+/// A decision made ready for valuing.
+struct Prepared<'d> {
+    d: &'d DecisionSpec,
+    view: SeatView,
+    cands: Vec<Candidate>,
+    dseed: u64,
+}
+
+/// The order a batch works in and writes in: longest expected first, so the run ends on cheap
+/// worlds and its tail is short. Earlier tricks first, then earlier positions in the trick (the
+/// leader sees the fewest cards: trick-2 exact worlds take seconds at position 1 and hundredths
+/// of a second at position 8), then more candidates first, then decision id.
+fn batch_order(p: &Prepared) -> (u8, u8, Reverse<usize>, u64) {
+    (p.d.trick, p.d.position, Reverse(p.cands.len()), p.d.id)
+}
+
+/// Value every candidate of every decision in `ds` in worlds `job.from..job.to`, handing each
+/// finished decision to `sink` with its timing.
+///
+/// Scheduling: one flat work queue holds every (decision, world) task of the whole run, ordered
+/// by [`batch_order`] then world; `cfg.threads` workers take the next task from an atomic index,
+/// so a slow world never holds other threads up (there is no barrier per decision). Each result
+/// goes into a pre-sized slot by (decision, world); a decision is handed to `sink`, in batch
+/// order, once it and every decision before it are complete. Values, rows and the order of the
+/// `sink` calls are therefore the same for any thread count; only the timings differ.
+pub fn world_rows_batch(
+    ds: &[DecisionSpec],
+    job: &WorldsJob,
+    ctx: &Ctx,
+    cfg: &SearchConfig,
+    progress: Option<&BatchProgress>,
+    mut sink: impl FnMut(WorldRows, DecisionTiming) -> Result<(), String>,
+) -> Result<(), String> {
+    assert!(job.to >= job.from, "worlds from..to");
+    let mut preps: Vec<Prepared> = ds
+        .iter()
+        .map(|d| {
+            let (_, view, legal) = d.replay();
+            let (_, cands) = candidates(&view, &legal);
+            Prepared {
+                d,
+                view,
+                cands,
+                dseed: measure_seed(job.seed, job.label, d.id),
+            }
+        })
+        .collect();
+    preps.sort_by_key(batch_order);
+    let worlds: Vec<_> = preps
+        .iter()
+        .map(|p| ctx.source.prepare(&p.view, ctx.rules))
+        .collect();
+    let nw = (job.to - job.from) as usize;
+    let total = preps.len() * nw;
+    let slots: Vec<OnceLock<Vec<MoneyChance>>> = (0..total).map(|_| OnceLock::new()).collect();
+    let left: Vec<AtomicUsize> = preps.iter().map(|_| AtomicUsize::new(nw)).collect();
+    let us: Vec<AtomicU64> = preps.iter().map(|_| AtomicU64::new(0)).collect();
+    let max_us: Vec<AtomicU64> = preps.iter().map(|_| AtomicU64::new(0)).collect();
+    let next = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let threads = cfg.threads.max(1).min(total.max(1));
+    if let Some(p) = progress {
+        p.threads.store(threads as u64, Ordering::Relaxed);
+    }
+    // Solve progress is only meaningful with one parallel solve at a time.
+    let par = progress
+        .filter(|_| threads == 1 && cfg.solve_threads > 1)
+        .map(|p| &p.par);
+    let work = |tx: mpsc::Sender<()>| {
+        while !stop.load(Ordering::Relaxed) {
+            let k = next.fetch_add(1, Ordering::Relaxed);
+            if k >= total {
+                break;
+            }
+            let (j, i) = (k / nw, k % nw);
+            let p = &preps[j];
+            let t0 = Instant::now();
+            let w = job.from + i as u64;
+            let v = world_row(
+                &p.view,
+                &*worlds[j],
+                &p.cands,
+                job.method,
+                w,
+                p.dseed,
+                ctx,
+                cfg,
+                par,
+            );
+            let t = t0.elapsed().as_micros() as u64;
+            us[j].fetch_add(t, Ordering::Relaxed);
+            max_us[j].fetch_max(t, Ordering::Relaxed);
+            assert!(slots[k].set(v).is_ok(), "each task is taken once");
+            if let Some(p) = progress {
+                p.worlds_done.fetch_add(1, Ordering::Relaxed);
+            }
+            if left[j].fetch_sub(1, Ordering::AcqRel) == 1 {
+                // The writer may have stopped (a sink error); nothing to do then.
+                let _ = tx.send(());
+            }
+        }
+    };
+    std::thread::scope(|s| {
+        let (tx, rx) = mpsc::channel::<()>();
+        for _ in 0..threads.min(total) {
+            let tx = tx.clone();
+            s.spawn(move || work(tx));
+        }
+        drop(tx);
+        // The writer (this thread): hand finished decisions out in batch order.
+        let mut j = 0;
+        let result = 'write: loop {
+            while j < preps.len() && left[j].load(Ordering::Acquire) == 0 {
+                let p = &preps[j];
+                let rows: Vec<Vec<[u64; 4]>> = slots[j * nw..(j + 1) * nw]
+                    .iter()
+                    .map(|c| {
+                        c.get()
+                            .expect("a finished decision has every world")
+                            .iter()
+                            .map(|v| v.0)
+                            .collect()
+                    })
+                    .collect();
+                let r = WorldRows {
+                    id: p.d.id,
+                    trick: p.d.trick,
+                    stratum: p.d.stratum,
+                    position: p.d.position,
+                    team: engine::team_of(p.d.seat),
+                    method: method_name(job.method).to_string(),
+                    label: job.label,
+                    from: job.from,
+                    cands: p.cands.clone(),
+                    rows,
+                    log2_worlds: worlds[j].count().map(|c| c.max(1).ilog2()),
+                    hand_type: view_hand_type(&p.view),
+                };
+                let t = DecisionTiming {
+                    id: p.d.id,
+                    trick: p.d.trick,
+                    position: p.d.position,
+                    method: r.method.clone(),
+                    label: job.label,
+                    worlds: nw as u64,
+                    world_us: us[j].load(Ordering::Relaxed),
+                    max_world_us: max_us[j].load(Ordering::Relaxed),
+                };
+                if let Err(e) = sink(r, t) {
+                    break 'write Err(e);
+                }
+                if let Some(pr) = progress {
+                    pr.decisions_done.fetch_add(1, Ordering::Relaxed);
+                }
+                j += 1;
+            }
+            if j == preps.len() {
+                break Ok(());
+            }
+            if rx.recv().is_err() {
+                // Every worker has stopped (one panicked); the scope re-raises the panic.
+                break Ok(());
+            }
+        };
+        stop.store(true, Ordering::Relaxed);
+        result
+    })
+}
+
+/// Value every candidate of `d` in worlds `from..to` by `method` (a batch of one decision).
 #[allow(clippy::too_many_arguments)]
 pub fn world_rows(
     d: &DecisionSpec,
@@ -206,32 +513,124 @@ pub fn world_rows(
     ctx: &Ctx,
     cfg: &SearchConfig,
 ) -> WorldRows {
-    let t0 = std::time::Instant::now();
-    let (_, view, legal) = d.replay();
-    let (_, cands) = candidates(&view, &legal);
-    let dseed = measure_seed(seed, label, d.id);
-    let rows = world_values(&view, &cands, method, from, to, dseed, ctx, cfg);
-    WorldRows {
-        id: d.id,
-        trick: d.trick,
-        stratum: d.stratum,
-        position: d.position,
-        team: engine::team_of(d.seat),
-        method: match method {
-            Method::ExactPimc => "exact",
-            Method::RolloutPimc => "rollout",
-            Method::Forced => "forced",
-        }
-        .to_string(),
+    let job = WorldsJob {
+        method,
         label,
+        seed,
         from,
-        cands,
-        rows: rows
-            .into_iter()
-            .map(|r| r.into_iter().map(|v| v.0).collect())
-            .collect(),
-        ms: t0.elapsed().as_millis() as u64,
+        to,
+    };
+    let mut out = None;
+    world_rows_batch(std::slice::from_ref(d), &job, ctx, cfg, None, |r, _| {
+        out = Some(r);
+        Ok(())
+    })
+    .expect("the sink never fails");
+    out.expect("one decision")
+}
+
+/// Read a JSON-lines file; a torn line (a run killed mid-write) is skipped.
+pub fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>, String> {
+    let f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut out = Vec::new();
+    for l in std::io::BufReader::new(f).lines() {
+        let l = l.map_err(|e| e.to_string())?;
+        if l.trim().is_empty() {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str(&l) {
+            out.push(v);
+        }
     }
+    Ok(out)
+}
+
+/// The timing file that goes with a worlds file: `<out>.times.jsonl`.
+pub fn timing_path(out: &Path) -> PathBuf {
+    let mut s = out.as_os_str().to_owned();
+    s.push(".times.jsonl");
+    PathBuf::from(s)
+}
+
+/// The `search worlds` step: value decisions `ds` by `job` into the JSON-lines file `out`, one
+/// line per decision in batch order, resuming from what `out` already holds (decisions already
+/// there are skipped; a torn last line is dropped and redone). The file is byte-identical for any
+/// thread count, and whether or not the run was interrupted and resumed. Timings are appended to
+/// [`timing_path`]`(out)`. `on_done` sees each decision as it is written (for logs). Returns the
+/// number of decisions valued by this call.
+pub fn worlds_file(
+    out: &Path,
+    ds: &[DecisionSpec],
+    job: &WorldsJob,
+    ctx: &Ctx,
+    cfg: &SearchConfig,
+    progress: Option<&BatchProgress>,
+    mut on_done: impl FnMut(&WorldRows, &DecisionTiming),
+) -> Result<usize, String> {
+    let done: Vec<WorldRows> = if out.exists() {
+        read_jsonl(out)?
+    } else {
+        Vec::new()
+    };
+    let nw = job.to - job.from;
+    if let Some(r) = done.iter().find(|r| {
+        r.method != method_name(job.method)
+            || r.label != job.label
+            || r.from != job.from
+            || r.rows.len() as u64 != nw
+    }) {
+        return Err(format!(
+            "{}: decision {} was made with other settings ({} label {} worlds {}..{}); \
+             use another output file",
+            out.display(),
+            r.id,
+            r.method,
+            r.label,
+            r.from,
+            r.from + r.rows.len() as u64
+        ));
+    }
+    // Rewrite the file without a torn line, then append.
+    let mut text = String::new();
+    for r in &done {
+        text.push_str(&serde_json::to_string(r).map_err(|e| e.to_string())?);
+        text.push('\n');
+    }
+    std::fs::write(out, text).map_err(|e| format!("{}: {e}", out.display()))?;
+    let open = |p: &Path| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(p)
+            .map_err(|e| format!("{}: {e}", p.display()))
+    };
+    let mut f = open(out)?;
+    let mut ft = open(&timing_path(out))?;
+    let todo: Vec<DecisionSpec> = ds
+        .iter()
+        .filter(|d| !done.iter().any(|r| r.id == d.id))
+        .cloned()
+        .collect();
+    if let Some(p) = progress {
+        let before = (ds.len() - todo.len()) as u64;
+        p.decisions_total.store(ds.len() as u64, Ordering::Relaxed);
+        p.decisions_done.store(before, Ordering::Relaxed);
+        p.worlds_total
+            .store(ds.len() as u64 * nw, Ordering::Relaxed);
+        p.worlds_done.store(before * nw, Ordering::Relaxed);
+    }
+    let mut n = 0;
+    world_rows_batch(&todo, job, ctx, cfg, progress, |r, t| {
+        let line = serde_json::to_string(&r).map_err(|e| e.to_string())?;
+        writeln!(f, "{line}").map_err(|e| e.to_string())?;
+        f.flush().map_err(|e| e.to_string())?;
+        let tl = serde_json::to_string(&t).map_err(|e| e.to_string())?;
+        writeln!(ft, "{tl}").map_err(|e| e.to_string())?;
+        on_done(&r, &t);
+        n += 1;
+        Ok(())
+    })?;
+    Ok(n)
 }
 
 fn mc(v: [u64; 4]) -> MoneyChance {
@@ -476,6 +875,171 @@ pub fn paired(a: &[Scored], b: &[Scored]) -> Paired {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use engine::cards::card;
+    use equity::MatchState;
+    use solver::FnLeaf;
+
+    use crate::pimc::{SharedLeaf, world_values};
+    use crate::worlds::RejectionSource;
+
+    fn leaf() -> Arc<SharedLeaf> {
+        Arc::new(FnLeaf(|s: &MatchState| {
+            MoneyChance::from_weights(core::array::from_fn(|t| {
+                1 + u128::from(s.scores[t]) + 40 * u128::from(s.games[t])
+            }))
+        }))
+    }
+
+    /// A small mixed set: exact-cheap trick-4 decisions and trick-3 ones (ids kept distinct).
+    fn small_set() -> Vec<DecisionSpec> {
+        let starts = collect_starts(400, 5);
+        let mut ds = build_decisions(4, 12, 3, &starts);
+        for mut d in build_decisions(3, 4, 4, &starts) {
+            d.id += 100;
+            ds.push(d);
+        }
+        ds
+    }
+
+    fn tmp(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("search-measure-{}-{tag}.jsonl", std::process::id()))
+    }
+
+    fn run(path: &Path, ds: &[DecisionSpec], job: &WorldsJob, threads: usize) -> Vec<u8> {
+        let l = leaf();
+        let src = RejectionSource::new();
+        let ctx = Ctx {
+            leaf: &*l,
+            source: &src,
+            rules: Rules::HOUSE,
+        };
+        let cfg = SearchConfig {
+            threads,
+            tt_mb: 4,
+            ..SearchConfig::default()
+        };
+        worlds_file(path, ds, job, &ctx, &cfg, None, |_, _| {}).expect("runs");
+        std::fs::read(path).expect("written")
+    }
+
+    fn clean(p: &Path) {
+        let _ = std::fs::remove_file(p);
+        let _ = std::fs::remove_file(timing_path(p));
+    }
+
+    /// The worlds file is byte-identical on 1, 3 and 8 threads, for exact and rollout PIMC; it
+    /// is in batch order (earlier positions first); an interrupted run (torn last line) resumes to
+    /// the same bytes; the rows equal the per-decision `world_values` the bots use.
+    #[test]
+    fn worlds_files_thread_independent_and_resumable() {
+        let ds = small_set();
+        for (k, method) in [Method::ExactPimc, Method::RolloutPimc]
+            .into_iter()
+            .enumerate()
+        {
+            let job = WorldsJob {
+                method,
+                label: 1 + k as u64,
+                seed: 7,
+                from: 1,
+                to: 5,
+            };
+            let mut files = Vec::new();
+            for threads in [1, 3, 8] {
+                let p = tmp(&format!("m{k}-t{threads}"));
+                clean(&p);
+                files.push(run(&p, &ds, &job, threads));
+                let times: Vec<DecisionTiming> = read_jsonl(&timing_path(&p)).expect("timings");
+                assert_eq!(times.len(), ds.len());
+                clean(&p);
+            }
+            assert_eq!(files[0], files[1], "1 vs 3 threads");
+            assert_eq!(files[0], files[2], "1 vs 8 threads");
+            let text = String::from_utf8(files[0].clone()).expect("utf8");
+            let rows: Vec<WorldRows> = text
+                .lines()
+                .map(|l| serde_json::from_str(l).expect("row"))
+                .collect();
+            assert_eq!(rows.len(), ds.len());
+            let order: Vec<(u8, u8)> = rows.iter().map(|r| (r.trick, r.position)).collect();
+            assert!(order.windows(2).all(|w| w[0] <= w[1]), "{order:?}");
+            assert!(
+                rows.iter()
+                    .all(|r| r.rows.len() == 4 && r.hand_type.is_some())
+            );
+            // Interrupted after 5 decisions, mid-way through writing the 6th: resume.
+            let lines: Vec<&str> = text.lines().collect();
+            let p = tmp(&format!("m{k}-resume"));
+            clean(&p);
+            let mut part = lines[..5].join("\n");
+            part.push('\n');
+            part.push_str(&lines[5][..lines[5].len() / 2]);
+            std::fs::write(&p, part).expect("write");
+            assert_eq!(run(&p, &ds, &job, 3), files[0], "resumed run");
+            // A file made with other settings is refused, not mixed.
+            let l = leaf();
+            let src = RejectionSource::new();
+            let ctx = Ctx {
+                leaf: &*l,
+                source: &src,
+                rules: Rules::HOUSE,
+            };
+            let other = WorldsJob { label: 9, ..job };
+            let cfg = SearchConfig::default();
+            assert!(worlds_file(&p, &ds, &other, &ctx, &cfg, None, |_, _| {}).is_err());
+            clean(&p);
+            // Same values as the per-decision path.
+            for r in rows.iter().take(3) {
+                let d = ds.iter().find(|d| d.id == r.id).expect("decision");
+                let (_, v, legal) = d.replay();
+                let (_, cands) = candidates(&v, &legal);
+                let cfg = SearchConfig {
+                    tt_mb: 4,
+                    ..SearchConfig::default()
+                };
+                let want: Vec<Vec<[u64; 4]>> = world_values(
+                    &v,
+                    &cands,
+                    method,
+                    job.from,
+                    job.to,
+                    measure_seed(job.seed, job.label, d.id),
+                    &ctx,
+                    &cfg,
+                )
+                .into_iter()
+                .map(|row| row.into_iter().map(|x| x.0).collect())
+                .collect();
+                assert_eq!(r.rows, want);
+                assert_eq!(r.cands, cands);
+            }
+        }
+    }
+
+    #[test]
+    fn hand_types() {
+        let h = |cs: &[(Suit, u8)]| cs.iter().fold(0, |a, &(s, r)| a | bit(card(s, r)));
+        use Suit::{Clubs, Hearts, Spades};
+        let a = h(&[(Hearts, 5), (Hearts, 11), (Hearts, 1), (Spades, 13)]) | bit(JOKER);
+        let t = hand_type(a, Hearts);
+        assert_eq!((t.trumps, t.top_trumps, t.longest_plain), (4, 4, 1));
+        assert_eq!(t.bands(), [3, 2, 1]);
+        let b = h(&[
+            (Hearts, 1),
+            (Spades, 1),
+            (Spades, 2),
+            (Clubs, 3),
+            (Clubs, 4),
+            (Clubs, 5),
+        ]);
+        let t = hand_type(b, Spades);
+        assert_eq!((t.trumps, t.top_trumps, t.longest_plain), (3, 2, 3));
+        let t = hand_type(h(&[(Clubs, 2), (Spades, 3)]), Hearts);
+        assert_eq!((t.trumps, t.top_trumps, t.longest_plain), (0, 0, 1));
+        assert_eq!(t.bands(), [0, 0, 1]);
+    }
 
     #[test]
     fn strata_classify() {
