@@ -57,13 +57,16 @@ KEEP = ["id", "machine_id", "host_id", "cpu_name", "cpu_cores", "cpu_cores_effec
 
 # ------------------------------------------------------------------ queries
 
+# Max $/GB up or down, matching launch.py --max-net-cost (owner 2026-10-14: 0.10; our traffic is tiny).
+NET_CAP = 0.10
+
 def base_query(min_cores: int, min_ram_gb: int) -> dict:
     """The launcher's CPU-only filter (launch.py offer_query with --cpu-only), as API JSON."""
     return {
         "verified": {"eq": True}, "external": {"eq": False}, "rentable": {"eq": True},
         "reliability": {"gt": 0.98}, "num_gpus": {"gte": 1}, "gpu_frac": {"eq": 1},
         "cpu_cores_effective": {"gte": min_cores}, "cpu_ram": {"gte": min_ram_gb * 1000},
-        "disk_space": {"gte": 20}, "inet_down_cost": {"lte": 0.02}, "inet_up_cost": {"lte": 0.02},
+        "disk_space": {"gte": 20}, "inet_down_cost": {"lte": NET_CAP}, "inet_up_cost": {"lte": NET_CAP},
         "order": [["dph_total", "asc"]], "type": "on-demand", "limit": 2000, "allocated_storage": 20,
     }
 
@@ -76,11 +79,11 @@ def queries(min_cores: int, min_ram_gb: int) -> dict[str, dict]:
     partial = dict(eligible, gpu_frac={"lt": 1})
     low_rel = dict(eligible, reliability={"gt": 0.90, "lte": 0.98})
     unverified = dict(eligible, verified={"eq": False})
-    return {"eligible": eligible, "network_cost_over_0.02": net, "partial_machine": partial,
+    return {"eligible": eligible, "network_cost_over_cap": net, "partial_machine": partial,
             "reliability_0.90-0.98": low_rel, "unverified": unverified}
 
 
-WHY = {"network_cost_over_0.02": "network > $0.02/GB", "partial_machine": "shared machine",
+WHY = {"network_cost_over_cap": f"network > ${NET_CAP}/GB", "partial_machine": "shared machine",
        "reliability_0.90-0.98": "reliability < 0.98", "unverified": "unverified"}
 
 
@@ -258,7 +261,7 @@ def report(snap: dict, sp: dict, a) -> str:
     elig = [o for o in offers if o["query"] == "eligible"]
     min_cores = snap["queries"].get("eligible", {}).get("cpu_cores_effective", {}).get("gte", a.min_cores)
     out.append(f"vast.ai on-demand market at {snap['utc']}: {len(elig)} offers launch.py can rent "
-               f"(whole machine, verified, reliability > 0.98, network <= $0.02/GB, >= {min_cores} effective cores)"
+               f"(whole machine, verified, reliability > 0.98, network <= ${NET_CAP}/GB, >= {min_cores} effective cores)"
                + "".join(f"; {sum(o['query'] == q for o in offers)} {q}" for q in snap["queries"] if q != "eligible"))
     out.append("Speed: per hardware thread with all threads busy, EPYC 7502 = 1.00; '~' = estimate, not yet measured. "
                "1 unit of work = 1 hour of one EPYC 7502 thread.\n")
@@ -293,11 +296,11 @@ def report(snap: dict, sp: dict, a) -> str:
     out.append(table(T1_HEAD, offer_rows(near_t[:a.top], "tt", a.t1_table_gb), md))
 
     if a.include_other:
-        other = [o for o in offers if o["query"] in ("network_cost_over_0.02", "partial_machine")]
+        other = [o for o in offers if o["query"] in ("network_cost_over_cap", "partial_machine")]
         for o in other:
             o["_quirk"] = WHY[o["query"]] + ("; " + o["_quirk"] if o["_quirk"] else "")
         ranked_o, _ = rank(other, "compute", a.premium)
-        out.append(f"\n## Not rentable by launch.py's current rules (network cost over $0.02/GB, or part of a "
+        out.append(f"\n## Not rentable by launch.py's current rules (network cost over the cap, or part of a "
                    f"machine shared with other renters), cheapest compute work first, top {a.top}\n")
         out.append(table(OFFER_HEAD, offer_rows(ranked_o[:a.top], "compute"), md))
     unknown = sorted({o["_model"] for o in offers if o["_compute_src"] == "default"})
@@ -361,7 +364,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="trick-1 ranking: RAM per deal solved at once (the worst trick-1 deal so far peaked at 65 GB)")
     p.add_argument("--t1-min-gb-per-thread", type=float, default=1.0, help="trick-1 ranking: minimum RAM per thread")
     p.add_argument("--include-other", action="store_true",
-                   help="also rank offers launch.py refuses today (network cost over $0.02/GB, shared machines)")
+                   help="also rank offers launch.py refuses today (network cost over the cap, shared machines)")
     p.add_argument("--markdown", action="store_true", help="print markdown tables")
     sub = p.add_subparsers(dest="cmd")
     r = sub.add_parser("record", help="store a measured speed factor for a CPU model")
