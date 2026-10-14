@@ -40,7 +40,7 @@ from datetime import datetime, timezone
 
 POLL_S = 60
 HEARTBEAT_STALE_S = 180
-LOW_CPU_PCT = 85.0
+LOW_CPU_PCT = 85.0  # default; --low-cpu-pct overrides per run
 LOW_CPU_S = 300
 
 
@@ -366,10 +366,10 @@ def cmd_run(a) -> int:
             partial_ok = bool((hb.get("progress") or {}).get("partial_cpu_ok"))
             if hb.get("phase") in ("benchmark", "chunk") and cpu is not None and not partial_ok:
                 cpu_samples.append(float(cpu))
-                if cpu < LOW_CPU_PCT:
+                if cpu < a.low_cpu_pct:
                     low_since = low_since or now
                     if now - low_since >= LOW_CPU_S:
-                        reason = f"CPU use below {LOW_CPU_PCT:.0f}% for 5 minutes while work remains"
+                        reason = f"CPU use below {a.low_cpu_pct:.0f}% for 5 minutes while work remains"
                         break
                 else:
                     low_since = None
@@ -451,6 +451,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--image", required=True)
     s.add_argument("--bin-sha", required=True)
     s.add_argument("--max-minutes", type=int, default=30)
+    s.add_argument("--low-cpu-pct", type=float, default=LOW_CPU_PCT,
+                   help="destroy if CPU stays below this for 5 minutes (lower only for runs with known serial tails)")
     s.add_argument("--startup-minutes", type=int, default=15)
     s.add_argument("--state-file", help="write the instance id here (for a cleanup step)")
     s.add_argument("--dry-run", action="store_true", help="choose the offer, but create nothing")
