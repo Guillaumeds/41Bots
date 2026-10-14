@@ -82,3 +82,17 @@ M1 adds the table manager, the arena (14-way duplicate block, generalised SPRT, 
 - Table v0 checks pass; σ_b = 0.146 money chance (1.17 stakes) per 14-way block, rules-v1 vs random; canary exactly 0.
 - Leakage and replay tests pass. **M1 gate met.** Open owner question: see the early Joker-burn ace question above.
 - Next: M2 (exact solver) — measurement spike first (PLAN §13).
+
+## M2 progress (2026-10-14)
+- **Measurement spike done** (`crates/solver`, binary `solver-spike`, results in `docs/M2-SPIKE.md`): naive exact max^n in money chance, optional plain transposition table; matches an engine-driven brute force on 1-, 2-, 3-card endgames; table on = off.
+- Naive costs on the 4-vCPU Xeon: trick 3 median 18 ms (p90 55 ms) with the table; trick 2 median 9 s, 7% over 60 s, 365 MB; trick 1 never finished in 60 s. 82–85% of decisions have tied best cards; reversing the tie order never changed a root value at tricks 3–4.
+- Next: equivalent cards, Sturtevant pruning (on = off under the tie order), move ordering; repeat the spike on a second CPU type (vast.ai EPYC) for the M2 gate.
+- **2026-10-14 (later): optimised exact solver** (`solver::solve_fast`, details and tables in `docs/M2-SPIKE.md`). Four switchable speed-ups: bounded transposition table keyed per A2, equivalent cards with the 41 exceptions, move ordering, Sturtevant shallow pruning (proof in `fast.rs`; deep/speculative pruning left out, no proof for 4 teams with our tie rule).
+  - **Gate: identical answers to the naive solver** (root value, every root card's value, chosen card, both tie orders, all 16 switch combinations): 0 differences over 150,000 worlds each at tricks 4 and 5, 3,000 at trick 3 (three leaf tables), 64 at trick 2 (table-on combinations). Four-layer validation in `crates/solver/tests/`: engine parity (found and fixed a `from_match` bug: a 5 of trumps already in the current trick was marked as scored), brute force on 1–3-card endgames, on/off identity, best response at the root. Forced-denial check (test-only) added and tested.
+  - Costs (4-vCPU Xeon): trick 3 median 8.8 ms (naive 17.6), p90 30 ms (55); trick 2 median 3.1 s (naive 9.2 s), all 100 worlds solved, worst 29 s (naive: 7 over 60 s); trick 1 still unsolved in 60 s. Equivalent cards give almost all of it (3.3× fewer nodes at trick 3, 5× at trick 2); shallow pruning fires at ~1 node in 10,000; move ordering costs 15% and saves nothing, so it is off by default.
+  - Next for the M2 gate: repeat the cost tables on a second CPU type (vast.ai EPYC).
+
+## M2 gate result (2026-10-14)
+- Optimised solver identical to the naive solver (0 mismatches on the Xeon and on an AMD EPYC 7502); pruning on/off identical; brute force on 1–3-card endgames passes; costs published for both CPU types (`docs/M2-SPIKE.md`). **M2 gate met.**
+- Follow-up in progress: a multi-core single-world solve to measure the true trick-1 duration on a high-core machine (owner request).
+- Next: M3 (card tracker, suit-length-matrix world generator, PIMC teacher: exact from trick 3, rollout-PIMC with the rules bot at tricks 1–2; pre-registered PIMC-suitability measurement; full runner).

@@ -21,7 +21,7 @@ Rules applied:
   the one doing the most work per hour.
 - Watch through the vast API and the R2 heartbeat every 60 s, never SSH. Destroy when: no
   heartbeat within --startup-minutes; heartbeat older than 3 minutes; CPU use below 85% for 5
-  minutes while the chunk is running; --max-minutes reached; DONE/FAILED seen. Always destroy,
+  minutes while the chunk is running (unless its heartbeat says progress.partial_cpu_ok); --max-minutes reached; DONE/FAILED seen. Always destroy,
   never stop.
 """
 
@@ -87,7 +87,8 @@ def search_offers(a) -> list[dict]:
     # --type on-demand: fixed-price rental only. Interruptible (bid) machines are never used.
     rows = vast("search", "offers", offer_query(a), "--type", "on-demand", "--order", "dph_total", "--limit", "200")
     return [o for o in (rows or []) if not o.get("is_bid") and o.get("dph_total") and o.get("cpu_cores_effective")
-            and (not a.max_dph or float(o["dph_total"]) <= a.max_dph)]
+            and (not a.max_dph or float(o["dph_total"]) <= a.max_dph)
+            and (not a.cpu_match or re.search(a.cpu_match, o.get("cpu_name") or "", re.I))]
 
 
 # ------------------------------------------------------------------ R2 (aws CLI, S3 API)
@@ -360,7 +361,10 @@ def cmd_run(a) -> int:
             if cpu is None:
                 cpu = hb.get("host_cpu_busy_pct")
             log(f"heartbeat {hb.get('seq')}: phase {hb.get('phase')}, cpu {cpu}%, elapsed {hb.get('elapsed_s')} s, est ${hb.get('est_cost_usd')}")
-            if hb.get("phase") in ("benchmark", "chunk") and cpu is not None:
+            # A chunk may declare a stretch of deliberately partial CPU use (e.g. the solver
+            # measurement, which times single-thread solves); the low-CPU rule skips it.
+            partial_ok = bool((hb.get("progress") or {}).get("partial_cpu_ok"))
+            if hb.get("phase") in ("benchmark", "chunk") and cpu is not None and not partial_ok:
                 cpu_samples.append(float(cpu))
                 if cpu < LOW_CPU_PCT:
                     low_since = low_since or now
@@ -435,6 +439,7 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("--max-net-cost", type=float, default=0.02, help="max $/GB up or down")
         s.add_argument("--premium", type=float, default=0.20, help="speed premium margin (owner's 20%% rule)")
         s.add_argument("--max-dph", type=float, default=None, help="max total $/hour for the offer")
+        s.add_argument("--cpu-match", default="", help="regex the offer's CPU name must match (e.g. EPYC)")
         s.add_argument("--cheapest", action="store_true", help="test runs: take the cheapest $/hour offer, not the best cost per work")
 
     s = sub.add_parser("plan", help="dry run: rank offers and print the choice")

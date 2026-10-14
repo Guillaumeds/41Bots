@@ -1,0 +1,21 @@
+world	2	0	7	46829.996	749852844	229945808	0	0	0	228030884	221312060	4	4	0	-	-
+world	2	1	7	60000.145	1486118912	164609084	0	0	0	163803805	139804665	4	0	1	-	-
+world	2	2	4	4948.072	48685049	33804078	0	0	0	32821947	32619147	4	4	0	-	-
+world	2	3	5	60000.134	1221038080	236715328	0	0	0	235133163	235133163	4	0	1	-	-
+world	2	4	0	24908.191	622814470	66473820	0	0	0	66066954	53933465	4	4	0	-	-
+world	2	5	7	60000.071	1512738816	163338032	0	0	0	162542698	138516628	4	0	1	-	-
+world	2	6	2	60000.122	1493925888	158785546	0	0	0	157869154	117856011	4	0	1	-	-
+world	2	7	5	60000.063	1481375744	158729079	0	0	0	158095001	124572485	4	0	1	-	-
+summary	trick=2 worlds=8 solver=naive switches=11 tt=false cap_ms=Some(60000) threads=4 wall_s=120.0
+summary	cutoffs=0 equiv_skipped=0 tt_replaced=0 fast_tt_max_mb=0.0 nodes_total=1421352363
+summary	solved=3 timeouts=5 ms_median=24908.191 ms_p90=46829.996 ms_max=46829.996 nodes_median=622814470 nodes_p90=749852844 nodes_max=749852844
+summary	tt_hit_rate=NaN tt_max_entries=0 tt_max_mb=0.0 peak_rss_mb=76.4 (before solving 76.4)
+summary	tied_node_frac=0.9417 root_tied_child_frac=1.0000 root_any_tie=3/3 card_flips=0/0 root_value_changed=0
+seat	0	count=1 timeouts=0 ms_median=24908.191 ms_p90=24908.191 nodes_median=622814470
+seat	1	count=0 timeouts=0 ms_median=NaN ms_p90=NaN nodes_median=NaN
+seat	2	count=0 timeouts=1 ms_median=NaN ms_p90=NaN nodes_median=NaN
+seat	3	count=0 timeouts=0 ms_median=NaN ms_p90=NaN nodes_median=NaN
+seat	4	count=1 timeouts=0 ms_median=4948.072 ms_p90=4948.072 nodes_median=48685049
+seat	5	count=0 timeouts=2 ms_median=NaN ms_p90=NaN nodes_median=NaN
+seat	6	count=0 timeouts=0 ms_median=NaN ms_p90=NaN nodes_median=NaN
+seat	7	count=1 timeouts=2 ms_median=46829.996 ms_p90=46829.996 nodes_median=749852844
