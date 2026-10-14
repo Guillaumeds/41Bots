@@ -426,7 +426,13 @@ def cmd_run(a) -> int:
     log(f"run ended: {reason}")
     if not attempts:
         return 1
-    result = json.loads(r2_get(f"runs/{run_id}/result.json") or r2_get(f"runs/{run_id}/merged.json") or b"{}")
+    result = json.loads(r2_get(f"runs/{run_id}/result.json") or b"{}")
+    if resumable:
+        # The merged report lists every output; the cost report keeps the per-stream summary.
+        merged = json.loads(r2_get(f"runs/{run_id}/merged.json") or b"{}")
+        result = {"complete": merged.get("complete"), "streams": [
+            {k: st.get(k) for k in ("name", "kind", "chunks_done", "chunks_total", "left", "sprt") if k in st}
+            for st in merged.get("streams", [])]}
     benches = run_benchmarks(run_id, resumable)
     bench = benches[-1] if benches else {}
     dollars = sum(x["dollars_est"] for x in attempts)

@@ -59,6 +59,9 @@ class World:
             {"seq": self.hb_seq, "phase": "chunks", "cpu_util_pct": 99.0}).encode()
         self.hb_seq += 1
         if kind == "done" and inst["polls"] >= n:
+            self.store[f"runs/{RUN}/merged.json"] = json.dumps({"complete": True, "streams": [
+                {"name": "gate", "kind": "arena_blocks", "chunks_done": 3, "chunks_total": 145, "left": 0,
+                 "sprt": {"decision": "Accept"}, "chunks": [{"index": 0}]}]}).encode()
             self.store[f"runs/{RUN}/DONE"] = b"{}"
             inst["alive"] = False  # the runner destroys its own instance
 
@@ -165,6 +168,8 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(w.created_on, [1, 3])
         self.assertIn("heartbeat missing", report["attempts"][0]["ended"])
         self.assertTrue(all(not i["alive"] for i in w.instances.values()))
+        self.assertEqual(report["result"]["streams"][0]["sprt"]["decision"], "Accept")
+        self.assertNotIn("chunks", report["result"]["streams"][0])
         # The launcher recorded the binaries in the manifest the machines run.
         self.assertEqual(json.loads(w.store[f"runs/{RUN}/manifest.json"])["bin_sha"], "abc")
 
