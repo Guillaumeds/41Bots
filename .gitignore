@@ -26,4 +26,3 @@ rclone.conf
 .idea/
 .DS_Store
 Thumbs.db
-.claude/worktrees/

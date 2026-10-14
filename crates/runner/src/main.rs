@@ -9,8 +9,8 @@
 //! every 30 s, write outputs then `DONE` (or `FAILED`), upload everything to R2 with rclone, and,
 //! when `CONTAINER_ID` and `CONTAINER_API_KEY` are set, destroy this vast.ai instance last.
 //!
-//! The chunk work itself is done by the sibling release binaries (`difftest`, `equity`, later
-//! `arena`) found next to this executable, so the runner links no game code.
+//! The chunk work itself is done by the sibling release binaries (`difftest`, `equity`, `solver-spike`,
+//! `solver-identity`, later `arena`) found next to this executable, so the runner links no game code.
 //!
 //! R2 layout under the manifest's `out` prefix (default `runs/<run_id>`):
 //! `hardware.json`, `benchmark.json`, `heartbeat/<seq:06>.json` (versioned, never overwritten),
@@ -25,6 +25,8 @@ use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+
+mod spike;
 
 const USAGE: &str = "usage:
   runner run <manifest.json> [--work-dir DIR]
@@ -806,6 +808,7 @@ fn steps(ctx: &mut Ctx, manifest: &Value) -> Result<(), String> {
             let s = num(params, "seconds")?;
             benchmark(ctx, s)?
         }
+        "solver_spike" => spike::chunk(ctx, params)?,
         "arena_block" => {
             return Err("arena_block chunks need the arena binary (not built yet)".into());
         }
