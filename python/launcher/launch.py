@@ -78,7 +78,7 @@ def offer_query(a) -> str:
     return " ".join([
         "reliability>0.98", "num_gpus>=1", "gpu_frac=1", "rentable=true", "verified=true",
         f"cpu_cores_effective>={a.min_cores}", f"cpu_ram>={a.min_ram_gb}",
-        "compute_cap>=600", "compute_cap<1000", "cuda_vers>=12.6",
+    ] + ([] if a.cpu_only else ["compute_cap>=600", "compute_cap<1000", "cuda_vers>=12.6"]) + [
         f"disk_space>={a.disk_gb}", f"inet_down_cost<={a.max_net_cost}", f"inet_up_cost<={a.max_net_cost}",
     ] + ([f"dph_total<={a.max_dph}"] if a.max_dph else []))
 
@@ -441,6 +441,8 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("--max-dph", type=float, default=None, help="max total $/hour for the offer")
         s.add_argument("--cpu-match", default="", help="regex the offer's CPU name must match (e.g. EPYC)")
         s.add_argument("--cheapest", action="store_true", help="test runs: take the cheapest $/hour offer, not the best cost per work")
+        s.add_argument("--cpu-only", action="store_true",
+                       help="CPU-only job: drop the GPU compute-capability/CUDA filters (they only matter for PyTorch training)")
 
     s = sub.add_parser("plan", help="dry run: rank offers and print the choice")
     offer_args(s)

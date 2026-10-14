@@ -18,6 +18,10 @@ on:
       max_minutes:
         description: "Hard time limit (minutes) before the machine is destroyed"
         default: "30"
+      cpu_only:
+        description: "CPU-only job: ignore the GPU type when choosing a machine"
+        type: boolean
+        default: true
       low_cpu_pct:
         description: "Low-CPU watchdog threshold in % (default 85; lower only for runs with known serial tails)"
         default: "85"
@@ -73,12 +77,12 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$DRY_RUN" = "true" ]; then
-            python3 python/launcher/launch.py plan --min-cores "$MIN_CORES" --cpu-match "$CPU_MATCH" ${{ inputs.cheapest && '--cheapest' || '' }}
+            python3 python/launcher/launch.py plan --min-cores "$MIN_CORES" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} ${{ inputs.cheapest && '--cheapest' || '' }}
             exit 0
           fi
           # A blank run_id gets a timestamp from the launcher.
           MANIFEST=$(python3 -c 'import json,os,sys; t=os.environ["MANIFEST"]; m=json.loads(t if t.lstrip().startswith("{") else open(t).read()); m["run_id"]=m.get("run_id") or "gh-${{ github.run_id }}"; print(json.dumps(m))')
-          python3 python/launcher/launch.py run --manifest "$MANIFEST" --min-cores "$MIN_CORES" --cpu-match "$CPU_MATCH" \
+          python3 python/launcher/launch.py run --manifest "$MANIFEST" --min-cores "$MIN_CORES" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} \
             --max-minutes "$MAX_MINUTES" --low-cpu-pct "$LOW_CPU_PCT" --image "$IMAGE" --bin-sha "$BIN_SHA" --state-file instance-id.txt ${{ inputs.cheapest && '--cheapest' || '' }}
       - name: Safety net - destroy the instance if the job was cancelled or failed
         if: always() && hashFiles('instance-id.txt') != ''
