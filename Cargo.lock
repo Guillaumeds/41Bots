@@ -10,6 +10,7 @@ dependencies = [
  "bots",
  "engine",
  "equity",
+ "search",
  "serde",
  "serde_json",
  "tablemgr",
@@ -376,6 +377,19 @@ dependencies = [
  "quick-error",
  "tempfile",
  "wait-timeout",
+]
+
+[[package]]
+name = "search"
+version = "0.1.0"
+dependencies = [
+ "bot",
+ "bots",
+ "engine",
+ "equity",
+ "serde",
+ "serde_json",
+ "solver",
 ]
 
 [[package]]

@@ -1,0 +1,27 @@
+[package]
+name = "search"
+version = "0.1.0"
+description = "The PIMC teacher (M3): rollout-PIMC and exact PIMC scored in money chance, the PIMC bots, teacher data and the early-trick yardstick measurements"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# docs/M3-SPEC.md §1: engine, bot, bots, equity, solver, belief, serde, serde_json.
+# (`belief` is added when crates/belief lands; until then worlds come from the engine-based
+# rejection sampler in `worlds`.)
+[dependencies]
+engine = { path = "../engine", features = ["serde"] }
+bot = { path = "../bot" }
+bots = { path = "../bots" }
+equity = { path = "../equity" }
+solver = { path = "../solver" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[[bin]]
+name = "search"
+path = "src/bin/search.rs"
+
+[lints]
+workspace = true
