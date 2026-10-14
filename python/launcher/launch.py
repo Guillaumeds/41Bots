@@ -24,6 +24,14 @@ Rules applied:
   heartbeat within --startup-minutes; heartbeat older than 3 minutes; CPU use below 85% for 5
   minutes while the chunk is running (unless its heartbeat says progress.partial_cpu_ok); --max-minutes reached; DONE/FAILED seen. Always destroy,
   never stop.
+- Keep finished work (docs/M3-SPEC.md §13.1 item 11): before destroying a machine that is still
+  working (--max-minutes, low CPU, Ctrl-C) the launcher writes runs/<run_id>/STOP; the runner
+  reads it at its next heartbeat, stops, uploads what it finished, writes DONE or FAILED, and the
+  launcher waits up to --stop-wait-s (300 s) for that marker before destroying. The report's
+  outcome is then STOPPED. A machine whose heartbeat stopped or that died is destroyed at once.
+  When the workflow is cancelled this process is killed within seconds, so it only writes STOP
+  and leaves the wait, the destroy and the key deletion to the workflow's cleanup steps
+  (`launch.py stop RUN_ID --instance ID`; the run id is kept in <state-file>.run-id).
 - If creating the instance fails (typically the offer was taken between search and create, which
   vast reports as an empty answer), the next-best offer is tried, up to 5 offers.
 - Format-2 manifests (docs/M3-SPEC.md section 7.3) resume: when the heartbeat goes missing for 3
@@ -69,6 +77,8 @@ MAX_REPLACEMENTS = 3
 MAX_CREATE_TRIES = 5
 LOW_CPU_PCT = 85.0  # default; --low-cpu-pct overrides per run
 LOW_CPU_S = 300
+STOP_WAIT_S = 300  # default; --stop-wait-s overrides: how long a stopped machine may take to upload
+STOP_POLL_S = 10
 
 
 def log(msg: str) -> None:
@@ -479,6 +489,11 @@ def cmd_run(a) -> int:
     cpu_samples: list[float] = []
     dkey = None if a.no_destroy_key else create_destroy_key(run_id)
     a.destroy_key = dkey["key"] if dkey else ""
+    a.stopped = False
+    if a.state_file:
+        # For the workflow's cleanup step (`launch.py stop`), should this process be cancelled.
+        with open(f"{a.state_file}.run-id", "w") as fh:
+            fh.write(run_id)
     if dkey and a.state_file:
         # For the workflow's cleanup step, should this process not reach its own deletion.
         with open(f"{a.state_file}.destroy-key", "w") as fh:
@@ -486,7 +501,8 @@ def cmd_run(a) -> int:
     try:
         final, reason = rent_and_watch(a, run_id, best, resumable, run_start, attempts, cpu_samples)
     finally:
-        if dkey:
+        # A cancelled run handed to the cleanup step keeps its key until the machine is gone.
+        if dkey and not getattr(a, "handed_over", False):
             delete_destroy_key(dkey["id"])
             if a.state_file:
                 with contextlib.suppress(OSError):
@@ -507,20 +523,42 @@ def rent_and_watch(a, run_id: str, best: dict | None, resumable: bool, run_start
         ncpu = int(best["cpu_cores_effective"])
         dph = float(best["dph_total"])
         created = time.time()
-        final, reason, replaceable = "", "", False
+        final, reason, replaceable, graceful = "", "", False, False
         try:
-            final, reason, replaceable = watch(a, run_id, instance_id, created, run_start, cpu_samples)
+            final, reason, replaceable, graceful = watch(a, run_id, instance_id, created, run_start, cpu_samples)
+        except KeyboardInterrupt:
+            # A cancelled workflow or Ctrl-C: let the machine upload what it finished first.
+            reason, graceful = "cancelled", True
+            if a.state_file:
+                # Under the workflow, this process is killed seconds after the interrupt; its
+                # cleanup step (`launch.py stop`) waits for the upload, then destroys the
+                # machine and deletes the run's key. Here: only ask the runner to stop.
+                request_stop(run_id, reason)
+                a.handed_over = True
+                raise
         finally:
-            if final != "DONE":
-                log(f"last status before destroy: {status_line(instance_status(instance_id))}")
-                print_logs(instance_id)
-            if final:
-                # The runner destroys itself after uploading; give it two minutes, then make sure.
-                for _ in range(4):
-                    if instance_gone(instance_id):
-                        break
-                    time.sleep(30)
-            destroy(instance_id)
+            if not getattr(a, "handed_over", False):
+                if graceful and not final:
+                    # A machine still working: it uploads what it finished, then writes its marker.
+                    try:
+                        marker = stop_and_wait(run_id, reason, a.stop_wait_s)
+                    except KeyboardInterrupt:
+                        marker = ""
+                        log("second interrupt: destroying now")
+                    if marker:
+                        final = marker
+                        reason = f"{reason}; stopped by the launcher, the runner uploaded what it finished ({marker})"
+                        a.stopped = True
+                if final != "DONE":
+                    log(f"last status before destroy: {status_line(instance_status(instance_id))}")
+                    print_logs(instance_id)
+                if final:
+                    # The runner destroys itself after uploading; give it two minutes, then make sure.
+                    for _ in range(4):
+                        if instance_gone(instance_id):
+                            break
+                        time.sleep(30)
+                destroy(instance_id)
         ended = time.time()
         attempts.append({"instance_id": instance_id, "offer_id": best["id"], "cpu_name": best.get("cpu_name"),
                          "gpu_name": best.get("gpu_name"), "cores_effective": ncpu, "dph": dph,
@@ -558,7 +596,8 @@ def report_run(a, run_id: str, resumable: bool, run_start: float, attempts: list
     last = attempts[-1]
     matches = result.get("matches") or 0
     report = {
-        "run_id": run_id, "instance_id": last["instance_id"], "offer_id": last["offer_id"], "outcome": final or "KILLED",
+        "run_id": run_id, "instance_id": last["instance_id"], "offer_id": last["offer_id"],
+        "outcome": "STOPPED" if getattr(a, "stopped", False) else final or "KILLED",
         "reason": reason, "cpu_name": last["cpu_name"], "gpu_name": last["gpu_name"],
         "cores_effective": last["cores_effective"], "dph": last["dph"],
         "elapsed_min": round((time.time() - run_start) / 60, 1), "dollars_est": round(dollars, 4), "matches": matches,
@@ -578,7 +617,7 @@ def report_run(a, run_id: str, resumable: bool, run_start: float, attempts: list
     if summary:
         with open(summary, "a") as fh:
             fh.write(f"## vast.ai run {run_id}: {report['outcome']}\n\n```json\n{json.dumps(report, indent=2)}\n```\n")
-    return 0 if final == "DONE" else 1
+    return 0 if final == "DONE" and not getattr(a, "stopped", False) else 1
 
 
 def run_benchmarks(run_id: str, resumable: bool) -> list[dict]:
@@ -639,9 +678,39 @@ def create_instance(a, best: dict, run_id: str, ncpu: int, dph: float) -> int | 
     return instance_id
 
 
+def request_stop(run_id: str, reason: str) -> None:
+    """Asks the runner to stop: it uploads what it finished, then writes DONE or FAILED
+    (crates/runner/src/stop.rs reads runs/<run_id>/STOP at every heartbeat)."""
+    try:
+        r2_put(f"runs/{run_id}/STOP", json.dumps({"reason": reason, "utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}).encode())
+        log(f"asked run {run_id} to stop ({reason}); it uploads what it finished, then ends")
+    except RuntimeError as e:
+        log(f"could not ask run {run_id} to stop: {e}")
+
+
+def stop_and_wait(run_id: str, reason: str, wait_s: int) -> str:
+    """Requests a stop (unless a marker is already there) and waits up to `wait_s` seconds for
+    the runner's DONE or FAILED marker; returns the marker, or "" if none came in time."""
+    for marker in ("DONE", "FAILED"):
+        if r2_get(f"runs/{run_id}/{marker}") is not None:
+            return marker
+    request_stop(run_id, reason)
+    deadline = time.time() + max(0, wait_s)
+    while time.time() < deadline:
+        time.sleep(STOP_POLL_S)
+        for marker in ("DONE", "FAILED"):
+            if r2_get(f"runs/{run_id}/{marker}") is not None:
+                log(f"run {run_id} stopped and wrote {marker}")
+                return marker
+    log(f"::warning::run {run_id} wrote no marker within {wait_s} s of the stop request; destroying anyway")
+    return ""
+
+
 def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
-          cpu_samples: list[float]) -> tuple[str, str, bool]:
-    """Watch one instance. Returns (DONE/FAILED or "", reason, whether a replacement may resume)."""
+          cpu_samples: list[float]) -> tuple[str, str, bool, bool]:
+    """Watch one instance. Returns (DONE/FAILED or "", reason, whether a replacement may resume,
+    whether to ask the machine to stop and upload before destroying it: a machine that is still
+    working, ended for the time limit or low CPU; a silent or dead one is destroyed at once)."""
     low_since, last_key, last_change = None, None, created
     warned: set[str] = set()
     # Heartbeats of an earlier machine of this run do not count as this one's.
@@ -651,9 +720,9 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
         now = time.time()
         for marker in ("DONE", "FAILED"):
             if r2_get(f"runs/{run_id}/{marker}") is not None:
-                return marker, marker, False
+                return marker, marker, False, False
         if now - run_start > a.max_minutes * 60:
-            return "", f"max_minutes ({a.max_minutes}) reached", False
+            return "", f"max_minutes ({a.max_minutes}) reached", False, True
         key, hb = latest_heartbeat(run_id)
         if key == first_key:
             key = None
@@ -661,16 +730,16 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
             last_key, last_change = key, now
         if key is None:
             if now - created > a.startup_minutes * 60:
-                return "", f"no heartbeat within {a.startup_minutes} minutes of renting", True
+                return "", f"no heartbeat within {a.startup_minutes} minutes of renting", True, False
             info = instance_status(instance_id)
             if instance_gone(instance_id) or (info or {}).get("actual_status") == "exited":
-                return "", "instance stopped before the first heartbeat", True
+                return "", "instance stopped before the first heartbeat", True, False
             log(f"waiting for the machine to start (image download and boot): {status_line(info)}")
             continue
         if now - last_change > HEARTBEAT_STALE_S:
-            return "", "heartbeat missing for 3 minutes", True
+            return "", "heartbeat missing for 3 minutes", True, False
         if instance_gone(instance_id):
-            return "", "instance died before DONE", True
+            return "", "instance died before DONE", True, False
         hb = hb or {}
         cpu = hb.get("cpu_util_pct")
         if cpu is None:
@@ -689,7 +758,7 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
             if cpu < a.low_cpu_pct:
                 low_since = low_since or now
                 if now - low_since >= LOW_CPU_S:
-                    return "", f"CPU use below {a.low_cpu_pct:.0f}% for 5 minutes while work remains", False
+                    return "", f"CPU use below {a.low_cpu_pct:.0f}% for 5 minutes while work remains", False, True
             else:
                 low_since = None
 
@@ -720,6 +789,20 @@ def cmd_put_input(a) -> int:
 def cmd_destroy(a) -> int:
     need_env("VAST_API_KEY")
     destroy(int(a.instance_id))
+    return 0
+
+
+def cmd_stop(a) -> int:
+    """Stops a run cleanly: asks the runner to stop (unless it has already ended), waits up to
+    --wait-s seconds for it to upload what it finished and write its marker, then destroys the
+    instance. The vast-run workflow's cleanup step uses it when a run is cancelled."""
+    need_env("VAST_API_KEY", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET", "R2_S3_ENDPOINT")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", a.run_id):
+        sys.exit("launch: run_id may only use letters, digits, - _ .")
+    marker = stop_and_wait(a.run_id, a.reason, a.wait_s)
+    log(f"run {a.run_id}: {marker or 'no marker'}")
+    if a.instance:
+        destroy(int(a.instance))
     return 0
 
 
@@ -757,6 +840,9 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--low-cpu-pct", type=float, default=LOW_CPU_PCT,
                    help="destroy if CPU stays below this for 5 minutes (lower only for runs with known serial tails)")
     s.add_argument("--startup-minutes", type=int, default=15)
+    s.add_argument("--stop-wait-s", type=int, default=STOP_WAIT_S,
+                   help="before destroying a machine that is still working (time limit, low CPU, Ctrl-C), ask it to "
+                        "stop and wait this long for it to upload what it finished")
     s.add_argument("--state-file", help="write the instance id here (for a cleanup step)")
     s.add_argument("--dry-run", action="store_true", help="choose the offer, but create nothing")
     s.add_argument("--no-destroy-key", action="store_true",
@@ -768,6 +854,12 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("destroy", help="destroy one instance")
     s.add_argument("instance_id")
     s.set_defaults(fn=cmd_destroy)
+    s = sub.add_parser("stop", help="ask a run to stop, wait for its upload (bounded), then destroy its instance")
+    s.add_argument("run_id")
+    s.add_argument("--instance", default="", help="the instance to destroy afterwards")
+    s.add_argument("--wait-s", type=int, default=STOP_WAIT_S)
+    s.add_argument("--reason", default="stopped by launch.py stop")
+    s.set_defaults(fn=cmd_stop)
     s = sub.add_parser("delete-key", help="delete one API key by id (a run's destroy-only key)")
     s.add_argument("key_id")
     s.set_defaults(fn=cmd_delete_key)

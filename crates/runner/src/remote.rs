@@ -33,6 +33,55 @@ pub trait Remote {
     }
     /// SHA-256 and size of the stored object, read back in full; `None` when missing.
     fn sha256(&self, key: &str) -> Result<Option<(String, u64)>, String>;
+    /// Whether `key` exists (a cheap check: one listing of its directory level).
+    fn exists(&self, key: &str) -> Result<bool, String>;
+    /// Uploads every file under `dir` to `prefix/<relative path>` and checks each arrived with
+    /// its size. Returns the keys uploaded.
+    fn put_dir(&self, dir: &Path, prefix: &str, immutable: bool) -> Result<Vec<String>, String> {
+        let mut keys = Vec::new();
+        if !dir.is_dir() {
+            return Ok(keys);
+        }
+        let prefix = prefix.trim_end_matches('/');
+        for rel in crate::bundle::list_files(dir)? {
+            let key = format!("{prefix}/{rel}");
+            self.put(&dir.join(&rel), &key, immutable)?;
+            keys.push(key);
+        }
+        let listed: std::collections::BTreeMap<String, u64> = self
+            .list_sized(&format!("{prefix}/"))?
+            .into_iter()
+            .collect();
+        for (rel, key) in crate::bundle::list_files(dir)?.iter().zip(&keys) {
+            let n = fs::metadata(dir.join(rel))
+                .map_err(|e| e.to_string())?
+                .len();
+            if listed.get(key) != Some(&n) {
+                return Err(format!("upload check: {key} is not there with {n} bytes"));
+            }
+        }
+        Ok(keys)
+    }
+}
+
+/// The remote store given by the environment, if any: `RUNNER_REMOTE_DIR` (a local directory,
+/// for tests and the laptop), else R2 through rclone when `RCLONE_CONFIG_R2_TYPE` and
+/// `R2_BUCKET` are set.
+pub fn from_env() -> Option<Box<dyn Remote>> {
+    if let Ok(d) = std::env::var("RUNNER_REMOTE_DIR")
+        && !d.is_empty()
+    {
+        return Some(Box::new(DirRemote { root: d.into() }));
+    }
+    match (
+        std::env::var("RCLONE_CONFIG_R2_TYPE"),
+        std::env::var("R2_BUCKET"),
+    ) {
+        (Ok(_), Ok(b)) if !b.is_empty() => Some(Box::new(RcloneRemote {
+            base: format!("r2:{b}"),
+        })),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------- test kill hook
@@ -145,6 +194,10 @@ impl Remote for DirRemote {
         }
         sha256_file(&p).map(Some)
     }
+
+    fn exists(&self, key: &str) -> Result<bool, String> {
+        Ok(self.path(key).is_file())
+    }
 }
 
 // ---------------------------------------------------------------- rclone (R2)
@@ -249,6 +302,47 @@ impl Remote for RcloneRemote {
             return Err(format!("rclone cat {key} failed ({status})"));
         }
         out.map(Some)
+    }
+
+    fn exists(&self, key: &str) -> Result<bool, String> {
+        // One level of the key's directory only (cheap on S3: a delimited listing).
+        let (dir, name) = key.rsplit_once('/').unwrap_or(("", key));
+        let o = Command::new("rclone")
+            .args(["lsf", "--files-only", "--max-depth", "1", "--include"])
+            .arg(format!("/{name}"))
+            .arg(self.url(dir))
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("cannot run rclone: {e}"))?;
+        if !o.status.success() {
+            return Ok(false);
+        }
+        Ok(String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .any(|l| l.trim() == name))
+    }
+
+    fn put_dir(&self, dir: &Path, prefix: &str, immutable: bool) -> Result<Vec<String>, String> {
+        if !dir.is_dir() {
+            return Ok(Vec::new());
+        }
+        let prefix = prefix.trim_end_matches('/');
+        let mut c = Command::new("rclone");
+        c.args(["copy", "--s3-no-check-bucket", "--retries", "5"]);
+        if immutable {
+            c.arg("--immutable");
+        }
+        c.arg(dir).arg(self.url(prefix));
+        self.run(c)?;
+        let mut c = Command::new("rclone");
+        c.args(["check", "--one-way"])
+            .arg(dir)
+            .arg(self.url(prefix));
+        self.run(c)?;
+        Ok(crate::bundle::list_files(dir)?
+            .into_iter()
+            .map(|r| format!("{prefix}/{r}"))
+            .collect())
     }
 }
 

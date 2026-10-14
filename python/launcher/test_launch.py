@@ -43,6 +43,14 @@ class World:
 
     def sleep(self, dt: float) -> None:
         self.t += dt
+        # A working runner sees the launcher's STOP at its next heartbeat: it uploads what it
+        # finished and writes FAILED with `stopped` (then destroys itself).
+        if f"runs/{RUN}/STOP" in self.store:
+            for inst in self.instances.values():
+                if inst["alive"] and inst["script"].split(":")[0] in ("work", "idle"):
+                    self.store[f"runs/{RUN}/out/measure/exact.jsonl"] = b'{"id": 0}\n'
+                    self.store[f"runs/{RUN}/FAILED"] = json.dumps({"stopped": "the launcher asked"}).encode()
+                    inst["alive"] = False
         if dt >= launch.POLL_S:
             for inst in self.instances.values():
                 if inst["alive"]:
@@ -53,6 +61,12 @@ class World:
         kind, n = inst["script"].split(":")
         n = int(n)
         if kind == "never":
+            return
+        if kind in ("work", "idle"):
+            # Works on and on (at full CPU, or at 10%), never finishing by itself.
+            self.store[f"runs/{RUN}/heartbeat/{self.hb_seq:06}.json"] = json.dumps(
+                {"seq": self.hb_seq, "phase": "chunk", "cpu_util_pct": 99.0 if kind == "work" else 10.0}).encode()
+            self.hb_seq += 1
             return
         if kind == "stall" and inst["polls"] > n:
             return
@@ -257,6 +271,97 @@ class LauncherTest(unittest.TestCase):
                                   "--no-destroy-key")
         self.assertEqual((code, w.keys), (0, {}))
         self.assertNotIn("VAST_DESTROY_KEY", w.envs[0])
+
+    def test_time_limit_stops_and_keeps_finished_work(self):
+        # The run is still working at --max-minutes: the launcher asks it to stop, waits for its
+        # marker (it uploads what it finished first), then destroys it.
+        w = World([offer(1, 11, 1.0)], ["work:0"])
+        code, report = self.run_launch_minutes(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}}, 5)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["outcome"], "STOPPED")
+        self.assertIn(f"runs/{RUN}/STOP", w.store)
+        self.assertIn(f"runs/{RUN}/out/measure/exact.jsonl", w.store)
+        self.assertIn("uploaded what it finished", report["reason"])
+        self.assertTrue(all(not i["alive"] for i in w.instances.values()))
+
+    def test_low_cpu_stops_gracefully(self):
+        w = World([offer(1, 11, 1.0)], ["idle:0"])
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}})
+        self.assertEqual((code, report["outcome"]), (1, "STOPPED"))
+        self.assertIn("CPU use below", report["reason"])
+        self.assertIn(f"runs/{RUN}/STOP", w.store)
+
+    def test_silent_machine_is_destroyed_without_waiting(self):
+        w = World([offer(1, 11, 1.0)], ["stall:2"])
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}})
+        self.assertEqual((code, report["outcome"]), (1, "KILLED"))
+        self.assertNotIn(f"runs/{RUN}/STOP", w.store)
+
+    def test_stop_subcommand_waits_then_destroys(self):
+        w = World([offer(1, 11, 1.0)], ["work:0"])
+        w.instances[100] = {"alive": True, "polls": 0, "script": "work:0", "offer": 1}
+        saved = {n: getattr(launch, n) for n in ("vast", "r2_get", "r2_put", "time")}
+        launch.vast, launch.r2_get, launch.r2_put, launch.time = w.vast, w.r2_get, w.r2_put, w
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(launch.main(["stop", RUN, "--instance", "100", "--wait-s", "60"]), 0)
+            self.assertIn(f"runs/{RUN}/STOP", w.store)
+            self.assertIn(f"runs/{RUN}/FAILED", w.store)
+            self.assertFalse(w.instances[100]["alive"])
+            # A run that already ended is not asked again.
+            del w.store[f"runs/{RUN}/STOP"]
+            with contextlib.redirect_stdout(io.StringIO()):
+                launch.main(["stop", RUN, "--wait-s", "60"])
+            self.assertNotIn(f"runs/{RUN}/STOP", w.store)
+        finally:
+            for n, v in saved.items():
+                setattr(launch, n, v)
+
+    def test_cancel_under_workflow_leaves_wait_to_cleanup(self):
+        # Interrupted with a state file: only STOP is written; the cleanup step waits and destroys,
+        # so the instance and the run's key are left alone here.
+        import tempfile
+        w = World([offer(1, 11, 1.0)], ["work:0"])
+        saved_watch = launch.watch
+
+        def interrupted(*args, **kw):
+            raise KeyboardInterrupt
+        launch.watch = interrupted
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                state = os.path.join(d, "instance-id.txt")
+                with self.assertRaises(KeyboardInterrupt):
+                    self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}},
+                                    "--state-file", state)
+                with open(f"{state}.run-id") as fh:
+                    self.assertEqual(fh.read(), RUN)
+                self.assertTrue(os.path.exists(f"{state}.destroy-key"))
+            self.assertIn(f"runs/{RUN}/STOP", w.store)
+            self.assertTrue(w.instances[100]["alive"])
+            self.assertEqual(w.deleted_keys, [])
+            # Without a state file (a person's Ctrl-C): wait for the upload, then destroy.
+            w = World([offer(1, 11, 1.0)], ["work:0"])
+            code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}})
+            self.assertEqual((code, report["outcome"]), (1, "STOPPED"))
+            self.assertFalse(w.instances[100]["alive"])
+            self.assertEqual(w.deleted_keys, [77])
+        finally:
+            launch.watch = saved_watch
+
+    def run_launch_minutes(self, world: World, manifest: dict, minutes: int) -> tuple[int, dict]:
+        saved = {n: getattr(launch, n) for n in ("vast", "r2_get", "r2_put", "r2_list", "r2_exists", "time")}
+        launch.vast = world.vast
+        launch.r2_get, launch.r2_put = world.r2_get, world.r2_put
+        launch.r2_list, launch.r2_exists = world.r2_list, world.r2_exists
+        launch.time = world
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = launch.main(["run", "--manifest", json.dumps(manifest), "--image", "img:1", "--bin-sha", "abc",
+                                    "--max-minutes", str(minutes), "--startup-minutes", "5"])
+        finally:
+            for n, v in saved.items():
+                setattr(launch, n, v)
+        return code, json.loads(world.store.get(f"runs/{RUN}/report.json", b"{}"))
 
     def test_parse_created_key(self):
         p = launch.parse_created_key

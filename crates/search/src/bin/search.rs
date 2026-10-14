@@ -5,7 +5,12 @@
 //! search worlds    --decisions FILE --method exact|rollout --to N --out FILE
 //!                  [--from-world A] [--label L] [--seed S] [--first I] [--last J]
 //!                  [--ids 3,17,42 | --ids FILE] [--threads K] [--solve-threads K] [--tt-mb M]
+//!                  [--schedule fixed|auto] [--tt-budget-mb B] [--sched-json JSON|FILE]
 //!                  --equity TABLE [--progress FILE]
+//! search bench-t1  --decisions FILE --equity TABLE --json OUT [--set P:D:W,…] [--name N]
+//!                  [--threads T] [--schedule fixed --worlds-at-once W --solve-threads S --tt-mb M
+//!                  | --schedule auto --tt-budget-mb B [--sched-json …]] [--cap-s X]
+//!                  [--stop-occ-s Y] [--seed 1] [--label 1] [--progress FILE]
 //! search agree     --worlds FILE [--worlds FILE …] [--grid 10,20,40,80,160,320] [--json FILE]
 //!                  [--decisions FILE …]
 //! search curves    --worlds FILE [--worlds FILE …] [--decisions FILE …]
@@ -32,6 +37,12 @@
 //! worlds already saved) it extends them: the new worlds are appended as new records (to the same
 //! file or another), and `agree`, `curves` and `score` join every record of a decision, so they
 //! see exactly the rows one longer run would have written (§13.1 item 10).
+//! `--schedule auto` gives every exact world its own threads and table by position on `--threads`
+//! threads within `--tt-budget-mb` (`search::plan`, §13.1 item 11); the file is the same bytes.
+//! `bench-t1` is one run of the trick-1 bench (`search::t1bench`): set `--set` of the decisions
+//! file under one configuration, stopped at `--cap-s` seconds or once the thread-seconds held
+//! reach `--stop-occ-s`; it writes every world's time, threads, nodes, table use and values, and
+//! the process's CPU time and peak memory, to `--json`.
 //! `agree` reports N against 2N on the grid, per trick, per position in the trick (§13.1 item 6),
 //! per match-state stratum and per log2 world-count band (item 8) and per hand-type band (item 9:
 //! trumps, top trumps, longest plain suit; and the hand features added on 2026-10-14, holds the 5
@@ -52,11 +63,13 @@ use std::time::{Duration, Instant};
 use search::bot::{PimcFactory, PimcSpec, load_equity};
 use search::curves::{CurveParams, N_CAP, TrickReport, analyse, score_groups};
 use search::measure::{
-    BatchProgress, DecisionSpec, DecisionTiming, WorldRows, WorldsJob, agreement_curve,
+    BatchProgress, DecisionSpec, DecisionTiming, Schedule, WorldRows, WorldsJob, agreement_curve,
     build_decisions, collect_starts, feature_band_name, paired, parse_ids, read_jsonl, read_worlds,
-    relabel, score, stratum_of, summarise, timing_path, worlds_file,
+    relabel, score, stratum_of, summarise, timing_path, worlds_file_sched,
 };
 use search::pimc::{Ctx, Method, SearchConfig, SharedLeaf};
+use search::plan::AutoParams;
+use search::t1bench::{BenchProgress, BenchSchedule, run_bench};
 use search::teacher::{decisions_npy, teacher_deck, teacher_hand};
 use search::worlds::{BeliefSource, RejectionSource, WorldSource};
 
@@ -113,8 +126,9 @@ fn main() -> ExitCode {
         Some("curves") => curves(&a),
         Some("score") => score_cmd(&a),
         Some("teacher") => teacher(&a),
+        Some("bench-t1") => bench_t1(&a),
         _ => Err(
-            "usage: search decisions|worlds|agree|curves|score|teacher … (see the source docs)"
+            "usage: search decisions|worlds|agree|curves|score|teacher|bench-t1 … (see the source docs)"
                 .into(),
         ),
     };
@@ -201,6 +215,10 @@ fn write_progress(
         "worlds_total": ld(&p.worlds_total),
         "par_tasks_done": ld(&p.par.tasks_done),
         "par_tasks_total": ld(&p.par.tasks_total),
+        "planned": p.planned.load(Ordering::Relaxed),
+        "running": ld(&p.exec.running),
+        "busy_threads": ld(&p.exec.busy_threads),
+        "tail": p.exec.tail.load(Ordering::Relaxed),
         "elapsed_s": t0.elapsed().as_secs(),
         "finished": finished,
     });
@@ -234,6 +252,7 @@ fn worlds(a: &Args) -> Result<(), String> {
         tt_mb: a.num("--tt-mb", 256)? as usize,
         ..SearchConfig::default()
     };
+    let sched = schedule(a, cfg.threads)?;
     let (from, to) = (a.num("--from-world", 0)?, a.num("--to", 10)?);
     if to < from {
         return Err(format!("--to {to} is below --from-world {from}"));
@@ -261,13 +280,23 @@ fn worlds(a: &Args) -> Result<(), String> {
     let progress_path = a.get("--progress").map(PathBuf::from);
     let prog = BatchProgress::default();
     let finished = AtomicBool::new(false);
-    eprintln!(
-        "worlds: {} decisions, worlds {from}..{to}, {} threads, {} solve threads (table loaded in {:.1} s)",
-        ds.len(),
-        cfg.threads,
-        cfg.solve_threads,
-        t0.elapsed().as_secs_f64()
-    );
+    match &sched {
+        Schedule::Fixed => eprintln!(
+            "worlds: {} decisions, worlds {from}..{to}, {} threads, {} solve threads (table loaded in {:.1} s)",
+            ds.len(),
+            cfg.threads,
+            cfg.solve_threads,
+            t0.elapsed().as_secs_f64()
+        ),
+        Schedule::Auto {
+            threads, budget_mb, ..
+        } => eprintln!(
+            "worlds: {} decisions, worlds {from}..{to}, position-aware on {threads} threads with \
+             {budget_mb} MB for tables (table loaded in {:.1} s)",
+            ds.len(),
+            t0.elapsed().as_secs_f64()
+        ),
+    }
     let n = std::thread::scope(|s| {
         if let Some(p) = &progress_path {
             let (prog, finished, job, cfg) = (&prog, &finished, &job, &cfg);
@@ -283,7 +312,7 @@ fn worlds(a: &Args) -> Result<(), String> {
                 }
             });
         }
-        let r = worlds_file(out, &ds, &job, &ctx, &cfg, Some(&prog), |r, t| {
+        let r = worlds_file_sched(out, &ds, &job, &ctx, &cfg, &sched, Some(&prog), |r, t| {
             eprintln!(
                 "decision {} trick {} pos {} cands {}: {:.1} ms per world (slowest {:.1} ms); {}/{} decisions, {:.0} s",
                 r.id,
@@ -308,6 +337,151 @@ fn worlds(a: &Args) -> Result<(), String> {
         t0.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+/// `--schedule fixed|auto` (default fixed): with `auto`, every exact world gets its own threads
+/// and table by position ([`search::plan`]) on `--threads` threads in all, with
+/// `--tt-budget-mb` MB for all tables at their peak (default: 16384) and the plan's knobs from
+/// `--sched-json` (a JSON object of `AutoParams` fields, or a file holding one).
+fn schedule(a: &Args, threads: usize) -> Result<Schedule, String> {
+    match a.get("--schedule").unwrap_or("fixed") {
+        "fixed" => Ok(Schedule::Fixed),
+        "auto" => Ok(Schedule::Auto {
+            threads: threads.max(1),
+            budget_mb: a.num("--tt-budget-mb", 16_384)?,
+            params: Box::new(auto_params(a)?),
+        }),
+        s => Err(format!("unknown --schedule {s} (fixed or auto)")),
+    }
+}
+
+/// `--sched-json`: the position-aware plan's knobs, inline JSON or a file.
+fn auto_params(a: &Args) -> Result<AutoParams, String> {
+    match a.get("--sched-json") {
+        None => Ok(AutoParams::default()),
+        Some(s) => {
+            let text = if s.trim_start().starts_with('{') {
+                s.to_string()
+            } else {
+                std::fs::read_to_string(s).map_err(|e| format!("--sched-json {s}: {e}"))?
+            };
+            serde_json::from_str(&text).map_err(|e| format!("--sched-json: {e}"))
+        }
+    }
+}
+
+/// CPU seconds of this process so far (Linux), with the kernel's clock tick from `getconf`.
+fn cpu_seconds() -> Option<f64> {
+    let tck = std::process::Command::new("getconf")
+        .arg("CLK_TCK")
+        .output()
+        .ok()
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse::<f64>()
+                .ok()
+        })
+        .filter(|&x| x > 0.0)
+        .unwrap_or(100.0);
+    search::t1bench::proc_cpu_ticks().map(|t| t as f64 / tck)
+}
+
+/// `search bench-t1`: one run of the trick-1 bench (one configuration on one set; see
+/// `search::t1bench`), written as JSON to `--json`.
+fn bench_t1(a: &Args) -> Result<(), String> {
+    let ds: Vec<DecisionSpec> = read_lines(a.req("--decisions")?)?;
+    let table = load_equity(a.req("--equity")?)?;
+    let leaf: Arc<SharedLeaf> = Arc::new(table);
+    let src = world_source(a)?;
+    let ctx = Ctx {
+        leaf: &*leaf,
+        source: &*src,
+        rules: engine::game::Rules::HOUSE,
+    };
+    let threads = a.num("--threads", 1)? as usize;
+    let sched = match a.get("--schedule").unwrap_or("fixed") {
+        "fixed" => BenchSchedule::Fixed {
+            worlds_at_once: a.num("--worlds-at-once", 1)? as usize,
+            solve_threads: a.num("--solve-threads", threads as u64)? as usize,
+            tt_mb: a.num("--tt-mb", 256)? as usize,
+        },
+        "auto" => BenchSchedule::Auto {
+            threads,
+            budget_mb: a.num("--tt-budget-mb", 16_384)?,
+            params: Box::new(auto_params(a)?),
+        },
+        s => return Err(format!("unknown --schedule {s} (fixed or auto)")),
+    };
+    let cap_s = a.get("--cap-s").map_or(Ok(600.0), |s| {
+        s.parse::<f64>().map_err(|_| format!("--cap-s: {s}"))
+    })?;
+    let stop_occ = a
+        .get("--stop-occ-s")
+        .map(|s| s.parse::<f64>().map_err(|_| format!("--stop-occ-s: {s}")))
+        .transpose()?;
+    let name = a.get("--name").unwrap_or("run").to_string();
+    let set = a
+        .get("--set")
+        .unwrap_or(search::t1bench::MID_SET)
+        .to_string();
+    let prog = BenchProgress::default();
+    let finished = AtomicBool::new(false);
+    let progress_path = a.get("--progress").map(PathBuf::from);
+    let t0 = Instant::now();
+    let cpu0 = cpu_seconds();
+    let mut run = std::thread::scope(|s| {
+        if let Some(p) = &progress_path {
+            let (prog, finished) = (&prog, &finished);
+            s.spawn(move || {
+                while !finished.load(Ordering::Relaxed) {
+                    let ld = |x: &std::sync::atomic::AtomicU64| x.load(Ordering::Relaxed);
+                    let v = serde_json::json!({
+                        "worlds_total": ld(&prog.total), "worlds_done": ld(&prog.done),
+                        "running": ld(&prog.running), "elapsed_s": t0.elapsed().as_secs(),
+                    });
+                    let mut tmp = p.as_os_str().to_owned();
+                    tmp.push(".tmp");
+                    if std::fs::write(&tmp, v.to_string()).is_ok() {
+                        let _ = std::fs::rename(&tmp, p);
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            });
+        }
+        let r = run_bench(
+            &name,
+            &ds,
+            &set,
+            a.num("--seed", 1)?,
+            a.num("--label", 1)?,
+            &ctx,
+            &sched,
+            cap_s,
+            stop_occ,
+            Some(&prog),
+        );
+        finished.store(true, Ordering::Relaxed);
+        r
+    })?;
+    run.cpu_s = match (cpu0, cpu_seconds()) {
+        (Some(a), Some(b)) => Some(b - a),
+        _ => None,
+    };
+    run.peak_rss_mb = search::t1bench::proc_peak_rss_mb();
+    let tot = search::t1bench::totals(&run);
+    eprintln!(
+        "bench-t1 {name}: {}/{} worlds in {:.1} s, occupancy {:.0} thread-s{}",
+        tot.finished,
+        tot.worlds,
+        run.wall_s,
+        tot.occupancy_s,
+        run.stopped
+            .as_deref()
+            .map_or(String::new(), |s| format!(", stopped ({s})"))
+    );
+    let text = serde_json::to_string(&run).map_err(|e| e.to_string())?;
+    std::fs::write(a.req("--json")?, text + "\n").map_err(|e| e.to_string())
 }
 
 /// `--grid`: a list (`10,20,40`) or a range `start:end:step` (`10:320:10`).

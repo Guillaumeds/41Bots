@@ -21,12 +21,13 @@ use engine::rng::Rng;
 use serde_json::{Value, json};
 
 /// Kinds a format-2 stream may run.
-pub const KINDS: [&str; 10] = [
+pub const KINDS: [&str; 11] = [
     "difftest",
     "equity_sweep",
     "benchmark",
     "solver_spike",
     "search_measure",
+    "t1bench",
     "teacher",
     "arena_blocks",
     "suitability",

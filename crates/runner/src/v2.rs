@@ -50,11 +50,12 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::bundle::{bundle_dir, sha256_file};
-use crate::remote::{DirRemote, RcloneRemote, Remote, UPLOAD_ENTRY, kill_point};
+use crate::remote::{DirRemote, Remote, UPLOAD_ENTRY, kill_point};
 use crate::sched::{
     Chunks, Manifest2, StreamState, chunk_seed, finished_median, latest_done, parse_v2, pick,
     size_note, sprt_prefix,
 };
+use crate::stop;
 use crate::{
     CpuSampler, Ctx, default_threads, hardware, run_kind, self_destroy, sibling, unix_now,
     utc_string,
@@ -201,6 +202,17 @@ fn worker_inner(spec_path: &Path) -> Result<(), String> {
                     .ok_or_else(|| format!("search_measure needs input `{name}` (ids_input)"))?;
                 o.insert("ids".into(), json!(path));
             }
+            // A prebuilt equity table among the inputs (`params.equity_input`, default
+            // `equity`) replaces building it; its hash is still checked against the record.
+            if ["search_measure", "t1bench"].contains(&kind.as_str())
+                && let Ok(path) = equity()
+                && let Some(o) = p.as_object_mut()
+            {
+                let t = o.entry("table").or_insert_with(|| json!({}));
+                if let Some(t) = t.as_object_mut() {
+                    t.entry("path").or_insert(json!(path));
+                }
+            }
             let mut r = run_kind(&mut ctx, &kind, &p)?;
             if let Some(o) = r.as_object_mut() {
                 o.insert("kind".into(), json!(kind));
@@ -334,6 +346,9 @@ struct Run {
     warnings: Vec<String>,
     /// Every warning seen this session, for the final manifest.
     warned: BTreeSet<String>,
+    /// Unfinished outputs of chunks stopped mid-way (deadline or stop request), uploaded under
+    /// `runs/<run>/partial/`: for reading only, never resumed from.
+    partial: Vec<Value>,
 }
 
 fn compact_utc() -> String {
@@ -341,22 +356,11 @@ fn compact_utc() -> String {
 }
 
 fn choose_remote(work: &Path) -> Box<dyn Remote> {
-    if let Ok(d) = std::env::var("RUNNER_REMOTE_DIR")
-        && !d.is_empty()
-    {
-        return Box::new(DirRemote { root: d.into() });
-    }
-    match (
-        std::env::var("RCLONE_CONFIG_R2_TYPE"),
-        std::env::var("R2_BUCKET"),
-    ) {
-        (Ok(_), Ok(b)) if !b.is_empty() => Box::new(RcloneRemote {
-            base: format!("r2:{b}"),
-        }),
-        _ => Box::new(DirRemote {
+    crate::remote::from_env().unwrap_or_else(|| {
+        Box::new(DirRemote {
             root: work.join("remote"),
-        }),
-    }
+        })
+    })
 }
 
 fn env_nonempty(k: &str) -> Option<String> {
@@ -407,12 +411,14 @@ pub fn run(manifest: &Value, work: &Path) -> ExitCode {
         noted: BTreeSet::new(),
         warnings: Vec::new(),
         warned: BTreeSet::new(),
+        partial: Vec::new(),
     };
     let outcome = r.go();
     let ok = outcome.is_ok();
     let marker = if ok { "DONE" } else { "FAILED" };
     let body = json!({ "utc": utc_string(unix_now()), "elapsed_s": r.start.elapsed().as_secs(),
-                       "error": outcome.as_ref().err() });
+                       "error": outcome.as_ref().err(), "stopped": stop::requested(),
+                       "partial": r.partial });
     r.heartbeat(true, if ok { "uploading" } else { "failed" });
     // The marker goes last: a DONE means every output, the merged report and the final manifest
     // are already in the remote.
@@ -693,6 +699,42 @@ impl Run {
         let _ = fs::remove_file(&local);
     }
 
+    /// Keeps what a chunk stopped mid-way had finished: its `out/` as it stands, bundled and
+    /// uploaded to `runs/<run>/partial/<stream>/<index:06>-<utc>.tar.zst` (outside the done-list,
+    /// so a resumed run still redoes the chunk from its seed), plus its logs. Never fatal.
+    fn keep_partial(&mut self, r: &Running) {
+        self.states[r.stream].running.remove(&r.index);
+        let name = self.m.streams[r.stream].name.clone();
+        let local = self
+            .root
+            .join("tmp")
+            .join(format!("partial-{name}-{:06}.tar.zst", r.index));
+        let key = format!(
+            "{}/partial/{name}/{:06}-{}.tar.zst",
+            self.prefix(),
+            r.index,
+            compact_utc()
+        );
+        let res = bundle_dir(&r.dir.join("out"), &local).and_then(|(sha, bytes)| {
+            self.remote.put(&local, &key, false)?;
+            Ok((sha, bytes))
+        });
+        match res {
+            Ok((sha, bytes)) => {
+                println!(
+                    "runner: chunk {name}/{} stopped; kept its partial outputs in {key}",
+                    r.index
+                );
+                self.partial
+                    .push(json!({ "stream": name, "index": r.index, "seed": r.seed,
+                                          "path": key, "sha256": sha, "bytes": bytes }));
+            }
+            Err(e) => eprintln!("runner: partial outputs of {name}/{}: {e}", r.index),
+        }
+        let _ = fs::remove_file(&local);
+        self.upload_logs(r);
+    }
+
     /// Bundle, upload, verify, list one finished chunk.
     fn finish(&mut self, r: &Running) -> Result<(), String> {
         let s = &self.m.streams[r.stream];
@@ -758,14 +800,26 @@ impl Run {
         let mut stopped = false;
         loop {
             let now = unix_now();
-            if self.m.deadline.is_some_and(|d| now >= d) && !stopped {
-                eprintln!("runner: deadline reached; stopping running chunks");
+            if self.m.deadline.is_some_and(|d| now >= d) {
+                stop::request("the manifest's deadline_utc was reached");
+            }
+            if let Some(why) = stop::requested()
+                && !stopped
+            {
+                eprintln!("runner: {why}; stopping running chunks and keeping what they finished");
                 stopped = true;
                 for r in &mut running {
                     stop_child(&mut r.child);
                 }
-                for r in running.drain(..) {
-                    self.states[r.stream].running.remove(&r.index);
+                // Chunks that finished just before the stop are kept as usual.
+                for mut r in running.drain(..) {
+                    if matches!(r.child.try_wait(), Ok(Some(st)) if st.success()) {
+                        if let Err(e) = self.finish(&r) {
+                            error.get_or_insert(e);
+                        }
+                    } else {
+                        self.keep_partial(&r);
+                    }
                 }
             }
             // Start chunks while threads are free.
@@ -824,6 +878,9 @@ impl Run {
                             if let Err(e) = self.finish(&r) {
                                 error.get_or_insert(e);
                             }
+                        } else if stop::requested().is_some() {
+                            // Ended by the stop (e.g. Ctrl-C reached its processes first).
+                            self.keep_partial(&r);
                         } else {
                             self.states[r.stream].running.remove(&r.index);
                             let name = &self.m.streams[r.stream].name;
@@ -914,6 +971,8 @@ impl Run {
             return;
         }
         self.last_hb = Some(Instant::now());
+        // The launcher's STOP object (or a local STOP file) asks the run to stop.
+        stop::poll(Some((&*self.remote, &self.prefix())), &self.root);
         let cpu = self.cpu.sample(None);
         let round = |x: Option<f64>| x.map(|x| (x * 10.0).round() / 10.0);
         let elapsed = self.start.elapsed().as_secs_f64();
@@ -1014,6 +1073,8 @@ impl Run {
             "chunk_seeds": seeds,
             "done_list_seq": self.done_seq.saturating_sub(1),
             "warnings": self.warned,
+            "stopped": stop::requested(),
+            "partial": self.partial,
             "utc": utc_string(unix_now()),
         })
     }

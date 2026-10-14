@@ -10,6 +10,10 @@
 //! - [`measure`]: stratified decision sets and the early-trick yardstick measurements (§13.1).
 //! - [`curves`]: N-curves from saved per-world values: money loss against N, power-law fits,
 //!   held-out checks and the N each scenario needs (§13.1 item 10).
+//! - [`plan`]: position-aware threads and tables per exact world, and the runner that packs
+//!   them onto the machine (§13.1 item 11).
+//! - [`t1bench`]: the trick-1 bench: configurations compared on fixed yardstick worlds (§13.1
+//!   item 11).
 //! - [`teacher`]: teacher hands and their output files (§5.10).
 //!
 //! Everything that scores is fixed point ([`equity::MoneyChance`]); floats appear in reports
@@ -19,6 +23,8 @@ pub mod bot;
 pub mod curves;
 pub mod measure;
 pub mod pimc;
+pub mod plan;
+pub mod t1bench;
 pub mod teacher;
 pub mod worlds;
 

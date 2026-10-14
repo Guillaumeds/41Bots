@@ -88,6 +88,10 @@ jobs:
           MANIFEST=$(python3 -c 'import json,os,sys; t=os.environ["MANIFEST"]; m=json.loads(t if t.lstrip().startswith("{") else open(t).read()); m["run_id"]=m.get("run_id") or "gh-${{ github.run_id }}"; print(json.dumps(m))')
           python3 python/launcher/launch.py run --manifest "$MANIFEST" --min-cores "$MIN_CORES" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} \
             --max-minutes "$MAX_MINUTES" --low-cpu-pct "$LOW_CPU_PCT" --image "$IMAGE" --bin-sha "$BIN_SHA" --state-file instance-id.txt ${{ inputs.cheapest && '--cheapest' || '' }}
+      - name: Cancelled - ask the run to stop and wait (at most 5 minutes) for it to upload what it finished
+        if: cancelled() && hashFiles('instance-id.txt.run-id') != ''
+        shell: bash
+        run: python3 python/launcher/launch.py stop "$(cat instance-id.txt.run-id)" --instance "$(cat instance-id.txt)" --wait-s 300 --reason "workflow cancelled" || true
       - name: Safety net - destroy the instance if the job was cancelled or failed
         if: always() && hashFiles('instance-id.txt') != ''
         shell: bash

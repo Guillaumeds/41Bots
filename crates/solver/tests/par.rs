@@ -7,9 +7,11 @@
 mod common;
 
 use common::{L, leaf, position_mid, tie_leaf};
+use std::sync::atomic::Ordering;
+
 use solver::{
-    FastOptions, Solution, SolveMem, TieOrder, from_match, solve_fast, solve_fast_par,
-    solve_fast_par_with,
+    FastOptions, ParProgress, Solution, SolveMem, TieOrder, from_match, solve_fast, solve_fast_par,
+    solve_fast_par_with, solve_fast_watched, solve_fast_with,
 };
 
 fn same(a: &Solution, b: &Solution, what: &str) {
@@ -73,6 +75,40 @@ fn par_identity_with_reused_memory() {
                     &format!("seed {seed} trick {k}+{extra} tt {tt_mb} threads {threads}"),
                 );
             }
+        }
+    }
+}
+
+/// A watched sequential solve (`solve_fast_watched`, used where a run must be stoppable) gives
+/// exactly `solve_fast_with`'s answer and counters while its stop flag is clear, keeps the node
+/// counter up to date, and reports a timeout once the flag is set (sequential and parallel).
+#[test]
+fn watched_solves_equal_and_stop_on_request() {
+    let mut mem = SolveMem::new();
+    for seed in 0..6 {
+        let m = position_mid(seed, 3, 0);
+        let (pos, ctx, _) = from_match(&m).expect("position");
+        let opts = FastOptions {
+            tt_mb: 4,
+            ..FastOptions::default()
+        };
+        let plain = solve_fast_with(&pos, ctx, &leaf(), opts, &mut SolveMem::new());
+        let pr = ParProgress::default();
+        let watched = solve_fast_watched(&pos, ctx, &leaf(), opts, &mut mem, Some(&pr));
+        same(&plain, &watched, &format!("seed {seed}"));
+        assert_eq!(plain.stats, watched.stats, "seed {seed}: counters");
+        assert_eq!(
+            pr.nodes.load(Ordering::Relaxed),
+            plain.stats.nodes & !0xFFF,
+            "seed {seed}: the counter advances every 4096 nodes"
+        );
+        let stop = ParProgress::default();
+        stop.abort.store(true, Ordering::Relaxed);
+        if plain.stats.nodes >= 0x1000 {
+            let s = solve_fast_watched(&pos, ctx, &leaf(), opts, &mut mem, Some(&stop));
+            assert!(s.timed_out && s.children.is_empty(), "seed {seed}: stopped");
+            let p = solve_fast_par_with(&pos, ctx, &leaf(), opts, 3, Some(&stop), &mut mem);
+            assert!(p.timed_out, "seed {seed}: parallel solve stopped");
         }
     }
 }

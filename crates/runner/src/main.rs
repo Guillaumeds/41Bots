@@ -14,7 +14,10 @@
 //! `hardware.json`, `benchmark.json`, `heartbeat/<seq:06>.json` (versioned, never overwritten),
 //! `out/...` (immutable), `result.json`, and `DONE` or `FAILED` uploaded last.
 //! Uploads are skipped (with a notice) when `RCLONE_CONFIG_R2_TYPE` is unset, so the same
-//! manifest runs on the laptop.
+//! manifest runs on the laptop; `RUNNER_REMOTE_DIR` makes a local directory the remote (tests).
+//! A stop request (SIGTERM/SIGINT/SIGHUP, the launcher's `<out>/STOP`, a local `STOP` file, or
+//! the deadline) ends the chunk, uploads `out/` with whatever it finished and writes `FAILED`
+//! with `stopped` and the file list (`stop.rs`).
 //!
 //! **Format 2** (`"format": 2`, docs/M3-SPEC.md section 7): several prioritised streams of
 //! chunks, a deadline, a versioned done-list and resume after a lost machine; see `v2.rs`.
@@ -37,6 +40,8 @@ mod mem;
 mod remote;
 mod sched;
 mod spike;
+mod stop;
+mod t1bench;
 mod v2;
 
 const USAGE: &str = "usage:
@@ -47,6 +52,7 @@ const USAGE: &str = "usage:
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(30);
 
 fn main() -> ExitCode {
+    stop::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("run") if args.len() >= 2 => {
@@ -418,7 +424,9 @@ struct Ctx {
     root: PathBuf,
     /// Where child-process logs go (`out/` for format 1; outside the bundle for format 2).
     logs: PathBuf,
-    remote: Option<String>,
+    /// Format 1's remote store and its key prefix (`runs/<run_id>` unless the manifest says).
+    remote: Option<Box<dyn remote::Remote>>,
+    prefix: String,
     threads: usize,
     dph: f64,
     start: Instant,
@@ -440,6 +448,7 @@ impl Ctx {
             root: root.to_path_buf(),
             logs: root.join("logs"),
             remote: None,
+            prefix: format!("runs/{run_id}"),
             threads,
             dph: 0.0,
             start: Instant::now(),
@@ -467,18 +476,26 @@ impl Ctx {
         Ok(p)
     }
 
-    /// `rclone copyto` one file to `<remote>/<rel>`; failures are logged, never fatal.
+    /// Uploads one file to `<prefix>/<rel>`; failures are logged, never fatal.
     fn upload_file(&self, local: &Path, rel: &str, immutable: bool) -> bool {
         let Some(remote) = &self.remote else {
             return true;
         };
-        let mut c = Command::new("rclone");
-        c.args(["copyto", "--s3-no-check-bucket", "--retries", "5"]);
-        if immutable {
-            c.arg("--immutable");
+        match remote.put(local, &format!("{}/{rel}", self.prefix), immutable) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("runner: upload {rel}: {e}");
+                false
+            }
         }
-        c.arg(local).arg(format!("{remote}/{rel}"));
-        rclone(c)
+    }
+
+    /// The run's stop requests: a signal, the launcher's `STOP` object, a local `STOP` file.
+    fn poll_stop(&self) {
+        stop::poll(
+            self.remote.as_deref().map(|r| (r, self.prefix.as_str())),
+            &self.root,
+        );
     }
 
     fn heartbeat(&mut self, force: bool) {
@@ -486,6 +503,7 @@ impl Ctx {
             return;
         }
         self.last_hb = Some(Instant::now());
+        self.poll_stop();
         let cpu = self.cpu.sample(self.child);
         let round = |x: Option<f64>| x.map(|x| (x * 10.0).round() / 10.0);
         let elapsed = self.elapsed();
@@ -535,6 +553,9 @@ impl Ctx {
         log: &str,
         poll: &mut dyn FnMut(&mut Ctx),
     ) -> Result<(), String> {
+        if let Some(why) = stop::requested() {
+            return Err(format!("stopped before {log}: {why}"));
+        }
         let log_path = self.logs.join(log);
         if let Some(d) = log_path.parent() {
             fs::create_dir_all(d).map_err(|e| e.to_string())?;
@@ -566,6 +587,13 @@ impl Ctx {
     ) -> Result<(), String> {
         loop {
             poll(self);
+            if let Some(why) = stop::requested() {
+                // Whatever the child finished is already in its files (they are written as each
+                // piece finishes); the run uploads them next.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("stopped: {why}"));
+            }
             if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
                 return if status.success() {
                     Ok(())
@@ -577,6 +605,7 @@ impl Ctx {
                 };
             }
             if self.deadline.is_some_and(|d| unix_now() >= d) {
+                stop::request("the manifest's deadline_utc was reached");
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err("deadline reached; chunk killed".into());
@@ -588,20 +617,6 @@ impl Ctx {
             }
             self.heartbeat(false);
             std::thread::sleep(Duration::from_millis(200));
-        }
-    }
-}
-
-fn rclone(mut c: Command) -> bool {
-    match c.stdin(Stdio::null()).status() {
-        Ok(s) if s.success() => true,
-        Ok(s) => {
-            eprintln!("runner: rclone failed ({s}): {c:?}");
-            false
-        }
-        Err(e) => {
-            eprintln!("runner: cannot run rclone: {e}");
-            false
         }
     }
 }
@@ -682,22 +697,20 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
         .and_then(Value::as_str)
         .map(|s| s.trim_matches('/').to_string())
         .unwrap_or_else(|| format!("runs/{run_id}"));
-    let remote = match (
-        std::env::var("RCLONE_CONFIG_R2_TYPE"),
-        std::env::var("R2_BUCKET"),
-    ) {
-        (Ok(_), Ok(bucket)) if !bucket.is_empty() => Some(format!("r2:{bucket}/{out}")),
-        _ => {
-            println!("runner: RCLONE_CONFIG_R2_TYPE or R2_BUCKET unset: local run, no uploads");
-            None
-        }
-    };
+    let remote = remote::from_env();
+    if remote.is_none() {
+        println!(
+            "runner: RCLONE_CONFIG_R2_TYPE or R2_BUCKET unset (and no RUNNER_REMOTE_DIR): local \
+             run, no uploads"
+        );
+    }
     let root = work.join(run_id);
     let mut ctx = Ctx {
         run_id: run_id.to_string(),
         logs: root.join("out"),
         root,
         remote,
+        prefix: out,
         threads,
         dph: std::env::var("DPH")
             .ok()
@@ -722,44 +735,62 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
     println!(
         "runner: run {run_id}, {threads} threads ({:.2} usable cores), uploading to {}",
         ctx.cpu.cores,
-        ctx.remote.as_deref().unwrap_or("(nowhere)")
+        ctx.remote
+            .as_ref()
+            .map_or("(nowhere)".to_string(), |r| format!(
+                "{}/{}",
+                r.describe(),
+                ctx.prefix
+            ))
     );
 
     let outcome = steps(&mut ctx, &manifest);
     let ok = outcome.is_ok();
     let marker = if ok { "DONE" } else { "FAILED" };
+    // A stopped run (signal, the launcher's STOP, the deadline) keeps everything it finished:
+    // the whole out/ is uploaded below, and the marker lists it.
+    let stopped = stop::requested();
+    let outputs: Vec<Value> = bundle::list_files(&ctx.root.join("out"))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|rel| {
+            let n = fs::metadata(ctx.root.join("out").join(&rel)).map_or(0, |m| m.len());
+            json!({ "path": format!("out/{rel}"), "bytes": n })
+        })
+        .collect();
     let marker_body = json!({
         "utc": utc_string(unix_now()),
         "elapsed_s": ctx.elapsed().round(),
         "error": outcome.as_ref().err(),
+        "stopped": stopped,
+        "partial": !ok,
+        "outputs": outputs,
     });
-    ctx.set_phase(if ok { "uploading" } else { "failed" }, Value::Null);
+    ctx.set_phase(
+        if ok {
+            "uploading"
+        } else if stopped.is_some() {
+            "stopped"
+        } else {
+            "failed"
+        },
+        Value::Null,
+    );
     let _ = ctx.write_json(marker, &marker_body);
     let mut uploaded = true;
-    if let Some(remote) = ctx.remote.clone() {
+    if let Some(remote) = &ctx.remote {
         for f in ["hardware.json", "benchmark.json", "result.json"] {
             let p = ctx.root.join(f);
             if p.exists() {
                 uploaded &= ctx.upload_file(&p, f, false);
             }
         }
-        let mut c = Command::new("rclone");
-        c.args([
-            "copy",
-            "--s3-no-check-bucket",
-            "--immutable",
-            "--retries",
-            "5",
-        ])
-        .arg(ctx.root.join("out"))
-        .arg(format!("{remote}/out"));
-        uploaded &= !ctx.root.join("out").exists() || rclone(c);
-        let mut c = Command::new("rclone");
-        c.args(["check", "--one-way"])
-            .arg(ctx.root.join("out"))
-            .arg(format!("{remote}/out"));
-        uploaded &= !ctx.root.join("out").exists() || rclone(c);
-        // The marker goes last: a DONE in R2 means every output is already there.
+        if let Err(e) = remote.put_dir(&ctx.root.join("out"), &format!("{}/out", ctx.prefix), true)
+        {
+            eprintln!("runner: upload out/: {e}");
+            uploaded = false;
+        }
+        // The marker goes last: a DONE (or FAILED) in R2 means every output is already there.
         let p = ctx.root.join(marker);
         uploaded &= ctx.upload_file(&p, marker, false);
     }
@@ -963,6 +994,7 @@ fn run_kind(ctx: &mut Ctx, kind: &str, params: &Value) -> Result<Value, String> 
         }
         "solver_spike" => spike::chunk(ctx, params)?,
         "search_measure" => measure::chunk(ctx, params)?,
+        "t1bench" => t1bench::chunk(ctx, params)?,
         "arena_block" => {
             return Err("arena_block chunks need the arena binary (not built yet)".into());
         }

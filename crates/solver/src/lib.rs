@@ -39,7 +39,7 @@ pub mod worlds;
 
 pub use fast::{
     FastOptions, ParProgress, SolveMem, solve_fast, solve_fast_par, solve_fast_par_split,
-    solve_fast_par_with, solve_fast_with,
+    solve_fast_par_with, solve_fast_watched, solve_fast_with,
 };
 pub use tt::{TableMemory, shared_table_memory, table_memory};
 pub use worlds::sample_world;

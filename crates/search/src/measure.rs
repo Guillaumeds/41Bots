@@ -33,7 +33,11 @@ use serde::{Deserialize, Serialize};
 use solver::{ParProgress, SolveMem};
 
 use crate::labels;
-use crate::pimc::{Candidate, Ctx, Method, SearchConfig, aggregate, candidates, world_row};
+use crate::pimc::{
+    Candidate, Ctx, Method, SearchConfig, aggregate, candidates, solves_per_world, world_row,
+};
+use crate::plan::{AutoParams, ExecProgress, PlanTask, WorldPlan, plan_auto, run_planned};
+use crate::worlds::Worlds;
 
 /// The four strata of start states (§5.10).
 pub fn stratum_of(s: &HandStartState) -> u8 {
@@ -376,6 +380,25 @@ pub struct DecisionTiming {
     pub world_us: u64,
     /// The slowest world, in microseconds.
     pub max_world_us: u64,
+    /// Solver threads per world, in a position-aware run ([`Schedule::Auto`]); absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threads: Option<u64>,
+}
+
+/// How a worlds run is spread over the machine. Values never depend on it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Schedule {
+    /// The explicit settings: `cfg.threads` workers, each solving one world at a time on
+    /// `cfg.solve_threads` threads with `cfg.tt_mb`-MB tables.
+    #[default]
+    Fixed,
+    /// Position-aware ([`crate::plan`]): each exact world gets its own threads and table, on
+    /// `threads` threads in all, with `budget_mb` of memory for all tables at their peak.
+    Auto {
+        threads: usize,
+        budget_mb: u64,
+        params: Box<AutoParams>,
+    },
 }
 
 /// One worlds job: which worlds of every decision, valued by which method.
@@ -413,11 +436,16 @@ pub struct BatchProgress {
     pub worlds_total: AtomicU64,
     /// Tasks finished.
     pub worlds_done: AtomicU64,
-    /// Worker threads in use.
+    /// Worker threads in use (a position-aware run: all its threads).
     pub threads: AtomicU64,
     /// The parallel exact solve now running, when one worker runs `solve_fast_par`
     /// (`threads == 1`, `solve_threads > 1`): its subproblems done and total.
     pub par: ParProgress,
+    /// Set by a position-aware run ([`Schedule::Auto`] with more than one plan shape), whose
+    /// worlds run at once and tail are in `exec`.
+    pub planned: AtomicBool,
+    /// The position-aware runner's state: worlds running, threads busy, tail.
+    pub exec: ExecProgress,
 }
 
 /// A decision made ready for valuing.
@@ -454,20 +482,7 @@ pub fn world_rows_batch(
     mut sink: impl FnMut(WorldRows, DecisionTiming) -> Result<(), String>,
 ) -> Result<(), String> {
     assert!(job.to >= job.from, "worlds from..to");
-    let mut preps: Vec<Prepared> = ds
-        .iter()
-        .map(|d| {
-            let (_, view, legal) = d.replay();
-            let (_, cands) = candidates(&view, &legal);
-            Prepared {
-                d,
-                view,
-                cands,
-                dseed: measure_seed(job.seed, job.label, d.id),
-            }
-        })
-        .collect();
-    preps.sort_by_key(batch_order);
+    let preps = prepare_batch(ds, job);
     let worlds: Vec<_> = preps
         .iter()
         .map(|p| ctx.source.prepare(&p.view, ctx.rules))
@@ -539,7 +554,6 @@ pub fn world_rows_batch(
         let mut j = 0;
         let result = 'write: loop {
             while j < preps.len() && left[j].load(Ordering::Acquire) == 0 {
-                let p = &preps[j];
                 let rows: Vec<Vec<[u64; 4]>> = slots[j * nw..(j + 1) * nw]
                     .iter()
                     .map(|c| {
@@ -550,30 +564,17 @@ pub fn world_rows_batch(
                             .collect()
                     })
                     .collect();
-                let r = WorldRows {
-                    id: p.d.id,
-                    trick: p.d.trick,
-                    stratum: p.d.stratum,
-                    position: p.d.position,
-                    team: engine::team_of(p.d.seat),
-                    method: method_name(job.method).to_string(),
-                    label: job.label,
-                    from: job.from,
-                    cands: p.cands.clone(),
+                let (r, t) = records(
+                    &preps[j],
+                    job,
+                    &*worlds[j],
                     rows,
-                    log2_worlds: worlds[j].count().map(|c| c.max(1).ilog2()),
-                    hand_type: view_hand_type(&p.view),
-                };
-                let t = DecisionTiming {
-                    id: p.d.id,
-                    trick: p.d.trick,
-                    position: p.d.position,
-                    method: r.method.clone(),
-                    label: job.label,
-                    worlds: nw as u64,
-                    world_us: us[j].load(Ordering::Relaxed),
-                    max_world_us: max_us[j].load(Ordering::Relaxed),
-                };
+                    (
+                        us[j].load(Ordering::Relaxed),
+                        max_us[j].load(Ordering::Relaxed),
+                    ),
+                    None,
+                );
                 if let Err(e) = sink(r, t) {
                     break 'write Err(e);
                 }
@@ -593,6 +594,200 @@ pub fn world_rows_batch(
         stop.store(true, Ordering::Relaxed);
         result
     })
+}
+
+/// The decisions of a batch made ready, in [`batch_order`] (the order of the output file).
+fn prepare_batch<'d>(ds: &'d [DecisionSpec], job: &WorldsJob) -> Vec<Prepared<'d>> {
+    let mut preps: Vec<Prepared> = ds
+        .iter()
+        .map(|d| {
+            let (_, view, legal) = d.replay();
+            let (_, cands) = candidates(&view, &legal);
+            Prepared {
+                d,
+                view,
+                cands,
+                dseed: measure_seed(job.seed, job.label, d.id),
+            }
+        })
+        .collect();
+    preps.sort_by_key(batch_order);
+    preps
+}
+
+/// The worlds record and timing of a finished decision (`us`: total and slowest world in µs).
+fn records(
+    p: &Prepared,
+    job: &WorldsJob,
+    worlds: &dyn Worlds,
+    rows: Vec<Vec<[u64; 4]>>,
+    us: (u64, u64),
+    threads: Option<u64>,
+) -> (WorldRows, DecisionTiming) {
+    let nw = rows.len() as u64;
+    let r = WorldRows {
+        id: p.d.id,
+        trick: p.d.trick,
+        stratum: p.d.stratum,
+        position: p.d.position,
+        team: engine::team_of(p.d.seat),
+        method: method_name(job.method).to_string(),
+        label: job.label,
+        from: job.from,
+        cands: p.cands.clone(),
+        rows,
+        log2_worlds: worlds.count().map(|c| c.max(1).ilog2()),
+        hand_type: view_hand_type(&p.view),
+    };
+    let t = DecisionTiming {
+        id: p.d.id,
+        trick: p.d.trick,
+        position: p.d.position,
+        method: r.method.clone(),
+        label: job.label,
+        worlds: nw,
+        world_us: us.0,
+        max_world_us: us.1,
+        threads,
+    };
+    (r, t)
+}
+
+/// [`world_rows_batch`] under a [`Schedule`]: `Fixed` is [`world_rows_batch`] itself. `Auto`
+/// plans every exact world's threads and table by position ([`crate::plan::plan_auto`]) and
+/// runs them with [`crate::plan::run_planned`]; when every world gets one thread and the same
+/// table (cheap tricks), that is `world_rows_batch` on all threads with that table, and rollout
+/// methods (no tables) also run that way. Rows, their order and the `sink` calls are exactly
+/// `world_rows_batch`'s under any schedule; only the timings differ.
+pub fn world_rows_sched(
+    ds: &[DecisionSpec],
+    job: &WorldsJob,
+    ctx: &Ctx,
+    cfg: &SearchConfig,
+    sched: &Schedule,
+    progress: Option<&BatchProgress>,
+    mut sink: impl FnMut(WorldRows, DecisionTiming) -> Result<(), String>,
+) -> Result<(), String> {
+    let Schedule::Auto {
+        threads,
+        budget_mb,
+        params,
+    } = sched
+    else {
+        return world_rows_batch(ds, job, ctx, cfg, progress, sink);
+    };
+    let threads = (*threads).max(1);
+    let budget = budget_mb.saturating_mul(1 << 20);
+    let flat = |tt_mb: usize| SearchConfig {
+        threads,
+        solve_threads: 1,
+        tt_mb,
+        ..*cfg
+    };
+    if job.method != Method::ExactPimc || job.to <= job.from {
+        return world_rows_batch(ds, job, ctx, &flat(cfg.tt_mb), progress, sink);
+    }
+    assert!(job.to >= job.from, "worlds from..to");
+    let preps = prepare_batch(ds, job);
+    let nw = (job.to - job.from) as usize;
+    let tasks: Vec<PlanTask> = preps
+        .iter()
+        .flat_map(|p| {
+            let t = PlanTask {
+                trick: p.d.trick,
+                position: p.d.position,
+                solves: solves_per_world(&p.cands),
+            };
+            std::iter::repeat_n(t, nw)
+        })
+        .collect();
+    let planned = plan_auto(&tasks, threads, budget, params);
+    let one = planned.plans.first().copied();
+    if let Some(one) = one
+        && one.threads == 1
+        && planned.plans.iter().all(|w| *w == one)
+    {
+        return world_rows_batch(ds, job, ctx, &flat(one.tt_mb), progress, sink);
+    }
+    eprintln!("worlds: position-aware plan {}", planned.record);
+    let worlds: Vec<_> = preps
+        .iter()
+        .map(|p| ctx.source.prepare(&p.view, ctx.rules))
+        .collect();
+    if let Some(p) = progress {
+        p.threads.store(threads as u64, Ordering::Relaxed);
+        p.planned.store(true, Ordering::Relaxed);
+    }
+    let mut rows: Vec<Vec<Option<Vec<[u64; 4]>>>> = vec![vec![None; nw]; preps.len()];
+    let mut left = vec![nw; preps.len()];
+    let mut us = vec![(0u64, 0u64); preps.len()];
+    let mut j_out = 0usize;
+    let stop = AtomicBool::new(false);
+    let work = |k: usize, plan: WorldPlan, mem: &mut SolveMem| {
+        let (j, i) = (k / nw, k % nw);
+        let p = &preps[j];
+        let c = SearchConfig {
+            threads: 1,
+            solve_threads: plan.threads,
+            tt_mb: plan.tt_mb,
+            ..*cfg
+        };
+        let w = job.from + i as u64;
+        let v = world_row(
+            &p.view,
+            &*worlds[j],
+            &p.cands,
+            job.method,
+            w,
+            p.dseed,
+            ctx,
+            &c,
+            None,
+            mem,
+        );
+        v.into_iter().map(|x| x.0).collect::<Vec<[u64; 4]>>()
+    };
+    run_planned(
+        &planned.order,
+        &planned.plans,
+        threads,
+        budget,
+        &stop,
+        progress.map(|p| &p.exec),
+        work,
+        |k, v, ran| {
+            let (j, i) = (k / nw, k % nw);
+            rows[j][i] = Some(v);
+            left[j] -= 1;
+            let t = (ran.wall_s * 1e6) as u64;
+            us[j] = (us[j].0 + t, us[j].1.max(t));
+            if let Some(p) = progress {
+                p.worlds_done.fetch_add(1, Ordering::Relaxed);
+            }
+            // Hand finished decisions out in batch order.
+            while j_out < preps.len() && left[j_out] == 0 {
+                let r: Vec<Vec<[u64; 4]>> = core::mem::take(&mut rows[j_out])
+                    .into_iter()
+                    .map(|x| x.expect("a finished decision has every world"))
+                    .collect();
+                let threads = planned.plans[j_out * nw].threads as u64;
+                let (r, t) = records(
+                    &preps[j_out],
+                    job,
+                    &*worlds[j_out],
+                    r,
+                    us[j_out],
+                    Some(threads),
+                );
+                sink(r, t)?;
+                if let Some(pr) = progress {
+                    pr.decisions_done.fetch_add(1, Ordering::Relaxed);
+                }
+                j_out += 1;
+            }
+            Ok(())
+        },
+    )
 }
 
 /// Value every candidate of `d` in worlds `from..to` by `method` (a batch of one decision).
@@ -665,6 +860,22 @@ pub fn worlds_file(
     ctx: &Ctx,
     cfg: &SearchConfig,
     progress: Option<&BatchProgress>,
+    on_done: impl FnMut(&WorldRows, &DecisionTiming),
+) -> Result<usize, String> {
+    worlds_file_sched(out, ds, job, ctx, cfg, &Schedule::Fixed, progress, on_done)
+}
+
+/// [`worlds_file`] under a [`Schedule`] ([`world_rows_sched`]): the file is the same bytes under
+/// any schedule.
+#[allow(clippy::too_many_arguments)]
+pub fn worlds_file_sched(
+    out: &Path,
+    ds: &[DecisionSpec],
+    job: &WorldsJob,
+    ctx: &Ctx,
+    cfg: &SearchConfig,
+    sched: &Schedule,
+    progress: Option<&BatchProgress>,
     mut on_done: impl FnMut(&WorldRows, &DecisionTiming),
 ) -> Result<usize, String> {
     let done: Vec<WorldRows> = if out.exists() {
@@ -728,7 +939,7 @@ pub fn worlds_file(
         p.worlds_done.store(before * nw, Ordering::Relaxed);
     }
     let mut n = 0;
-    world_rows_batch(&todo, job, ctx, cfg, progress, |r, t| {
+    world_rows_sched(&todo, job, ctx, cfg, sched, progress, |r, t| {
         let line = serde_json::to_string(&r).map_err(|e| e.to_string())?;
         writeln!(f, "{line}").map_err(|e| e.to_string())?;
         f.flush().map_err(|e| e.to_string())?;
@@ -1265,6 +1476,98 @@ mod tests {
                 assert_eq!(r.cands, cands);
             }
         }
+    }
+
+    /// The position-aware schedule writes the same bytes as the explicit settings, on 1, 3 and 8
+    /// threads, under plans that give worlds different thread counts and tables (costs and table
+    /// needs raised so trick-3/4 worlds get 1–8 threads; budgets down to 1 MB tables, which forces
+    /// replacement), including a resumed run and the all-one-thread plan that falls back to the
+    /// plain workers; its timings record the threads each decision's worlds had.
+    #[test]
+    fn planned_schedules_write_identical_files() {
+        let ds = small_set();
+        let job = WorldsJob {
+            method: Method::ExactPimc,
+            label: 1,
+            seed: 11,
+            from: 0,
+            to: 3,
+        };
+        let base = tmp("plan-base");
+        clean(&base);
+        let want = run(&base, &ds, &job, 2, 4);
+        clean(&base);
+        let l = leaf();
+        let src = RejectionSource::new();
+        let ctx = Ctx {
+            leaf: &*l,
+            source: &src,
+            rules: Rules::HOUSE,
+        };
+        let spread = AutoParams {
+            leader_cost_s: [0.0, 0.0, 0.0, 400.0, 100.0, 1.0],
+            position_ratio: 1.5,
+            leader_table_mb: [0.0, 0.0, 0.0, 64.0, 8.0, 1.0],
+            target_s: Some(20.0),
+            ..AutoParams::default()
+        };
+        let mut planned_seen = false;
+        for (k, (threads, budget_mb, params)) in [
+            (1, 64, spread.clone()),
+            (3, 8, spread.clone()),
+            (8, 512, spread.clone()),
+            (8, 1, spread.clone()),
+            (3, 64, AutoParams::default()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let sched = Schedule::Auto {
+                threads,
+                budget_mb,
+                params: Box::new(params.clone()),
+            };
+            let p = tmp(&format!("plan-{k}"));
+            clean(&p);
+            let cfg = SearchConfig::default();
+            let prog = BatchProgress::default();
+            worlds_file_sched(&p, &ds, &job, &ctx, &cfg, &sched, Some(&prog), |_, _| {})
+                .expect("runs");
+            assert_eq!(std::fs::read(&p).expect("written"), want, "plan {k}");
+            let times: Vec<DecisionTiming> = read_jsonl(&timing_path(&p)).expect("timings");
+            assert_eq!(times.len(), ds.len());
+            let planned = prog.planned.load(Ordering::Relaxed);
+            planned_seen |= planned;
+            if planned {
+                assert!(times.iter().all(|t| t.threads.is_some()), "plan {k}");
+                if threads == 8 && budget_mb > 1 {
+                    let spreads: std::collections::BTreeSet<u64> =
+                        times.iter().filter_map(|t| t.threads).collect();
+                    assert!(spreads.len() >= 2, "plan {k}: {spreads:?}");
+                }
+            } else {
+                assert!(times.iter().all(|t| t.threads.is_none()), "plan {k}");
+            }
+            assert_eq!(
+                prog.worlds_done.load(Ordering::Relaxed),
+                (ds.len() * 3) as u64
+            );
+            // Interrupted after 4 decisions with a torn 5th line: resumed under the plan.
+            let text = String::from_utf8(want.clone()).expect("utf8");
+            let lines: Vec<&str> = text.lines().collect();
+            let mut part = lines[..4].join("\n");
+            part.push('\n');
+            part.push_str(&lines[4][..lines[4].len() / 3]);
+            std::fs::write(&p, part).expect("write");
+            worlds_file_sched(&p, &ds, &job, &ctx, &cfg, &sched, None, |_, _| {}).expect("resumes");
+            assert_eq!(
+                std::fs::read(&p).expect("written"),
+                want,
+                "plan {k} resumed"
+            );
+            clean(&p);
+        }
+        assert!(planned_seen, "some plan used the position-aware runner");
     }
 
     /// Extending chosen decisions (`--ids` with `--from-world`) appends records that

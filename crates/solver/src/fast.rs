@@ -244,7 +244,8 @@ struct Search<'a, L: Leaf> {
     stats: Stats,
     start: Instant,
     aborted: bool,
-    par: Option<(&'a ParProgress, &'a SharedTable)>,
+    /// Live counters and the stop flag (parallel solves, and sequential solves given one).
+    progress: Option<&'a ParProgress>,
 }
 
 /// The position of a card in the tie order (smaller = earlier).
@@ -355,9 +356,14 @@ impl<L: Leaf> Search<'_, L> {
             {
                 self.aborted = true;
             }
-            if let Some((pr, tt)) = self.par {
+            if let Some(pr) = self.progress {
                 pr.nodes.fetch_add(0x1000, Ordering::Relaxed);
-                pr.tt_entries.store(tt.entries(), Ordering::Relaxed);
+                let entries = match &self.tt {
+                    Tt::Off => 0,
+                    Tt::Own(t) => t.entries,
+                    Tt::Shared(t) => t.entries(),
+                };
+                pr.tt_entries.store(entries, Ordering::Relaxed);
                 if self.aborted {
                     pr.abort.store(true, Ordering::Relaxed);
                 }
@@ -451,6 +457,20 @@ pub fn solve_fast_with<L: Leaf>(
     opts: FastOptions,
     mem: &mut SolveMem,
 ) -> Solution {
+    solve_fast_watched(pos, ctx, leaf, opts, mem, None)
+}
+
+/// [`solve_fast_with`] that also keeps `progress`'s node and table counters up to date and stops
+/// (reporting a timeout) once its `abort` flag is set, as [`solve_fast_par`] does. Everything
+/// else, the answer and every counter included, is exactly [`solve_fast_with`]'s.
+pub fn solve_fast_watched<L: Leaf>(
+    pos: &Position,
+    ctx: MatchCtx,
+    leaf: &L,
+    opts: FastOptions,
+    mem: &mut SolveMem,
+    progress: Option<&ParProgress>,
+) -> Solution {
     let mut s = Search {
         ctx,
         leaf,
@@ -464,7 +484,7 @@ pub fn solve_fast_with<L: Leaf>(
         stats: Stats::default(),
         start: Instant::now(),
         aborted: false,
-        par: None,
+        progress,
     };
     s.stats.nodes += 1;
     let mut values: Vec<(Card, MoneyChance)> = Vec::new();
@@ -703,7 +723,7 @@ fn par_solve<L: Leaf + Sync>(
         stats: Stats::default(),
         start,
         aborted: false,
-        par: None,
+        progress: None,
     };
     exp.stats.nodes += 1;
     let mut nodes: Vec<PNode> = Vec::new();
@@ -763,7 +783,7 @@ fn par_solve<L: Leaf + Sync>(
                         stats: Stats::default(),
                         start,
                         aborted: false,
-                        par: Some((pr, shared)),
+                        progress: Some(pr),
                     };
                     loop {
                         let k = next.fetch_add(1, Ordering::Relaxed);

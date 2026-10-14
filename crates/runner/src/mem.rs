@@ -204,7 +204,7 @@ pub(crate) struct Plan {
 /// Chooses `tt_mb` for `tables` within `limit`, the process also holding `other` bytes.
 pub(crate) fn plan(requested: Requested, tables: Tables, other: u64, limit: &Limit) -> Plan {
     let margin = limit.margin();
-    let budget = limit.bytes.saturating_sub(margin).saturating_sub(other);
+    let (budget, _) = budget(other, limit);
     let fits = |mb: u64| tables.peak(mb) <= budget;
     // The largest size that fits, up to `top` (the peak never falls as the size grows, so a
     // binary search finds it; the result is checked to fit either way).
@@ -293,6 +293,49 @@ pub(crate) fn plan(requested: Requested, tables: Tables, other: u64, limit: &Lim
         warning,
         record,
     }
+}
+
+/// The memory budget for all tables of a process (bytes): the limit minus the safety margin
+/// minus the process's `other` memory, as [`plan`] computes it; with its record. The
+/// position-aware schedule shares it out per thread (`search::plan`).
+pub(crate) fn budget(other: u64, limit: &Limit) -> (u64, Value) {
+    let margin = limit.margin();
+    let budget = limit.bytes.saturating_sub(margin).saturating_sub(other);
+    let mb_of = |b: u64| b / MIB;
+    (
+        budget,
+        json!({
+            "tt_mb": "per world (position-aware)",
+            "budget_mb": mb_of(budget),
+            "limit_mb": limit.mb(), "limit_source": limit.source,
+            "cgroup_limit_mb": limit.cgroup.map(mb_of),
+            "mem_total_mb": limit.mem_total.map(mb_of),
+            "mem_available_mb": limit.mem_available.map(mb_of),
+            "margin_mb": mb_of(margin),
+            "other_mb": mb_of(other),
+        }),
+    )
+}
+
+/// [`budget`] on this machine for a process that loads `equity` and runs `threads` threads, as a
+/// [`Plan`] (`tt_mb` 0: each world's table is chosen by the schedule) and the budget in bytes.
+pub(crate) fn budget_here(equity: &Path, threads: u64, what: &str) -> (Plan, u64) {
+    let limit = Sys::host().limit();
+    let (b, record) = budget(other_bytes(equity, threads), &limit);
+    println!(
+        "runner: {what}: position-aware tables within {} MB of {} MB ({})",
+        b / MIB,
+        limit.mb(),
+        limit.source
+    );
+    (
+        Plan {
+            tt_mb: 0,
+            warning: None,
+            record,
+        },
+        b,
+    )
 }
 
 /// The other memory of a process that loads the equity table at `equity` and runs `threads`

@@ -98,8 +98,19 @@ export BIN_RUSTC
 
 trap - ERR
 # The runner uploads its outputs, writes DONE or FAILED last, and destroys the instance.
+# A SIGTERM to this script (PID 1: `docker stop`, a stopped instance) is passed on to the runner,
+# which then stops its work, uploads what it finished and writes its marker
+# (crates/runner/src/stop.rs); this script waits for that before it exits.
 status=0
-./bin/runner run run-manifest.json --work-dir "$W/work" || status=$?
+./bin/runner run run-manifest.json --work-dir "$W/work" &
+runner_pid=$!
+trap 'kill -TERM "$runner_pid" 2>/dev/null || true' TERM INT HUP
+while true; do
+  wait "$runner_pid" && status=0 || status=$?
+  # `wait` also returns when a trapped signal arrives; go on waiting while the runner lives.
+  kill -0 "$runner_pid" 2>/dev/null || break
+done
+trap - TERM INT HUP
 # Only reached if the runner could not destroy the instance itself (e.g. it crashed).
 echo "boot: runner exited with $status" >&2
 self_destroy || true
