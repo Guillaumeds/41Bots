@@ -478,3 +478,15 @@ Changes to this spec:
 3. **Trick 2 teacher default.** The few-worlds exact trick-2 arm stops being only a comparison. It becomes the **default trick-2 teacher** if its mean loss against the yardstick is lower than rollout-PIMC's by more than 2 standard errors at a compute cost within the M3 budget. Otherwise rollouts stay the default, and the gap is reported.
 4. **Trick 1 teacher.** Rollout-PIMC stays the scalable trick-1 teacher at M3. Its measured loss against the exact yardstick is a pre-registered number the later phases must reduce: M4 network rollouts, M5 recursive search and M6 self-play. Each of these is scored against the same yardstick in addition to tournaments.
 5. **Scope note.** Exact PIMC is itself an approximation of true imperfect-information play, because it plays each world with all cards face up. It ignores what each card reveals and how it is inferred. The yardstick measures how close the cheap searches come to exact PIMC. Strength beyond PIMC comes from M5 search and M6 self-play, judged by money in tournaments (PLAN §8–9).
+
+### 13.1 Sizing the yardstick (owner-approved 2026-10-14; replaces the fixed "300 + 300")
+The yardstick is for **measuring only, not training**. Its size is set by measurement:
+1. **Deals per decision (N): agreement curve first.**
+   - **Trick 2:** 200 decisions with N = 10, 20, 40, 80, 160, 320 (nested world sets, common seeds).
+   - **Plateau rule:** the plateau N is the smallest N where doubling it changes the chosen card in under 1% of decisions **and** changes the mean chosen-card value by under 0.001 money chance.
+   - **Trick 1:** 20 decisions on a large machine with `solve_fast_par`, N = 10, 20, 40, 80, to confirm whether trick 1 plateaus near the trick-2 N.
+   - 20 is only the published plateau for 5-card PIMC, and Skat needed 160, so nothing is assumed.
+2. **Number of decisions.** Methods are compared **paired**, on the same decisions. Size the set so that a 3-point difference in card agreement between two methods is detected at 95% confidence; the expected range is 300–500. The disagreement rate is measured on the trick-2 data before any trick-1 money is spent.
+3. **Trick 2:** 1,000 decisions at the plateau N, costing under $1.
+4. **Trick 1:** cost = decisions × N × measured seconds per deal. The 384-core EPYC measured 7–140 s per deal, about $0.28 per decision at N = 20. **The trick-1 set is priced with the owner before it runs.**
+5. **Repeatability:** re-solve 20 decisions with fresh deals at the chosen N. The chosen card must match in at least 95% of them, or N is raised.
