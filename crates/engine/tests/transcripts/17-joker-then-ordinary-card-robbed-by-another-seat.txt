@@ -1,7 +1,7 @@
 title: A turned Joker, then an ordinary card robbed by another player at its turn: two burns in one hand
-story: Seat 0 deals and turns the Joker. The dealer takes it and burns at once (rule 24): legal are all six of its cards, as it holds no ace; it burns the 2 of spades and keeps the Joker.
-story: The next card, the 6 of diamonds, is turned: diamonds are trumps. It is not an ace and the dealer does not hold the ace of diamonds, so the 6 stays on the table and the dealer is known to lack the ace.
-story: Seat 3 holds the ace of diamonds. Seats 1 and 2 play to trick 1 first (each proving it lacks the ace); then seat 3 takes the 6 of diamonds and burns the 8 of clubs (aces excluded), and plays the ace of diamonds.
+story: Seat 0 deals and turns the Joker. The dealer takes it and burns at once (rule 24): legal are all six of its cards; it burns the 2 of spades and keeps the Joker.
+story: The next card, the 6 of diamonds, is turned: diamonds are trumps. It is not an ace, so the 6 stays on the table; whoever holds the ace of diamonds, the dealer included, robs at their own turn in trick 1 (H2, H4 as amended 2026-10-14).
+story: Seat 3 holds the ace of diamonds. Seats 1 and 2 play to trick 1 first (each proving it lacks the ace); then seat 3 takes the 6 of diamonds and burns the 8 of clubs, and plays the ace of diamonds.
 story: This hand has two burns, one by the dealer and one by seat 3 (RULES "two takes in one hand"). The rest of the hand is ordinary play. Final scores of the hand: 15,0,0,16.
 dealer: 0
 # ---- Hand 1 of this file (hand index 0), dealer seat 0: the Joker turned, then the 6 of diamonds; seat 3 holds the ace of diamonds ----
@@ -25,9 +25,8 @@ legal: KC 4D 7H 2S QS JK
 > Burn 2S    # seat 0 burns
 = BurnDone seat=0
 = Turned card=6D
-= ProvedNoAce seat=0
-# The 6 of diamonds is turned: diamonds are trumps. It is not an ace and the dealer does not hold the ace of diamonds,
-# so it stays on the table and the dealer has proved it lacks the ace (H4). Seat 3 holds the ace and will rob at its own turn (H2).
+# The 6 of diamonds is turned: diamonds are trumps. It is not an ace, so it stays on the table; nothing is yet known
+# about the dealer (H4, amended 2026-10-14). Seat 3 holds the ace and will rob at its own turn (H2).
 phase: AwaitPlay 1
 # Trick 1
 > Play 9D    # seat 1
@@ -36,7 +35,7 @@ phase: AwaitPlay 1
 = ProvedNoAce seat=2
 = Took seat=3 card=6D
 phase: AwaitBurn 3
-legal: 8C 6D 6H JH 5S
+legal: 8C AD 6D 6H JH 5S
 > Burn 8C    # seat 3 burns
 = BurnDone seat=3
 phase: AwaitPlay 3

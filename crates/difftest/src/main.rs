@@ -1,4 +1,4 @@
-//! `difftest <matches> [seed] [--bonus-later N] [--threads N]`
+//! `difftest <matches> [seed] [--threads N]`
 //!
 //! Plays `matches` random matches through the engine and the reference, comparing them after
 //! every action, then prints the rule-branch counts. Exits with status 1 on any disagreement, or
@@ -11,32 +11,23 @@ use std::time::Instant;
 use difftest::{COVERAGE_MIN_MATCHES, Per, Report};
 use engine::game::Rules;
 
-const USAGE: &str = "usage: difftest <matches> [seed] [--bonus-later N] [--threads N]\n\
+const USAGE: &str = "usage: difftest <matches> [seed] [--threads N]\n\
     \x20 matches        number of matches to play\n\
     \x20 seed           run seed (default 0)\n\
-    \x20 --bonus-later  points for a team's later best-trump bonuses in a game (default 5; 6 is the flat-11 rule)\n\
     \x20 --threads      worker threads (default: all cores); the report does not depend on it";
 
 struct Options {
     matches: u64,
     seed: u64,
-    bonus_later: u8,
     threads: usize,
 }
 
 fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut positional = Vec::new();
-    let mut bonus_later = Rules::HOUSE.bonus_later;
     let mut threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--bonus-later" => {
-                let v = it.next().ok_or("--bonus-later needs a value")?;
-                bonus_later = v
-                    .parse()
-                    .map_err(|_| format!("--bonus-later: not a number 0-255: {v}"))?;
-            }
             "--threads" => {
                 let v = it.next().ok_or("--threads needs a value")?;
                 threads = v
@@ -65,7 +56,6 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     Ok(Options {
         matches,
         seed,
-        bonus_later,
         threads,
     })
 }
@@ -147,16 +137,11 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let rules = Rules {
-        bonus_later: o.bonus_later,
-        ..Rules::HOUSE
-    };
+    let rules = Rules::HOUSE;
     println!(
-        "difftest: {} matches, seed {}, rules bonus_first={} bonus_later={} stake={}, {} thread{}",
+        "difftest: {} matches, seed {}, stake {}, {} thread{}",
         grouped(o.matches),
         o.seed,
-        rules.bonus_first,
-        rules.bonus_later,
         rules.stake,
         o.threads,
         if o.threads == 1 { "" } else { "s" }

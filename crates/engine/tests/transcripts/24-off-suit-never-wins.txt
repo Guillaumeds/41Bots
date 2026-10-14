@@ -1,7 +1,7 @@
 title: A card of another suit never wins: the 3 of diamonds beats three kings
 story: Seat 7 deals and turns the 9 of clubs: clubs are trumps (the ace of clubs is undealt, so nobody robs).
 story: Seat 0 leads the 3 of diamonds. Seat 2 follows with the 2 of diamonds and seat 4 with the ace of diamonds; the others have no diamond and throw high cards of other suits: the king of spades, king of hearts, queen of spades, J of hearts and queen of hearts. Nobody trumps.
-story: With no trump in the trick, it goes to the highest card of the suit led (rule 19); a card of any other suit never wins, however high. In a red plain suit the ace is the lowest card (rule 9), so the 3 of diamonds beats the 2 and the ace: seat 0 wins.
+story: With no trump in the trick, it goes to the highest card of the suit led (rule 19); a card of any other suit never wins, however high. In a red plain suit the ace is the lowest card (rule 9), so the 3 of diamonds beats the 2 and the ace: seat 0 wins. This holds only because diamonds are a plain suit here, diamonds were led and nobody played a trump; any trump would have won the trick.
 story: The rest of the hand is ordinary play. Final scores of the hand: 10,11,0,10.
 dealer: 7
 # ---- Hand 1 of this file (hand index 0), dealer seat 7: clubs trumps ----

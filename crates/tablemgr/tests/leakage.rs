@@ -51,11 +51,7 @@ fn permuting_the_undealt_pack_changes_no_action_and_no_view() {
     for i in 0..200u64 {
         let block_seed = Rng::derive(0x1EA4, &[i]).next_u64();
         let match_seed = Rng::derive(0x1EA5, &[i]).next_u64();
-        let rules = if i.is_multiple_of(3) {
-            Rules::FLAT
-        } else {
-            Rules::HOUSE
-        };
+        let rules = Rules::HOUSE;
         let dealer = block_first_dealer(block_seed);
         let mut a = Match::new_block(
             block_seed,
@@ -164,14 +160,7 @@ fn check_match_views(i: u64) -> Bits {
     let cfg = if i % 4 == 3 {
         TableConfig::in_block(seed, Rules::HOUSE, BlockSpec::new(seed ^ 0xB10C))
     } else {
-        TableConfig::plain(
-            seed,
-            if i.is_multiple_of(2) {
-                Rules::HOUSE
-            } else {
-                Rules::FLAT
-            },
-        )
+        TableConfig::plain(seed, Rules::HOUSE)
     };
     let mut m = cfg.new_match();
     let mut bots = if i.is_multiple_of(2) {
@@ -280,11 +269,11 @@ fn keys(v: &Value) -> Vec<String> {
 fn every_message_to_a_seat_is_exactly_its_view_and_the_legal_actions() {
     let configs = [
         TableConfig::plain(11, Rules::HOUSE),
-        TableConfig::plain(12, Rules::FLAT),
+        TableConfig::plain(12, Rules::HOUSE),
         TableConfig::plain(13, Rules::HOUSE),
         TableConfig::in_block(14, Rules::HOUSE, BlockSpec::new(140)),
         TableConfig::in_block(15, Rules::HOUSE, BlockSpec::new(150)),
-        TableConfig::in_block(16, Rules::FLAT, BlockSpec::new(160)),
+        TableConfig::in_block(16, Rules::HOUSE, BlockSpec::new(160)),
     ];
     for cfg in configs {
         let sent: [Rc<RefCell<Vec<String>>>; 8] = core::array::from_fn(|_| Rc::default());

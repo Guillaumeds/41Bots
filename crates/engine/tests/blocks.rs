@@ -65,7 +65,7 @@ fn matches_of_one_block_deal_identical_decks_for_every_hand_index() {
 fn the_dealer_of_hand_k_is_the_same_in_every_match_of_a_block() {
     let block_seed = 7;
     let first = block_first_dealer(block_seed);
-    let mut m = block_match(block_seed, Rules::FLAT);
+    let mut m = block_match(block_seed, Rules::HOUSE);
     while m.phase() != Phase::MatchOver {
         assert_eq!(
             u32::from(m.dealer()),

@@ -5,10 +5,6 @@ use engine::cards::{ACE, Bits, JOKER, Suit, bit, card};
 use engine::game::build_deck;
 
 const HOUSE: Rules = Rules::HOUSE;
-const FLAT: Rules = Rules {
-    bonus_later: 6,
-    ..Rules::HOUSE
-};
 
 type Events = [Vec<String>; snapshot::SEATS];
 
@@ -40,12 +36,6 @@ fn house_rule_200_matches() {
         let w = r.match_wins[t] as i64;
         assert_eq!(r.money[t], 6 * stake * w - 2 * stake * (200 - w));
     }
-}
-
-#[test]
-fn flat_rule_100_matches() {
-    let r = run_threads(2, 100, FLAT, 4).unwrap_or_else(|d| panic!("{d}"));
-    assert_consistent(&r, 100);
 }
 
 #[test]
@@ -223,7 +213,7 @@ fn forced_branches_agree_and_are_counted() {
     assert!(r.turned_joker >= 1 && r.joker_then_ace >= 1 && r.dealer_robbed_at_once >= 1);
 
     let r = forced(3, hands_with(3, ad), &[JOKER, nine_d]);
-    assert!(r.joker_dealer_holds_ace >= 1 && r.dealer_robbed_at_once >= 1);
+    assert!(r.joker_dealer_holds_ace >= 1 && r.dealer_robbed_in_turn >= 1);
 
     let r = forced(6, [0; 8], &[JOKER, nine_d]);
     assert!(r.turned_joker >= 1);

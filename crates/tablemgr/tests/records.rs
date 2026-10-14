@@ -16,7 +16,7 @@ fn some_records() -> Vec<MatchRecord> {
         let cfg = if i.is_multiple_of(2) {
             TableConfig::plain(100 + i, Rules::HOUSE)
         } else {
-            TableConfig::in_block(100 + i, Rules::FLAT, BlockSpec::new(i))
+            TableConfig::in_block(100 + i, Rules::HOUSE, BlockSpec::new(i))
         };
         let mut bots = if i < 3 { mixed_bots() } else { random_bots() };
         out.push(play_match(&cfg, &mut bots).unwrap());
@@ -125,7 +125,7 @@ fn the_record_carries_versions_and_the_spec_fields_in_order() {
     assert_eq!(FORMAT_VERSION, 1);
     assert_eq!(r.rules_version, RULES_VERSION);
     let json = r.to_json();
-    assert!(json.starts_with(r#"{"format_version":1,"rules_version":1,"rules":{"#));
+    assert!(json.starts_with(r#"{"format_version":1,"rules_version":2,"rules":{"#));
     assert_eq!(
         top_level_keys(&json),
         [
@@ -240,7 +240,7 @@ fn verify_catches_a_tampered_record() {
     assert!(matches!(r.verify(), Err(RecordError::Mismatch { .. })));
 
     let mut r = good.clone();
-    r.actions[0] = Action::Burn(0); // the ace of clubs: never burnable
+    r.actions[0] = Action::Burn(53); // no such card
     assert!(matches!(
         r.verify(),
         Err(RecordError::Illegal { index: 0, .. })

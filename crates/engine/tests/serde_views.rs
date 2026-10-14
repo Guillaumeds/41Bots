@@ -55,7 +55,7 @@ fn the_json_shapes_are_the_protocol_shapes() {
     );
     assert_eq!(
         serde_json::to_string(&Rules::HOUSE).unwrap(),
-        r#"{"bonus_first":6,"bonus_later":5,"stake":5}"#
+        r#"{"stake":5}"#
     );
     assert_eq!(
         serde_json::to_string(&Phase::AwaitPlay(4)).unwrap(),

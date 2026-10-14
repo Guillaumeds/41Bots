@@ -1,7 +1,7 @@
-title: A turned Joker, and the dealer holds the ace of the new trump suit: it takes the second card at once
-story: Seat 7 deals and turns the Joker. The dealer takes it and burns at once (rule 24): it holds the ace of clubs and the A♥, which may not be burned (H3); it burns the 8 of spades.
-story: The next card, the 9 of clubs, is turned: clubs are trumps. The dealer holds the ace of clubs, the ace of trumps, so it must rob the 9 at once, before the first lead (rule 24, H4), and burn again; it burns the Joker.
-story: So the dealer burns twice, the 9 of clubs is taken into its hand, and nobody else robs. Seat 0 leads trick 1 as usual.
+title: A turned Joker, and the dealer holds the ace of the new trump suit: it robs the second card at its own turn
+story: Seat 7 deals and turns the Joker. The dealer takes it and burns at once (rule 24): it holds the ace of clubs and the A♥, which it could burn (H3); it burns the 8 of spades.
+story: The next card, the 9 of clubs, is turned: clubs are trumps. The dealer holds the ace of clubs, the ace of trumps, so it robs the 9 at its own first turn in trick 1, as the eighth card, after seeing the other seven (H2, H4 as amended 2026-10-14), and burns again; it burns the Joker.
+story: So the dealer burns twice, the 9 of clubs is taken into its hand, and nobody else robs. Seat 0 leads trick 1 as usual; the dealer takes the 9 only when its turn comes.
 story: The rest of the hand is ordinary play. Final scores of the hand: 5,0,5,21.
 dealer: 7
 # ---- Hand 1 of this file (hand index 0), dealer seat 7: the Joker turned, then the 9 of clubs; the dealer holds the ace of clubs ----
@@ -20,21 +20,15 @@ undealt: 10S QS 10C 2D 5D 4S 3H 2C 2S 7H 3C
 # ======== Play ========
 = Turned card=JK
 = Took seat=7 card=JK
-# The dealer takes the Joker at once and burns. No ace may be burned: not the ace of clubs, not the A♥.
+# The dealer takes the Joker at once and burns. Any card may be burned (H3), the ace of clubs and the A♥ included.
 phase: AwaitBurn 7
-legal: 3D QD 8S JK
+legal: AC 3D QD AH 8S JK
 > Burn 8S    # seat 7 burns
 = BurnDone seat=7
 = Turned card=9C
-= Took seat=7 card=9C
-# The 9 of clubs is turned: clubs are trumps. The dealer holds the ace of clubs, so it must rob this card at once,
-# before the first lead (rule 24, H4), and burn another card.
-phase: AwaitBurn 7
-legal: 9C 3D QD JK
-> Burn JK    # seat 7 burns
-= BurnDone seat=7
+# The 9 of clubs is turned: clubs are trumps. The dealer holds the ace of clubs, but after a turned Joker only a turned
+# ace is robbed at once (H4, amended 2026-10-14): the dealer robs at its own first turn, as the eighth card of trick 1.
 phase: AwaitPlay 0
-# This time the dealer burns the Joker it took. Seat 0 leads trick 1; nobody else robs.
 > Play 7D    # seat 0
 > Play 10D    # seat 1
 > Play JC    # seat 2
@@ -42,6 +36,13 @@ phase: AwaitPlay 0
 > Play QC    # seat 4
 > Play KC    # seat 5
 > Play AD    # seat 6
+= Took seat=7 card=9C
+phase: AwaitBurn 7
+legal: AC 9C 3D QD AH JK
+> Burn JK    # seat 7 burns
+= BurnDone seat=7
+phase: AwaitPlay 7
+# This time the dealer burns the Joker it took, then plays its first card.
 > Play 3D    # seat 7
 = TrickWon trick=1 seat=3 team=3 points=5
 scores: 0,0,0,11

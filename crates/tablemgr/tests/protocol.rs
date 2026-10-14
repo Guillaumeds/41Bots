@@ -23,7 +23,7 @@ fn messages_have_the_spec_shapes() {
     };
     assert_eq!(
         encode_table(&hello),
-        r#"{"v":1,"type":"hello","seat":3,"rules":{"bonus_first":6,"bonus_later":5,"stake":5},"seed":123}"#
+        r#"{"v":1,"type":"hello","seat":3,"rules":{"stake":5},"seed":123}"#
     );
     let action = SeatMsg::Action {
         action: Action::Play(17),
@@ -76,7 +76,7 @@ fn other_versions_and_garbage_are_refused() {
 fn configs() -> Vec<TableConfig> {
     vec![
         TableConfig::plain(1, Rules::HOUSE),
-        TableConfig::plain(2, Rules::FLAT),
+        TableConfig::plain(2, Rules::HOUSE),
         TableConfig::in_block(3, Rules::HOUSE, BlockSpec::new(30)),
         TableConfig::in_block(4, Rules::HOUSE, BlockSpec::new(31)),
     ]

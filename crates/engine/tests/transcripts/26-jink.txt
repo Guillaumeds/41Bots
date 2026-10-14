@@ -3,7 +3,7 @@ story: Seat 0 deals and spades are trumps (the 9 of spades is turned). The 5 and
 story: Seat 1 holds the J of spades, the Joker, the ace of hearts, the king of spades and the 2 of diamonds; partner seat 5 holds the queen of spades and four small spades.
 story: Seat 1 leads the J, the Joker, the ace of hearts and the king in turn and wins tricks 1 to 4 (each trump lead makes everyone holding an ordinary trump follow with a trump).
 story: In trick 5 seat 1 leads the 2 of diamonds and partner seat 5 trumps it with the queen of spades, the best trump left.
-story: Team 1 (seats 1 and 5) has taken all five tricks: a jink (rule 33), which wins the game at once with 25 points. The jink is checked before the end-of-hand bonus, so no bonus is awarded for the J of spades.
+story: Team 1 (seats 1 and 5) has taken all five tricks: a jink (rule 33). A jink counts as reaching 41: the team wins the game outright at once, whatever its points (the score shown, 25, does not matter; the reason reported is `jink`). No end-of-hand bonus is needed, so none is awarded for the J of spades.
 story: The next game starts with all scores back to nought (rule 36).
 dealer: 0
 # ---- Hand 1 of this file (hand index 0), dealer seat 0 ----

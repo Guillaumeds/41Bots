@@ -306,8 +306,6 @@ fn parse_rules(s: &str) -> Result<Rules, String> {
             .ok_or_else(|| format!("`{word}` is not key=value"))?;
         let bad = || format!("bad value in `{word}`");
         match key {
-            "bonus_first" => rules.bonus_first = value.parse().map_err(|_| bad())?,
-            "bonus_later" => rules.bonus_later = value.parse().map_err(|_| bad())?,
             "stake" => rules.stake = value.parse().map_err(|_| bad())?,
             _ => return Err(format!("unknown rule `{key}`")),
         }

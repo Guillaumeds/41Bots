@@ -12,7 +12,9 @@
 //! The sweep, the Monte-Carlo simulator and the engine-parity test all use these functions, so
 //! the table scores hands exactly as the engine does.
 
-use engine::game::{GameEndReason, Rules, TRICK_POINTS, TRICKS_PER_HAND, WINNING_SCORE};
+use engine::game::{
+    BONUS_FIRST, BONUS_LATER, GameEndReason, TRICK_POINTS, TRICKS_PER_HAND, WINNING_SCORE,
+};
 
 use crate::state::has_first_bonus;
 
@@ -26,27 +28,12 @@ pub struct Scoring {
 }
 
 impl Scoring {
-    /// The house rules (6 then 5): the only setting where the bonus flag is `score mod 5 == 1`.
+    /// The house rules (6 then 5, the only scoring there is): the bonus flag is
+    /// `score mod 5 == 1`.
     pub const HOUSE: Scoring = Scoring {
-        bonus_first: 6,
-        bonus_later: 5,
+        bonus_first: BONUS_FIRST,
+        bonus_later: BONUS_LATER,
     };
-
-    /// The scoring of these rules, if the table can be built for them. Only the house rule
-    /// (`bonus_first = 6`, `bonus_later = 5`) is supported: under any other setting the flags are
-    /// not implied by the scores and the table would need explicit flags (RULES, `bonus_later`;
-    /// not built at M1).
-    pub fn for_rules(rules: &Rules) -> Result<Scoring, String> {
-        if rules.bonus_first == 6 && rules.bonus_later == 5 {
-            Ok(Scoring::HOUSE)
-        } else {
-            Err(format!(
-                "the match-equity table is built for the house rule (bonus 6 then 5); \
-                 bonus {} then {} needs explicit flags (not built at M1)",
-                rules.bonus_first, rules.bonus_later
-            ))
-        }
-    }
 }
 
 /// The scoring state inside a hand, in one team order.
@@ -284,7 +271,5 @@ mod tests {
         };
         assert_eq!(q.scores[0], 21);
         assert!(q.flags_match_scores());
-        assert!(Scoring::for_rules(&Rules::HOUSE).is_ok());
-        assert!(Scoring::for_rules(&Rules::FLAT).is_err());
     }
 }

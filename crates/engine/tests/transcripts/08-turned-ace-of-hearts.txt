@@ -1,6 +1,6 @@
 title: A turned ace of hearts: hearts are trumps (14 of them), the dealer robs at once
 story: Seat 4 deals and turns the ace of hearts. Hearts become trumps, and the A♥ is then the ace of trumps, fourth best of only 14 trumps (rule 8).
-story: A turned ace is robbed by the dealer at once (rule 22, H4): seat 4 takes the A♥ before anyone plays and burns a card. Its legal burns are the 2 of clubs, 9 of diamonds, 3 of hearts and 8 of spades, never the ace of clubs or the A♥ (H3). It burns the 8 of spades.
+story: A turned ace is robbed by the dealer at once (rule 22, H4): seat 4 takes the A♥ before anyone plays and burns a card. Any of its six cards may be burned (H3), the ace of clubs and the A♥ included. It burns the 8 of spades.
 story: Seat 5 leads the king of hearts. Seat 7 must follow with a trump (its 2 of hearts cannot be held back) and plays the Joker; the dealer, last to play, must also play a trump and plays the A♥.
 story: The Joker beats the A♥, which beats the king: seat 7 wins trick 1. The 5 and J of hearts are undealt, so the Joker is the best trump of the hand and team 3 gets the +6 bonus at the end of the hand.
 story: Final scores of the hand: 0,20,0,11.
@@ -21,10 +21,10 @@ undealt: 5H JH QD 8D 10C 4D JD 9S 3C 4S AD 7S
 = Turned card=AH
 = Took seat=4 card=AH
 # A turned ace is robbed by the dealer at once, before the first card is led (rule 22, H4). The A♥ makes hearts trumps
-# and is itself the ace of trumps. The dealer now holds six cards and must burn one; aces can never be burned (H3),
+# and is itself the ace of trumps. The dealer now holds six cards and must burn one; any of them may go (H3),
 # so the ace of clubs and the ace of hearts are excluded.
 phase: AwaitBurn 4
-legal: 2C 9D 3H 8S
+legal: AC 2C 9D AH 3H 8S
 > Burn 8S    # seat 4 burns
 = BurnDone seat=4
 phase: AwaitPlay 5

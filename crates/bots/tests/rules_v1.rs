@@ -125,12 +125,21 @@ fn tracker(m: &Match, seat: u8) -> Tracker {
 #[test]
 fn burn_robber_never_burns_the_taken_trump() {
     // Spades are trumps; seat 0 holds the ace and robs the 10S (the lowest trump) at its first
-    // turn. Its other burnable cards are trumps too (KS, 4S): the lowest of them goes, never the
-    // card it took.
+    // turn. All its other cards are trumps too (AS, KS, QS, 4S, 3S): the lowest of them goes (in
+    // black trumps the 4 ranks below the 3), never the card it took.
+    let mut m = one_hand(7, ["AS KS QS 4S 3S", "", "", "", "", "", "", ""], "10S");
+    assert_eq!(m.phase(), Phase::AwaitBurn(0));
+    expect_burn(&mut m, "4S");
+}
+
+#[test]
+fn burn_a_plain_ace_by_plain_rank_order() {
+    // Aces may be burned (house rule H3 as amended on 2026-10-14). The red plain ace is the
+    // lowest plain card of its suit, so the robber holding AD and AC burns the AD.
     let mut m = one_hand(7, ["AS KS 4S AD AC", "", "", "", "", "", "", ""], "10S");
     assert_eq!(m.phase(), Phase::AwaitBurn(0));
     assert_eq!(names(m.truth().hands[0]), names(set("AS KS 4S AD AC 10S")));
-    expect_burn(&mut m, "4S");
+    expect_burn(&mut m, "AD");
 }
 
 #[test]
@@ -157,8 +166,8 @@ fn burn_after_a_turned_joker_lowest_rank_beats_a_short_suit_and_keeps_the_joker(
 #[test]
 fn burn_twice_after_a_turned_joker_then_a_turned_ace() {
     // Joker turned, then the ace of diamonds: the dealer burns twice. First the lowest plain card
-    // (3D, rank 3, against 2C, black 2 = rank 9); then only the 2C and the Joker may go, and the
-    // Joker the dealer took is kept.
+    // (3D, rank 3, against 2C, black 2 = rank 9, and the black aces, rank 10); then the 2C, the
+    // lowest plain card left, and the Joker and AD the dealer took are kept.
     let mut m = one_hand(7, ["", "", "", "", "", "", "", "AC AH AS 3D 2C"], "JK AD");
     expect_burn(&mut m, "3D");
     assert_eq!(m.phase(), Phase::AwaitBurn(7));
@@ -168,13 +177,19 @@ fn burn_twice_after_a_turned_joker_then_a_turned_ace() {
 
 #[test]
 fn burn_a_taken_trump_only_when_nothing_else_may_go() {
-    // The dealer holds all four aces. After the Joker it burns the 2C; then it must rob the 7S
-    // (it holds the ace of spades) and may burn only the Joker or the 7S, both taken trumps: the
-    // lower trump goes.
-    let mut m = one_hand(7, ["", "", "", "", "", "", "", "AC AD AH AS 2C"], "JK 7S");
-    expect_burn(&mut m, "2C");
+    // After the Joker the dealer burns the 2D (the lowest plain rank while trumps are unknown).
+    // It holds the ace of spades, so it robs the 7S at its own turn, as the eighth card of trick
+    // 1 (H4, amended 2026-10-14): its untaken cards (AS, KS, 4S, AH) and the two taken trumps
+    // (Joker, 7S) are all trumps, so the lowest untaken trump goes, the 4S, and neither taken
+    // trump.
+    let mut m = one_hand(7, ["", "", "", "", "", "", "", "AS KS 4S AH 2D"], "JK 7S");
+    expect_burn(&mut m, "2D");
+    for _ in 0..7 {
+        let a = m.legal_actions()[0];
+        m.apply(a).expect("legal");
+    }
     assert_eq!(m.phase(), Phase::AwaitBurn(7));
-    expect_burn(&mut m, "7S");
+    expect_burn(&mut m, "4S");
 }
 
 // ===== rule 2: clinch defence =====
@@ -239,15 +254,15 @@ fn clinch_defence_spends_a_top_trump_to_stop_41() {
     // team B 26 + 5 + 5 (its later bonus) = 36 and team C 0 + 5 + 6 = 11: no threat yet.
     play(&mut m, "2C 3C 4C 5C 5S");
     let v = m.view(6);
-    assert_eq!(score_if_team_wins_trick(&v, &Rules::HOUSE, 1), 36);
-    assert_eq!(score_if_team_wins_trick(&v, &Rules::HOUSE, 2), 11);
+    assert_eq!(score_if_team_wins_trick(&v, 1), 36);
+    assert_eq!(score_if_team_wins_trick(&v, 2), 11);
     play(&mut m, "6C 7C QC");
     assert_eq!(m.scores(), [5, 36, 0, 0]);
 
     // Trick 2: seat 5 leads the KD. Team B on 36 reaches 41 with this trick, so seat 6 spends
     // the Joker (a top trump, normally kept until trick 4) to take it.
     play(&mut m, "KD");
-    assert_eq!(score_if_team_wins_trick(&m.view(6), &Rules::HOUSE, 1), 41);
+    assert_eq!(score_if_team_wins_trick(&m.view(6), 1), 41);
     expect_play(&mut m, "JK", Rule::ClinchDefence);
 }
 

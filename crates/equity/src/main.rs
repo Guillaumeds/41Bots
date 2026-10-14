@@ -147,7 +147,7 @@ fn build(flags: &Flags) -> Result<(), String> {
     let (model, model_sha) = load_model(model_path)?;
     let compiled = model.compile();
     let rules = Rules::HOUSE;
-    let sc = Scoring::for_rules(&rules)?;
+    let sc = Scoring::HOUSE;
     println!(
         "model {} ({}), sha256 {}…, {} empty distributions backed off",
         model.model_id,

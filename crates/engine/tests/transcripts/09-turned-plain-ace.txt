@@ -1,6 +1,6 @@
 title: A turned plain ace: the dealer robs at once, and the ace of trumps ranks just below the A♥
 story: Seat 5 deals and turns the ace of clubs: clubs are trumps. The dealer must rob a turned ace at once, before the first lead (rule 22, H4): it takes the ace of clubs and burns a card.
-story: The dealer also holds the ace of diamonds; no ace may be burned (H3), so the legal burns are the 10 of clubs, 8 of diamonds, 4 of hearts and 7 of spades. It burns the 4 of hearts.
+story: The dealer also holds the ace of diamonds; any of its six cards may be burned (H3), both aces included. It burns the 4 of hearts.
 story: Trick 1: seat 6 leads the 9 of diamonds; seat 7 trumps with the king of clubs, seat 1 with the ace of hearts and the dealer with the ace of clubs. The A♥ is the best of them (rule 8: the ace of trumps comes straight after the A♥), so seat 1 wins.
 story: The 5 and J of clubs and the Joker are undealt, so the A♥ is the best trump of the hand: team 1 gets +6 at the end. Final scores of the hand: 10,11,0,10.
 dealer: 5
@@ -20,9 +20,9 @@ undealt: 5C JC JK 3C 5D QH JD 9S 5H 6D AS 2C
 = Turned card=AC
 = Took seat=5 card=AC
 # A turned ace is robbed by the dealer at once (rule 22, H4). Clubs are trumps. The dealer burns one of six cards;
-# the ace of clubs and the ace of diamonds may not be burned (H3).
+# any card may be burned (H3), the ace of clubs and the ace of diamonds included.
 phase: AwaitBurn 5
-legal: 10C 8D 4H 7S
+legal: AC 10C AD 8D 4H 7S
 > Burn 4H    # seat 5 burns
 = BurnDone seat=5
 phase: AwaitPlay 6

@@ -83,7 +83,7 @@ fn watched_table(make: impl Fn(usize) -> Box<dyn Bot>) -> Watched {
 fn bots_are_started_once_with_their_seat_seed_and_asked_only_for_their_seat() {
     for cfg in [
         TableConfig::plain(77, Rules::HOUSE),
-        TableConfig::in_block(77, Rules::FLAT, BlockSpec::new(5)),
+        TableConfig::in_block(77, Rules::HOUSE, BlockSpec::new(5)),
     ] {
         let (mut bots, seen) = watched_table(bot_for_seat);
         let record = play_match(&cfg, &mut bots).unwrap();

@@ -2,7 +2,7 @@ title: The dealer holds the ace of trumps with an ordinary turned card: robs at 
 story: Seat 1 deals and turns the 8 of spades: spades are trumps. The dealer holds the ace of spades.
 story: An ordinary turned card is robbed by the ace holder at their own first turn (rule 20, H2), and for the dealer that is the last card of trick 1. Only a turned ace or a turned Joker is robbed "at once" (H4).
 story: Seats 2, 3, 4, 5, 6, 7 and 0 play to trick 1 in turn; each proves, by playing without robbing, that it lacks the ace.
-story: Then the dealer takes the 8 of spades and burns one of its six cards, after seeing the other seven cards of the trick. The legal burns are the 3 of clubs, queen of diamonds, 9 of hearts and 8 of spades (never the ace of spades or the ace of diamonds). It burns the 9 of hearts and plays the ace of spades.
+story: Then the dealer takes the 8 of spades and burns one of its six cards, after seeing the other seven cards of the trick. Any of the six may be burned (H3), the aces included. It burns the 9 of hearts and plays the ace of spades.
 story: The 5 and J of spades, the Joker and the A♥ are undealt, so the ace of spades wins trick 1 and is the best trump of the hand: team 1 gets the +6 at the end. Final scores of the hand: 10,11,5,5.
 dealer: 1
 # ---- Hand 1 of this file (hand index 0), dealer seat 1: spades trumps, the dealer holds the ace of spades ----
@@ -38,10 +38,10 @@ phase: AwaitPlay 2
 > Play 6D    # seat 0
 = ProvedNoAce seat=0
 # All seven other players have played, each proving it lacks the ace. Now the dealer takes the 8 of spades and burns,
-# having seen the seven cards of the trick. The ace of spades and the ace of diamonds may not be burned (H3).
+# having seen the seven cards of the trick. Any card may be burned (H3), the aces included.
 = Took seat=1 card=8S
 phase: AwaitBurn 1
-legal: 3C QD 9H 8S
+legal: 3C AD QD 9H AS 8S
 > Burn 9H    # seat 1 burns
 = BurnDone seat=1
 phase: AwaitPlay 1

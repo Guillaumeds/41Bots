@@ -9,7 +9,7 @@ use crate::cards::{
 /// The ace of hearts, a trump in every hand (rule 7).
 pub const ACE_HEARTS: Card = card(Suit::Hearts, ACE);
 
-/// All four aces (the cards that may never be burned, H3).
+/// All four aces.
 pub const ACES: Bits = bit(card(Suit::Clubs, ACE))
     | bit(card(Suit::Diamonds, ACE))
     | bit(card(Suit::Hearts, ACE))
@@ -169,9 +169,10 @@ pub fn legal_plays(hand: Bits, led: Option<Card>, trump: Suit) -> Bits {
     }
 }
 
-/// Legal cards to burn from a hand: anything but an ace (H3).
+/// Legal cards to burn from a hand: any card at all, aces and the Joker included (H3, as
+/// amended by the owner on 2026-10-14).
 pub const fn legal_burns(hand: Bits) -> Bits {
-    hand & !ACES
+    hand
 }
 
 /// Which of the played cards wins the trick (rule 19). `plays` are in play order; the first led.
@@ -321,9 +322,30 @@ mod tests {
     }
 
     #[test]
-    fn burns_never_an_ace() {
+    fn any_card_may_be_burned() {
         let hand = set("AC AD AH AS JK 2C");
-        assert_eq!(names(legal_burns(hand)), "2C JK");
+        assert_eq!(legal_burns(hand), hand);
+    }
+
+    fn win(plays: &str, t: Suit) -> usize {
+        let v: Vec<Card> = plays.split(' ').map(|n| parse(n).unwrap()).collect();
+        trick_winner(&v, t)
+    }
+
+    #[test]
+    fn plain_heart_led_ace_of_hearts_wins_only_without_a_higher_trump() {
+        let t = Suit::Spades;
+        assert_eq!(win("9H AH KH QH 2C 3C 4C 6C", t), 1);
+        assert_eq!(win("9H AH KH JK 2C 3C 4C 6C", t), 3);
+        assert_eq!(win("9H AH KH JS 2C 3C 4C 6C", t), 3);
+        assert_eq!(win("9H AH KH 5S 2C 3C 4C 6C", t), 3);
+    }
+
+    #[test]
+    fn three_of_diamonds_wins_only_as_the_led_plain_suit_without_trumps() {
+        let t = Suit::Clubs;
+        assert_eq!(win("3D 2D KS AD KH QS JH QH", t), 0);
+        assert_eq!(win("3D 2D KS AD KH QS JH 2C", t), 7);
     }
 
     #[test]

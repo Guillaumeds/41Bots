@@ -1,4 +1,4 @@
-title: Rule 17: the J of trumps led forces out the Joker and the A♥; the 5 led forces out every trump
+title: Rule 17: the J of trumps led forces out the Joker, the A♥ and every lower trump; the 5 led forces out every trump
 story: Seat 2 deals and turns the 9 of spades: spades are trumps. The ace of spades is undealt, so nobody robs.
 story: Trick 1: seat 3 leads the J of spades. Against a J, only the 5 may be held back (rule 17). Seat 4 holds the 5 and no other trump, so it may play any card (rule 18) and keeps the 5. Seat 5 (Joker and 6 of spades) must play a trump and may choose either; it plays the 6. Seat 6, whose only trump is the A♥, must play the A♥. Seat 7 must play one of its two small spades. The J wins.
 story: Trick 2: seat 3 leads the 3 of diamonds and seat 4 wins it with the king of diamonds.

@@ -6,9 +6,11 @@
 //! 1. **Burn** ([`Rule::Burn`]): burn a plain (non-trump) card if possible: the lowest plain rank,
 //!    then the suit the hand holds fewest plain cards of, then the lowest card index. With no
 //!    plain card to burn, burn the lowest trump. A trump this seat took this hand (the robbed
-//!    card, or the Joker the dealer took) is never burned unless nothing else may be. Aces are
-//!    never legal burns anyway (house rule H3). While trumps are unknown (the dealer's burn after
-//!    a turned Joker), only the Joker and the ace of hearts count as trumps.
+//!    card, or the Joker the dealer took) is never burned unless nothing else may be. Any card is
+//!    a legal burn (house rule H3, amended 2026-10-14), so aces are eligible by plain rank order
+//!    like any other card (a red plain ace is the lowest card of its suit). While trumps are
+//!    unknown (the dealer's burn after a turned Joker), only the Joker and the ace of hearts
+//!    count as trumps.
 //! 2. **Clinch defence** ([`Rule::ClinchDefence`], following only): if another team T would
 //!    reach 41 or more by winning this trick (`score + 5 + bonus ≥ 41`, the bonus counting only
 //!    if the trick already holds the 5 of trumps, at T's first or later rate), T can still take
@@ -44,7 +46,7 @@
 
 use bot::Bot;
 use engine::cards::{Bits, Card, Suit, bit, cards, count, has, suit_of};
-use engine::game::{Action, Rules, TRICK_POINTS, WINNING_SCORE};
+use engine::game::{Action, BONUS_FIRST, BONUS_LATER, Rules, TRICK_POINTS, WINNING_SCORE};
 use engine::rules::{
     ACE_HEARTS, EffSuit, beats, effective_suit, five_of, is_top_trump, jack_of, plain_rank,
     trick_winner, trump_mask, trump_rank,
@@ -130,7 +132,7 @@ fn top_trumps(trump: Suit) -> Bits {
 /// The score `team` would have if it won the current trick as it stands: its score, plus 5,
 /// plus its best-trump bonus (first or later rate) if the trick already holds the 5 of trumps.
 /// This is the engine's arithmetic for a trick (rules 27–29).
-pub fn score_if_team_wins_trick(view: &SeatView, rules: &Rules, team: u8) -> u16 {
+pub fn score_if_team_wins_trick(view: &SeatView, team: u8) -> u16 {
     let p = &view.public;
     let t = usize::from(team % TEAMS as u8);
     let five_in = p
@@ -138,8 +140,8 @@ pub fn score_if_team_wins_trick(view: &SeatView, rules: &Rules, team: u8) -> u16
         .is_some_and(|tr| p.trick_cards.iter().any(|&(_, c)| c == five_of(tr)));
     let bonus = match (five_in, p.bonus_taken[t]) {
         (false, _) => 0,
-        (true, false) => rules.bonus_first,
-        (true, true) => rules.bonus_later,
+        (true, false) => BONUS_FIRST,
+        (true, true) => BONUS_LATER,
     };
     u16::from(p.scores[t]) + u16::from(TRICK_POINTS) + u16::from(bonus)
 }
@@ -148,7 +150,7 @@ pub fn score_if_team_wins_trick(view: &SeatView, rules: &Rules, team: u8) -> u16
 ///
 /// # Panics
 /// If `legal` is empty (the table never asks a bot to act without a legal action).
-pub fn decide(view: &SeatView, rules: &Rules, legal: &[Action]) -> (Action, Rule) {
+pub fn decide(view: &SeatView, _rules: &Rules, legal: &[Action]) -> (Action, Rule) {
     let Some(&first) = legal.first() else {
         panic!("rules-v1 was asked to act with no legal action");
     };
@@ -164,7 +166,7 @@ pub fn decide(view: &SeatView, rules: &Rules, legal: &[Action]) -> (Action, Rule
             let choice = if view.public.trick_cards.is_empty() {
                 lead(&t, trump, view.public.trick_no, mask)
             } else {
-                follow(view, rules, &t, trump, mask)
+                follow(view, &t, trump, mask)
             };
             match choice {
                 Some((c, rule)) if has(mask, c) => (Action::Play(c), rule),
@@ -291,33 +293,21 @@ impl TrickState {
 
 /// Rule 2's test: is there another team that would reach 41 by winning this trick and can still
 /// take it?
-fn clinch_threat(
-    view: &SeatView,
-    rules: &Rules,
-    t: &Tracker,
-    trump: Suit,
-    trick: &TrickState,
-) -> bool {
+fn clinch_threat(view: &SeatView, t: &Tracker, trump: Suit, trick: &TrickState) -> bool {
     let mine = team_of(view.seat);
     (0..TEAMS as u8).filter(|&tm| tm != mine).any(|tm| {
-        score_if_team_wins_trick(view, rules, tm) >= u16::from(WINNING_SCORE)
+        score_if_team_wins_trick(view, tm) >= u16::from(WINNING_SCORE)
             && (team_of(trick.winner_seat) == tm
                 || trick.beatable_after(t, trump, |s| team_of(s) == tm))
     })
 }
 
-fn follow(
-    view: &SeatView,
-    rules: &Rules,
-    t: &Tracker,
-    trump: Suit,
-    legal: Bits,
-) -> Option<(Card, Rule)> {
+fn follow(view: &SeatView, t: &Tracker, trump: Suit, legal: Bits) -> Option<(Card, Rule)> {
     let trick = TrickState::new(view, trump)?;
     let winners = trick.beating(legal, trump);
 
     // Rule 2: clinch defence.
-    if winners != 0 && clinch_threat(view, rules, t, trump, &trick) {
+    if winners != 0 && clinch_threat(view, t, trump, &trick) {
         return lowest(winners, trump).map(|c| (c, Rule::ClinchDefence));
     }
 

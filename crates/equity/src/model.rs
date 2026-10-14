@@ -89,21 +89,13 @@ pub fn comp_index(tw: [u8; 4]) -> usize {
 /// Rule switches recorded with a model (the stake does not affect the model).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RulesRecord {
-    /// First best-trump bonus in a game.
-    pub bonus_first: u8,
-    /// Later best-trump bonuses in the same game.
-    pub bonus_later: u8,
     /// Stake per losing player.
     pub stake: i32,
 }
 
 impl From<engine::game::Rules> for RulesRecord {
     fn from(r: engine::game::Rules) -> Self {
-        RulesRecord {
-            bonus_first: r.bonus_first,
-            bonus_later: r.bonus_later,
-            stake: r.stake,
-        }
+        RulesRecord { stake: r.stake }
     }
 }
 

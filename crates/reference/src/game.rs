@@ -10,24 +10,21 @@ use crate::order;
 #[cfg(test)]
 mod tests;
 
-/// Rule switches (M0-SPEC section 1).
+/// Points for a team's first best-trump bonus in a game (6: an 11-point trick).
+const FIRST_BONUS: u8 = 6;
+/// Points for every later bonus in the same game (house rule: 5, a 10-point trick).
+const LATER_BONUS: u8 = 5;
+
+/// Match settings (M0-SPEC section 1): only the stake varies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rules {
-    /// Points for a team's first best-trump bonus in a game (6: an 11-point trick).
-    pub bonus_first: u8,
-    /// Points for every later bonus in the same game (house rule 5; 6 is the flat-11 rule).
-    pub bonus_later: u8,
     /// The stake each player of a losing team pays.
     pub stake: i32,
 }
 
 impl Default for Rules {
     fn default() -> Self {
-        Rules {
-            bonus_first: 6,
-            bonus_later: 5,
-            stake: 5,
-        }
+        Rules { stake: 5 }
     }
 }
 
@@ -642,7 +639,7 @@ impl Match {
             (Phase::AwaitBurn(_), Action::Play(_)) => "a burn is required first",
             (Phase::AwaitPlay(_), Action::Burn(_)) => "no burn is due now",
             _ if !in_hand => "the card is not in the hand of the seat to act",
-            (Phase::AwaitBurn(_), Action::Burn(_)) => "an ace may never be burned (H3)",
+            (Phase::AwaitBurn(_), Action::Burn(_)) => "that card may not be burned",
             _ => "the card does not follow suit or the trump-lead rules (rules 14-18)",
         }
     }
@@ -668,21 +665,16 @@ impl Match {
         self.turn_up(second);
         let trump = second.suit().expect("there is only one Joker");
         self.trump = Some(trump);
-        let ace = order::ace_of_trumps(trump);
 
         if second.is_ace() {
             // 2c: a turned ace is robbed by the dealer at once.
             self.take_table_card(d, true);
             self.waiting = Waiting::DealerRobBurn;
-        } else if self.hands[d as usize].contains(&ace) {
-            // 2d: the dealer holds the ace of trumps and robs at once.
-            self.take_table_card(d, true);
-            self.waiting = Waiting::DealerRobBurn;
         } else {
-            // 2e: the card stays up; whoever else holds the ace robs at their turn.
+            // 2e: the card stays up; whoever holds the ace robs at their own turn in
+            // trick 1, the dealer included (H4 as amended on 2026-10-14: a dealer holding
+            // the ace of trumps no longer robs at once).
             self.pending_robber = self.holder_of_ace_of_trumps();
-            self.proved_no_ace[d as usize] = true;
-            self.emit_public(format!("ProvedNoAce seat={d}"));
             self.start_trick_one();
         }
     }
@@ -697,7 +689,7 @@ impl Match {
             && self.robber.is_none()
             && self.table_card.is_some()
             && self.pending_robber != Some(seat)
-            && !self.took_a_card[seat as usize]
+            && !self.proved_no_ace[seat as usize]
         {
             self.proved_no_ace[seat as usize] = true;
             self.emit_public(format!("ProvedNoAce seat={seat}"));
@@ -770,10 +762,16 @@ impl Match {
             return;
         }
 
-        // After trick 1, nobody robbing means the ace of trumps is in the undealt pack.
+        // After trick 1, nobody robbing means the ace of trumps is out of play: undealt, or
+        // burned by the dealer after a turned Joker, before trumps were known (H3 lets any card
+        // be burned since 2026-10-14).
         if self.trick_no == 1 && self.robber.is_none() {
             let ace = order::ace_of_trumps(trump);
-            assert!(self.undealt.contains(&ace), "unrobbed ace must be undealt");
+            let dealer = self.dealer;
+            assert!(
+                self.undealt.contains(&ace) || self.burns[dealer as usize].contains(&ace),
+                "unrobbed ace must be undealt or in the dealer's burn"
+            );
             self.ace_undealt = true;
             self.emit_public("AceUndealt".to_string());
         }
@@ -789,9 +787,9 @@ impl Match {
 
     fn award_bonus(&mut self, team: usize, card: Card, kind: &str) {
         let points = if self.bonus_taken[team] {
-            self.rules.bonus_later
+            LATER_BONUS
         } else {
-            self.rules.bonus_first
+            FIRST_BONUS
         };
         self.bonus_taken[team] = true;
         self.scores[team] += points;
