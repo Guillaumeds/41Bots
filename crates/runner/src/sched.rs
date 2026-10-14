@@ -1,5 +1,18 @@
 //! Format-2 manifests and the scheduling rules (docs/M3-SPEC.md sections 7.1 and 7.2), as pure
 //! functions over the queue state and a clock value, so they are unit-tested with a fake clock.
+//!
+//! Manifest fields (section 7.1's example, plus the optional ones marked *):
+//! - `format: 2`, `run_id`, `run_seed`, `deadline_utc` (optional), `threads` (null = the usable
+//!   cores), `bin_sha` (checked against the machine's `BIN_SHA`), `inputs` (`name:
+//!   "sha256:<hex>"`, fetched from `inputs/sha256/<hex>` and verified), `upload_every_s` (≤ 600,
+//!   default 600), `heartbeat_every_s` (default 30), *`benchmark_seconds` (start-up benchmark,
+//!   default 60, 0 = none);
+//! - per stream: `name`, `priority` (lower first), `kind`, `params`, `chunks` (a number, or
+//!   `"until_decided"` for an `arena_blocks` stream with `params.sprt`);
+//! - stream params read by the scheduler: *`threads` (per chunk, default 1, or `"all"`),
+//!   *`chunk_sizes` (one per chunk: longest first), *`est_seconds` (the duration assumed by the
+//!   deadline rule until a chunk of the kind has finished), `blocks_per_chunk`, `sprt` (`s0`,
+//!   `s1`, `alpha`, `beta`, `max_blocks`, *`reject_only`); the rest goes to the chunk kind.
 
 use std::collections::{BTreeMap, BTreeSet};
 

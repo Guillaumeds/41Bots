@@ -347,7 +347,9 @@ pub fn run(manifest: &Value, work: &Path) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let remote = choose_remote(work);
+    // Absolute, so chunk workers and their children get paths that do not depend on a cwd.
+    let work = std::path::absolute(work).unwrap_or_else(|_| work.to_path_buf());
+    let remote = choose_remote(&work);
     let root = work.join(&m.run_id);
     let threads = m.threads.unwrap_or_else(default_threads);
     m.resolve_threads(threads);
@@ -775,21 +777,22 @@ impl Run {
                     Ok(None) => i += 1,
                     Ok(Some(st)) => {
                         let r = running.remove(i);
-                        if st.success() && error.is_none() {
+                        if st.success() {
+                            // Chunks in flight when another failed are still kept.
                             if let Err(e) = self.finish(&r) {
-                                error = Some(e);
+                                error.get_or_insert(e);
                             }
                         } else {
                             self.states[r.stream].running.remove(&r.index);
                             let name = &self.m.streams[r.stream].name;
-                            if !st.success() {
-                                eprintln!(
-                                    "runner: chunk {name}/{} failed ({st}); last lines of its log:\n{}",
-                                    r.index,
-                                    log_tail(&r.dir.join("logs").join("worker.log"), 20)
-                                );
-                                self.upload_logs(&r);
-                            }
+                            eprintln!(
+                                "runner: chunk {name}/{} failed ({st}); last lines of its log:\n{}",
+                                r.index,
+                                log_tail(&r.dir.join("logs").join("worker.log"), 20)
+                            );
+                            self.upload_logs(&r);
+                            // No new chunks after a failure: the run ends FAILED once the
+                            // chunks in flight are done.
                             if error.is_none() {
                                 error = Some(format!(
                                     "chunk {name}/{} failed ({st}); logs in {}/logs/{name}/{:06}.tar.zst",
