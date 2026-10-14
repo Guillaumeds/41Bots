@@ -484,7 +484,7 @@ The yardstick is for **measuring only, not training**. Its size is set by measur
 1. **Deals per decision (N): agreement curve first.**
    - **Trick 2:** 200 decisions with N = 10, 20, 40, 80, 160, 320 (nested world sets, common seeds).
    - **Plateau rule:** the plateau N is the smallest N where doubling it changes the chosen card in under 1% of decisions **and** changes the mean chosen-card value by under 0.001 money chance.
-   - **Trick 1:** 20 decisions on a large machine with `solve_fast_par`, N = 10, 20, 40, 80, to confirm whether trick 1 plateaus near the trick-2 N.
+   - **Trick 1:** 20 decisions on a large machine with `solve_fast_par`, N = 10, 20, 40, 80, to measure trick 1's **own** plateau N, using the same rule. Trick 1 has more hidden cards than trick 2, so it may need a larger N. If there is no plateau by N = 80, extend to 160 and 320 (priced with the owner first). Trick 1 never borrows trick 2's N.
    - 20 is only the published plateau for 5-card PIMC, and Skat needed 160, so nothing is assumed.
 2. **Number of decisions.** Methods are compared **paired**, on the same decisions. Size the set so that a 3-point difference in card agreement between two methods is detected at 95% confidence; the expected range is 300–500. The disagreement rate is measured on the trick-2 data before any trick-1 money is spent.
 3. **Trick 2:** 1,000 decisions at the plateau N, costing under $1.
