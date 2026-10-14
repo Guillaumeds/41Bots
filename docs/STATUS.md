@@ -76,3 +76,9 @@ M1 adds the table manager, the arena (14-way duplicate block, generalised SPRT, 
   - Checks: fmt, clippy, all tests, WASM check pass; difftest 100,000 matches seed 1: zero disagreements, PASS (ace burned in 3.9% of hands).
   - Equity v0 rebuilt (1M rules-v1 hands, seed 1): all checks pass (Monte Carlo largest |z| 2.52); table sha256 `64740dab…6808`.
   - Arena canary: every block exactly 0. **σ_b (rules-v1 vs random, 200 blocks): 0.1463 money chance (1.170 stakes), mean +0.2606.**
+
+## M1 gate result (2026-10-14)
+- First vast.ai run end to end (GitHub run 38512961545): cheapest ≥16-core on-demand box, 20M-hand equity sweep, DONE uploaded, instance self-destroyed and verified gone; CPU 98.6% (benchmark), 77% (chunk start), 93% (last reading). Cost < $0.01.
+- Table v0 checks pass; σ_b = 0.146 money chance (1.17 stakes) per 14-way block, rules-v1 vs random; canary exactly 0.
+- Leakage and replay tests pass. **M1 gate met.** Open owner question: see the early Joker-burn ace question above.
+- Next: M2 (exact solver) — measurement spike first (PLAN §13).
