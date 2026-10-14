@@ -23,7 +23,7 @@ die() {
   printf '{"stage":"boot","error":"%s"}\n' "$*" >FAILED || true
   rclone copyto "${RC[@]}" FAILED "$R/runs/$RUN_ID/FAILED" || true
   if [[ -n "${CONTAINER_ID:-}" && -n "${CONTAINER_API_KEY:-}" ]]; then
-    vastai destroy instance "$CONTAINER_ID" --api-key "$CONTAINER_API_KEY" || true
+    vastai destroy instance "$CONTAINER_ID" -y --api-key "$CONTAINER_API_KEY" || true
   fi
   exit 1
 }
@@ -63,6 +63,6 @@ status=0
 # Only reached if the runner could not destroy the instance itself (e.g. it crashed).
 echo "boot: runner exited with $status" >&2
 if [[ -n "${CONTAINER_ID:-}" && -n "${CONTAINER_API_KEY:-}" ]]; then
-  vastai destroy instance "$CONTAINER_ID" --api-key "$CONTAINER_API_KEY" || true
+  vastai destroy instance "$CONTAINER_ID" -y --api-key "$CONTAINER_API_KEY" || true
 fi
 exit "$status"

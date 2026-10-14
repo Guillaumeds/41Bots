@@ -211,9 +211,14 @@ def instance_env(run_id: str, ncpu: int, dph: float, bin_sha: str) -> str:
 def destroy(instance_id: int) -> None:
     for attempt in range(5):
         try:
-            vast("destroy", "instance", str(instance_id), raw=False)
-            log(f"destroyed instance {instance_id}")
-            return
+            # -y: without it vastai asks "Are you sure?" on stdin, reads EOF and silently does nothing.
+            vast("destroy", "instance", str(instance_id), "-y", raw=False)
+            time.sleep(5)
+            info = instance_status(instance_id)
+            if info is None or info.get("actual_status") in (None, "exited", "offline", "destroyed"):
+                log(f"destroyed instance {instance_id} (verified)")
+                return
+            log(f"destroy attempt {attempt + 1}: instance {instance_id} still {info.get('actual_status')}")
         except RuntimeError as e:
             log(f"destroy attempt {attempt + 1} failed: {e}")
             time.sleep(10)

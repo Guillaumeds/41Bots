@@ -554,7 +554,7 @@ fn self_destroy() {
     println!("runner: destroying vast.ai instance {id}");
     let _ = std::io::stdout().flush();
     let status = Command::new("vastai")
-        .args(["destroy", "instance", &id, "--api-key", &key])
+        .args(["destroy", "instance", &id, "-y", "--api-key", &key])
         .stdin(Stdio::null())
         .status();
     if !matches!(status, Ok(s) if s.success()) {
