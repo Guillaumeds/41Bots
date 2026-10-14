@@ -21,8 +21,16 @@ pub trait Remote {
     fn put(&self, local: &Path, key: &str, immutable: bool) -> Result<(), String>;
     /// Downloads `key` to `local`; `Ok(false)` when it does not exist.
     fn get(&self, key: &str, local: &Path) -> Result<bool, String>;
+    /// Every key under `prefix` (which ends with `/`) with its size in bytes, sorted by key.
+    fn list_sized(&self, prefix: &str) -> Result<Vec<(String, u64)>, String>;
     /// Every key under `prefix` (which ends with `/`), sorted.
-    fn list(&self, prefix: &str) -> Result<Vec<String>, String>;
+    fn list(&self, prefix: &str) -> Result<Vec<String>, String> {
+        Ok(self
+            .list_sized(prefix)?
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect())
+    }
     /// SHA-256 and size of the stored object, read back in full; `None` when missing.
     fn sha256(&self, key: &str) -> Result<Option<(String, u64)>, String>;
 }
@@ -89,7 +97,7 @@ impl Remote for DirRemote {
         let half = data.len() / 2;
         f.write_all(&data[..half]).map_err(|e| e.to_string())?;
         f.flush().map_err(|e| e.to_string())?;
-        if key.ends_with(".tar.zst") {
+        if key.contains("/out/") && key.ends_with(".tar.zst") {
             kill_point(
                 "mid_upload",
                 UPLOAD_ENTRY.load(std::sync::atomic::Ordering::Relaxed),
@@ -112,16 +120,20 @@ impl Remote for DirRemote {
         Ok(true)
     }
 
-    fn list(&self, prefix: &str) -> Result<Vec<String>, String> {
+    fn list_sized(&self, prefix: &str) -> Result<Vec<(String, u64)>, String> {
         let dir = self.path(prefix.trim_end_matches('/'));
         if !dir.is_dir() {
             return Ok(vec![]);
         }
-        let mut v: Vec<String> = crate::bundle::list_files(&dir)?
-            .into_iter()
-            .filter(|r| !r.contains(".partial-"))
-            .map(|r| format!("{}/{r}", prefix.trim_end_matches('/')))
-            .collect();
+        let mut v = Vec::new();
+        for r in crate::bundle::list_files(&dir)? {
+            // A temporary file of an upload that was killed is not an object.
+            if r.contains(".partial-") {
+                continue;
+            }
+            let n = fs::metadata(dir.join(&r)).map_err(|e| e.to_string())?.len();
+            v.push((format!("{}/{r}", prefix.trim_end_matches('/')), n));
+        }
         v.sort();
         Ok(v)
     }
@@ -182,9 +194,17 @@ impl Remote for RcloneRemote {
         self.run(c).map(|()| true)
     }
 
-    fn list(&self, prefix: &str) -> Result<Vec<String>, String> {
+    fn list_sized(&self, prefix: &str) -> Result<Vec<(String, u64)>, String> {
         let o = Command::new("rclone")
-            .args(["lsf", "-R", "--files-only"])
+            .args([
+                "lsf",
+                "-R",
+                "--files-only",
+                "--format",
+                "sp",
+                "--separator",
+                "\t",
+            ])
             .arg(self.url(prefix.trim_end_matches('/')))
             .stdin(Stdio::null())
             .output()
@@ -197,11 +217,17 @@ impl Remote for RcloneRemote {
             );
             return Ok(vec![]);
         }
-        let mut v: Vec<String> = String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(|l| format!("{}/{l}", prefix.trim_end_matches('/')))
-            .collect();
+        let mut v = Vec::new();
+        for l in String::from_utf8_lossy(&o.stdout).lines() {
+            let Some((size, path)) = l.split_once('\t') else {
+                continue;
+            };
+            let n = size
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| format!("rclone lsf {prefix}: bad line {l:?}"))?;
+            v.push((format!("{}/{path}", prefix.trim_end_matches('/')), n));
+        }
         v.sort();
         Ok(v)
     }
@@ -257,6 +283,14 @@ mod tests {
         assert!(r.put(&b, "x/y/1.tar.zst", true).is_err());
         r.put(&b, "x/z.json", false).unwrap();
         assert_eq!(r.list("x/").unwrap(), vec!["x/y/1.tar.zst", "x/z.json"]);
+        assert_eq!(
+            r.list_sized("x/y/").unwrap(),
+            vec![("x/y/1.tar.zst".to_string(), 3)]
+        );
+        // A killed upload's temporary file is not listed.
+        fs::write(base.join("r/x/y/2.partial-1"), b"half").unwrap();
+        assert_eq!(r.list("x/y/").unwrap(), vec!["x/y/1.tar.zst"]);
+        assert_eq!(r.list("nothing/").unwrap(), Vec::<String>::new());
         assert_eq!(r.sha256("x/y/1.tar.zst").unwrap().unwrap().1, 3);
         assert_eq!(r.sha256("x/none").unwrap(), None);
         let _ = fs::remove_dir_all(&base);

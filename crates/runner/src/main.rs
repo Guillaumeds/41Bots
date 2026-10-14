@@ -1,22 +1,26 @@
-//! `runner`: executes one chunk of a run manifest (docs/M1-SPEC.md section 7).
+//! `runner`: executes a run manifest on one machine.
 //!
 //! ```text
 //! runner run <manifest.json> [--work-dir DIR]
 //! runner hardware
 //! ```
 //!
-//! Steps: record the hardware, run the micro-benchmark, run the chunk while writing a heartbeat
-//! every 30 s, write outputs then `DONE` (or `FAILED`), upload everything to R2 with rclone, and,
-//! when `CONTAINER_ID` and `CONTAINER_API_KEY` are set, destroy this vast.ai instance last.
-//!
-//! The chunk work itself is done by the sibling release binaries (`difftest`, `equity`, `solver-spike`,
-//! `solver-identity`, later `arena`) found next to this executable, so the runner links no game code.
-//!
+//! **Format 1** (docs/M1-SPEC.md section 7; no `format` key): one chunk. Steps: record the
+//! hardware, run the micro-benchmark, run the chunk while writing a heartbeat every 30 s, write
+//! outputs then `DONE` (or `FAILED`), upload everything to R2 with rclone, and, when
+//! `CONTAINER_ID` and `CONTAINER_API_KEY` are set, destroy this vast.ai instance last.
 //! R2 layout under the manifest's `out` prefix (default `runs/<run_id>`):
 //! `hardware.json`, `benchmark.json`, `heartbeat/<seq:06>.json` (versioned, never overwritten),
 //! `out/...` (immutable), `result.json`, and `DONE` or `FAILED` uploaded last.
 //! Uploads are skipped (with a notice) when `RCLONE_CONFIG_R2_TYPE` is unset, so the same
 //! manifest runs on the laptop.
+//!
+//! **Format 2** (`"format": 2`, docs/M3-SPEC.md section 7): several prioritised streams of
+//! chunks, a deadline, a versioned done-list and resume after a lost machine; see `v2.rs`.
+//!
+//! The chunk work itself is done by the sibling release binaries (`difftest`, `equity`,
+//! `solver-spike`, `solver-identity`, `search`) found next to this executable; `arena_blocks`
+//! chunks play in-process through `arena` and `search` (the bot registry).
 
 use std::fs;
 use std::io::Write;
@@ -583,7 +587,10 @@ fn rclone(mut c: Command) -> bool {
 fn sibling(name: &str) -> PathBuf {
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join(name)))
+        .and_then(|p| {
+            p.parent()
+                .map(|d| d.join(format!("{name}{}", std::env::consts::EXE_SUFFIX)))
+        })
         .filter(|p| p.exists())
         .unwrap_or_else(|| PathBuf::from(name))
 }

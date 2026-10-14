@@ -6,10 +6,16 @@
 //! same `Remote` trait as the rclone backend). The kill is `Child::kill` (SIGKILL on Unix,
 //! `TerminateProcess` on Windows) once the runner reports reaching the named point.
 //!
-//! It needs release binaries (`runner`, `search`, `equity`, `difftest`): the teacher is far too
-//! slow in a debug build. It uses `RUNNER_TEST_BIN_DIR` when set (and then fails if anything is
-//! missing), else `target/release` when all four are there, else it is skipped with a notice.
-//! CI builds them and sets `RUNNER_TEST_BIN_DIR`.
+//! It needs release binaries (`runner`, `search`, `equity`, `difftest`; the teacher is far too
+//! slow in a debug build), so it is `#[ignore]`d in the plain `cargo test --workspace`. CI runs:
+//! ```text
+//! cargo build --release -p runner -p search -p equity -p difftest
+//! RUNNER_TEST_BIN_DIR=target/release cargo test --release -p runner --test resume_identity -- --ignored
+//! ```
+//! (`RUNNER_TEST_BIN_DIR` may be relative to the workspace root; without it `target/release`.)
+//!
+//! The third stream is `difftest` standing in for `suitability` (2 chunks), because the
+//! `search suitability` binary (section 6) does not exist yet; swap it in when it does.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -24,20 +30,25 @@ fn workspace() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-fn bin_dir() -> Option<PathBuf> {
+fn bin_dir() -> PathBuf {
     let names = ["runner", "search", "equity", "difftest"];
-    let have = |d: &Path| names.iter().all(|n| d.join(format!("{n}{EXE}")).is_file());
-    if let Ok(d) = std::env::var("RUNNER_TEST_BIN_DIR") {
-        let d = PathBuf::from(d);
+    let d = std::env::var("RUNNER_TEST_BIN_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("target/release"));
+    let d = if d.is_absolute() {
+        d
+    } else {
+        workspace().join(d)
+    };
+    for n in names {
         assert!(
-            have(&d),
-            "RUNNER_TEST_BIN_DIR={} lacks {names:?}",
+            d.join(format!("{n}{EXE}")).is_file(),
+            "{} lacks {n}: build release binaries first \
+             (cargo build --release -p runner -p search -p equity -p difftest)",
             d.display()
         );
-        return Some(d);
     }
-    let d = workspace().join("target").join("release");
-    have(&d).then_some(d)
+    d
 }
 
 fn fxhash(b: &[u8]) -> u128 {
@@ -145,15 +156,9 @@ fn setup(base: &Path, name: &str, table: &Path, hex: &str) -> PathBuf {
 }
 
 #[test]
+#[ignore = "needs release binaries; CI runs it with --ignored (see the file's docs)"]
 fn resume_identity() {
-    let Some(bins) = bin_dir() else {
-        eprintln!(
-            "resume_identity SKIPPED: build release binaries first \
-             (cargo build --release -p runner -p search -p equity -p difftest) \
-             or set RUNNER_TEST_BIN_DIR"
-        );
-        return;
-    };
+    let bins = bin_dir();
     let base = std::env::temp_dir().join(format!("runner-resume-{}", std::process::id()));
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
@@ -210,8 +215,33 @@ fn resume_identity() {
         String::from_utf8_lossy(&merged_b)
     );
 
-    // No chunk listed twice in the final done-list.
+    // Both runs finished cleanly and the report covers every chunk.
+    for d in [&a, &b] {
+        assert!(d.join("remote/runs").join(RUN).join("DONE").is_file());
+        assert!(
+            d.join("remote/runs")
+                .join(RUN)
+                .join("final-manifest.json")
+                .is_file()
+        );
+    }
+    let merged: serde_json::Value = serde_json::from_slice(&merged_a).unwrap();
+    assert_eq!(merged["complete"], true);
+    let gate = &merged["streams"][1];
+    assert_eq!(
+        (gate["name"].as_str(), gate["chunks_done"].as_u64()),
+        (Some("gate"), Some(3))
+    );
+    assert_eq!(gate["sprt"]["decision"], "Inconclusive"); // 3 blocks: the cap, below 20
+
+    // Done-list versions have distinct, increasing sequence numbers (one per write, across
+    // restarts), and no chunk is listed twice in the last one.
     let done = files(&b.join("remote").join("done").join(RUN));
+    let seqs: Vec<u64> = done
+        .keys()
+        .map(|k| k[..8].parse::<u64>().unwrap())
+        .collect();
+    assert!(seqs.windows(2).all(|w| w[0] < w[1]), "{seqs:?}");
     let (_, last) = done.iter().next_back().unwrap();
     let doc: serde_json::Value = serde_json::from_slice(last).unwrap();
     let entries = doc["entries"].as_array().unwrap();

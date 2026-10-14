@@ -1,8 +1,12 @@
 name: vast-run
 
-# Rents one ON-DEMAND vast.ai machine (never interruptible), runs one manifest chunk with the
-# prebuilt binaries of `bin_sha`, watches it through the vast API and the R2 heartbeat (no SSH),
-# destroys it, and uploads a cost report to R2 runs/<run_id>/report.json.
+# Rents one ON-DEMAND vast.ai machine (never interruptible), runs one manifest with the prebuilt
+# binaries of `bin_sha`, watches it through the vast API and the R2 heartbeat (no SSH), destroys
+# it, and uploads a cost report to R2 runs/<run_id>/report.json.
+# Format 1 (M1): one chunk. Format 2 (docs/M3-SPEC.md section 7): prioritised streams of chunks;
+# if the machine dies or its heartbeat stops, the launcher rents a replacement that resumes from
+# the done-list (at most 3). Format-2 inputs must be in R2 first (launch.py put-input FILE).
+# If the chosen offer is taken before it can be rented, the next-best offer is tried.
 # Set dry_run to only print the offer that would be chosen.
 
 on:

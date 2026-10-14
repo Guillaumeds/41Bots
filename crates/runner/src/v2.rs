@@ -7,20 +7,34 @@
 //! deterministic `.tar.zst`, uploads it to `runs/<run>/out/<stream>/<index:06>-<sha16>.tar.zst`
 //! (immutable), reads it back to verify the SHA-256, then appends a done-list entry. Every
 //! `upload_every_s` the whole done-list is written as a new key `done/<run>/<seq:08>-<utc>.json`.
+//! A chunk's logs (timings, so never in the bundle) go to `runs/<run>/logs/<stream>/<index:06>.tar.zst`.
 //!
 //! Resume: on start the highest done-list is read; listed chunks whose remote bundles still match
 //! are skipped, everything else is redone from its seed (local leftovers are deleted first). A
 //! chunk's bundle depends only on its seed and parameters, so a redone chunk reproduces the same
 //! bytes and the same key.
 //!
-//! End: every bundle of this session is re-verified, `merged.json` (the deterministic merged
+//! End: every listed output is checked in the remote, `merged.json` (the deterministic merged
 //! report) is uploaded, then `final-manifest.json` (git commit, image, build, seeds, threads,
 //! versions), then `DONE` (or `FAILED`), then the instance destroys itself (M1 behaviour).
+//!
+//! Chunk kinds and what a worker runs (`<seed>` is the chunk seed, `out/` the bundled directory):
+//! - `teacher`: `search teacher --hands <params.hands_per_chunk> --seed <seed> --config
+//!   <params.config> --equity <input> [--start-hands H] [params.args…] --out out/`;
+//! - `arena_blocks`: in-process, `params.a` vs `params.b`, block `j` of the chunk seeded
+//!   `arena::block_seed(<seed>, 0, j)`, writes `out/blocks.json`; the scores feed the stream's
+//!   sequential test (`params.sprt`);
+//! - `suitability`, `agree`, `belief_bench`: `search <kind with - for _> --seed <seed>
+//!   [--hands <params.hands_per_chunk>] [--equity <input>] [params.args…] --out out/`;
+//! - `difftest`, `equity_sweep`: as in format 1 with `seed` = the chunk seed;
+//! - `benchmark`, `solver_spike`, `search_measure`: as in format 1, params unchanged.
+//!
+//! The equity input is `inputs.equity` (or the input named by `params.equity_input`).
 //!
 //! Remote: `RUNNER_REMOTE_DIR` (a local directory, used by tests and the laptop), else R2 through
 //! rclone when `RCLONE_CONFIG_R2_TYPE` and `R2_BUCKET` are set, else `<work>/remote`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -33,8 +47,8 @@ use serde_json::{Value, json};
 use crate::bundle::{bundle_dir, sha256_file};
 use crate::remote::{DirRemote, RcloneRemote, Remote, UPLOAD_ENTRY, kill_point};
 use crate::sched::{
-    Chunks, Manifest2, StreamState, chunk_seed, kind_median, latest_done, parse_v2, pick,
-    sprt_prefix,
+    Chunks, Manifest2, StreamState, chunk_seed, finished_median, latest_done, parse_v2, pick,
+    size_note, sprt_prefix,
 };
 use crate::{
     CpuSampler, Ctx, default_threads, hardware, run_kind, self_destroy, sibling, unix_now,
@@ -141,6 +155,7 @@ fn worker_inner(spec_path: &Path) -> Result<(), String> {
             if let Some(h) = params.get("start_hands").and_then(Value::as_u64) {
                 c.args(["--start-hands", &h.to_string()]);
             }
+            extra_args(&mut c, &params)?;
             ctx.run_child(c, "search.log")?;
             json!({ "kind": kind, "seed": seed, "hands": hands })
         }
@@ -157,22 +172,18 @@ fn worker_inner(spec_path: &Path) -> Result<(), String> {
             if let Ok(e) = equity() {
                 c.arg("--equity").arg(e);
             }
-            for a in params
-                .get("args")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                c.arg(a.as_str().ok_or("params.args must be strings")?);
-            }
+            extra_args(&mut c, &params)?;
             c.arg("--out").arg(&out);
             ctx.run_child(c, "search.log")?;
             json!({ "kind": kind, "seed": seed })
         }
         _ => {
-            // Existing kinds: their `seed` is the chunk seed, so chunks differ.
+            // Existing kinds. Where `seed` is the chunk's own randomness the chunk seed replaces
+            // it; the whole-machine measurements keep their fixed measurement seeds.
             let mut p = params.clone();
-            if let Some(o) = p.as_object_mut() {
+            if SEEDED_KINDS.contains(&kind.as_str())
+                && let Some(o) = p.as_object_mut()
+            {
                 o.insert("seed".into(), json!(seed));
             }
             let mut r = run_kind(&mut ctx, &kind, &p)?;
@@ -184,6 +195,25 @@ fn worker_inner(spec_path: &Path) -> Result<(), String> {
     };
     let text = serde_json::to_string_pretty(&result).map_err(|e| e.to_string())? + "\n";
     fs::write(out.join("result.json"), text).map_err(|e| e.to_string())
+}
+
+/// Existing kinds whose `seed` parameter is the chunk's own randomness, so the chunk seed
+/// `Rng::derive(run_seed, &[k, i])` replaces it. The others (`benchmark`, `solver_spike`,
+/// `search_measure`) are whole-machine measurements whose `seed` is a fixed constant of the
+/// measurement (the equity table's, the decision set's); their params pass through unchanged.
+const SEEDED_KINDS: [&str; 2] = ["difftest", "equity_sweep"];
+
+/// Appends `params.args` (a list of strings) to a `search` command line verbatim.
+fn extra_args(c: &mut Command, params: &Value) -> Result<(), String> {
+    for a in params
+        .get("args")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        c.arg(a.as_str().ok_or("params.args must be strings")?);
+    }
+    Ok(())
 }
 
 /// `arena_blocks`: plays this chunk's blocks in order (block `j` of chunk `i` uses
@@ -266,8 +296,6 @@ struct Run {
     states: Vec<StreamState>,
     /// The done-list, in completion order.
     entries: Vec<Value>,
-    /// Entries verified in this session (re-checked at the end).
-    session: Vec<usize>,
     done_seq: u64,
     dirty: bool,
     last_done_write: Instant,
@@ -276,6 +304,11 @@ struct Run {
     cpu: CpuSampler,
     start: Instant,
     dph: f64,
+    /// Partial CPU use is expected now (idle tail, or a chunk says so): the launcher's low-CPU
+    /// rule skips such heartbeats.
+    partial_ok: bool,
+    /// Kinds whose chunk-size note has been printed.
+    noted: BTreeSet<String>,
 }
 
 fn compact_utc() -> String {
@@ -301,9 +334,13 @@ fn choose_remote(work: &Path) -> Box<dyn Remote> {
     }
 }
 
+fn env_nonempty(k: &str) -> Option<String> {
+    std::env::var(k).ok().filter(|v| !v.is_empty())
+}
+
 /// `runner run` on a format-2 manifest.
 pub fn run(manifest: &Value, work: &Path) -> ExitCode {
-    let m = match parse_v2(manifest) {
+    let mut m = match parse_v2(manifest) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("runner: manifest: {e}");
@@ -313,6 +350,7 @@ pub fn run(manifest: &Value, work: &Path) -> ExitCode {
     let remote = choose_remote(work);
     let root = work.join(&m.run_id);
     let threads = m.threads.unwrap_or_else(default_threads);
+    m.resolve_threads(threads);
     println!(
         "runner: format-2 run {}, {threads} threads, {} streams, remote {}",
         m.run_id,
@@ -327,7 +365,6 @@ pub fn run(manifest: &Value, work: &Path) -> ExitCode {
         threads,
         inputs: BTreeMap::new(),
         entries: Vec::new(),
-        session: Vec::new(),
         done_seq: 0,
         dirty: false,
         last_done_write: Instant::now(),
@@ -339,6 +376,8 @@ pub fn run(manifest: &Value, work: &Path) -> ExitCode {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0.0),
+        partial_ok: false,
+        noted: BTreeSet::new(),
     };
     let outcome = r.go();
     let ok = outcome.is_ok();
@@ -346,6 +385,8 @@ pub fn run(manifest: &Value, work: &Path) -> ExitCode {
     let body = json!({ "utc": utc_string(unix_now()), "elapsed_s": r.start.elapsed().as_secs(),
                        "error": outcome.as_ref().err() });
     r.heartbeat(true, if ok { "uploading" } else { "failed" });
+    // The marker goes last: a DONE means every output, the merged report and the final manifest
+    // are already in the remote.
     let uploaded = r.put_json(marker, &format!("{}/{marker}", r.prefix()), &body);
     if let Err(e) = &uploaded {
         eprintln!("runner: upload {marker}: {e}");
@@ -382,6 +423,16 @@ impl Run {
 
     fn go(&mut self) -> Result<(), String> {
         fs::create_dir_all(&self.root).map_err(|e| e.to_string())?;
+        // The binaries must be the ones the manifest names.
+        if let (Some(want), Some(have)) = (
+            self.m.bin_sha.clone().filter(|s| !s.is_empty()),
+            env_nonempty("BIN_SHA"),
+        ) && want != have
+        {
+            return Err(format!(
+                "manifest bin_sha {want} but these binaries are {have}"
+            ));
+        }
         // Heartbeat numbering continues across machines.
         self.hb_seq = self
             .remote
@@ -422,22 +473,14 @@ impl Run {
         }
         res?;
         self.heartbeat(true, "checking");
-        for &i in &self.session {
-            for o in self.entries[i]["outputs"].as_array().into_iter().flatten() {
-                let key = o["path"].as_str().unwrap_or_default();
-                let want = o["sha256"].as_str().unwrap_or_default();
-                match self.remote.sha256(key)? {
-                    Some((h, _)) if h == want => {}
-                    other => return Err(format!("final check: {key} is {other:?}, want {want}")),
-                }
-            }
-        }
+        self.final_check()?;
         let merged = self.merged();
         self.put_json(
             "merged.json",
             &format!("{}/merged.json", self.prefix()),
             &merged,
         )?;
+        // The run manifest goes last before the marker (PLAN §12.5).
         let fm = self.final_manifest();
         self.put_json(
             "final-manifest.json",
@@ -472,6 +515,8 @@ impl Run {
         self.m.streams.iter().position(|s| s.name == name)
     }
 
+    /// Reads the highest done-list; keeps the entries whose remote bundles still match (each read
+    /// back in full and hashed), so everything else is redone from its seed.
     fn resume(&mut self) -> Result<(), String> {
         let keys = self.remote.list(&format!("done/{}/", self.m.run_id))?;
         // Local leftovers of unfinished chunks are never reused.
@@ -488,9 +533,10 @@ impl Run {
         let doc: Value =
             serde_json::from_str(&fs::read_to_string(&local).map_err(|e| e.to_string())?)
                 .map_err(|e| format!("{key}: {e}"))?;
-        let mut seen = std::collections::BTreeSet::new();
+        let mut seen = BTreeSet::new();
         let mut redo = 0;
         for e in doc["entries"].as_array().cloned().unwrap_or_default() {
+            self.heartbeat(false, "resume");
             let (Some(stream), Some(index)) = (e["stream"].as_str(), e["index"].as_u64()) else {
                 continue;
             };
@@ -500,7 +546,7 @@ impl Run {
             if !seen.insert((k, index)) {
                 continue;
             }
-            let mut ok = true;
+            let mut ok = e["outputs"].as_array().is_some_and(|o| !o.is_empty());
             for o in e["outputs"].as_array().into_iter().flatten() {
                 let key = o["path"].as_str().unwrap_or_default();
                 let want = o["sha256"].as_str().unwrap_or_default();
@@ -515,7 +561,7 @@ impl Run {
             self.entries.push(e);
         }
         println!(
-            "runner: resuming from {key}: {} chunks done, {redo} to redo",
+            "runner: resuming from {key}: {} chunks done, {redo} listed chunks to redo",
             self.entries.len()
         );
         Ok(())
@@ -546,10 +592,11 @@ impl Run {
         fs::create_dir_all(p.parent().unwrap_or(&self.root)).map_err(|e| e.to_string())?;
         fs::write(
             &p,
-            serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?,
+            serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())? + "\n",
         )
         .map_err(|e| e.to_string())?;
         self.remote.put(&p, &key, true)?;
+        let _ = fs::remove_file(&p);
         self.done_seq += 1;
         self.dirty = false;
         self.last_done_write = Instant::now();
@@ -566,7 +613,8 @@ impl Run {
             .join(&s.name)
             .join(format!("{index:06}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let logs = dir.join("logs");
+        fs::create_dir_all(&logs).map_err(|e| e.to_string())?;
         let spec = json!({
             "stream": s.name, "index": index, "seed": seed, "kind": s.kind,
             "params": s.params, "threads": s.threads, "inputs": self.inputs,
@@ -574,15 +622,10 @@ impl Run {
         });
         let sp = dir.join("spec.json");
         fs::write(&sp, spec.to_string()).map_err(|e| e.to_string())?;
-        let logs = self.root.join("logs");
-        fs::create_dir_all(&logs).map_err(|e| e.to_string())?;
-        let log = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(logs.join(format!("{}-{index:06}.log", s.name)))
-            .map_err(|e| e.to_string())?;
+        let log = fs::File::create(logs.join("worker.log")).map_err(|e| e.to_string())?;
         let log2 = log.try_clone().map_err(|e| e.to_string())?;
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        // stdin is a pipe the worker watches: it ends when this process dies or stops the chunk.
         let child = Command::new(exe)
             .arg("chunk")
             .arg(&sp)
@@ -603,6 +646,24 @@ impl Run {
         })
     }
 
+    /// Uploads a chunk's logs (worker and child-process output: diagnostics with timings, so
+    /// outside the deterministic bundle) to `runs/<run>/logs/<stream>/<index:06>.tar.zst`,
+    /// replacing any earlier attempt's. Never fatal.
+    fn upload_logs(&self, r: &Running) {
+        let name = &self.m.streams[r.stream].name;
+        let local = self
+            .root
+            .join("tmp")
+            .join(format!("logs-{name}-{:06}.tar.zst", r.index));
+        let key = format!("{}/logs/{name}/{:06}.tar.zst", self.prefix(), r.index);
+        let res = bundle_dir(&r.dir.join("logs"), &local)
+            .and_then(|_| self.remote.put(&local, &key, false));
+        if let Err(e) = res {
+            eprintln!("runner: logs of {name}/{}: {e}", r.index);
+        }
+        let _ = fs::remove_file(&local);
+    }
+
     /// Bundle, upload, verify, list one finished chunk.
     fn finish(&mut self, r: &Running) -> Result<(), String> {
         let s = &self.m.streams[r.stream];
@@ -621,7 +682,10 @@ impl Run {
         );
         let n = self.entries.len() as u64 + 1;
         UPLOAD_ENTRY.store(n, Ordering::Relaxed);
-        self.remote.put(&local, &key, true)?;
+        self.remote
+            .put(&local, &key, true)
+            .map_err(|e| format!("upload {key}: {e}"))?;
+        // Read back in full and hash before listing it.
         match self.remote.sha256(&key)? {
             Some((h, b)) if h == sha && b == bytes => {}
             other => return Err(format!("upload check {key}: got {other:?}, want {sha}")),
@@ -641,9 +705,18 @@ impl Run {
         self.states[r.stream].running.remove(&r.index);
         self.record(r.stream, r.index, &e);
         self.entries.push(e);
-        self.session.push(self.entries.len() - 1);
         self.dirty = true;
+        self.upload_logs(r);
+        let _ = fs::remove_file(&local);
         let _ = fs::remove_dir_all(&r.dir);
+        let kind = self.m.streams[r.stream].kind.clone();
+        if let Some(note) =
+            finished_median(&self.m.streams, &self.states, &self.m.streams[r.stream])
+                .and_then(size_note)
+            && self.noted.insert(kind.clone())
+        {
+            println!("runner: {kind}: {note}");
+        }
         if self.last_done_write.elapsed().as_secs() >= self.m.upload_every_s {
             self.write_done()?;
         }
@@ -667,12 +740,12 @@ impl Run {
                 }
             }
             // Start chunks while threads are free.
+            let mut used: usize = running
+                .iter()
+                .map(|r| self.m.streams[r.stream].threads)
+                .sum();
             if error.is_none() && !stopped {
                 loop {
-                    let used: usize = running
-                        .iter()
-                        .map(|r| self.m.streams[r.stream].threads)
-                        .sum();
                     // A chunk needing more threads than the machine has still runs, alone.
                     let free = if used == 0 {
                         usize::MAX
@@ -685,12 +758,16 @@ impl Run {
                         break;
                     };
                     let r = self.spawn(k, i)?;
+                    used += self.m.streams[k].threads;
                     running.push(r);
                 }
             }
             if running.is_empty() {
                 break;
             }
+            // Free threads with nothing to start (the tail, or a deadline cut-off), or a chunk
+            // that says so itself: partial CPU use is expected.
+            self.partial_ok = used < self.threads || running.iter().any(|r| chunk_partial(&r.dir));
             // Reap finished workers in a fixed order.
             let mut i = 0;
             while i < running.len() {
@@ -704,12 +781,20 @@ impl Run {
                             }
                         } else {
                             self.states[r.stream].running.remove(&r.index);
+                            let name = &self.m.streams[r.stream].name;
+                            if !st.success() {
+                                eprintln!(
+                                    "runner: chunk {name}/{} failed ({st}); last lines of its log:\n{}",
+                                    r.index,
+                                    log_tail(&r.dir.join("logs").join("worker.log"), 20)
+                                );
+                                self.upload_logs(&r);
+                            }
                             if error.is_none() {
                                 error = Some(format!(
-                                    "chunk {}/{} failed ({st}); see logs/{}-{:06}.log",
-                                    self.m.streams[r.stream].name,
+                                    "chunk {name}/{} failed ({st}); logs in {}/logs/{name}/{:06}.tar.zst",
                                     r.index,
-                                    self.m.streams[r.stream].name,
+                                    self.prefix(),
                                     r.index
                                 ));
                             }
@@ -724,10 +809,37 @@ impl Run {
             self.heartbeat(false, "chunks");
             std::thread::sleep(Duration::from_millis(100));
         }
+        self.partial_ok = false;
         match error {
             Some(e) => Err(e),
             None => Ok(()),
         }
+    }
+
+    /// The end check (PLAN §12.5's `rclone check`): every output in the done-list is in the
+    /// remote with its recorded size. Each was also read back in full and hashed when it was
+    /// uploaded (this session) or when the run resumed (earlier sessions).
+    fn final_check(&mut self) -> Result<(), String> {
+        let listed: BTreeMap<String, u64> = self
+            .remote
+            .list_sized(&format!("{}/out/", self.prefix()))?
+            .into_iter()
+            .collect();
+        for e in &self.entries {
+            for o in e["outputs"].as_array().into_iter().flatten() {
+                let key = o["path"].as_str().unwrap_or_default();
+                let want = o["bytes"].as_u64();
+                match listed.get(key) {
+                    Some(&n) if Some(n) == want => {}
+                    other => {
+                        return Err(format!(
+                            "final check: {key} has {other:?} bytes, want {want:?}"
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn queue(&self) -> Value {
@@ -737,9 +849,14 @@ impl Run {
             .iter()
             .zip(&self.states)
             .map(|(s, st)| {
-                json!({ "stream": s.name, "done": st.done.len(), "running": st.running.len(),
-                        "left": st.left(s), "decided": st.decided(s),
-                        "median_s": kind_median(&self.m.streams, &self.states, s) })
+                let med = finished_median(&self.m.streams, &self.states, s);
+                let mut q = json!({ "stream": s.name, "done": st.done.len(),
+                        "running": st.running.len(), "left": st.left(s), "decided": st.decided(s),
+                        "median_s": med.map(|x| (x * 10.0).round() / 10.0) });
+                if let Some(note) = med.and_then(size_note) {
+                    q["size_note"] = json!(note);
+                }
+                q
             })
             .collect();
         json!(v)
@@ -756,8 +873,11 @@ impl Run {
         let elapsed = self.start.elapsed().as_secs_f64();
         let hb = json!({
             "run_id": self.m.run_id, "seq": self.hb_seq, "utc": utc_string(unix_now()),
-            "phase": phase, "progress": { "queue": self.queue(), "entries": self.entries.len() },
+            "phase": phase,
+            "progress": { "queue": self.queue(), "entries": self.entries.len(),
+                          "partial_cpu_ok": self.partial_ok },
             "elapsed_s": elapsed.round(), "threads": self.threads,
+            "usable_cores": (self.cpu.cores * 100.0).round() / 100.0,
             "cpu_util_pct": round(cpu.cgroup), "cpu_util_source": "cgroup",
             "host_cpu_busy_pct": round(cpu.host),
             "est_cost_usd": (elapsed / 3600.0 * self.dph * 10_000.0).round() / 10_000.0,
@@ -770,7 +890,9 @@ impl Run {
     }
 
     /// The merged report: depends only on which chunks are done and their bundles, never on
-    /// timing or completion order.
+    /// timing or completion order. A decided `until_decided` stream lists only the chunks of the
+    /// decided prefix: chunks still in flight at the decision finish and stay in the done-list,
+    /// but how many there were depends on timing, so they are left out here.
     fn merged(&self) -> Value {
         let mut by: Vec<BTreeMap<u64, &Value>> = vec![BTreeMap::new(); self.m.streams.len()];
         for e in &self.entries {
@@ -788,15 +910,19 @@ impl Run {
             .zip(&self.states)
             .zip(&by)
             .map(|((s, st), es)| {
+                let prefix = s.sprt.as_ref().map(|sp| sprt_prefix(&st.scores, sp));
+                let cut = match &prefix {
+                    Some(p) if s.chunks == Chunks::UntilDecided && st.decided(s) => p.chunks,
+                    _ => u64::MAX,
+                };
                 let chunks: Vec<Value> = es
-                    .values()
-                    .map(|e| json!({ "index": e["index"], "seed": e["seed"], "outputs": e["outputs"] }))
+                    .range(..cut)
+                    .map(|(_, e)| json!({ "index": e["index"], "seed": e["seed"], "outputs": e["outputs"] }))
                     .collect();
                 let mut v = json!({ "name": s.name, "kind": s.kind, "priority": s.priority,
-                    "chunks_total": s.total(), "chunks_done": es.len(), "left": st.left(s),
+                    "chunks_total": s.total(), "chunks_done": chunks.len(), "left": st.left(s),
                     "chunks": chunks });
-                if let Some(sp) = &s.sprt {
-                    let p = sprt_prefix(&st.scores, sp);
+                if let Some(p) = prefix {
                     v["sprt"] = json!({ "blocks": p.blocks, "chunks": p.chunks, "llr": p.llr,
                         "decision": format!("{:?}", p.decision), "mean": p.mean, "sd": p.sd,
                         "until_decided": s.chunks == Chunks::UntilDecided });
@@ -827,18 +953,40 @@ impl Run {
             .collect();
         json!({
             "manifest": self.m.raw,
-            "git_commit": option_env!("GIT_COMMIT").map(str::to_string).or_else(|| std::env::var("GIT_COMMIT").ok()),
-            "bin_sha": std::env::var("BIN_SHA").ok(),
-            "bin_build": std::env::var("BIN_BUILD").ok(),
-            "image_digest": std::env::var("IMAGE_DIGEST").ok(),
+            // Release binaries are named by their commit (BIN_SHA); a local build may set GIT_COMMIT.
+            "git_commit": option_env!("GIT_COMMIT").map(str::to_string)
+                .or_else(|| env_nonempty("GIT_COMMIT")).or_else(|| env_nonempty("BIN_SHA")),
+            "bin_sha": env_nonempty("BIN_SHA"),
+            "bin_build": env_nonempty("BIN_BUILD"),
+            "bin_rustc": env_nonempty("BIN_RUSTC"),
+            "image": env_nonempty("IMAGE"),
+            "image_digest": env_nonempty("IMAGE_DIGEST"),
             "runner_version": env!("CARGO_PKG_VERSION"),
             "threads": self.threads,
+            "stream_threads": self.m.streams.iter().map(|s| json!({ "stream": s.name, "threads": s.threads })).collect::<Vec<_>>(),
             "inputs": self.m.inputs.iter().map(|(n, h)| json!({ "name": n, "sha256": h })).collect::<Vec<_>>(),
             "chunk_seeds": seeds,
             "done_list_seq": self.done_seq.saturating_sub(1),
             "utc": utc_string(unix_now()),
         })
     }
+}
+
+/// Whether a running chunk's own heartbeat (written by its worker into the chunk directory)
+/// declares a stretch of deliberately partial CPU use.
+fn chunk_partial(dir: &Path) -> bool {
+    fs::read_to_string(dir.join("heartbeat.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v["progress"]["partial_cpu_ok"].as_bool())
+        .unwrap_or(false)
+}
+
+/// The last `n` lines of a log file.
+fn log_tail(p: &Path, n: usize) -> String {
+    let t = fs::read_to_string(p).unwrap_or_default();
+    let lines: Vec<&str> = t.lines().collect();
+    lines[lines.len().saturating_sub(n)..].join("\n")
 }
 
 /// Stops a chunk worker: closing its stdin makes it stop its own child and exit; kill it if it

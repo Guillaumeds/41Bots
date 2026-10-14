@@ -34,6 +34,8 @@ pub enum Chunks {
 pub struct StreamSprt {
     pub params: SprtParams,
     pub max_blocks: u64,
+    /// Stage 1 of a two-stage test (PLAN A9): it can only reject.
+    pub reject_only: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -43,8 +45,10 @@ pub struct Stream {
     pub kind: String,
     pub params: Value,
     pub chunks: Chunks,
-    /// Threads one chunk uses (`params.threads`, default 1).
+    /// Threads one chunk uses (`params.threads`, default 1; `"all"` is the whole machine, see
+    /// [`Manifest2::resolve_threads`]).
     pub threads: usize,
+    pub threads_all: bool,
     /// Known chunk sizes (`params.chunk_sizes`), for longest-first order.
     pub sizes: Option<Vec<u64>>,
     /// Duration guess before any chunk of this kind has finished (`params.est_seconds`).
@@ -102,6 +106,17 @@ pub struct Manifest2 {
     pub benchmark_seconds: u64,
     pub streams: Vec<Stream>,
     pub raw: Value,
+}
+
+impl Manifest2 {
+    /// Gives streams with `params.threads = "all"` the machine's thread count.
+    pub fn resolve_threads(&mut self, machine: usize) {
+        for s in &mut self.streams {
+            if s.threads_all {
+                s.threads = machine.max(1);
+            }
+        }
+    }
 }
 
 /// Chunk `i` of stream `k`: `Rng::derive(run_seed, &[k, i])`, first output.
@@ -235,11 +250,16 @@ pub fn parse_v2(v: &Value) -> Result<Manifest2, String> {
                 ));
             }
         };
-        let threads = params
-            .get("threads")
-            .and_then(Value::as_u64)
-            .unwrap_or(1)
-            .max(1) as usize;
+        let (threads, threads_all) = match params.get("threads") {
+            None => (1, false),
+            Some(Value::String(x)) if x == "all" => (1, true),
+            Some(x) => (
+                x.as_u64().filter(|&t| t > 0).ok_or_else(|| {
+                    format!("stream `{name}`: params.threads must be a whole number or \"all\"")
+                })? as usize,
+                false,
+            ),
+        };
         let sizes = match params.get("chunk_sizes") {
             None => None,
             Some(a) => Some(
@@ -278,9 +298,16 @@ pub fn parse_v2(v: &Value) -> Result<Manifest2, String> {
                         ));
                     }
                 };
+                let reject_only = match p.get("reject_only") {
+                    None => false,
+                    Some(b) => b.as_bool().ok_or_else(|| {
+                        format!("stream `{name}`: sprt.reject_only must be true or false")
+                    })?,
+                };
                 Some(StreamSprt {
                     params: sp,
                     max_blocks,
+                    reject_only,
                 })
             }
         };
@@ -303,6 +330,7 @@ pub fn parse_v2(v: &Value) -> Result<Manifest2, String> {
             params,
             chunks,
             threads,
+            threads_all,
             sizes,
             est_seconds,
             blocks_per_chunk,
@@ -363,7 +391,13 @@ pub fn sprt_prefix(scores: &BTreeMap<u64, Vec<i64>>, sprt: &StreamSprt) -> Prefi
             out.llr = llr(m.n, mu, var, sprt.params.s0, sprt.params.s1);
             out.mean = mu;
             out.sd = var.sqrt();
-            out.decision = decide(m.n, out.llr, &sprt.params, false, sprt.max_blocks);
+            out.decision = decide(
+                m.n,
+                out.llr,
+                &sprt.params,
+                sprt.reject_only,
+                sprt.max_blocks,
+            );
             if out.decision != Decision::Continue {
                 break 'chunks;
             }
@@ -423,16 +457,42 @@ pub fn median(v: &[f64]) -> Option<f64> {
     Some(v[v.len() / 2])
 }
 
-/// Running median duration of finished chunks of `kind` (all streams of that kind), else the
-/// stream's estimate.
-pub fn kind_median(streams: &[Stream], states: &[StreamState], s: &Stream) -> f64 {
+/// Running median duration of finished chunks of `s`'s kind (all streams of that kind), if any
+/// has finished (on this machine or, through the done-list, an earlier one).
+pub fn finished_median(streams: &[Stream], states: &[StreamState], s: &Stream) -> Option<f64> {
     let all: Vec<f64> = streams
         .iter()
         .zip(states)
         .filter(|(t, _)| t.kind == s.kind)
         .flat_map(|(_, st)| st.done.values().copied())
         .collect();
-    median(&all).unwrap_or(s.est_seconds)
+    median(&all)
+}
+
+/// The duration the deadline rule assumes for the next chunk of `s`: the running median of its
+/// kind, else the stream's estimate (`params.est_seconds`, default 0).
+pub fn kind_median(streams: &[Stream], states: &[StreamState], s: &Stream) -> f64 {
+    finished_median(streams, states, s).unwrap_or(s.est_seconds)
+}
+
+/// The chunk-size target (M3-SPEC §7.2: 2–5 minutes): a note for the heartbeat and the log when
+/// a kind's running median is outside it, so the next manifest can resize its chunks. Chunk sizes
+/// are never changed inside a run, because a chunk's output must not depend on the machine.
+pub fn size_note(median_s: f64) -> Option<String> {
+    let min = median_s / 60.0;
+    if min.is_nan() || min <= 0.0 {
+        None
+    } else if min < 2.0 {
+        Some(format!(
+            "chunks take {min:.1} min, under the 2-5 min target: use larger chunks next time"
+        ))
+    } else if min > 5.0 {
+        Some(format!(
+            "chunks take {min:.1} min, over the 2-5 min target: use smaller chunks next time"
+        ))
+    } else {
+        None
+    }
 }
 
 /// The next chunk to start: the lowest priority number (then stream order) with a chunk left
@@ -619,12 +679,12 @@ mod tests {
         let s = streams(json!([arena_stream(json!("until_decided"), 1000)]));
         let sp = s[0].sprt.clone().unwrap();
         let unit = arena::block::SCORE_DEN * 4_294_967_296;
-        // A clearly winning candidate: block scores alternate 0.5 and 0.3 (mean 0.4 ≫ s1).
+        // A clearly winning candidate: block scores alternate 0.04 and 0.02 (mean 0.03 > s1).
         let good = |j: u64| {
             if j.is_multiple_of(2) {
-                unit / 2
+                unit * 4 / 100
             } else {
-                unit * 3 / 10
+                unit * 2 / 100
             }
         };
         let mut st = StreamState::default();
@@ -656,7 +716,7 @@ mod tests {
         // Losing candidate rejects.
         let mut bad = BTreeMap::new();
         for i in 0u64..15 {
-            bad.insert(i, vec![-unit / 2, -unit * 3 / 10]);
+            bad.insert(i, vec![-unit * 2 / 100, -unit * 4 / 100]);
         }
         assert_eq!(sprt_prefix(&bad, &sp).decision, Decision::Reject);
         // The cap.
@@ -688,6 +748,47 @@ mod tests {
             Some((10, "done/r/00000010-20261014T000000Z.json".into()))
         );
         assert_eq!(latest_done(&[]), None);
+    }
+
+    #[test]
+    fn threads_all_and_reject_only() {
+        let mut m = parse_v2(&m2(json!([
+            {"name": "box", "priority": 1, "kind": "solver_spike", "chunks": 1, "params": {"threads": "all"}},
+            {"name": "one", "priority": 2, "kind": "difftest", "chunks": 1, "params": {"threads": 2}}])))
+        .unwrap();
+        assert!(m.streams[0].threads_all);
+        m.resolve_threads(16);
+        assert_eq!((m.streams[0].threads, m.streams[1].threads), (16, 2));
+        assert!(
+            parse_v2(&m2(
+                json!([{"name": "a", "priority": 1, "kind": "teacher", "chunks": 1, "params": {"threads": 0}}])
+            ))
+            .is_err()
+        );
+        // Stage 1 (reject-only): a clear winner never accepts, it runs to the cap.
+        let mut v = arena_stream(json!("until_decided"), 40);
+        v["params"]["sprt"]["reject_only"] = json!(true);
+        let s = streams(json!([v]));
+        let sp = s[0].sprt.clone().unwrap();
+        assert!(sp.reject_only);
+        let unit = arena::block::SCORE_DEN * 4_294_967_296;
+        let mut good = BTreeMap::new();
+        let mut bad = BTreeMap::new();
+        for i in 0u64..20 {
+            good.insert(i, vec![unit * 4 / 100, unit * 2 / 100]);
+            bad.insert(i, vec![-unit * 2 / 100, -unit * 4 / 100]);
+        }
+        let p = sprt_prefix(&good, &sp);
+        assert_eq!((p.decision, p.blocks), (Decision::Inconclusive, 40));
+        assert_eq!(sprt_prefix(&bad, &sp).decision, Decision::Reject);
+    }
+
+    #[test]
+    fn size_target_notes() {
+        assert_eq!(size_note(0.0), None);
+        assert_eq!(size_note(180.0), None);
+        assert!(size_note(30.0).unwrap().contains("larger"));
+        assert!(size_note(600.0).unwrap().contains("smaller"));
     }
 
     #[test]
