@@ -59,3 +59,7 @@ M1 adds the table manager, the arena (14-way duplicate block, generalised SPRT, 
 - Match-equity table v0: built from 1M rules-v1 self-play hands (`data/equity/model-rules-v1-1M-seed1.json`); all checks pass (sums, rotation, monotone, flag rule, Monte Carlo |z| ≤ 2.60). The 26 MB `.npy` is rebuilt from the model by `equity build`; its sha256 is in `data/equity/`.
 - **Must fix before untrusted seats (M3b):** (1) the seat seed can be inverted to the match seed — derive it one-way or from a secret; (2) the `end` message carries the full record, revealing the other decks of a duplicate block — send records only after the block, or strip seeds/burns.
 - Next: arena (spec §5), run-ops (spec §7), first vast.ai smoke run, σ_b.
+## M0 gate result (2026-10-14 00:37 UTC)
+- 10M-match differential gate: 5 shards × 2M matches on GitHub CI (run 38480695319), all PASS, zero engine/reference disagreements.
+- All M0 gate items met **except the owner's reading and approval of the transcripts** (`docs/TRANSCRIPTS.md`, `crates/engine/tests/transcripts/`).
+- 2026-10-14: the owner read and approved the transcripts. **M0 gate fully met.**
