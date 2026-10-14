@@ -37,6 +37,8 @@ class World:
         self.keys: dict[int, str] = {}  # destroy-only keys alive in the account
         self.deleted_keys: list[int] = []
         self.poll = launch.POLL_S  # the launcher's poll interval in this test (--poll-s)
+        self.progress = None  # a heartbeat's progress object (e.g. with an eta), if set
+        self.outputs: dict[str, bytes] = {}  # files a finishing run uploads before its DONE
         self.destroyed_at: dict[int, float] = {}  # instance id -> clock at its destroy
 
     # ---- clock
@@ -49,7 +51,7 @@ class World:
         # finished and writes FAILED with `stopped` (then destroys itself).
         if f"runs/{RUN}/STOP" in self.store:
             for inst in self.instances.values():
-                if inst["alive"] and inst["script"].split(":")[0] in ("work", "idle"):
+                if inst["alive"] and inst["script"].split(":")[0] in ("work", "idle", "silentbusy"):
                     self.store[f"runs/{RUN}/out/measure/exact.jsonl"] = b'{"id": 0}\n'
                     self.store[f"runs/{RUN}/FAILED"] = json.dumps({"stopped": "the launcher asked"}).encode()
                     inst["alive"] = False
@@ -58,17 +60,37 @@ class World:
                 if inst["alive"]:
                     self.step(inst)
 
+    def heartbeat(self, phase: str, cpu: float) -> None:
+        hb = {"seq": self.hb_seq, "phase": phase, "cpu_util_pct": cpu}
+        if self.progress is not None:
+            hb["progress"] = self.progress
+        self.store[f"runs/{RUN}/heartbeat/{self.hb_seq:06}.json"] = json.dumps(hb).encode()
+        self.hb_seq += 1
+
     def step(self, inst: dict) -> None:
         inst["polls"] += 1
-        kind, n = inst["script"].split(":")
-        n = int(n)
+        kind, *args = inst["script"].split(":")
+        n = int(args[0])
         if kind in ("never", "broken"):
             return
         if kind in ("work", "idle"):
             # Works on and on (at full CPU, or at 10%), never finishing by itself.
-            self.store[f"runs/{RUN}/heartbeat/{self.hb_seq:06}.json"] = json.dumps(
-                {"seq": self.hb_seq, "phase": "chunk", "cpu_util_pct": 99.0 if kind == "work" else 10.0}).encode()
-            self.hb_seq += 1
+            self.heartbeat("chunk", 99.0 if kind == "work" else 10.0)
+            return
+        if kind in ("silentbusy", "silentidle"):
+            # Heartbeats for n polls, then none: its uploads hang (busy) or it stopped working (idle).
+            if inst["polls"] <= n:
+                self.heartbeat("chunk", 99.0)
+            return
+        if kind == "hiccup":
+            # Silent (busy) from poll n+1 to poll m, then heartbeats again, and done 3 polls later.
+            m = int(args[1])
+            if n < inst["polls"] <= m:
+                return
+            self.heartbeat("chunk", 99.0)
+            if inst["polls"] >= m + 3:
+                self.store[f"runs/{RUN}/DONE"] = b"{}"
+                inst["alive"] = False
             return
         if kind == "stall" and inst["polls"] > n:
             return
@@ -79,6 +101,7 @@ class World:
             {"seq": self.hb_seq, "phase": "chunks", "cpu_util_pct": 99.0}).encode()
         self.hb_seq += 1
         if kind == "done" and inst["polls"] >= n:
+            self.store.update(self.outputs)
             self.store[f"runs/{RUN}/merged.json"] = json.dumps({"complete": True, "streams": [
                 {"name": "gate", "kind": "arena_blocks", "chunks_done": 3, "chunks_total": 145, "left": 0,
                  "sprt": {"decision": "Accept"}, "chunks": [{"index": 0}]}]}).encode()
@@ -119,6 +142,10 @@ class World:
             inst = self.instances.get(int(args[2]))
             if not inst or not inst["alive"]:
                 return {"actual_status": "exited", "intended_status": "stopped"}
+            cpu = {"silentbusy": 95.0, "hiccup": 97.0, "silentidle": 0.02}.get(inst["script"].split(":")[0])
+            if cpu is not None:
+                return {"actual_status": "running", "intended_status": "running", "cpu_util": cpu,
+                        "cpu_cores_effective": 32, "status_msg": "success, running img:1"}
             if inst["script"].startswith("broken"):
                 # The 2026-10-14 failure: the host cannot start the container (the message here
                 # also carries a secret, which must never be logged).
@@ -149,6 +176,9 @@ class World:
     def r2_list(self, prefix: str) -> list[str]:
         return sorted(k for k in self.store if k.startswith(prefix))
 
+    def r2_list_sized(self, prefix: str) -> list[tuple[str, int]]:
+        return [(k, len(self.store[k])) for k in self.r2_list(prefix)]
+
     def r2_exists(self, key: str) -> bool:
         return key in self.store
 
@@ -168,10 +198,12 @@ class LauncherTest(unittest.TestCase):
         self.env.__exit__(None, None, None)
 
     def run_launch(self, world: World, manifest: dict, *extra: str) -> tuple[int, dict]:
-        saved = {n: getattr(launch, n) for n in ("vast", "r2_get", "r2_put", "r2_list", "r2_exists", "time")}
+        saved = {n: getattr(launch, n) for n in ("vast", "r2_get", "r2_put", "r2_list", "r2_list_sized", "r2_exists",
+                                                 "time")}
         launch.vast = world.vast
         launch.r2_get, launch.r2_put = world.r2_get, world.r2_put
         launch.r2_list, launch.r2_exists = world.r2_list, world.r2_exists
+        launch.r2_list_sized = world.r2_list_sized
         launch.time = world
         out = io.StringIO()
         try:
@@ -349,6 +381,111 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(len(w.created_on), 4)
         self.assertEqual(report["replacements"], 3)
 
+    def test_silent_busy_machine_gets_time_then_stops_and_uploads(self):
+        # Heartbeats stop but vast shows the machine busy (95% CPU): an upload problem, not a dead
+        # machine. The launcher prints its log, waits 15 more minutes, then asks it to stop and
+        # upload what it finished, and only then destroys it.
+        w = World([offer(1, 11, 1.0)], ["silentbusy:2"])
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}})
+        self.assertEqual((code, report["outcome"]), (1, "STOPPED"))
+        self.assertIn("stayed busy", report["reason"])
+        self.assertIn("vast CPU 95%", report["reason"])
+        self.assertIn(f"runs/{RUN}/STOP", w.store)
+        self.assertIn(f"runs/{RUN}/out/measure/exact.jsonl", w.store)
+        self.assertGreaterEqual(report["attempts"][0]["minutes"], 2 + 3 + 15)
+        self.assertIn("treating it as an upload problem", self.log)
+        self.assertIn("vast container log of instance 100", self.log)
+        # --silent-busy-min shortens the wait.
+        w = World([offer(1, 11, 1.0)], ["silentbusy:2"])
+        code, short = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}},
+                                      "--silent-busy-min", "5")
+        self.assertEqual(short["outcome"], "STOPPED")
+        self.assertLess(short["attempts"][0]["minutes"], report["attempts"][0]["minutes"] - 8)
+
+    def test_silent_busy_machine_that_recovers_is_kept(self):
+        # Six silent minutes while busy, then heartbeats resume and the run finishes.
+        w = World([offer(1, 11, 1.0)], ["hiccup:2:8"])
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}})
+        self.assertEqual((code, report["outcome"]), (0, "DONE"))
+        self.assertNotIn(f"runs/{RUN}/STOP", w.store)
+        self.assertIn("heartbeats resumed", self.log)
+
+    def test_silent_idle_or_gone_machine_is_destroyed_at_once(self):
+        for script, word in (("silentidle:2", "idle (running, vast CPU 2%"), ("stall:2", "no CPU reading"),
+                             ("die:2", "instance died")):
+            w = World([offer(1, 11, 1.0)], [script])
+            code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}})
+            self.assertEqual((code, report["outcome"]), (1, "KILLED"), script)
+            self.assertIn(word, report["reason"], script)
+            self.assertNotIn(f"runs/{RUN}/STOP", w.store, script)
+            self.assertLess(report["attempts"][0]["minutes"], 2 + 3 + 3, script)
+
+    def test_vast_cpu_reading(self):
+        c = launch.vast_cpu_pct
+        self.assertIsNone(c({}))
+        self.assertIsNone(c({"cpu_util": None}))
+        self.assertEqual(c({"cpu_util": 0.9}), 90.0)  # a fraction
+        self.assertEqual(c({"cpu_util": 75.0}), 75.0)  # a percentage
+        self.assertEqual(c({"cpu_util": 3000.0, "cpu_cores_effective": 32}), 93.75)  # summed over cores
+        st = launch.silent_state
+        self.assertEqual(st(None, 50)[0], "gone")
+        self.assertEqual(st({"actual_status": "exited", "cpu_util": 99}, 50)[0], "gone")
+        self.assertEqual(st({"actual_status": "running", "cpu_util": 60}, 50)[0], "busy")
+        self.assertEqual(st({"actual_status": "running", "cpu_util": 10}, 50)[0], "idle")
+        self.assertEqual(st({"actual_status": "running"}, 50)[0], "idle")
+
+    def test_budget_stops_and_uploads_and_warns_on_projection(self):
+        w = World([offer(1, 11, 1.0)], ["work:0"])
+        w.progress = {"eta": {"done_frac": 0.25, "eta_utc": "2026-10-14T15:20:00Z", "projected_usd": 0.5,
+                              "basis": "chunks done"}}
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}},
+                                       "--max-dollars", "0.1")
+        self.assertEqual((code, report["outcome"]), (1, "STOPPED"))
+        self.assertIn("budget reached: $0.10 of $0.10 spent", report["reason"])
+        self.assertIn(f"runs/{RUN}/STOP", w.store)
+        # Six minutes at $1/hour, then the stop.
+        self.assertLess(report["attempts"][0]["minutes"], 6 + 2)
+        # The projection is shown on every poll line and warned about once.
+        self.assertEqual(self.log.count("::warning::projected cost $0.50 is more than 20% over the budget"), 1)
+        self.assertIn("25.0% done, ETA 14 Oct 15:20 UTC (14 Oct 19:20 Mauritius), projected $0.50, basis: chunks done",
+                      self.log)
+        self.assertRegex(self.log, r"heartbeat 0, phase chunk, [0-9.]+ min, \$0\.0[0-9] so far, CPU 99\.0%")
+        # No budget: no warning, no stop for money.
+        w = World([offer(1, 11, 1.0)], ["done:3"])
+        w.progress = {"eta": {"projected_usd": 50.0}}
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}})
+        self.assertEqual((code, report["outcome"]), (0, "DONE"))
+        self.assertNotIn("over the budget", self.log)
+
+    def test_budget_rents_no_replacement(self):
+        # The first machine dies (at 4 minutes, $0.80 at $12/hour) just under the budget; with its
+        # destroy it has used the budget, so no replacement is rented.
+        w = World([offer(1, 11, 12.0), offer(2, 12, 12.0)], ["die:3", "done:1"])
+        code, report = self.run_launch(w, {"format": 2, "run_id": RUN, "run_seed": 1, "streams": []},
+                                       "--max-dollars", "0.81")
+        self.assertEqual(code, 1)
+        self.assertEqual(w.created_on, [1])
+        self.assertIn("no replacement", report["reason"])
+
+    def test_step_summary_lists_what_was_saved(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "summary.md")
+            with _env({"GITHUB_STEP_SUMMARY": path}):
+                w = World([offer(1, 11, 1.0)], ["done:2"])
+                w.outputs = {f"runs/{RUN}/out/t1bench/results.json": b"x" * 2048,
+                             f"runs/{RUN}/out/t1bench/summary.txt": b"y" * 100}
+                code, _ = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}})
+            with open(path) as fh:
+                md = fh.read()
+        self.assertEqual(code, 0)
+        self.assertIn(f"## vast.ai run {RUN}: DONE", md)
+        self.assertIn("- **Outcome:** DONE: DONE", md)
+        self.assertIn("minutes on 1 machine(s); **cost:** about $0.0", md)
+        self.assertIn(f"- **Saved in R2** `runs/{RUN}/out/`: 2 file(s), 2.1 KB", md)
+        self.assertIn("<details><summary>Full report</summary>", md)
+        self.assertNotIn("partial/", md)
+
     def test_container_start_error(self):
         e = launch.container_start_error
         self.assertIsNone(e(None))
@@ -457,9 +594,10 @@ def _env(values: dict[str, str]):
 
 
 def mock_env():
+    # GITHUB_STEP_SUMMARY empty: tests run under CI must not write into the job's summary.
     return _env({"VAST_API_KEY": "vk-test-key-1", "R2_ACCESS_KEY_ID": "ak-test-id-2",
                  "R2_SECRET_ACCESS_KEY": "sk-test-secret-3",
-                 "R2_BUCKET": "b", "R2_S3_ENDPOINT": "https://example.invalid"})
+                 "R2_BUCKET": "b", "R2_S3_ENDPOINT": "https://example.invalid", "GITHUB_STEP_SUMMARY": ""})
 
 
 if __name__ == "__main__":

@@ -30,6 +30,18 @@ Rules applied:
   inject", "OCI runtime", or actual_status exited/offline) is destroyed at once and the next offer
   is rented (counted as a replacement, for format 1 too: nothing ran on it), instead of waiting
   for --startup-minutes.
+- A silent machine (no new heartbeat for 3 minutes) is checked through the vast API first, and its
+  container log tail printed (redacted): gone, exited or idle (vast CPU below --busy-cpu-pct, 50%)
+  is destroyed at once; running and busy is treated as an upload problem (run m3-agree-t1-b lost
+  172 minutes of work that way): the launcher waits up to --silent-busy-min (15) more minutes for
+  heartbeats to resume, logging each poll, then asks it to stop and upload as below.
+- Budget: --max-dollars (0 = none) stops the run (stop and upload, then destroy) once the money
+  spent on its machines reaches it, and rents no replacement past it. A heartbeat's progress.eta
+  (done_frac, eta_utc, projected_usd, basis) is shown on each poll line, with a warning once if
+  the projected cost exceeds the budget by more than 20%.
+- One log line per poll: minutes elapsed, dollars so far, CPU, progress, ETA (UTC and Mauritius
+  time, UTC+4) and projected dollars. At the end a short markdown summary (outcome, reason,
+  minutes, dollars, the run's files in R2) goes to $GITHUB_STEP_SUMMARY with the full report.
 - Keep finished work (docs/M3-SPEC.md §13.1 item 11): before destroying a machine that is still
   working (--max-minutes, low CPU, Ctrl-C) the launcher writes runs/<run_id>/STOP; the runner
   reads it at its next heartbeat, stops, uploads what it finished, writes DONE or FAILED, and the
@@ -75,7 +87,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 POLL_S = 60  # default; --poll-s overrides
 HEARTBEAT_STALE_S = 180
@@ -85,6 +97,9 @@ LOW_CPU_PCT = 85.0  # default; --low-cpu-pct overrides per run
 LOW_CPU_S = 300  # default; --low-cpu-s overrides
 STOP_WAIT_S = 300  # default; --stop-wait-s overrides: how long a stopped machine may take to upload
 STOP_POLL_S = 10
+SILENT_BUSY_MIN = 15  # default; --silent-busy-min overrides
+BUSY_CPU_PCT = 50.0  # default; --busy-cpu-pct overrides
+MAURITIUS = timezone(timedelta(hours=4))
 
 
 def log(msg: str) -> None:
@@ -203,11 +218,16 @@ def r2_put_file(key: str, path: str) -> None:
 
 
 def r2_list(prefix: str) -> list[str]:
+    return [k for k, _ in r2_list_sized(prefix)]
+
+
+def r2_list_sized(prefix: str) -> list[tuple[str, int]]:
+    """(key, bytes) of every object under `prefix` (the aws CLI follows every page)."""
     p = _aws("s3api", "list-objects-v2", "--bucket", os.environ["R2_BUCKET"], "--prefix", prefix, "--output", "json")
     out = p.stdout.decode().strip()
     if not out:
         return []
-    return [c["Key"] for c in json.loads(out).get("Contents", [])]
+    return [(c["Key"], int(c.get("Size") or 0)) for c in json.loads(out).get("Contents", [])]
 
 
 # ------------------------------------------------------------------ ranking
@@ -416,11 +436,8 @@ def print_logs(instance_id: int, lines: int = 200) -> None:
         except RuntimeError as e:
             log(f"could not fetch {label} logs: {e}")
             continue
-        secret = os.environ.get("R2_SECRET_ACCESS_KEY")
-        if secret:
-            text = text.replace(secret, "***")
         log(f"::group::vast {label} log of instance {instance_id} (last {lines} lines)")
-        print(text.rstrip(), flush=True)
+        print(redact(text or "").rstrip(), flush=True)
         log("::endgroup::")
 
 
@@ -451,6 +468,77 @@ def container_start_error(info: dict | None) -> str | None:
     if status in ("exited", "offline"):
         return f"actual_status {status}" + (f": {msg[:250]}" if msg else "")
     return None
+
+
+def vast_cpu_pct(info: dict | None) -> float | None:
+    """The instance's CPU use in percent from vast's `cpu_util`, or None when absent. vast does
+    not document the field's scale, so it is read defensively: up to 1 as a fraction, over 100 as
+    summed over cores (divided by the effective cores); the raw value is always logged too."""
+    try:
+        v = float((info or {}).get("cpu_util"))
+    except (TypeError, ValueError):
+        return None
+    if v < 0:
+        return None
+    if v <= 1.0:
+        return v * 100.0
+    if v > 100.0:
+        cores = float((info or {}).get("cpu_cores_effective") or 0)
+        return min(100.0, v / cores) if cores > 0 else 100.0
+    return v
+
+
+def silent_state(info: dict | None, busy_pct: float) -> tuple[str, str]:
+    """What a machine whose heartbeats stopped is doing, from vast's view of it: ("gone" |
+    "idle" | "busy", detail). Busy means running with CPU at or above `busy_pct`; no CPU reading
+    counts as idle (destroyed at once, as before)."""
+    if not info:
+        return "gone", "vast no longer reports it"
+    status = info.get("actual_status")
+    if status != "running":
+        return "gone", f"actual_status {status}"
+    pct = vast_cpu_pct(info)
+    raw = info.get("cpu_util")
+    if pct is None:
+        return "idle", "running, no CPU reading from vast"
+    detail = f"running, vast CPU {pct:.0f}% (cpu_util {raw})"
+    return ("busy" if pct >= busy_pct else "idle"), detail
+
+
+def eta_text(eta: dict) -> str:
+    """`progress.eta` for a log line: done share, ETA in UTC and Mauritius time, projected $."""
+    parts = []
+    frac = eta.get("done_frac")
+    if isinstance(frac, (int, float)):
+        parts.append(f"{100 * frac:.1f}% done")
+    utc = eta.get("eta_utc")
+    if isinstance(utc, str):
+        try:
+            t = datetime.strptime(utc, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            m = t.astimezone(MAURITIUS)
+            parts.append(f"ETA {t:%d %b %H:%M} UTC ({m:%d %b %H:%M} Mauritius)")
+        except ValueError:
+            parts.append(f"ETA {utc}")
+    usd = eta.get("projected_usd")
+    if isinstance(usd, (int, float)):
+        parts.append(f"projected ${usd:.2f}")
+    if eta.get("basis"):
+        parts.append(f"basis: {eta['basis']}")
+    return ", ".join(parts)
+
+
+def poll_line(hb: dict, minutes: float, spent: float, cpu) -> str:
+    """The one log line per poll."""
+    p = hb.get("progress") if isinstance(hb.get("progress"), dict) else {}
+    parts = [f"heartbeat {hb.get('seq')}", f"phase {hb.get('phase')}"
+             + (f" ({p['window']} {p.get('t_s')} s)" if isinstance(p.get("window"), str) else ""),
+             f"{minutes:.1f} min", f"${spent:.2f} so far", f"CPU {cpu}%" if cpu is not None else "CPU ?"]
+    eta = p.get("eta")
+    if isinstance(eta, dict):
+        text = eta_text(eta)
+        if text:
+            parts.append(text)
+    return ", ".join(parts)
 
 
 def latest_heartbeat(run_id: str) -> tuple[str | None, dict | None]:
@@ -542,6 +630,11 @@ def rent_and_watch(a, run_id: str, best: dict | None, resumable: bool, run_start
     """Rents, watches and destroys machines until the run ends; returns (DONE/FAILED or "", reason)."""
     final, reason = "", ""
     while True:
+        spent = sum(x["dollars_est"] for x in attempts)
+        if a.max_dollars and spent >= a.max_dollars:
+            reason = (f"{reason}; " if reason else "") + f"budget of ${a.max_dollars:.2f} used (${spent:.2f}): no replacement"
+            log(f"::error::{reason}")
+            break
         best, instance_id = rent(a, run_id, best)
         if not best:
             reason = (f"{reason}; " if reason else "") + "no offer could be rented"
@@ -552,7 +645,8 @@ def rent_and_watch(a, run_id: str, best: dict | None, resumable: bool, run_start
         created = time.time()
         final, reason, replaceable, graceful = "", "", False, False
         try:
-            final, reason, replaceable, graceful = watch(a, run_id, instance_id, created, run_start, cpu_samples)
+            final, reason, replaceable, graceful = watch(a, run_id, instance_id, created, run_start, cpu_samples,
+                                                         dph=dph, spent_before=spent)
         except KeyboardInterrupt:
             # A cancelled workflow or Ctrl-C: let the machine upload what it finished first.
             reason, graceful = "cancelled", True
@@ -645,8 +739,47 @@ def report_run(a, run_id: str, resumable: bool, run_start: float, attempts: list
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a") as fh:
-            fh.write(f"## vast.ai run {run_id}: {report['outcome']}\n\n```json\n{json.dumps(report, indent=2)}\n```\n")
+            fh.write(summary_markdown(run_id, report, saved_files(run_id)))
     return 0 if final == "DONE" and not getattr(a, "stopped", False) else 1
+
+
+def saved_files(run_id: str) -> list[tuple[str, int, int]]:
+    """(prefix, files, bytes) of what the run saved in R2: its outputs (out/) and, for stopped
+    format-2 chunks, their unfinished outputs (partial/)."""
+    out = []
+    for sub in ("out/", "partial/"):
+        prefix = f"runs/{run_id}/{sub}"
+        try:
+            items = r2_list_sized(prefix)
+        except (RuntimeError, OSError, ValueError) as e:
+            log(f"could not list {prefix}: {e}")
+            continue
+        if items or sub == "out/":
+            out.append((prefix, len(items), sum(n for _, n in items)))
+    return out
+
+
+def human_bytes(n: int) -> str:
+    for unit in ("bytes", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n} {unit}" if unit == "bytes" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} GB"
+
+
+def summary_markdown(run_id: str, report: dict, saved: list[tuple[str, int, int]]) -> str:
+    """The short markdown summary for $GITHUB_STEP_SUMMARY, then the full report folded."""
+    machines = len(report.get("attempts") or [])
+    lines = [f"## vast.ai run {run_id}: {report['outcome']}", "",
+             f"- **Outcome:** {report['outcome']}: {report.get('reason')}",
+             f"- **Time:** {report.get('elapsed_min')} minutes on {machines} machine(s); "
+             f"**cost:** about ${report.get('dollars_est', 0):.2f}"]
+    for prefix, files, size in saved:
+        what = f"{files} file(s), {human_bytes(size)}" if files else "nothing (no outputs were saved)"
+        lines.append(f"- **Saved in R2** `{prefix}`: {what}")
+    lines += ["", "<details><summary>Full report</summary>", "", "```json", json.dumps(report, indent=2), "```",
+              "", "</details>", ""]
+    return "\n".join(lines) + "\n"
 
 
 def run_benchmarks(run_id: str, resumable: bool) -> list[dict]:
@@ -736,12 +869,16 @@ def stop_and_wait(run_id: str, reason: str, wait_s: int) -> str:
 
 
 def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
-          cpu_samples: list[float]) -> tuple[str, str, bool, bool]:
+          cpu_samples: list[float], dph: float = 0.0, spent_before: float = 0.0) -> tuple[str, str, bool, bool]:
     """Watch one instance. Returns (DONE/FAILED or "", reason, whether a replacement may resume,
     whether to ask the machine to stop and upload before destroying it: a machine that is still
-    working, ended for the time limit or low CPU; a silent or dead one is destroyed at once)."""
+    working, ended for the time limit, the budget, low CPU or silent while busy; a dead, idle or
+    gone one is destroyed at once). `dph` is this machine's price, `spent_before` the dollars of
+    the run's earlier machines."""
     low_since, last_key, last_change = None, None, created
     warned: set[str] = set()
+    silent_logged = False
+    eta_warned = False
     # Heartbeats of an earlier machine of this run do not count as this one's.
     first_key, _ = latest_heartbeat(run_id)
     while True:
@@ -752,6 +889,9 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
                 return marker, marker, False, False
         if now - run_start > a.max_minutes * 60:
             return "", f"max_minutes ({a.max_minutes}) reached", False, True
+        spent = spent_before + (now - created) / 3600 * dph
+        if a.max_dollars and spent >= a.max_dollars:
+            return "", f"budget reached: ${spent:.2f} of ${a.max_dollars:.2f} spent", False, True
         key, hb = latest_heartbeat(run_id)
         if key == first_key:
             key = None
@@ -769,15 +909,44 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
                 return "", "instance stopped before the first heartbeat", True, False
             log(f"waiting for the machine to start (image download and boot): {redact(status_line(info))}")
             continue
-        if now - last_change > HEARTBEAT_STALE_S:
-            return "", "heartbeat missing for 3 minutes", True, False
+        silent_s = now - last_change
+        if silent_s > HEARTBEAT_STALE_S:
+            info = instance_status(instance_id)
+            state, detail = silent_state(info, a.busy_cpu_pct)
+            if not silent_logged:
+                silent_logged = True
+                log(f"::warning::no new heartbeat for {silent_s / 60:.1f} minutes; vast: {redact(status_line(info))}; "
+                    f"{redact(detail)}")
+                print_logs(instance_id, 100)
+            if state != "busy":
+                return "", f"heartbeat missing for {silent_s / 60:.0f} minutes and the instance is {state} ({redact(detail)})", True, False
+            waited_min = (silent_s - HEARTBEAT_STALE_S) / 60
+            if waited_min >= a.silent_busy_min:
+                # Still busy but silent: its uploads are stuck. Ask it to stop and upload.
+                return "", (f"heartbeat missing for {silent_s / 60:.0f} minutes while the machine stayed busy "
+                            f"({redact(detail)}): uploads stuck"), True, True
+            log(f"::warning::no heartbeat for {silent_s / 60:.1f} min but the instance is busy ({redact(detail)}): "
+                f"treating it as an upload problem; waiting {a.silent_busy_min - waited_min:.0f} more min "
+                f"for heartbeats to resume (${spent:.2f} so far)")
+            continue
+        if silent_logged:
+            silent_logged = False
+            log("heartbeats resumed")
         if instance_gone(instance_id):
             return "", "instance died before DONE", True, False
         hb = hb or {}
         cpu = hb.get("cpu_util_pct")
         if cpu is None:
             cpu = hb.get("host_cpu_busy_pct")
-        log(f"heartbeat {hb.get('seq')}: phase {hb.get('phase')}, cpu {cpu}%, elapsed {hb.get('elapsed_s')} s, est ${hb.get('est_cost_usd')}")
+        line = poll_line(hb, (now - run_start) / 60, spent, cpu)
+        log(line if now == last_change else f"no new heartbeat for {now - last_change:.0f} s; last: {line}")
+        eta = (hb.get("progress") or {}).get("eta")
+        usd = eta.get("projected_usd") if isinstance(eta, dict) else None
+        if (a.max_dollars and isinstance(usd, (int, float)) and spent_before + usd > 1.2 * a.max_dollars
+                and not eta_warned):
+            eta_warned = True
+            log(f"::warning::projected cost ${spent_before + usd:.2f} is more than 20% over the budget of "
+                f"${a.max_dollars:.2f} (the run stops when the budget is reached)")
         # Warnings the runner reports (e.g. a transposition table lowered to fit memory), once each.
         for w in (hb.get("progress") or {}).get("warnings") or []:
             if isinstance(w, str) and w not in warned:
@@ -876,6 +1045,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="seconds of CPU below --low-cpu-pct before the machine is stopped and destroyed")
     s.add_argument("--poll-s", type=int, default=POLL_S,
                    help="seconds between checks of the machine (vast status, R2 heartbeat and markers)")
+    s.add_argument("--silent-busy-min", type=float, default=SILENT_BUSY_MIN,
+                   help="a machine silent for 3 minutes but busy (vast CPU >= --busy-cpu-pct) gets this many more "
+                        "minutes for its heartbeats to resume before it is asked to stop and upload")
+    s.add_argument("--busy-cpu-pct", type=float, default=BUSY_CPU_PCT,
+                   help="vast CPU use at or above which a silent machine counts as busy")
+    s.add_argument("--max-dollars", type=float, default=0.0,
+                   help="stop the run (stop and upload, then destroy) once its machines have cost this much (0 = no limit)")
     s.add_argument("--startup-minutes", type=int, default=15)
     s.add_argument("--stop-wait-s", type=int, default=STOP_WAIT_S,
                    help="before destroying a machine that is still working (time limit, low CPU, Ctrl-C), ask it to "
