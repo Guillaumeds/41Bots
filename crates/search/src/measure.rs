@@ -11,17 +11,20 @@
 //!    `dseed = Rng::derive(seed, &[AGREE, L, d])`, so world sets are nested (N worlds are the first
 //!    N of 2N) and a chunk can be redone identically. All (decision, world) tasks of a run share
 //!    one work queue (see [`world_rows_batch`]), so no thread waits for another decision's slow
-//!    world; the output file is byte-identical for any thread count.
+//!    world; the output file is byte-identical for any thread count. [`worlds_file`] also appends
+//!    each world to a checkpoint ([`ckpt_path`]) the moment it finishes, so a run that is killed
+//!    and resumed (here or on another machine, from an uploaded copy) redoes only the worlds that
+//!    were being solved, and still writes the same bytes. Progress is estimated by [`crate::eta`].
 //! 3. [`agreement_curve`]: the plateau rule of §13.1 on nested world sets.
 //! 4. [`score`]: a method against the yardstick (exact PIMC at the plateau N): agreement, mean
 //!    money-chance loss, loss distribution, and paired comparisons with confidence intervals.
 
 use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 
 use engine::cards::{Bits, DECK_SIZE, JOKER, Suit, bit, count};
@@ -32,11 +35,12 @@ use equity::{MoneyChance, ONE};
 use serde::{Deserialize, Serialize};
 use solver::{ParProgress, SolveMem};
 
+use crate::eta::{Eta, EtaClass, EtaTracker, MIN_PRIOR_S};
 use crate::labels;
 use crate::pimc::{
     Candidate, Ctx, Method, SearchConfig, aggregate, candidates, solves_per_world, world_row,
 };
-use crate::plan::{AutoParams, ExecProgress, PlanTask, WorldPlan, plan_auto, run_planned};
+use crate::plan::{AutoParams, ExecProgress, PlanTask, Planned, WorldPlan, plan_auto, run_planned};
 use crate::worlds::Worlds;
 
 /// The four strata of start states (§5.10).
@@ -425,7 +429,8 @@ pub fn method_name(m: Method) -> &'static str {
     }
 }
 
-/// Live counters of a [`world_rows_batch`] run, for progress reports only.
+/// Live counters of a worlds run ([`world_rows_batch`], [`worlds_file`]), for progress reports
+/// only.
 #[derive(Debug, Default)]
 pub struct BatchProgress {
     /// Decisions in the run (including ones already done before a resume).
@@ -434,8 +439,15 @@ pub struct BatchProgress {
     pub decisions_done: AtomicU64,
     /// (decision, world) tasks in the run (including ones already done before a resume).
     pub worlds_total: AtomicU64,
-    /// Tasks finished.
+    /// Tasks finished (including ones already done before a resume).
     pub worlds_done: AtomicU64,
+    /// Decisions already complete in the output file when the run started (a resume).
+    pub decisions_resumed: AtomicU64,
+    /// Worlds already done when the run started: every world of the complete decisions, plus
+    /// the worlds of unfinished decisions restored from the checkpoint ([`ckpt_path`]).
+    pub worlds_resumed: AtomicU64,
+    /// Worlds valued by this process (so `worlds_total - worlds_resumed` once it is done).
+    pub worlds_valued: AtomicU64,
     /// Worker threads in use (a position-aware run: all its threads).
     pub threads: AtomicU64,
     /// The parallel exact solve now running, when one worker runs `solve_fast_par`
@@ -446,6 +458,16 @@ pub struct BatchProgress {
     pub planned: AtomicBool,
     /// The position-aware runner's state: worlds running, threads busy, tail.
     pub exec: ExecProgress,
+    /// The progress estimate of the run under way ([`crate::eta`]), once it has started.
+    pub eta: Mutex<Option<Arc<EtaTracker>>>,
+}
+
+impl BatchProgress {
+    /// The progress estimate now ([`crate::eta`]), once a run has started.
+    pub fn eta(&self) -> Option<Eta> {
+        let t = self.eta.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        t.map(|t| t.snapshot())
+    }
 }
 
 /// A decision made ready for valuing.
@@ -476,9 +498,10 @@ pub fn batch_key(d: &DecisionSpec, n_cands: usize) -> (u8, u8, Reverse<usize>, u
 /// Scheduling: one flat work queue holds every (decision, world) task of the whole run, ordered
 /// by [`batch_order`] then world; `cfg.threads` workers take the next task from an atomic index,
 /// so a slow world never holds other threads up (there is no barrier per decision). Each result
-/// goes into a pre-sized slot by (decision, world); a decision is handed to `sink`, in batch
-/// order, once it and every decision before it are complete. Values, rows and the order of the
-/// `sink` calls are therefore the same for any thread count; only the timings differ.
+/// goes to one collecting thread, which puts it in its slot by (decision, world); a decision is
+/// handed to `sink`, in batch order, once it and every decision before it are complete. Values,
+/// rows and the order of the `sink` calls are therefore the same for any thread count; only the
+/// timings differ.
 pub fn world_rows_batch(
     ds: &[DecisionSpec],
     job: &WorldsJob,
@@ -487,6 +510,78 @@ pub fn world_rows_batch(
     progress: Option<&BatchProgress>,
     mut sink: impl FnMut(WorldRows, DecisionTiming) -> Result<(), String>,
 ) -> Result<(), String> {
+    run_worlds(
+        ds,
+        job,
+        ctx,
+        cfg,
+        &Schedule::Fixed,
+        progress,
+        &Resume::default(),
+        &mut (),
+        &mut sink,
+    )
+}
+
+/// A world finished by an earlier, interrupted run (read back from the checkpoint).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DoneWorld {
+    /// Each candidate's value (four u64 per value).
+    pub v: Vec<[u64; 4]>,
+    /// Microseconds it took (timings only).
+    pub us: u64,
+}
+
+/// What a resumed run already has. Both only shorten the work: no value, row or order depends
+/// on them.
+#[derive(Clone, Debug, Default)]
+pub struct Resume {
+    /// Worlds finished earlier, by (decision id, world number).
+    pub worlds: BTreeMap<(u64, u64), DoneWorld>,
+    /// Decisions already complete in the output (they count as done work in the estimate).
+    pub decisions: Vec<DecisionSpec>,
+}
+
+/// Receives each world as it finishes, on the one thread that collects results, before the
+/// decision it belongs to is handed on. [`worlds_file`]'s checkpoint is one.
+pub trait WorldSink {
+    /// World `w` of decision `id` finished with these values, in `us` microseconds.
+    fn world(&mut self, id: u64, w: u64, v: &[[u64; 4]], us: u64) -> Result<(), String>;
+    /// Decision `id` has been handed on complete: its worlds are no longer needed.
+    fn decision(&mut self, _id: u64) -> Result<(), String> {
+        Ok(())
+    }
+    /// The worlds given so far must now be in the file (called after each batch of them).
+    fn flush(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// No checkpoint.
+impl WorldSink for () {
+    fn world(&mut self, _: u64, _: u64, _: &[[u64; 4]], _: u64) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// Where finished decisions go.
+type Sink<'s> = dyn FnMut(WorldRows, DecisionTiming) -> Result<(), String> + 's;
+
+/// [`world_rows_sched`] resuming from `resume` and reporting every world to `ws` (the
+/// checkpoint) as it finishes: the worlds in `resume.worlds` are taken as they are, not valued
+/// again, so rows, their order and the `sink` calls are exactly an uninterrupted run's.
+#[allow(clippy::too_many_arguments)]
+pub fn run_worlds(
+    ds: &[DecisionSpec],
+    job: &WorldsJob,
+    ctx: &Ctx,
+    cfg: &SearchConfig,
+    sched: &Schedule,
+    progress: Option<&BatchProgress>,
+    resume: &Resume,
+    ws: &mut dyn WorldSink,
+    sink: &mut Sink,
+) -> Result<(), String> {
     assert!(job.to >= job.from, "worlds from..to");
     let preps = prepare_batch(ds, job);
     let worlds: Vec<_> = preps
@@ -494,112 +589,456 @@ pub fn world_rows_batch(
         .map(|p| ctx.source.prepare(&p.view, ctx.rules))
         .collect();
     let nw = (job.to - job.from) as usize;
-    let total = preps.len() * nw;
-    let slots: Vec<OnceLock<Vec<MoneyChance>>> = (0..total).map(|_| OnceLock::new()).collect();
-    let left: Vec<AtomicUsize> = preps.iter().map(|_| AtomicUsize::new(nw)).collect();
-    let us: Vec<AtomicU64> = preps.iter().map(|_| AtomicU64::new(0)).collect();
-    let max_us: Vec<AtomicU64> = preps.iter().map(|_| AtomicU64::new(0)).collect();
-    let next = AtomicUsize::new(0);
-    let stop = AtomicBool::new(false);
-    let threads = cfg.threads.max(1).min(total.max(1));
+    let mut col = Collect::new(&preps, job, &resume.worlds);
+    let todo = col.todo();
     if let Some(p) = progress {
+        p.worlds_done.fetch_add(col.restored, Ordering::Relaxed);
+    }
+    let params = match sched {
+        Schedule::Auto { params, .. } => (**params).clone(),
+        Schedule::Fixed => AutoParams::default(),
+    };
+    let cost = Costs::new(&preps, &resume.decisions, job, &params, &col);
+    let b = Batch {
+        preps: &preps,
+        worlds: &worlds,
+        job,
+        ctx,
+        progress,
+        cost: &cost,
+    };
+    let Schedule::Auto {
+        threads,
+        budget_mb,
+        params,
+    } = sched
+    else {
+        return batch_path(&b, cfg, &todo, &mut col, ws, sink);
+    };
+    let threads = (*threads).max(1);
+    let budget = budget_mb.saturating_mul(1 << 20);
+    let flat = |tt_mb: usize| SearchConfig {
+        threads,
+        solve_threads: 1,
+        tt_mb,
+        ..*cfg
+    };
+    if job.method != Method::ExactPimc || todo.is_empty() {
+        return batch_path(&b, &flat(cfg.tt_mb), &todo, &mut col, ws, sink);
+    }
+    let tasks: Vec<PlanTask> = todo
+        .iter()
+        .map(|&k| {
+            let p = &preps[k / nw];
+            PlanTask {
+                trick: p.d.trick,
+                position: p.d.position,
+                solves: solves_per_world(&p.cands),
+            }
+        })
+        .collect();
+    let planned = plan_auto(&tasks, threads, budget, params);
+    let one = planned.plans.first().copied();
+    if let Some(one) = one
+        && one.threads == 1
+        && planned.plans.iter().all(|w| *w == one)
+    {
+        return batch_path(&b, &flat(one.tt_mb), &todo, &mut col, ws, sink);
+    }
+    eprintln!("worlds: position-aware plan {}", planned.record);
+    planned_path(
+        &b, cfg, &todo, &planned, threads, budget, &mut col, ws, sink,
+    )
+}
+
+/// The read-only state of one worlds run, shared by its workers.
+struct Batch<'a> {
+    preps: &'a [Prepared<'a>],
+    worlds: &'a [Box<dyn Worlds + 'a>],
+    job: &'a WorldsJob,
+    ctx: &'a Ctx<'a>,
+    progress: Option<&'a BatchProgress>,
+    cost: &'a Costs,
+}
+
+impl Batch<'_> {
+    /// A progress estimate for this run with room for `slots` worlds at once, also published in
+    /// `progress`.
+    fn start_eta(&self, slots: usize) -> Arc<EtaTracker> {
+        let t = Arc::new(EtaTracker::new(self.cost.classes.clone(), slots));
+        if let Some(p) = self.progress {
+            *p.eta.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&t));
+        }
+        t
+    }
+}
+
+/// Classes (trick, position) and prior costs of a run's worlds, for the progress estimate
+/// ([`crate::eta`]): the plan's own expected cost per world for exact worlds.
+struct Costs {
+    /// (class, prior thread-seconds) of each prepared decision's worlds.
+    per_prep: Vec<(usize, f64)>,
+    classes: Vec<EtaClass>,
+}
+
+/// The prior cost (thread-seconds) of one world of a decision with these candidates.
+fn world_prior(
+    trick: u8,
+    position: u8,
+    cands: &[Candidate],
+    method: Method,
+    p: &AutoParams,
+) -> f64 {
+    let task = PlanTask {
+        trick,
+        position,
+        solves: solves_per_world(cands),
+    };
+    let s = match method {
+        Method::ExactPimc => p.expected_cost(&task),
+        // No model for rollout worlds: about a millisecond per candidate per trick left; the
+        // estimate calls itself rough until this is replaced by measured times.
+        _ => 1e-3 * cands.len() as f64 * f64::from(6u8.saturating_sub(trick).max(1)),
+    };
+    s.max(MIN_PRIOR_S)
+}
+
+impl Costs {
+    fn new(
+        preps: &[Prepared],
+        before: &[DecisionSpec],
+        job: &WorldsJob,
+        params: &AutoParams,
+        col: &Collect,
+    ) -> Costs {
+        let nw = job.to - job.from;
+        // (trick, position) → (tasks, prior total, done before, prior done before).
+        let mut acc: BTreeMap<(u8, u8), (u64, f64, u64, f64)> = BTreeMap::new();
+        let mut add = |key: (u8, u8), prior: f64, pre: u64| {
+            let e = acc.entry(key).or_default();
+            e.0 += nw;
+            e.1 += nw as f64 * prior;
+            e.2 += pre;
+            e.3 += pre as f64 * prior;
+        };
+        let priors: Vec<f64> = preps
+            .iter()
+            .map(|p| world_prior(p.d.trick, p.d.position, &p.cands, job.method, params))
+            .collect();
+        for (j, p) in preps.iter().enumerate() {
+            add((p.d.trick, p.d.position), priors[j], col.restored_per[j]);
+        }
+        for d in before {
+            let (_, view, legal) = d.replay();
+            let (_, cands) = candidates(&view, &legal);
+            let prior = world_prior(d.trick, d.position, &cands, job.method, params);
+            add((d.trick, d.position), prior, nw);
+        }
+        let index: BTreeMap<(u8, u8), usize> =
+            acc.keys().enumerate().map(|(i, &k)| (k, i)).collect();
+        let classes = acc
+            .iter()
+            .map(
+                |(&(trick, pos), &(tasks, prior, pre, prior_pre))| EtaClass {
+                    name: format!("t{trick}p{}", pos + 1),
+                    tasks,
+                    prior_total_s: prior,
+                    pre_done: pre,
+                    prior_pre_s: prior_pre,
+                },
+            )
+            .collect();
+        let per_prep = preps
+            .iter()
+            .zip(&priors)
+            .map(|(p, &prior)| (index[&(p.d.trick, p.d.position)], prior))
+            .collect();
+        Costs { per_prep, classes }
+    }
+}
+
+/// Collects finished worlds on one thread and hands complete decisions on in batch order.
+struct Collect {
+    nw: usize,
+    from: u64,
+    /// Decision id of each prepared decision.
+    ids: Vec<u64>,
+    rows: Vec<Vec<Option<Vec<[u64; 4]>>>>,
+    left: Vec<usize>,
+    /// Total and slowest world (µs) of each decision.
+    us: Vec<(u64, u64)>,
+    /// Solver threads per world of each decision, in a position-aware run.
+    threads: Vec<Option<u64>>,
+    /// The next decision to hand on.
+    next: usize,
+    /// Worlds restored from the checkpoint, in all and per decision.
+    restored: u64,
+    restored_per: Vec<u64>,
+}
+
+impl Collect {
+    fn new(preps: &[Prepared], job: &WorldsJob, done: &BTreeMap<(u64, u64), DoneWorld>) -> Collect {
+        let nw = (job.to - job.from) as usize;
+        let n = preps.len();
+        let mut c = Collect {
+            nw,
+            from: job.from,
+            ids: preps.iter().map(|p| p.d.id).collect(),
+            rows: vec![vec![None; nw]; n],
+            left: vec![nw; n],
+            us: vec![(0, 0); n],
+            threads: vec![None; n],
+            next: 0,
+            restored: 0,
+            restored_per: vec![0; n],
+        };
+        for (j, p) in preps.iter().enumerate() {
+            for i in 0..nw {
+                let w = job.from + i as u64;
+                // A row with another number of candidates is not this decision's (never used).
+                if let Some(d) = done
+                    .get(&(p.d.id, w))
+                    .filter(|d| d.v.len() == p.cands.len())
+                {
+                    c.rows[j][i] = Some(d.v.clone());
+                    c.left[j] -= 1;
+                    c.us[j] = (c.us[j].0 + d.us, c.us[j].1.max(d.us));
+                    c.restored += 1;
+                    c.restored_per[j] += 1;
+                }
+            }
+        }
+        c
+    }
+
+    /// The tasks (`decision × worlds + world`) still to value, in queue order.
+    fn todo(&self) -> Vec<usize> {
+        (0..self.rows.len() * self.nw)
+            .filter(|&k| self.rows[k / self.nw][k % self.nw].is_none())
+            .collect()
+    }
+
+    /// Task `k` finished with values `v` in `us` µs: report it to `ws`, then keep it.
+    fn put(
+        &mut self,
+        k: usize,
+        v: Vec<[u64; 4]>,
+        us: u64,
+        ws: &mut dyn WorldSink,
+    ) -> Result<(), String> {
+        let (j, i) = (k / self.nw, k % self.nw);
+        ws.world(self.ids[j], self.from + i as u64, &v, us)?;
+        debug_assert!(self.rows[j][i].is_none(), "each task is valued once");
+        self.rows[j][i] = Some(v);
+        self.left[j] -= 1;
+        self.us[j] = (self.us[j].0 + us, self.us[j].1.max(us));
+        Ok(())
+    }
+
+    /// Hands every complete decision at the head of the batch order to `sink`.
+    fn emit(&mut self, b: &Batch, ws: &mut dyn WorldSink, sink: &mut Sink) -> Result<(), String> {
+        while self.next < self.rows.len() && self.left[self.next] == 0 {
+            let j = self.next;
+            let rows: Vec<Vec<[u64; 4]>> = core::mem::take(&mut self.rows[j])
+                .into_iter()
+                .map(|x| x.expect("a finished decision has every world"))
+                .collect();
+            let (r, t) = records(
+                &b.preps[j],
+                b.job,
+                &*b.worlds[j],
+                rows,
+                self.us[j],
+                self.threads[j],
+            );
+            sink(r, t)?;
+            ws.decision(self.ids[j])?;
+            if let Some(p) = b.progress {
+                p.decisions_done.fetch_add(1, Ordering::Relaxed);
+            }
+            self.next += 1;
+        }
+        Ok(())
+    }
+
+    fn finished(&self) -> bool {
+        self.next == self.rows.len()
+    }
+}
+
+/// The plain workers: `cfg.threads` threads take the tasks of `todo` in order from one atomic
+/// index, each world on one worker (`solve_fast_par` on `cfg.solve_threads` threads when that is
+/// above 1); this thread collects.
+fn batch_path(
+    b: &Batch,
+    cfg: &SearchConfig,
+    todo: &[usize],
+    col: &mut Collect,
+    ws: &mut dyn WorldSink,
+    sink: &mut Sink,
+) -> Result<(), String> {
+    let nw = col.nw;
+    let threads = cfg.threads.max(1).min(todo.len().max(1));
+    if let Some(p) = b.progress {
         p.threads.store(threads as u64, Ordering::Relaxed);
     }
     // Solve progress is only meaningful with one parallel solve at a time.
-    let par = progress
+    let par = b
+        .progress
         .filter(|_| threads == 1 && cfg.solve_threads > 1)
         .map(|p| &p.par);
-    let work = |tx: mpsc::Sender<()>| {
+    let world_threads = if b.job.method == Method::ExactPimc {
+        cfg.solve_threads.max(1)
+    } else {
+        1
+    };
+    let eta = b.start_eta(threads);
+    let eta = &*eta;
+    let next = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    type Msg = (usize, Vec<[u64; 4]>, u64);
+    let work = |worker: usize, tx: mpsc::Sender<Msg>| {
         // One solver memory per worker for the whole run: its transposition table is allocated
         // once and emptied in O(1) between worlds, not allocated, first-touched and freed per
         // world (with hundreds of threads on short worlds that churn queued the threads on the
         // kernel's memory map). Values are unchanged (see `SolveMem`).
         let mut mem = SolveMem::new();
         while !stop.load(Ordering::Relaxed) {
-            let k = next.fetch_add(1, Ordering::Relaxed);
-            if k >= total {
+            let Some(&k) = todo.get(next.fetch_add(1, Ordering::Relaxed)) else {
                 break;
-            }
+            };
             let (j, i) = (k / nw, k % nw);
-            let p = &preps[j];
+            let p = &b.preps[j];
+            let (class, prior) = b.cost.per_prep[j];
+            let slot = eta.begin(worker, class, prior, world_threads);
             let t0 = Instant::now();
-            let w = job.from + i as u64;
             let v = world_row(
                 &p.view,
-                &*worlds[j],
+                &*b.worlds[j],
                 &p.cands,
-                job.method,
-                w,
+                b.job.method,
+                b.job.from + i as u64,
                 p.dseed,
-                ctx,
+                b.ctx,
                 cfg,
                 par,
                 &mut mem,
             );
-            let t = t0.elapsed().as_micros() as u64;
-            us[j].fetch_add(t, Ordering::Relaxed);
-            max_us[j].fetch_max(t, Ordering::Relaxed);
-            assert!(slots[k].set(v).is_ok(), "each task is taken once");
-            if let Some(p) = progress {
-                p.worlds_done.fetch_add(1, Ordering::Relaxed);
+            let wall = t0.elapsed();
+            eta.end(slot, class, prior, world_threads, wall.as_secs_f64());
+            if let Some(pr) = b.progress {
+                pr.worlds_done.fetch_add(1, Ordering::Relaxed);
+                pr.worlds_valued.fetch_add(1, Ordering::Relaxed);
             }
-            if left[j].fetch_sub(1, Ordering::AcqRel) == 1 {
-                // The writer may have stopped (a sink error); nothing to do then.
-                let _ = tx.send(());
+            let v: Vec<[u64; 4]> = v.into_iter().map(|x| x.0).collect();
+            if tx.send((k, v, wall.as_micros() as u64)).is_err() {
+                // The collector has stopped (a sink error).
+                break;
             }
         }
     };
     std::thread::scope(|s| {
-        let (tx, rx) = mpsc::channel::<()>();
-        for _ in 0..threads.min(total) {
+        let (tx, rx) = mpsc::channel::<Msg>();
+        for w in 0..threads.min(todo.len()) {
             let tx = tx.clone();
-            s.spawn(move || work(tx));
+            s.spawn(move || work(w, tx));
         }
         drop(tx);
-        // The writer (this thread): hand finished decisions out in batch order.
-        let mut j = 0;
-        let result = 'write: loop {
-            while j < preps.len() && left[j].load(Ordering::Acquire) == 0 {
-                let rows: Vec<Vec<[u64; 4]>> = slots[j * nw..(j + 1) * nw]
-                    .iter()
-                    .map(|c| {
-                        c.get()
-                            .expect("a finished decision has every world")
-                            .iter()
-                            .map(|v| v.0)
-                            .collect()
-                    })
-                    .collect();
-                let (r, t) = records(
-                    &preps[j],
-                    job,
-                    &*worlds[j],
-                    rows,
-                    (
-                        us[j].load(Ordering::Relaxed),
-                        max_us[j].load(Ordering::Relaxed),
-                    ),
-                    None,
-                );
-                if let Err(e) = sink(r, t) {
-                    break 'write Err(e);
-                }
-                if let Some(pr) = progress {
-                    pr.decisions_done.fetch_add(1, Ordering::Relaxed);
-                }
-                j += 1;
+        // The collector (this thread): checkpoint each world, hand decisions out in batch order.
+        let result: Result<(), String> = (|| loop {
+            col.emit(b, ws, sink)?;
+            if col.finished() {
+                return Ok(());
             }
-            if j == preps.len() {
-                break Ok(());
+            // Every worker has stopped (one panicked); the scope re-raises the panic.
+            let Ok((k, v, us)) = rx.recv() else {
+                return Ok(());
+            };
+            col.put(k, v, us, ws)?;
+            while let Ok((k, v, us)) = rx.try_recv() {
+                col.put(k, v, us, ws)?;
             }
-            if rx.recv().is_err() {
-                // Every worker has stopped (one panicked); the scope re-raises the panic.
-                break Ok(());
-            }
-        };
+            ws.flush()?;
+        })();
         stop.store(true, Ordering::Relaxed);
         result
     })
+}
+
+/// The position-aware runner ([`run_planned`]): each world of `todo` on its planned threads and
+/// table; this thread collects.
+#[allow(clippy::too_many_arguments)]
+fn planned_path(
+    b: &Batch,
+    cfg: &SearchConfig,
+    todo: &[usize],
+    planned: &Planned,
+    threads: usize,
+    budget: u64,
+    col: &mut Collect,
+    ws: &mut dyn WorldSink,
+    sink: &mut Sink,
+) -> Result<(), String> {
+    let nw = col.nw;
+    if let Some(p) = b.progress {
+        p.threads.store(threads as u64, Ordering::Relaxed);
+        p.planned.store(true, Ordering::Relaxed);
+    }
+    for (n, &k) in todo.iter().enumerate() {
+        col.threads[k / nw].get_or_insert(planned.plans[n].threads as u64);
+    }
+    let eta = b.start_eta(threads);
+    let eta = &*eta;
+    // Decisions restored whole from the checkpoint come first in the order.
+    col.emit(b, ws, sink)?;
+    let stop = AtomicBool::new(false);
+    let work = |n: usize, plan: WorldPlan, mem: &mut SolveMem| {
+        let k = todo[n];
+        let (j, i) = (k / nw, k % nw);
+        let p = &b.preps[j];
+        let (class, prior) = b.cost.per_prep[j];
+        let slot = eta.begin(0, class, prior, plan.threads);
+        let t0 = Instant::now();
+        let c = SearchConfig {
+            threads: 1,
+            solve_threads: plan.threads,
+            tt_mb: plan.tt_mb,
+            ..*cfg
+        };
+        let v = world_row(
+            &p.view,
+            &*b.worlds[j],
+            &p.cands,
+            b.job.method,
+            b.job.from + i as u64,
+            p.dseed,
+            b.ctx,
+            &c,
+            None,
+            mem,
+        );
+        eta.end(slot, class, prior, plan.threads, t0.elapsed().as_secs_f64());
+        v.into_iter().map(|x| x.0).collect::<Vec<[u64; 4]>>()
+    };
+    run_planned(
+        &planned.order,
+        &planned.plans,
+        threads,
+        budget,
+        &stop,
+        b.progress.map(|p| &p.exec),
+        work,
+        |n, v, ran| {
+            if let Some(p) = b.progress {
+                p.worlds_done.fetch_add(1, Ordering::Relaxed);
+                p.worlds_valued.fetch_add(1, Ordering::Relaxed);
+            }
+            col.put(todo[n], v, (ran.wall_s * 1e6) as u64, ws)?;
+            ws.flush()?;
+            col.emit(b, ws, sink)
+        },
+    )?;
+    col.emit(b, ws, sink)
 }
 
 /// The decisions of a batch made ready, in [`batch_order`] (the order of the output file).
@@ -674,125 +1113,16 @@ pub fn world_rows_sched(
     progress: Option<&BatchProgress>,
     mut sink: impl FnMut(WorldRows, DecisionTiming) -> Result<(), String>,
 ) -> Result<(), String> {
-    let Schedule::Auto {
-        threads,
-        budget_mb,
-        params,
-    } = sched
-    else {
-        return world_rows_batch(ds, job, ctx, cfg, progress, sink);
-    };
-    let threads = (*threads).max(1);
-    let budget = budget_mb.saturating_mul(1 << 20);
-    let flat = |tt_mb: usize| SearchConfig {
-        threads,
-        solve_threads: 1,
-        tt_mb,
-        ..*cfg
-    };
-    if job.method != Method::ExactPimc || job.to <= job.from {
-        return world_rows_batch(ds, job, ctx, &flat(cfg.tt_mb), progress, sink);
-    }
-    assert!(job.to >= job.from, "worlds from..to");
-    let preps = prepare_batch(ds, job);
-    let nw = (job.to - job.from) as usize;
-    let tasks: Vec<PlanTask> = preps
-        .iter()
-        .flat_map(|p| {
-            let t = PlanTask {
-                trick: p.d.trick,
-                position: p.d.position,
-                solves: solves_per_world(&p.cands),
-            };
-            std::iter::repeat_n(t, nw)
-        })
-        .collect();
-    let planned = plan_auto(&tasks, threads, budget, params);
-    let one = planned.plans.first().copied();
-    if let Some(one) = one
-        && one.threads == 1
-        && planned.plans.iter().all(|w| *w == one)
-    {
-        return world_rows_batch(ds, job, ctx, &flat(one.tt_mb), progress, sink);
-    }
-    eprintln!("worlds: position-aware plan {}", planned.record);
-    let worlds: Vec<_> = preps
-        .iter()
-        .map(|p| ctx.source.prepare(&p.view, ctx.rules))
-        .collect();
-    if let Some(p) = progress {
-        p.threads.store(threads as u64, Ordering::Relaxed);
-        p.planned.store(true, Ordering::Relaxed);
-    }
-    let mut rows: Vec<Vec<Option<Vec<[u64; 4]>>>> = vec![vec![None; nw]; preps.len()];
-    let mut left = vec![nw; preps.len()];
-    let mut us = vec![(0u64, 0u64); preps.len()];
-    let mut j_out = 0usize;
-    let stop = AtomicBool::new(false);
-    let work = |k: usize, plan: WorldPlan, mem: &mut SolveMem| {
-        let (j, i) = (k / nw, k % nw);
-        let p = &preps[j];
-        let c = SearchConfig {
-            threads: 1,
-            solve_threads: plan.threads,
-            tt_mb: plan.tt_mb,
-            ..*cfg
-        };
-        let w = job.from + i as u64;
-        let v = world_row(
-            &p.view,
-            &*worlds[j],
-            &p.cands,
-            job.method,
-            w,
-            p.dseed,
-            ctx,
-            &c,
-            None,
-            mem,
-        );
-        v.into_iter().map(|x| x.0).collect::<Vec<[u64; 4]>>()
-    };
-    run_planned(
-        &planned.order,
-        &planned.plans,
-        threads,
-        budget,
-        &stop,
-        progress.map(|p| &p.exec),
-        work,
-        |k, v, ran| {
-            let (j, i) = (k / nw, k % nw);
-            rows[j][i] = Some(v);
-            left[j] -= 1;
-            let t = (ran.wall_s * 1e6) as u64;
-            us[j] = (us[j].0 + t, us[j].1.max(t));
-            if let Some(p) = progress {
-                p.worlds_done.fetch_add(1, Ordering::Relaxed);
-            }
-            // Hand finished decisions out in batch order.
-            while j_out < preps.len() && left[j_out] == 0 {
-                let r: Vec<Vec<[u64; 4]>> = core::mem::take(&mut rows[j_out])
-                    .into_iter()
-                    .map(|x| x.expect("a finished decision has every world"))
-                    .collect();
-                let threads = planned.plans[j_out * nw].threads as u64;
-                let (r, t) = records(
-                    &preps[j_out],
-                    job,
-                    &*worlds[j_out],
-                    r,
-                    us[j_out],
-                    Some(threads),
-                );
-                sink(r, t)?;
-                if let Some(pr) = progress {
-                    pr.decisions_done.fetch_add(1, Ordering::Relaxed);
-                }
-                j_out += 1;
-            }
-            Ok(())
-        },
+    run_worlds(
+        ds,
+        job,
+        ctx,
+        cfg,
+        sched,
+        progress,
+        &Resume::default(),
+        &mut (),
+        &mut sink,
     )
 }
 
@@ -849,10 +1179,14 @@ pub fn timing_path(out: &Path) -> PathBuf {
 
 /// The `search worlds` step: value decisions `ds` by `job` into the JSON-lines file `out`, one
 /// line per decision in batch order, resuming from what `out` already holds (decisions already
-/// there with this job's worlds are skipped; a torn last line is dropped and redone). The file is
-/// byte-identical for any thread count, and whether or not the run was interrupted and resumed.
-/// Timings are appended to [`timing_path`]`(out)`. `on_done` sees each decision as it is written
-/// (for logs). Returns the number of decisions valued by this call.
+/// there with this job's worlds are skipped; a torn last line is dropped and redone) and from its
+/// checkpoint [`ckpt_path`]`(out)`, which holds every world finished since, one line each,
+/// appended as each world finishes: a resumed run values only the worlds missing from both, so
+/// an interrupted run loses at most the worlds that were being solved. The file is
+/// byte-identical for any thread count, and whether or not the run was interrupted and resumed,
+/// however many times and wherever. Timings are appended to [`timing_path`]`(out)`. `on_done`
+/// sees each decision as it is written (for logs). Returns the number of decisions valued by this
+/// call. The checkpoint is deleted once every decision is in `out`.
 ///
 /// Extension (§13.1 item 10): records of the same method and label for other world ranges may
 /// already be in `out` (or in other files). A job with `from` at the end of an earlier range
@@ -882,7 +1216,317 @@ pub fn worlds_file_sched(
     cfg: &SearchConfig,
     sched: &Schedule,
     progress: Option<&BatchProgress>,
+    on_done: impl FnMut(&WorldRows, &DecisionTiming),
+) -> Result<usize, String> {
+    worlds_file_knobs(
+        out,
+        ds,
+        job,
+        ctx,
+        cfg,
+        sched,
+        progress,
+        on_done,
+        CkptKnobs::default(),
+    )
+}
+
+/// The checkpoint that goes with a worlds file: `<out>.ckpt`, one JSON line ([`CkptRow`]) per
+/// finished world.
+pub fn ckpt_path(out: &Path) -> PathBuf {
+    let mut s = out.as_os_str().to_owned();
+    s.push(".ckpt");
+    PathBuf::from(s)
+}
+
+/// One line of a checkpoint: one finished world, with everything that decides its values, so a
+/// line is only ever used for the same world of the same decision under the same settings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CkptRow {
+    /// The decision's id.
+    pub id: u64,
+    /// The decision's fingerprint ([`decision_fingerprint`]).
+    pub fp: u64,
+    /// `exact` or `rollout`.
+    pub method: String,
+    /// World label.
+    pub label: u64,
+    /// Master seed.
+    pub seed: u64,
+    /// The world source's name.
+    pub source: String,
+    /// World number.
+    pub w: u64,
+    /// The candidates' values in this world (four u64 each).
+    pub v: Vec<[u64; 4]>,
+    /// Microseconds the world took (timings only).
+    pub us: u64,
+}
+
+/// A decision's fingerprint: 64-bit FNV-1a of the JSON of what defines it (start state, deck,
+/// actions before it, seat), so a checkpoint is never applied to another decision set.
+pub fn decision_fingerprint(d: &DecisionSpec) -> u64 {
+    let text = serde_json::to_string(&(&d.start, &d.deck, &d.actions, d.seat)).unwrap_or_default();
+    text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// Test switches of the checkpoint (production uses the defaults).
+#[derive(Clone, Copy, Debug)]
+struct CkptKnobs {
+    /// Stop with an error once this process has checkpointed this many worlds, as if it had been
+    /// killed there.
+    fail_after: Option<u64>,
+    /// Rewrite the checkpoint without the worlds of finished decisions once there are at least
+    /// this many such lines (and at least as many as live ones).
+    compact_min: usize,
+}
+
+impl Default for CkptKnobs {
+    fn default() -> Self {
+        CkptKnobs {
+            fail_after: None,
+            compact_min: 4096,
+        }
+    }
+}
+
+/// What a checkpoint holds for a job: worlds to restore, and the lines worth keeping.
+#[derive(Default)]
+struct CkptRead {
+    /// Finished worlds of this run's unfinished decisions in the job's range.
+    worlds: BTreeMap<(u64, u64), DoneWorld>,
+    /// Their lines, by decision id.
+    live: BTreeMap<u64, Vec<String>>,
+    /// Lines of other decisions or other world ranges (kept as they are).
+    other: Vec<String>,
+}
+
+/// Reads the checkpoint `path` for `job`. Torn lines are skipped and repeated worlds kept once;
+/// worlds of decisions already in the output are dropped. Lines made with other settings, or for
+/// a decision that differs from this run's decision of the same id, are an error.
+fn read_ckpt(
+    path: &Path,
+    job: &WorldsJob,
+    source: &str,
+    fps: &BTreeMap<u64, u64>,
+    done: &BTreeSet<u64>,
+) -> Result<CkptRead, String> {
+    let mut r = CkptRead::default();
+    if !path.exists() {
+        return Ok(r);
+    }
+    let mut seen = BTreeSet::new();
+    for row in read_jsonl::<CkptRow>(path)? {
+        if row.method != method_name(job.method)
+            || row.label != job.label
+            || row.seed != job.seed
+            || row.source != source
+        {
+            return Err(format!(
+                "{}: world {} of decision {} was made with other settings ({} label {} seed {} \
+                 source {}); use another output file, or delete the checkpoint",
+                path.display(),
+                row.w,
+                row.id,
+                row.method,
+                row.label,
+                row.seed,
+                row.source
+            ));
+        }
+        if fps.get(&row.id).is_some_and(|&fp| fp != row.fp) {
+            return Err(format!(
+                "{}: decision {} is not the one in the decisions file (another decision set?); \
+                 use another output file, or delete the checkpoint",
+                path.display(),
+                row.id
+            ));
+        }
+        if !seen.insert((row.id, row.w)) {
+            continue;
+        }
+        let in_range = (job.from..job.to).contains(&row.w);
+        if in_range && done.contains(&row.id) {
+            continue;
+        }
+        let line = serde_json::to_string(&row).map_err(|e| e.to_string())?;
+        if in_range && fps.contains_key(&row.id) {
+            r.live.entry(row.id).or_default().push(line);
+            r.worlds.insert(
+                (row.id, row.w),
+                DoneWorld {
+                    v: row.v,
+                    us: row.us,
+                },
+            );
+        } else {
+            r.other.push(line);
+        }
+    }
+    Ok(r)
+}
+
+/// The checkpoint writer ([`WorldSink`]): appends each finished world as one line; once most
+/// lines belong to decisions already written to the output, rewrites the file without them (a
+/// new file renamed over the old, so a kill at any moment leaves a whole checkpoint).
+struct Ckpt {
+    path: PathBuf,
+    f: std::io::BufWriter<std::fs::File>,
+    fps: BTreeMap<u64, u64>,
+    job: WorldsJob,
+    source: String,
+    /// Lines of decisions not yet in the output, by decision id.
+    live: BTreeMap<u64, Vec<String>>,
+    live_lines: usize,
+    /// Lines kept as they are (other decisions or world ranges).
+    other: Vec<String>,
+    /// Lines in the file whose decisions are now in the output.
+    stale: usize,
+    /// Worlds this process has written.
+    written: u64,
+    knobs: CkptKnobs,
+}
+
+/// Writes `text` as the whole of `path`: a new file renamed over the old, so a kill at any
+/// moment leaves either the old file or the new one.
+fn replace_file(path: &Path, text: &str) -> Result<(), String> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn append(p: &Path) -> Result<std::fs::File, String> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(p)
+        .map_err(|e| format!("{}: {e}", p.display()))
+}
+
+impl Ckpt {
+    /// The text of every line worth keeping.
+    fn text(&self) -> String {
+        let mut text = String::new();
+        for l in self.other.iter().chain(self.live.values().flatten()) {
+            text.push_str(l);
+            text.push('\n');
+        }
+        text
+    }
+
+    fn open(
+        path: &Path,
+        read: CkptRead,
+        fps: BTreeMap<u64, u64>,
+        job: &WorldsJob,
+        source: &str,
+        knobs: CkptKnobs,
+    ) -> Result<Ckpt, String> {
+        let live_lines = read.live.values().map(Vec::len).sum();
+        let mut c = Ckpt {
+            path: path.to_path_buf(),
+            // Replaced just below, once the file has been rewritten.
+            f: std::io::BufWriter::new(append(path)?),
+            fps,
+            job: *job,
+            source: source.to_string(),
+            live: read.live,
+            live_lines,
+            other: read.other,
+            stale: 0,
+            written: 0,
+            knobs,
+        };
+        // Start from a clean file: no torn line for the next line to be appended to.
+        replace_file(path, &c.text())?;
+        c.f = std::io::BufWriter::new(append(path)?);
+        Ok(c)
+    }
+
+    fn compact(&mut self) -> Result<(), String> {
+        self.flush()?;
+        replace_file(&self.path, &self.text())?;
+        self.f = std::io::BufWriter::new(append(&self.path)?);
+        self.stale = 0;
+        Ok(())
+    }
+
+    /// After the run: delete the checkpoint, or keep only the lines of other decisions/ranges.
+    fn close(mut self) -> Result<(), String> {
+        self.flush()?;
+        if self.other.is_empty() && self.live.is_empty() {
+            match std::fs::remove_file(&self.path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(format!("{}: {e}", self.path.display())),
+            }
+        } else {
+            replace_file(&self.path, &self.text())
+        }
+    }
+}
+
+impl WorldSink for Ckpt {
+    fn world(&mut self, id: u64, w: u64, v: &[[u64; 4]], us: u64) -> Result<(), String> {
+        let row = CkptRow {
+            id,
+            fp: self.fps.get(&id).copied().unwrap_or(0),
+            method: method_name(self.job.method).to_string(),
+            label: self.job.label,
+            seed: self.job.seed,
+            source: self.source.clone(),
+            w,
+            v: v.to_vec(),
+            us,
+        };
+        let line = serde_json::to_string(&row).map_err(|e| e.to_string())?;
+        writeln!(self.f, "{line}").map_err(|e| format!("{}: {e}", self.path.display()))?;
+        self.live.entry(id).or_default().push(line);
+        self.live_lines += 1;
+        self.written += 1;
+        if self.knobs.fail_after.is_some_and(|n| self.written >= n) {
+            self.flush()?;
+            return Err(format!(
+                "checkpoint: stopped after {} worlds (test)",
+                self.written
+            ));
+        }
+        Ok(())
+    }
+
+    fn decision(&mut self, id: u64) -> Result<(), String> {
+        if let Some(v) = self.live.remove(&id) {
+            self.stale += v.len();
+            self.live_lines -= v.len();
+        }
+        if self.stale >= self.knobs.compact_min && self.stale >= self.live_lines {
+            self.compact()?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), String> {
+        self.f
+            .flush()
+            .map_err(|e| format!("{}: {e}", self.path.display()))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn worlds_file_knobs(
+    out: &Path,
+    ds: &[DecisionSpec],
+    job: &WorldsJob,
+    ctx: &Ctx,
+    cfg: &SearchConfig,
+    sched: &Schedule,
+    progress: Option<&BatchProgress>,
     mut on_done: impl FnMut(&WorldRows, &DecisionTiming),
+    knobs: CkptKnobs,
 ) -> Result<usize, String> {
     let done: Vec<WorldRows> = if out.exists() {
         read_jsonl(out)?
@@ -915,46 +1559,73 @@ pub fn worlds_file_sched(
             job.to
         ));
     }
-    // Rewrite the file without a torn line, then append.
+    // Rewrite the file without a torn line (a new file renamed over the old, so a kill here
+    // never loses a decision), then append.
     let mut text = String::new();
     for r in &done {
         text.push_str(&serde_json::to_string(r).map_err(|e| e.to_string())?);
         text.push('\n');
     }
-    std::fs::write(out, text).map_err(|e| format!("{}: {e}", out.display()))?;
-    let open = |p: &Path| {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(p)
-            .map_err(|e| format!("{}: {e}", p.display()))
-    };
-    let mut f = open(out)?;
-    let mut ft = open(&timing_path(out))?;
-    let todo: Vec<DecisionSpec> = ds
-        .iter()
-        .filter(|d| !done.iter().any(|r| r.id == d.id && r.from == job.from))
-        .cloned()
-        .collect();
+    replace_file(out, &text)?;
+    let mut f = append(out)?;
+    let mut ft = append(&timing_path(out))?;
+    let is_done = |d: &DecisionSpec| done.iter().any(|r| r.id == d.id && r.from == job.from);
+    let (before, todo): (Vec<DecisionSpec>, Vec<DecisionSpec>) =
+        ds.iter().cloned().partition(|d| is_done(d));
+    // The checkpoint: worlds finished since the last complete decision was written.
+    let ck = ckpt_path(out);
+    let fps: BTreeMap<u64, u64> = ds.iter().map(|d| (d.id, decision_fingerprint(d))).collect();
+    let done_ids: BTreeSet<u64> = before.iter().map(|d| d.id).collect();
+    let mut read = read_ckpt(&ck, job, ctx.source.name(), &fps, &done_ids)?;
+    // Only this run's unfinished decisions are left in it (finished ones were dropped).
+    let worlds = std::mem::take(&mut read.worlds);
+    let restored = worlds.len() as u64;
     if let Some(p) = progress {
-        let before = (ds.len() - todo.len()) as u64;
+        let b = before.len() as u64;
         p.decisions_total.store(ds.len() as u64, Ordering::Relaxed);
-        p.decisions_done.store(before, Ordering::Relaxed);
+        p.decisions_done.store(b, Ordering::Relaxed);
         p.worlds_total
             .store(ds.len() as u64 * nw, Ordering::Relaxed);
-        p.worlds_done.store(before * nw, Ordering::Relaxed);
+        p.worlds_done.store(b * nw, Ordering::Relaxed);
+        p.decisions_resumed.store(b, Ordering::Relaxed);
+        p.worlds_resumed.store(b * nw + restored, Ordering::Relaxed);
     }
+    if !before.is_empty() || restored > 0 {
+        eprintln!(
+            "worlds: resuming: {} decisions already in {}, {restored} worlds of unfinished \
+             decisions restored from {}",
+            before.len(),
+            out.display(),
+            ck.display()
+        );
+    }
+    let mut ckpt = Ckpt::open(&ck, read, fps, job, ctx.source.name(), knobs)?;
     let mut n = 0;
-    world_rows_sched(&todo, job, ctx, cfg, sched, progress, |r, t| {
-        let line = serde_json::to_string(&r).map_err(|e| e.to_string())?;
-        writeln!(f, "{line}").map_err(|e| e.to_string())?;
-        f.flush().map_err(|e| e.to_string())?;
-        let tl = serde_json::to_string(&t).map_err(|e| e.to_string())?;
-        writeln!(ft, "{tl}").map_err(|e| e.to_string())?;
-        on_done(&r, &t);
-        n += 1;
-        Ok(())
-    })?;
+    let resume = Resume {
+        worlds,
+        decisions: before,
+    };
+    run_worlds(
+        &todo,
+        job,
+        ctx,
+        cfg,
+        sched,
+        progress,
+        &resume,
+        &mut ckpt,
+        &mut |r, t| {
+            let line = serde_json::to_string(&r).map_err(|e| e.to_string())?;
+            writeln!(f, "{line}").map_err(|e| e.to_string())?;
+            f.flush().map_err(|e| e.to_string())?;
+            let tl = serde_json::to_string(&t).map_err(|e| e.to_string())?;
+            writeln!(ft, "{tl}").map_err(|e| e.to_string())?;
+            on_done(&r, &t);
+            n += 1;
+            Ok(())
+        },
+    )?;
+    ckpt.close()?;
     Ok(n)
 }
 
@@ -1377,6 +2048,7 @@ mod tests {
     fn clean(p: &Path) {
         let _ = std::fs::remove_file(p);
         let _ = std::fs::remove_file(timing_path(p));
+        let _ = std::fs::remove_file(ckpt_path(p));
     }
 
     /// The worlds file is byte-identical on 1, 3 and 8 threads, for exact and rollout PIMC; it
@@ -1574,6 +2246,161 @@ mod tests {
             clean(&p);
         }
         assert!(planned_seen, "some plan used the position-aware runner");
+    }
+
+    /// Per-world resume through the checkpoint: runs stopped after K new worlds (as if killed:
+    /// some decisions complete in the file, others part-done in the checkpoint, its last line
+    /// torn), once or twice in a row on other thread counts, then resumed, write exactly the bytes
+    /// of an uninterrupted run and value only the worlds that were not saved; for exact and
+    /// rollout PIMC, under the plain and the position-aware schedules, with the checkpoint
+    /// compacted along the way. The checkpoint is deleted at the end, and the progress estimate
+    /// ends at 1.
+    #[test]
+    fn worlds_resume_per_world() {
+        let ds = small_set();
+        let l = leaf();
+        let src = RejectionSource::new();
+        let ctx = Ctx {
+            leaf: &*l,
+            source: &src,
+            rules: Rules::HOUSE,
+        };
+        let spread = AutoParams {
+            leader_cost_s: [0.0, 0.0, 0.0, 400.0, 100.0, 1.0],
+            position_ratio: 1.5,
+            leader_table_mb: [0.0, 0.0, 0.0, 64.0, 8.0, 1.0],
+            target_s: Some(20.0),
+            ..AutoParams::default()
+        };
+        let cases = [
+            (Method::ExactPimc, Schedule::Fixed),
+            (Method::RolloutPimc, Schedule::Fixed),
+            (
+                Method::ExactPimc,
+                Schedule::Auto {
+                    threads: 4,
+                    budget_mb: 64,
+                    params: Box::new(spread),
+                },
+            ),
+        ];
+        let nw = 5u64;
+        let total = ds.len() as u64 * nw;
+        for (c, (method, sched)) in cases.iter().enumerate() {
+            let job = WorldsJob {
+                method: *method,
+                label: 1,
+                seed: 13,
+                from: 0,
+                to: nw,
+            };
+            let base = tmp(&format!("pw{c}-base"));
+            clean(&base);
+            let want = run(&base, &ds, &job, 2, 4);
+            clean(&base);
+            for (k, stops) in [vec![1u64], vec![7], vec![23, 11], vec![total - 2]]
+                .iter()
+                .enumerate()
+            {
+                let p = tmp(&format!("pw{c}-{k}"));
+                clean(&p);
+                for (n, &stop) in stops.iter().enumerate() {
+                    let cfg = SearchConfig {
+                        threads: 1 + 2 * n,
+                        tt_mb: 4,
+                        ..SearchConfig::default()
+                    };
+                    let knobs = CkptKnobs {
+                        fail_after: Some(stop),
+                        compact_min: 3,
+                    };
+                    let e =
+                        worlds_file_knobs(&p, &ds, &job, &ctx, &cfg, sched, None, |_, _| {}, knobs)
+                            .expect_err("stopped");
+                    assert!(e.contains("test"), "{e}");
+                }
+                // What the stopped runs saved: complete decisions, and checkpointed worlds.
+                let complete: BTreeSet<u64> = read_jsonl::<WorldRows>(&p)
+                    .expect("reads")
+                    .iter()
+                    .map(|r| r.id)
+                    .collect();
+                let rows: Vec<CkptRow> = read_jsonl(&ckpt_path(&p)).expect("checkpoint");
+                let part: BTreeSet<(u64, u64)> = rows
+                    .iter()
+                    .filter(|r| !complete.contains(&r.id))
+                    .map(|r| (r.id, r.w))
+                    .collect();
+                assert!(
+                    !part.is_empty(),
+                    "case {c} {stops:?}: a decision is part-done"
+                );
+                let saved = complete.len() as u64 * nw + part.len() as u64;
+                // Killed mid-write: a torn last line.
+                let torn = serde_json::to_string(&rows[0]).expect("json");
+                let mut f = append(&ckpt_path(&p)).expect("open");
+                f.write_all(&torn.as_bytes()[..torn.len() / 2])
+                    .expect("write");
+                drop(f);
+                let prog = BatchProgress::default();
+                let cfg = SearchConfig {
+                    threads: 2,
+                    tt_mb: 4,
+                    ..SearchConfig::default()
+                };
+                worlds_file_sched(&p, &ds, &job, &ctx, &cfg, sched, Some(&prog), |_, _| {})
+                    .expect("resumes");
+                assert_eq!(
+                    std::fs::read(&p).expect("written"),
+                    want,
+                    "case {c} stopped at {stops:?}"
+                );
+                let ld = |x: &AtomicU64| x.load(Ordering::Relaxed);
+                assert_eq!(ld(&prog.worlds_resumed), saved, "case {c} {stops:?}");
+                assert_eq!(
+                    ld(&prog.worlds_valued),
+                    total - saved,
+                    "case {c} {stops:?}: only the unsaved worlds are valued"
+                );
+                assert_eq!(ld(&prog.worlds_done), total);
+                assert!(!ckpt_path(&p).exists(), "checkpoint deleted at the end");
+                let e = prog.eta().expect("an estimate");
+                assert!((e.done_frac - 1.0).abs() < 1e-9, "{e:?}");
+                clean(&p);
+            }
+        }
+        // A checkpoint from other settings is refused, not mixed in.
+        let p = tmp("pw-other");
+        clean(&p);
+        let job = WorldsJob {
+            method: Method::ExactPimc,
+            label: 1,
+            seed: 13,
+            from: 0,
+            to: nw,
+        };
+        let cfg = SearchConfig::default();
+        let knobs = CkptKnobs {
+            fail_after: Some(3),
+            compact_min: 3,
+        };
+        worlds_file_knobs(
+            &p,
+            &ds,
+            &job,
+            &ctx,
+            &cfg,
+            &Schedule::Fixed,
+            None,
+            |_, _| {},
+            knobs,
+        )
+        .expect_err("stopped");
+        let _ = std::fs::remove_file(&p);
+        let other = WorldsJob { seed: 14, ..job };
+        let e = worlds_file(&p, &ds, &other, &ctx, &cfg, None, |_, _| {}).expect_err("refused");
+        assert!(e.contains("other settings"), "{e}");
+        clean(&p);
     }
 
     /// Extending chosen decisions (`--ids` with `--from-world`) appends records that

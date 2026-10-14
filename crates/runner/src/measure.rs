@@ -45,7 +45,18 @@
 //! `solve_threads` 1, one world per thread on every thread.
 //!
 //! Heartbeat progress during a worlds step: the step, its N, decisions and worlds done of total,
-//! and the running parallel solve's subproblems done of total. `partial_cpu_ok` is set only for a
+//! worlds restored from an earlier run, the running parallel solve's subproblems done of total,
+//! and `eta` = `{done_frac, remaining_s, eta_utc, projected_usd, basis}`: the share of the step's
+//! work done, weighted by each world's expected cost (the plan's model, refined by this run's
+//! measured times per trick and position; `search::eta`), when the step should end, what the run
+//! will then have cost at this machine's price (`DPH`), and `basis` `"measured"` once at least
+//! 10% is done and every position with worlds left has at least 2 timed, else `"rough: …"` saying
+//! what is not measured yet.
+//!
+//! Resume: `search worlds` checkpoints every world as it finishes (`<worlds file>.ckpt`), so a
+//! killed chunk continues world by world: in format 1 from an earlier run's uploaded files
+//! (`resume_from`, see `main.rs`), in format 2 from the chunk's live files (`v2.rs`).
+//! `result.json` records what was taken over (`resumed`: decisions, worlds, worlds valued here). `partial_cpu_ok` is set only for a
 //! heartbeat interval that was at least [`TAIL_SHARE_OK`] in a genuine tail: fewer tasks left in
 //! the queue than worker threads (the end of the step), or fewer subproblems left in the running
 //! parallel solve than its threads, or (planned runs) every world started and threads free.
@@ -58,7 +69,7 @@ use serde_json::{Value, json};
 
 use crate::mem::{self, Requested, Tables};
 use crate::spike::build_table_from;
-use crate::{Ctx, sibling};
+use crate::{Ctx, sibling, unix_now, utc_string};
 
 /// The share of a heartbeat interval spent in a tail from which that interval's CPU sample is
 /// exempt from the launcher's low-CPU rule: the shortfall below its default 85% threshold.
@@ -105,7 +116,30 @@ fn grid_max(grid: &str, to: u64) -> u64 {
     vals.into_iter().filter(|&x| x <= to).max().unwrap_or(to)
 }
 
-/// Run one `search worlds` step, with its progress in the heartbeat.
+/// The heartbeat's `progress.eta` from `search worlds`' own estimate (`search::eta`): the share
+/// of the step's work done (weighted by each world's expected cost, refined by measured times),
+/// when the step should end at this rate, what the run will then have cost at this machine's
+/// price, and whether that rests on measured times (`basis`).
+fn eta_block(ctx: &Ctx, p: &Value) -> Value {
+    let Some(e) = p.get("eta").filter(|e| e.is_object()) else {
+        return Value::Null;
+    };
+    let remaining = e["remaining_s"]
+        .as_f64()
+        .filter(|r| r.is_finite() && *r >= 0.0);
+    json!({
+        "done_frac": e["done_frac"].as_f64().map(|x| (x * 10_000.0).round() / 10_000.0),
+        "remaining_s": remaining.map(f64::round),
+        "eta_utc": remaining.map(|r| utc_string(unix_now() + r.round() as u64)),
+        "projected_usd": remaining.filter(|_| ctx.dph > 0.0)
+            .map(|r| ((ctx.elapsed() + r) / 3600.0 * ctx.dph * 100.0).round() / 100.0),
+        "basis": e["basis"],
+        "of": "the worlds step",
+    })
+}
+
+/// Run one `search worlds` step, with its progress in the heartbeat. Returns the step's last
+/// progress record (counts done, and how many were restored from an earlier run).
 #[allow(clippy::too_many_arguments)]
 fn run_worlds(
     ctx: &mut Ctx,
@@ -116,7 +150,7 @@ fn run_worlds(
     solve_threads: u64,
     tt: &mem::Plan,
     progress_file: &Path,
-) -> Result<(), String> {
+) -> Result<Value, String> {
     let _ = fs::remove_file(progress_file);
     c.arg("--progress").arg(progress_file);
     let warnings: Vec<&String> = tt.warning.iter().collect();
@@ -140,17 +174,30 @@ fn run_worlds(
         polls += 1;
         tail_polls += u64::from(in_tail(&p, solve_threads));
         let share = tail_polls as f64 / polls as f64;
+        let eta = eta_block(ctx, &p);
         ctx.progress = json!({
             "kind": "search_measure", "step": step, "n": n_worlds,
             "threads": threads, "solve_threads": solve_threads,
             "decisions_done": g("decisions_done"), "decisions_total": g("decisions_total"),
             "worlds_done": g("worlds_done"), "worlds_total": g("worlds_total"),
+            "worlds_resumed": g("worlds_resumed"), "eta": eta,
             "par_tasks_done": g("par_tasks_done"), "par_tasks_total": g("par_tasks_total"),
             "tail_share": (share * 100.0).round() / 100.0,
             "partial_cpu_ok": share >= TAIL_SHARE_OK,
             "tt_mb": tt.tt_mb, "warnings": warnings,
         });
-    })
+    })?;
+    let last: Value = fs::read_to_string(progress_file)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(Value::Null);
+    Ok(last)
+}
+
+/// What a worlds step took over from an earlier run (its last progress record `p`).
+fn resumed(p: &Value) -> Value {
+    json!({ "decisions": p["decisions_resumed"], "worlds": p["worlds_resumed"],
+            "worlds_valued": p["worlds_valued"], "worlds_total": p["worlds_total"] })
 }
 
 /// Is a `search worlds` progress record in a genuine tail? Either the end of the step (fewer
@@ -314,7 +361,7 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
     } else {
         out.join(format!("exact-t{trick}-w{from}-{to}.jsonl"))
     };
-    run_worlds(
+    let last = run_worlds(
         ctx,
         worlds(1, "exact", from, to, &yard),
         "exact worlds",
@@ -324,7 +371,7 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         &tt,
         &progress_file,
     )?;
-    let base = json!({ "trick": trick, "count": count, "seed": seed, "from": from, "to": to,
+    let base = json!({ "resumed": resumed(&last), "trick": trick, "count": count, "seed": seed, "from": from, "to": to,
                        "ids": ids, "grid": grid, "solve_threads": solve_threads,
                        "worlds_threads": threads, "table": table_rec,
                        "schedule": if budget_mb.is_some() { "auto" } else { "fixed" },
@@ -377,7 +424,7 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         let label = n(m, "label", 2 + i as u64);
         let mto = n(m, "to", 64);
         let f = out.join(format!("{method}-t{trick}-l{label}-n{mto}.jsonl"));
-        run_worlds(
+        let _ = run_worlds(
             ctx,
             worlds(label, method, 0, mto, &f),
             &format!("method {i} ({method}) worlds"),

@@ -14,6 +14,21 @@
 //! chunk's bundle depends only on its seed and parameters, so a redone chunk reproduces the same
 //! bytes and the same key.
 //!
+//! Live files: every `upload_every_s` the running chunks' changed `out/` files go, in the
+//! background, to `runs/<run>/partial/<stream>/<index:06>/out/` (mutable keys, checkpoints
+//! first; `net.rs`); a stopped chunk uploads them once more before its partial bundle. A
+//! `search_measure` chunk started on a machine that resumes the run first downloads them back, so
+//! it continues world by world from its worlds file and checkpoint (`search::measure`): only the
+//! worlds being solved, or finished after the last upload, are redone, and the worlds file is the
+//! same bytes. Other kinds are redone from their seed.
+//!
+//! Network: the orchestrator writes its local `heartbeat.json` every `heartbeat_every_s` whatever
+//! the network does; heartbeat uploads and STOP checks run in the background, and every other
+//! remote call runs beside the heartbeat (`Run::net_call`), each with hard limits (`remote.rs`).
+//! Heartbeats carry `upload_failures`, `other_net_failures` and `last_upload_ok_s`, and the
+//! running chunks' progress estimates (`progress.chunk_eta`; with one chunk running also
+//! `progress.eta`, priced over the whole run).
+//!
 //! Warnings a running chunk puts in its own heartbeat (`progress.warnings`, e.g. a transposition
 //! table size lowered to fit memory) appear in the run's heartbeat as `<stream>/<index>: …`
 //! while it runs, on stderr once, and in `final-manifest.json` (`warnings`).
@@ -44,13 +59,15 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
 use crate::bundle::{bundle_dir, sha256_file};
-use crate::remote::{DirRemote, Remote, UPLOAD_ENTRY, kill_point};
+use crate::net::{self, Net};
+use crate::remote::{DirRemote, Remote, UPLOAD_ENTRY, kill_point, retry};
 use crate::sched::{
     Chunks, Manifest2, StreamState, chunk_seed, finished_median, latest_done, parse_v2, pick,
     size_note, sprt_prefix,
@@ -322,7 +339,9 @@ struct Running {
 
 struct Run {
     m: Manifest2,
-    remote: Box<dyn Remote>,
+    /// The remote store (counting its failures) and the background network work (`net.rs`).
+    remote: Arc<dyn Remote>,
+    net: Net,
     root: PathBuf,
     threads: usize,
     inputs: BTreeMap<String, String>,
@@ -347,8 +366,14 @@ struct Run {
     /// Every warning seen this session, for the final manifest.
     warned: BTreeSet<String>,
     /// Unfinished outputs of chunks stopped mid-way (deadline or stop request), uploaded under
-    /// `runs/<run>/partial/`: for reading only, never resumed from.
+    /// `runs/<run>/partial/` as bundles, for reading.
     partial: Vec<Value>,
+    /// The phase of the last heartbeat (repeated by heartbeats during network calls).
+    phase: String,
+    /// When the running chunks' files were last uploaded to their live prefixes.
+    last_partial: Instant,
+    /// The progress estimates of the running chunks (`<stream>/<index>`: their `progress.eta`).
+    chunk_etas: BTreeMap<String, Value>,
 }
 
 fn compact_utc() -> String {
@@ -378,7 +403,8 @@ pub fn run(manifest: &Value, work: &Path) -> ExitCode {
     };
     // Absolute, so chunk workers and their children get paths that do not depend on a cwd.
     let work = std::path::absolute(work).unwrap_or_else(|_| work.to_path_buf());
-    let remote = choose_remote(&work);
+    let net = Net::new(choose_remote(&work), &format!("runs/{}", m.run_id));
+    let remote = Arc::clone(&net.remote);
     let root = work.join(&m.run_id);
     let threads = m.threads.unwrap_or_else(default_threads);
     m.resolve_threads(threads);
@@ -392,6 +418,7 @@ pub fn run(manifest: &Value, work: &Path) -> ExitCode {
         states: vec![StreamState::default(); m.streams.len()],
         m,
         remote,
+        net,
         root,
         threads,
         inputs: BTreeMap::new(),
@@ -412,6 +439,9 @@ pub fn run(manifest: &Value, work: &Path) -> ExitCode {
         warnings: Vec::new(),
         warned: BTreeSet::new(),
         partial: Vec::new(),
+        phase: "start".into(),
+        last_partial: Instant::now(),
+        chunk_etas: BTreeMap::new(),
     };
     let outcome = r.go();
     let ok = outcome.is_ok();
@@ -426,6 +456,7 @@ pub fn run(manifest: &Value, work: &Path) -> ExitCode {
     if let Err(e) = &uploaded {
         eprintln!("runner: upload {marker}: {e}");
     }
+    r.net.drain(Duration::from_secs(10));
     match &outcome {
         Ok(()) => println!("runner: {marker}"),
         Err(e) => eprintln!("runner: FAILED: {e}"),
@@ -445,7 +476,7 @@ impl Run {
         format!("runs/{}", self.m.run_id)
     }
 
-    fn put_json(&self, local_name: &str, key: &str, v: &Value) -> Result<(), String> {
+    fn put_json(&mut self, local_name: &str, key: &str, v: &Value) -> Result<(), String> {
         let p = self.root.join("tmp").join(local_name);
         fs::create_dir_all(p.parent().unwrap_or(&self.root)).map_err(|e| e.to_string())?;
         fs::write(
@@ -453,7 +484,33 @@ impl Run {
             serde_json::to_string_pretty(v).map_err(|e| e.to_string())? + "\n",
         )
         .map_err(|e| e.to_string())?;
-        self.remote.put(&p, key, false)
+        let key = key.to_string();
+        self.net_call(move |r| retry(3, || r.put(&p, &key, false)))
+    }
+
+    /// Runs `f` on the remote on a helper thread while this one keeps heartbeating, so no
+    /// network call (each with hard limits, `remote.rs`) stops the heartbeat.
+    fn net_call<T: Send>(&mut self, f: impl FnOnce(&dyn Remote) -> T + Send) -> T {
+        let r = Arc::clone(&self.remote);
+        std::thread::scope(|s| {
+            let h = s.spawn(move || f(&*r));
+            while !h.is_finished() {
+                let phase = self.phase.clone();
+                self.heartbeat(false, &phase);
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))
+        })
+    }
+
+    /// The live prefix of chunk `index` of stream `k`, where its files are uploaded as it runs
+    /// (`runs/<run>/partial/<stream>/<index:06>/out`).
+    fn live_prefix(&self, k: usize, index: u64) -> String {
+        format!(
+            "{}/partial/{}/{index:06}/out",
+            self.prefix(),
+            self.m.streams[k].name
+        )
     }
 
     fn go(&mut self) -> Result<(), String> {
@@ -469,9 +526,9 @@ impl Run {
             ));
         }
         // Heartbeat numbering continues across machines.
+        let hb_prefix = format!("{}/heartbeat/", self.prefix());
         self.hb_seq = self
-            .remote
-            .list(&format!("{}/heartbeat/", self.prefix()))?
+            .net_call(move |r| r.list(&hb_prefix))?
             .iter()
             .filter_map(|k| {
                 k.rsplit('/')
@@ -531,7 +588,8 @@ impl Run {
             let have = local.is_file() && sha256_file(&local).map(|x| x.0) == Ok(hex.clone());
             if !have {
                 let key = format!("inputs/sha256/{hex}");
-                if !self.remote.get(&key, &local)? {
+                let (k2, l2) = (key.clone(), local.clone());
+                if !self.net_call(move |r| retry(3, || r.get(&k2, &l2)))? {
                     return Err(format!("input `{name}`: {key} not found"));
                 }
                 let (h, _) = sha256_file(&local)?;
@@ -553,7 +611,8 @@ impl Run {
     /// Reads the highest done-list; keeps the entries whose remote bundles still match (each read
     /// back in full and hashed), so everything else is redone from its seed.
     fn resume(&mut self) -> Result<(), String> {
-        let keys = self.remote.list(&format!("done/{}/", self.m.run_id))?;
+        let done_prefix = format!("done/{}/", self.m.run_id);
+        let keys = self.net_call(move |r| r.list(&done_prefix))?;
         // Local leftovers of unfinished chunks are never reused.
         let _ = fs::remove_dir_all(self.root.join("chunks"));
         let _ = fs::remove_dir_all(self.root.join("bundles"));
@@ -562,7 +621,8 @@ impl Run {
         };
         self.done_seq = seq + 1;
         let local = self.root.join("tmp").join("done-latest.json");
-        if !self.remote.get(&key, &local)? {
+        let (k2, l2) = (key.clone(), local.clone());
+        if !self.net_call(move |r| retry(3, || r.get(&k2, &l2)))? {
             return Err(format!("{key} vanished"));
         }
         let doc: Value =
@@ -583,9 +643,10 @@ impl Run {
             }
             let mut ok = e["outputs"].as_array().is_some_and(|o| !o.is_empty());
             for o in e["outputs"].as_array().into_iter().flatten() {
-                let key = o["path"].as_str().unwrap_or_default();
-                let want = o["sha256"].as_str().unwrap_or_default();
-                ok &= matches!(self.remote.sha256(key)?, Some((h, _)) if h == want);
+                let key = o["path"].as_str().unwrap_or_default().to_string();
+                let want = o["sha256"].as_str().unwrap_or_default().to_string();
+                ok &= matches!(self.net_call(move |r| retry(3, || r.sha256(&key)))?,
+                               Some((h, _)) if h == want);
             }
             if !ok {
                 redo += 1;
@@ -630,7 +691,8 @@ impl Run {
             serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())? + "\n",
         )
         .map_err(|e| e.to_string())?;
-        self.remote.put(&p, &key, true)?;
+        let p2 = p.clone();
+        self.net_call(move |r| retry(3, || r.put(&p2, &key, true)))?;
         let _ = fs::remove_file(&p);
         self.done_seq += 1;
         self.dirty = false;
@@ -650,6 +712,20 @@ impl Run {
         let _ = fs::remove_dir_all(&dir);
         let logs = dir.join("logs");
         fs::create_dir_all(&logs).map_err(|e| e.to_string())?;
+        if s.kind == "search_measure" {
+            // Continue where an earlier machine stopped: its files as last uploaded, with the
+            // checkpoint of the worlds finished since its last complete decision.
+            let (name, live, out) = (s.name.clone(), self.live_prefix(k, index), dir.join("out"));
+            let l2 = live.clone();
+            match self.net_call(move |r| net::restore(r, &[l2], &out)) {
+                Ok((0, _)) => {}
+                Ok((n, bytes)) => println!(
+                    "runner: chunk {name}/{index}: restored {n} files ({bytes} bytes) from {live}"
+                ),
+                Err(e) => eprintln!("runner: chunk {name}/{index}: restoring {live}: {e}"),
+            }
+        }
+        let s = &self.m.streams[k];
         let spec = json!({
             "stream": s.name, "index": index, "seed": seed, "kind": s.kind,
             "params": s.params, "threads": s.threads, "inputs": self.inputs,
@@ -684,15 +760,17 @@ impl Run {
     /// Uploads a chunk's logs (worker and child-process output: diagnostics with timings, so
     /// outside the deterministic bundle) to `runs/<run>/logs/<stream>/<index:06>.tar.zst`,
     /// replacing any earlier attempt's. Never fatal.
-    fn upload_logs(&self, r: &Running) {
-        let name = &self.m.streams[r.stream].name;
+    fn upload_logs(&mut self, r: &Running) {
+        let name = self.m.streams[r.stream].name.clone();
         let local = self
             .root
             .join("tmp")
             .join(format!("logs-{name}-{:06}.tar.zst", r.index));
         let key = format!("{}/logs/{name}/{:06}.tar.zst", self.prefix(), r.index);
-        let res = bundle_dir(&r.dir.join("logs"), &local)
-            .and_then(|_| self.remote.put(&local, &key, false));
+        let res = bundle_dir(&r.dir.join("logs"), &local).and_then(|_| {
+            let l2 = local.clone();
+            self.net_call(move |rem| retry(3, || rem.put(&l2, &key, false)))
+        });
         if let Err(e) = res {
             eprintln!("runner: logs of {name}/{}: {e}", r.index);
         }
@@ -705,6 +783,21 @@ impl Run {
     fn keep_partial(&mut self, r: &Running) {
         self.states[r.stream].running.remove(&r.index);
         let name = self.m.streams[r.stream].name.clone();
+        // First the chunk's files to its live prefix, checkpoints first: what a resumed run
+        // continues from (no older background copy may land after them).
+        self.quiesce_partial();
+        let (dir, live, snap, done) = (
+            r.dir.join("out"),
+            self.live_prefix(r.stream, r.index),
+            self.root.join("tmp").join("partial-stop"),
+            self.net.sent(),
+        );
+        let (sent, failed) =
+            self.net_call(move |rem| net::upload_changed(rem, &dir, &live, &snap, &done, None));
+        println!(
+            "runner: chunk {name}/{}: {sent} files uploaded to its live prefix ({failed} failed)",
+            r.index
+        );
         let local = self
             .root
             .join("tmp")
@@ -716,7 +809,8 @@ impl Run {
             compact_utc()
         );
         let res = bundle_dir(&r.dir.join("out"), &local).and_then(|(sha, bytes)| {
-            self.remote.put(&local, &key, false)?;
+            let (l2, k2) = (local.clone(), key.clone());
+            self.net_call(move |rem| retry(3, || rem.put(&l2, &k2, false)))?;
             Ok((sha, bytes))
         });
         match res {
@@ -739,6 +833,7 @@ impl Run {
     fn finish(&mut self, r: &Running) -> Result<(), String> {
         let s = &self.m.streams[r.stream];
         let name = s.name.clone();
+        let arena = s.kind == "arena_blocks";
         let local = self
             .root
             .join("bundles")
@@ -753,11 +848,12 @@ impl Run {
         );
         let n = self.entries.len() as u64 + 1;
         UPLOAD_ENTRY.store(n, Ordering::Relaxed);
-        self.remote
-            .put(&local, &key, true)
+        let (l2, k2) = (local.clone(), key.clone());
+        self.net_call(move |rem| retry(3, || rem.put(&l2, &k2, true)))
             .map_err(|e| format!("upload {key}: {e}"))?;
         // Read back in full and hash before listing it.
-        match self.remote.sha256(&key)? {
+        let k2 = key.clone();
+        match self.net_call(move |rem| retry(3, || rem.sha256(&k2)))? {
             Some((h, b)) if h == sha && b == bytes => {}
             other => return Err(format!("upload check {key}: got {other:?}, want {sha}")),
         }
@@ -765,7 +861,7 @@ impl Run {
         let seconds = (r.started.elapsed().as_secs_f64() * 10.0).round() / 10.0;
         let mut e = json!({ "stream": name, "index": r.index, "seed": r.seed,
             "outputs": [{ "path": key, "sha256": sha, "bytes": bytes }], "seconds": seconds });
-        if s.kind == "arena_blocks" {
+        if arena {
             let res: Value = serde_json::from_str(
                 &fs::read_to_string(r.dir.join("out").join("result.json"))
                     .map_err(|e| e.to_string())?,
@@ -866,6 +962,27 @@ impl Run {
                 }
             }
             self.warnings = warnings;
+            self.chunk_etas = running
+                .iter()
+                .filter_map(|r| {
+                    let name = &self.m.streams[r.stream].name;
+                    chunk_eta(&r.dir).map(|e| (format!("{name}/{}", r.index), e))
+                })
+                .collect();
+            // Every upload_every_s, the running chunks' changed files go to their live prefixes
+            // in the background (checkpoints first), so a replacement machine can continue them.
+            if !stopped
+                && self.last_partial.elapsed().as_secs() >= self.m.upload_every_s
+                && !self.net.partial_busy()
+            {
+                let sets = running
+                    .iter()
+                    .map(|r| (r.dir.join("out"), self.live_prefix(r.stream, r.index)))
+                    .collect();
+                self.net
+                    .partial(sets, self.root.join("tmp").join("partial"));
+                self.last_partial = Instant::now();
+            }
             // Reap finished workers in a fixed order.
             let mut i = 0;
             while i < running.len() {
@@ -883,7 +1000,7 @@ impl Run {
                             self.keep_partial(&r);
                         } else {
                             self.states[r.stream].running.remove(&r.index);
-                            let name = &self.m.streams[r.stream].name;
+                            let name = self.m.streams[r.stream].name.clone();
                             eprintln!(
                                 "runner: chunk {name}/{} failed ({st}); last lines of its log:\n{}",
                                 r.index,
@@ -913,6 +1030,7 @@ impl Run {
         }
         self.partial_ok = false;
         self.warnings.clear();
+        self.chunk_etas.clear();
         match error {
             Some(e) => Err(e),
             None => Ok(()),
@@ -923,9 +1041,9 @@ impl Run {
     /// remote with its recorded size. Each was also read back in full and hashed when it was
     /// uploaded (this session) or when the run resumed (earlier sessions).
     fn final_check(&mut self) -> Result<(), String> {
+        let out_prefix = format!("{}/out/", self.prefix());
         let listed: BTreeMap<String, u64> = self
-            .remote
-            .list_sized(&format!("{}/out/", self.prefix()))?
+            .net_call(move |r| retry(3, || r.list_sized(&out_prefix)))?
             .into_iter()
             .collect();
         for e in &self.entries {
@@ -965,32 +1083,72 @@ impl Run {
         json!(v)
     }
 
+    /// Ends the background uploads of the chunks' live files (between files), heartbeating
+    /// meanwhile, so an older copy never lands after a stop's own upload.
+    fn quiesce_partial(&mut self) {
+        self.net.cancel_partial();
+        let t0 = Instant::now();
+        while self.net.partial_busy() && t0.elapsed() < Duration::from_secs(300) {
+            let phase = self.phase.clone();
+            self.heartbeat(false, &phase);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Writes `heartbeat.json` (every `heartbeat_every_s`, or now with `force`) and hands its
+    /// upload to the background (`net.rs`); also checks the local STOP file and starts a
+    /// background check of the remote one.
     fn heartbeat(&mut self, force: bool, phase: &str) {
+        self.phase = phase.to_string();
         let every = Duration::from_secs(self.m.heartbeat_every_s);
         if !force && self.last_hb.is_some_and(|t| t.elapsed() < every) {
             return;
         }
         self.last_hb = Some(Instant::now());
-        // The launcher's STOP object (or a local STOP file) asks the run to stop.
-        stop::poll(Some((&*self.remote, &self.prefix())), &self.root);
+        // The launcher's STOP object (checked in the background) or a local STOP file.
+        stop::poll_local(&self.root);
+        self.net.poll_stop(&self.root);
         let cpu = self.cpu.sample(None);
         let round = |x: Option<f64>| x.map(|x| (x * 10.0).round() / 10.0);
         let elapsed = self.start.elapsed().as_secs_f64();
-        let hb = json!({
+        let mut progress = json!({ "queue": self.queue(), "entries": self.entries.len(),
+                                   "partial_cpu_ok": self.partial_ok, "warnings": self.warnings });
+        if !self.chunk_etas.is_empty() {
+            progress["chunk_eta"] = json!(self.chunk_etas);
+        }
+        if let [(_, e)] = self.chunk_etas.iter().collect::<Vec<_>>()[..] {
+            // One chunk running: its estimate is the run's, priced over the whole run.
+            let mut e = e.clone();
+            e["projected_usd"] = json!(
+                e["remaining_s"]
+                    .as_f64()
+                    .filter(|_| self.dph > 0.0)
+                    .map(|r| ((elapsed + r) / 3600.0 * self.dph * 100.0).round() / 100.0)
+            );
+            progress["eta"] = e;
+        }
+        let mut hb = json!({
             "run_id": self.m.run_id, "seq": self.hb_seq, "utc": utc_string(unix_now()),
             "phase": phase,
-            "progress": { "queue": self.queue(), "entries": self.entries.len(),
-                          "partial_cpu_ok": self.partial_ok, "warnings": self.warnings },
+            "progress": progress,
             "elapsed_s": elapsed.round(), "threads": self.threads,
             "usable_cores": (self.cpu.cores * 100.0).round() / 100.0,
             "cpu_util_pct": round(cpu.cgroup), "cpu_util_source": "cgroup",
             "host_cpu_busy_pct": round(cpu.host),
             "est_cost_usd": (elapsed / 3600.0 * self.dph * 10_000.0).round() / 10_000.0,
         });
-        let key = format!("{}/heartbeat/{:06}.json", self.prefix(), self.hb_seq);
-        if let Err(e) = self.put_json("heartbeat.json", &key, &hb) {
-            eprintln!("runner: heartbeat: {e}");
+        self.net.add_health(&mut hb);
+        let text = serde_json::to_string_pretty(&hb).unwrap_or_default() + "\n";
+        let local = self.root.join("heartbeat.json");
+        if let Err(e) = fs::create_dir_all(&self.root).and_then(|()| fs::write(&local, &text)) {
+            eprintln!("runner: heartbeat {}: {e}", local.display());
         }
+        let key = format!("{}/heartbeat/{:06}.json", self.prefix(), self.hb_seq);
+        self.net.heartbeat(
+            text,
+            key,
+            self.root.join("tmp").join("heartbeat-upload.json"),
+        );
         self.hb_seq += 1;
     }
 
@@ -1088,6 +1246,15 @@ fn chunk_partial(dir: &Path) -> bool {
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .and_then(|v| v["progress"]["partial_cpu_ok"].as_bool())
         .unwrap_or(false)
+}
+
+/// The progress estimate in a running chunk's own heartbeat (`progress.eta`), if it has one.
+fn chunk_eta(dir: &Path) -> Option<Value> {
+    fs::read_to_string(dir.join("heartbeat.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .map(|v| v["progress"]["eta"].clone())
+        .filter(Value::is_object)
 }
 
 /// The warnings a running chunk's own heartbeat lists (`progress.warnings`).

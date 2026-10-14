@@ -8,15 +8,19 @@
 //!   runner), SIGINT or SIGHUP. The handler only sets a flag (`signal_hook::flag::register`);
 //!   the runner's loops read it every few hundred milliseconds;
 //! - a `STOP` object in the run's remote prefix (`runs/<run_id>/STOP`), which the launcher writes
-//!   before it destroys a machine that is still working; it is read at every heartbeat;
+//!   before it destroys a machine that is still working; it is checked at every heartbeat, on a
+//!   background thread with hard time limits (`net.rs`), so a hung check never holds the run;
 //! - a `STOP` file in the run's local work directory (the laptop, and tests).
 //!
-//! What a stopped run keeps: format 1 uploads its whole `out/` (a `search_measure` chunk's worlds
-//! file holds every decision finished, one line each, written as it finishes; a line cut short is
-//! skipped by every reader) and writes `FAILED` with `stopped` and the list of files. Format 2
-//! stops its running chunks, uploads each one's unfinished `out/` as
-//! `runs/<run>/partial/<stream>/<index>-<utc>.tar.zst` (not in the done-list: a resumed run
-//! redoes the chunk from its seed), writes the done-list, then `DONE` with `stopped`.
+//! What a stopped run keeps: format 1 uploads the checkpoints of its `out/` first (a
+//! `search_measure` chunk's `<worlds file>.ckpt` holds every world finished since the last
+//! complete decision; the worlds file holds every complete decision, one line each, written as it
+//! finishes; a line cut short is skipped by every reader), then the whole `out/`, and writes
+//! `FAILED` with `stopped` and the list of files. Format 2 stops its running chunks, uploads each
+//! one's changed files to its live prefix `runs/<run>/partial/<stream>/<index:06>/out/`
+//! (checkpoints first; a resumed run restores them and continues the chunk world by world), then
+//! its unfinished `out/` as `runs/<run>/partial/<stream>/<index>-<utc>.tar.zst` for reading,
+//! writes the done-list, then `DONE` with `stopped`.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -65,29 +69,36 @@ impl StopState {
             .clone()
     }
 
-    /// Checks the local `STOP` file in `local_dir` and the remote `<prefix>/STOP` object; either
-    /// one requests a stop, with the reason written in it when it can be read.
-    pub fn poll(&self, remote: Option<(&dyn Remote, &str)>, local_dir: &Path) {
+    /// The local `STOP` file only (cheap: the runner's loop checks it at every heartbeat).
+    /// Whether a stop is now requested.
+    pub fn poll_local(&self, local_dir: &Path) -> bool {
         if self.requested().is_some() {
-            return;
+            return true;
         }
         let local = local_dir.join("STOP");
         if local.is_file() {
             let why = std::fs::read_to_string(&local).unwrap_or_default();
             self.request(&format!("STOP file {} {}", local.display(), why.trim()));
+            return true;
+        }
+        false
+    }
+
+    /// The remote `<prefix>/STOP` object only (a network call, made on a background thread with
+    /// hard limits, `net.rs`; a failed check is simply made again at the next heartbeat).
+    pub fn poll_remote(&self, r: &dyn Remote, prefix: &str, local_dir: &Path) {
+        if self.requested().is_some() {
             return;
         }
-        if let Some((r, prefix)) = remote {
-            let key = format!("{}/STOP", prefix.trim_end_matches('/'));
-            if matches!(r.exists(&key), Ok(true)) {
-                let tmp = local_dir.join("tmp").join("STOP.remote");
-                let why = match r.get(&key, &tmp) {
-                    Ok(true) => std::fs::read_to_string(&tmp).unwrap_or_default(),
-                    _ => String::new(),
-                };
-                let why: String = why.trim().chars().take(300).collect();
-                self.request(&format!("the launcher asked the run to stop ({key}) {why}"));
-            }
+        let key = format!("{}/STOP", prefix.trim_end_matches('/'));
+        if matches!(r.exists(&key), Ok(true)) {
+            let tmp = local_dir.join("tmp").join("STOP.remote");
+            let why = match r.get(&key, &tmp) {
+                Ok(true) => std::fs::read_to_string(&tmp).unwrap_or_default(),
+                _ => String::new(),
+            };
+            let why: String = why.trim().chars().take(300).collect();
+            self.request(&format!("the launcher asked the run to stop ({key}) {why}"));
         }
     }
 }
@@ -121,9 +132,9 @@ pub fn request(reason: &str) {
     global().request(reason);
 }
 
-/// [`StopState::poll`] on the process's state.
-pub fn poll(remote: Option<(&dyn Remote, &str)>, local_dir: &Path) {
-    global().poll(remote, local_dir);
+/// [`StopState::poll_local`] on the process's state.
+pub fn poll_local(local_dir: &Path) -> bool {
+    global().poll_local(local_dir)
 }
 
 #[cfg(test)]
@@ -143,12 +154,13 @@ mod tests {
             root: base.join("remote"),
         };
         let st = StopState::default();
-        st.poll(Some((&remote, "runs/x")), &work);
+        assert!(!st.poll_local(&work));
+        st.poll_remote(&remote, "runs/x", &work);
         assert_eq!(st.requested(), None);
         let f = base.join("why");
         std::fs::write(&f, "{\"reason\": \"low CPU\"}").expect("write");
         remote.put(&f, "runs/x/STOP", false).expect("put");
-        st.poll(Some((&remote, "runs/x")), &work);
+        st.poll_remote(&remote, "runs/x", &work);
         let why = st.requested().expect("stop requested");
         assert!(
             why.contains("runs/x/STOP") && why.contains("low CPU"),
@@ -158,7 +170,7 @@ mod tests {
         assert_eq!(st.requested(), Some(why));
         let st = StopState::default();
         std::fs::write(work.join("STOP"), "by hand").expect("write");
-        st.poll(None, &work);
+        assert!(st.poll_local(&work));
         assert!(st.requested().expect("stop").contains("by hand"));
         let st = StopState::default();
         st.signals[0].1.store(true, Ordering::Relaxed);

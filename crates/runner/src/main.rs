@@ -6,18 +6,31 @@
 //! ```
 //!
 //! **Format 1** (docs/M1-SPEC.md section 7; no `format` key): one chunk. Steps: record the
-//! hardware, run the micro-benchmark, run the chunk while writing a heartbeat every 30 s, write
-//! outputs then `DONE` (or `FAILED`), upload everything to R2 with rclone, and, on vast.ai
-//! (`CONTAINER_ID` set), ask vast.ai to destroy this instance last (see [`self_destroy`]; the
-//! launcher destroys it too, and is the mechanism that does not depend on this machine).
+//! hardware, run the micro-benchmark, run the chunk while writing a heartbeat every
+//! `heartbeat_every_s` (default 30), write outputs then `DONE` (or `FAILED`), upload everything to
+//! R2 with rclone, and, on vast.ai (`CONTAINER_ID` set), ask vast.ai to destroy this instance last
+//! (see [`self_destroy`]; the launcher destroys it too, and is the mechanism that does not depend
+//! on this machine).
 //! R2 layout under the manifest's `out` prefix (default `runs/<run_id>`):
 //! `hardware.json`, `benchmark.json`, `heartbeat/<seq:06>.json` (versioned, never overwritten),
-//! `out/...` (immutable), `result.json`, and `DONE` or `FAILED` uploaded last.
+//! `partial/out/...` (mutable: the chunk's changed files every `upload_every_s`, default 300,
+//! checkpoints first), `out/...` (immutable, at the end), `result.json`, and `DONE` or `FAILED`
+//! uploaded last.
 //! Uploads are skipped (with a notice) when `RCLONE_CONFIG_R2_TYPE` is unset, so the same
 //! manifest runs on the laptop; `RUNNER_REMOTE_DIR` makes a local directory the remote (tests).
+//! **The network never blocks the runner** (`net.rs`): the local `heartbeat.json` is written every
+//! interval whatever the network does; its upload, the STOP check and the partial uploads run on
+//! background threads, every rclone call has hard time limits (`remote.rs`), and the other
+//! uploads run beside the heartbeat ([`Ctx::blocking`]). Heartbeats carry `upload_failures`,
+//! `other_net_failures`, `last_upload_ok_s`, and, during a `search_measure` worlds step,
+//! `progress.eta` (`measure.rs`).
 //! A stop request (SIGTERM/SIGINT/SIGHUP, the launcher's `<out>/STOP`, a local `STOP` file, or
-//! the deadline) ends the chunk, uploads `out/` with whatever it finished and writes `FAILED`
-//! with `stopped` and the file list (`stop.rs`).
+//! the deadline) ends the chunk, uploads its checkpoints, then `out/` with whatever it finished,
+//! and writes `FAILED` with `stopped` and the file list (`stop.rs`).
+//! **Resume:** `"resume_from": "<run id>"` (in the manifest or the chunk's params; a
+//! `search_measure` chunk only) downloads that run's latest `out/` (its final one, else its
+//! `partial/out/`) before the chunk starts, so a replacement machine continues world by world;
+//! give the new run its own `run_id`.
 //!
 //! **Format 2** (`"format": 2`, docs/M3-SPEC.md section 7): several prioritised streams of
 //! chunks, a deadline, a versioned done-list and resume after a lost machine; see `v2.rs`.
@@ -30,6 +43,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -37,6 +51,7 @@ use serde_json::{Value, json};
 mod bundle;
 mod measure;
 mod mem;
+mod net;
 mod remote;
 mod sched;
 mod spike;
@@ -49,7 +64,11 @@ const USAGE: &str = "usage:
   runner chunk <spec.json>        (internal: one format-2 chunk, started by `runner run`)
   runner hardware";
 
+/// The default heartbeat interval (format 1's `heartbeat_every_s`).
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(30);
+
+/// Format 1's default interval between partial uploads of `out/` (`upload_every_s`).
+const UPLOAD_EVERY: Duration = Duration::from_secs(300);
 
 fn main() -> ExitCode {
     stop::install();
@@ -424,8 +443,10 @@ struct Ctx {
     root: PathBuf,
     /// Where child-process logs go (`out/` for format 1; outside the bundle for format 2).
     logs: PathBuf,
-    /// Format 1's remote store and its key prefix (`runs/<run_id>` unless the manifest says).
-    remote: Option<Box<dyn remote::Remote>>,
+    /// Format 1's remote store (counting its failures) and its background network work, with
+    /// the key prefix (`runs/<run_id>` unless the manifest says); `None` without a remote and in
+    /// format-2 chunk workers (their orchestrator does their uploads).
+    net: Option<net::Net>,
     prefix: String,
     threads: usize,
     dph: f64,
@@ -440,6 +461,13 @@ struct Ctx {
     /// Print one compact line per heartbeat to stdout ([`hb_line`]; format 1, where stdout is
     /// the machine's log that `vastai logs` shows).
     hb_stdout: bool,
+    /// Heartbeat interval (format 1's `heartbeat_every_s`, default 30 s).
+    heartbeat_every: Duration,
+    /// Interval of the background partial uploads of `out/` (format 1's `upload_every_s`,
+    /// default 300 s), and when the last one started; off once the final uploads begin.
+    upload_every: Duration,
+    last_partial: Instant,
+    partial_off: bool,
 }
 
 impl Ctx {
@@ -450,10 +478,14 @@ impl Ctx {
             run_id: run_id.to_string(),
             root: root.to_path_buf(),
             logs: root.join("logs"),
-            remote: None,
+            net: None,
             prefix: format!("runs/{run_id}"),
             threads,
-            dph: 0.0,
+            // The machine's price, for a chunk's own cost projection (`progress.eta`).
+            dph: std::env::var("DPH")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0),
             start: Instant::now(),
             deadline: None,
             seq: 0,
@@ -463,6 +495,10 @@ impl Ctx {
             phase: "chunk".into(),
             progress: Value::Null,
             hb_stdout: false,
+            heartbeat_every: HEARTBEAT_EVERY,
+            upload_every: UPLOAD_EVERY,
+            last_partial: Instant::now(),
+            partial_off: true,
         }
     }
 
@@ -480,12 +516,32 @@ impl Ctx {
         Ok(p)
     }
 
-    /// Uploads one file to `<prefix>/<rel>`; failures are logged, never fatal.
-    fn upload_file(&self, local: &Path, rel: &str, immutable: bool) -> bool {
-        let Some(remote) = &self.remote else {
+    /// The remote store, if this run has one.
+    fn remote(&self) -> Option<Arc<dyn remote::Remote>> {
+        self.net.as_ref().map(|n| Arc::clone(&n.remote))
+    }
+
+    /// Runs `f` (a network call) on a helper thread while this one keeps heartbeating, so a slow
+    /// upload or download never stops the heartbeat.
+    fn blocking<T: Send>(&mut self, f: impl FnOnce() -> T + Send) -> T {
+        std::thread::scope(|s| {
+            let h = s.spawn(f);
+            while !h.is_finished() {
+                self.heartbeat(false);
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))
+        })
+    }
+
+    /// Uploads one file to `<prefix>/<rel>` (up to 3 tries, each with hard limits, heartbeating
+    /// meanwhile); failures are logged, never fatal.
+    fn upload_file(&mut self, local: &Path, rel: &str, immutable: bool) -> bool {
+        let Some(r) = self.remote() else {
             return true;
         };
-        match remote.put(local, &format!("{}/{rel}", self.prefix), immutable) {
+        let (local, key) = (local.to_path_buf(), format!("{}/{rel}", self.prefix));
+        match self.blocking(move || remote::retry(3, || r.put(&local, &key, immutable))) {
             Ok(()) => true,
             Err(e) => {
                 eprintln!("runner: upload {rel}: {e}");
@@ -494,20 +550,53 @@ impl Ctx {
         }
     }
 
-    /// The run's stop requests: a signal, the launcher's `STOP` object, a local `STOP` file.
-    fn poll_stop(&self) {
-        stop::poll(
-            self.remote.as_deref().map(|r| (r, self.prefix.as_str())),
-            &self.root,
+    /// Every `upload_every`, uploads the changed files of `out/` to `<prefix>/partial/out/` in
+    /// the background, checkpoints first (`net.rs`); skipped while the last one is still going.
+    fn upload_partial(&mut self) {
+        let Some(n) = &self.net else {
+            return;
+        };
+        if self.partial_off || self.last_partial.elapsed() < self.upload_every || n.partial_busy() {
+            return;
+        }
+        self.last_partial = Instant::now();
+        n.partial(
+            vec![(
+                self.root.join("out"),
+                format!("{}/partial/out", self.prefix),
+            )],
+            self.root.join("tmp").join("partial"),
         );
     }
 
+    /// Ends the background partial uploads before the final ones: none starts again, and the
+    /// one under way stops after its current file (it writes `partial/out/`, the final uploads
+    /// `out/`, which a resumed run prefers, so they never need to wait for each other).
+    fn stop_partial(&mut self) {
+        self.partial_off = true;
+        if let Some(n) = &self.net {
+            n.cancel_partial();
+        }
+    }
+
+    /// Writes `heartbeat.json` (every `heartbeat_every`, or now with `force`) and hands its
+    /// upload to the background (`net.rs`): the network never holds this up. Also checks the
+    /// local STOP file, starts a background check of the remote one, and starts a partial upload
+    /// when one is due.
     fn heartbeat(&mut self, force: bool) {
-        if !force && self.last_hb.is_some_and(|t| t.elapsed() < HEARTBEAT_EVERY) {
+        self.upload_partial();
+        if !force
+            && self
+                .last_hb
+                .is_some_and(|t| t.elapsed() < self.heartbeat_every)
+        {
             return;
         }
         self.last_hb = Some(Instant::now());
-        self.poll_stop();
+        stop::poll_local(&self.root);
+        if let Some(n) = &self.net {
+            n.poll_stop(&self.root);
+        }
         let cpu = self.cpu.sample(self.child);
         let round = |x: Option<f64>| x.map(|x| (x * 10.0).round() / 10.0);
         let elapsed = self.elapsed();
@@ -527,6 +616,10 @@ impl Ctx {
             "host_cpu_busy_pct": round(cpu.host),
             "est_cost_usd": (elapsed / 3600.0 * self.dph * 10_000.0).round() / 10_000.0,
         });
+        let mut hb = hb;
+        if let Some(n) = &self.net {
+            n.add_health(&mut hb);
+        }
         if self.hb_stdout {
             println!(
                 "{}",
@@ -541,8 +634,13 @@ impl Ctx {
         }
         match self.write_json("heartbeat.json", &hb) {
             Ok(p) => {
-                let rel = format!("heartbeat/{:06}.json", self.seq);
-                self.upload_file(&p, &rel, true);
+                if let Some(n) = &self.net {
+                    n.heartbeat(
+                        fs::read_to_string(&p).unwrap_or_default(),
+                        format!("{}/heartbeat/{:06}.json", self.prefix, self.seq),
+                        self.root.join("tmp").join("heartbeat-upload.json"),
+                    );
+                }
             }
             Err(e) => eprintln!("runner: heartbeat: {e}"),
         }
@@ -752,8 +850,27 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
         .and_then(Value::as_str)
         .map(|s| s.trim_matches('/').to_string())
         .unwrap_or_else(|| format!("runs/{run_id}"));
-    let remote = remote::from_env();
-    if remote.is_none() {
+    let secs = |key: &str, default: Duration| -> Result<Duration, String> {
+        match manifest.get(key) {
+            None | Some(Value::Null) => Ok(default),
+            Some(v) => v
+                .as_u64()
+                .map(Duration::from_secs)
+                .ok_or_else(|| format!("{key} must be a whole number of seconds")),
+        }
+    };
+    let (heartbeat_every, upload_every) = match (
+        secs("heartbeat_every_s", HEARTBEAT_EVERY),
+        secs("upload_every_s", UPLOAD_EVERY),
+    ) {
+        (Ok(h), Ok(u)) => (h.max(Duration::from_secs(1)), u),
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("runner: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let net = remote::from_env().map(|r| net::Net::new(r, &out));
+    if net.is_none() {
         println!(
             "runner: RCLONE_CONFIG_R2_TYPE or R2_BUCKET unset (and no RUNNER_REMOTE_DIR): local \
              run, no uploads"
@@ -764,7 +881,7 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
         run_id: run_id.to_string(),
         logs: root.join("out"),
         root,
-        remote,
+        net,
         prefix: out,
         threads,
         dph: std::env::var("DPH")
@@ -780,6 +897,10 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
         phase: "start".into(),
         progress: Value::Null,
         hb_stdout: true,
+        heartbeat_every,
+        upload_every,
+        last_partial: Instant::now(),
+        partial_off: false,
     };
     // Continue a heartbeat sequence if this run id was started before on this disk.
     if let Ok(t) = fs::read_to_string(ctx.root.join("heartbeat.json"))
@@ -791,20 +912,20 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
     println!(
         "runner: run {run_id}, {threads} threads ({:.2} usable cores), uploading to {}",
         ctx.cpu.cores,
-        ctx.remote
-            .as_ref()
-            .map_or("(nowhere)".to_string(), |r| format!(
-                "{}/{}",
-                r.describe(),
-                ctx.prefix
-            ))
+        ctx.remote().map_or("(nowhere)".to_string(), |r| format!(
+            "{}/{}",
+            r.describe(),
+            ctx.prefix
+        ))
     );
 
     let outcome = steps(&mut ctx, &manifest);
     let ok = outcome.is_ok();
     let marker = if ok { "DONE" } else { "FAILED" };
+    // The background partial uploads end here; the final uploads follow.
+    ctx.stop_partial();
     // A stopped run (signal, the launcher's STOP, the deadline) keeps everything it finished:
-    // the whole out/ is uploaded below, and the marker lists it.
+    // its checkpoints and the whole out/ are uploaded below, and the marker lists them.
     let stopped = stop::requested();
     let outputs: Vec<Value> = bundle::list_files(&ctx.root.join("out"))
         .unwrap_or_default()
@@ -834,21 +955,13 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
     );
     let _ = ctx.write_json(marker, &marker_body);
     let mut uploaded = true;
-    if let Some(remote) = &ctx.remote {
-        for f in ["hardware.json", "benchmark.json", "result.json"] {
-            let p = ctx.root.join(f);
-            if p.exists() {
-                uploaded &= ctx.upload_file(&p, f, false);
-            }
+    if let Some(r) = ctx.remote() {
+        let (root, prefix) = (ctx.root.clone(), ctx.prefix.clone());
+        uploaded = ctx.blocking(move || final_uploads(&*r, &root, &prefix, marker));
+        ctx.heartbeat(true);
+        if let Some(n) = &ctx.net {
+            n.drain(Duration::from_secs(10));
         }
-        if let Err(e) = remote.put_dir(&ctx.root.join("out"), &format!("{}/out", ctx.prefix), true)
-        {
-            eprintln!("runner: upload out/: {e}");
-            uploaded = false;
-        }
-        // The marker goes last: a DONE (or FAILED) in R2 means every output is already there.
-        let p = ctx.root.join(marker);
-        uploaded &= ctx.upload_file(&p, marker, false);
     }
     match &outcome {
         Ok(()) => println!("runner: {marker}"),
@@ -863,6 +976,41 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
     } else {
         ExitCode::FAILURE
     }
+}
+
+/// Format 1's last uploads, most valuable first: the checkpoints of `out/` (a stopped
+/// `search_measure` chunk's worlds finished since its last complete decision: small, and what a
+/// resumed run needs), the run's records, the whole `out/` (immutable keys, checked), and the
+/// marker last, so a `DONE` or `FAILED` in the remote means everything else is there. Each upload
+/// is tried up to 3 times, each try with hard limits (`remote.rs`).
+fn final_uploads(r: &dyn remote::Remote, root: &Path, prefix: &str, marker: &str) -> bool {
+    let put = |local: &Path, key: String, immutable: bool| -> bool {
+        match remote::retry(3, || r.put(local, &key, immutable)) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("runner: upload {key}: {e}");
+                false
+            }
+        }
+    };
+    let mut ok = true;
+    let out = root.join("out");
+    for rel in bundle::list_files(&out).unwrap_or_default() {
+        if net::is_ckpt(&rel) {
+            ok &= put(&out.join(&rel), format!("{prefix}/out/{rel}"), true);
+        }
+    }
+    for f in ["hardware.json", "benchmark.json", "result.json"] {
+        let p = root.join(f);
+        if p.exists() {
+            ok &= put(&p, format!("{prefix}/{f}"), false);
+        }
+    }
+    if let Err(e) = remote::retry(3, || r.put_dir(&out, &format!("{prefix}/out"), true)) {
+        eprintln!("runner: upload out/: {e}");
+        ok = false;
+    }
+    ok & put(&root.join(marker), format!("{prefix}/{marker}"), false)
 }
 
 /// The keys tried to destroy this instance, in order: the per-instance key vast.ai injects
@@ -973,9 +1121,21 @@ fn steps(ctx: &mut Ctx, manifest: &Value) -> Result<(), String> {
         .filter(|o| o.len() == 1)
         .and_then(|o| o.iter().next())
         .ok_or("`chunk` must be an object with exactly one kind, e.g. {\"difftest\": {...}}")?;
+    let resumed = match resume_from(manifest, params)? {
+        None => None,
+        Some(_) if kind != "search_measure" => {
+            return Err(format!(
+                "resume_from works with search_measure chunks only (this chunk is {kind})"
+            ));
+        }
+        Some(from) => Some(resume_out(ctx, &from)?),
+    };
     ctx.set_phase("chunk", json!({ "kind": kind }));
     let t0 = Instant::now();
     let mut result = run_kind(ctx, kind, params)?;
+    if let (Some(o), Some(r)) = (result.as_object_mut(), resumed) {
+        o.insert("resumed_from".into(), r);
+    }
     let secs = t0.elapsed().as_secs_f64();
     if let Some(o) = result.as_object_mut() {
         o.insert("kind".into(), json!(kind));
@@ -985,6 +1145,43 @@ fn steps(ctx: &mut Ctx, manifest: &Value) -> Result<(), String> {
     }
     ctx.write_json("result.json", &result)?;
     Ok(())
+}
+
+/// The earlier run a format-1 chunk continues: `resume_from` in the manifest or the chunk's
+/// params, a run id (its files are under `runs/<id>`) or a key prefix containing `/`.
+fn resume_from(manifest: &Value, params: &Value) -> Result<Option<String>, String> {
+    let v = manifest
+        .get("resume_from")
+        .or_else(|| params.get("resume_from"));
+    match v {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) if s.contains('/') => Ok(Some(s.trim_matches('/').to_string())),
+        Some(Value::String(s))
+            if !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) =>
+        {
+            Ok(Some(format!("runs/{s}")))
+        }
+        Some(_) => Err("resume_from must be a run id (or a key prefix with /)".into()),
+    }
+}
+
+/// `resume_from`: downloads the latest copy of an earlier run's `out/` into this run's `out/`
+/// before the chunk starts: its final `out/` where it got that far (uploaded at its end or stop),
+/// else its partial uploads (`partial/out/`, every `upload_every_s`). A `search_measure` chunk
+/// then continues from its worlds file and checkpoint, redoing only the worlds that were being
+/// solved (or finished after the last upload). Local files at least as large are kept.
+fn resume_out(ctx: &mut Ctx, from: &str) -> Result<Value, String> {
+    let r = ctx
+        .remote()
+        .ok_or("resume_from needs a remote store (R2, or RUNNER_REMOTE_DIR)")?;
+    ctx.set_phase("resume", json!({ "from": from }));
+    let out = ctx.root.join("out");
+    let prefixes = vec![format!("{from}/out"), format!("{from}/partial/out")];
+    let (files, bytes) = ctx.blocking(move || net::restore(&*r, &prefixes, &out))?;
+    println!("runner: resuming from {from}: {files} files ({bytes} bytes) restored into out/");
+    Ok(json!({ "from": from, "files": files, "bytes": bytes }))
 }
 
 /// Runs one chunk of an existing (format-1) kind; also used by format-2 workers.
@@ -1166,6 +1363,84 @@ mod tests {
             "hb 3 chunk search_measure exact worlds cpu 99.2%"
         );
         assert_eq!(hb_line(0, "start", &Value::Null, None), "hb 0 start cpu -");
+    }
+
+    /// The network never blocks the runner (docs/M3-SPEC.md §7.3). With an rclone that hangs on
+    /// every call (a fake that sleeps 300 s), while a chunk (`sleep 4`) runs: the local heartbeat
+    /// is still written every interval, each hung call (heartbeat uploads, STOP checks, partial
+    /// uploads) is killed at its 1 s limit, `upload_failures` rises, and the chunk ends on time.
+    #[cfg(unix)]
+    #[test]
+    fn hung_network_never_blocks() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("runner-hang-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).expect("mkdir");
+        let log = base.join("calls.log");
+        let fake = base.join("rclone");
+        fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\necho \"$$ $1\" >> '{}'\nexec sleep 300\n",
+                log.display()
+            ),
+        )
+        .expect("write");
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).expect("chmod");
+        let raw = remote::RcloneRemote {
+            base: "r2:bucket".into(),
+            bin: fake,
+            limit: Duration::from_secs(1),
+        };
+        let root = base.join("work");
+        fs::create_dir_all(root.join("out")).expect("mkdir");
+        fs::write(root.join("out/w.jsonl.ckpt"), "1\n").expect("write");
+        let mut ctx = Ctx::local("hang", &root, 1);
+        ctx.net = Some(net::Net::new(Box::new(raw), "runs/hang"));
+        ctx.heartbeat_every = Duration::from_millis(200);
+        ctx.upload_every = Duration::from_millis(500);
+        ctx.partial_off = false;
+        let t0 = Instant::now();
+        let mut c = Command::new("sleep");
+        c.arg("4");
+        ctx.run_child(c, "sleep.log").expect("the chunk completes");
+        let took = t0.elapsed();
+        assert!(took < Duration::from_secs(6), "the chunk took {took:?}");
+        assert!(ctx.seq >= 8, "{} local heartbeats in {took:?}", ctx.seq);
+        let hb: Value =
+            serde_json::from_str(&fs::read_to_string(root.join("heartbeat.json")).expect("hb"))
+                .expect("json");
+        assert!(hb["upload_failures"].as_u64().expect("count") >= 2, "{hb}");
+        assert!(
+            hb["other_net_failures"].as_u64().expect("count") >= 1,
+            "{hb}"
+        );
+        assert_eq!(hb["last_upload_ok_s"], Value::Null, "{hb}");
+        // Every hung call was killed within its limit: none of those started so far is left
+        // 1.5 s later (the background lanes go on starting new ones; they are not counted).
+        let calls = fs::read_to_string(&log).expect("calls");
+        std::thread::sleep(Duration::from_millis(1500));
+        let kinds: std::collections::BTreeSet<&str> = calls
+            .lines()
+            .filter_map(|l| l.split_whitespace().nth(1))
+            .collect();
+        assert!(kinds.contains("copyto") && kinds.contains("lsf"), "{calls}");
+        eprintln!(
+            "hung network: chunk {took:?}, {} local heartbeats, {} hung rclone calls killed, \
+             upload_failures {}, other_net_failures {}",
+            ctx.seq,
+            calls.lines().count(),
+            hb["upload_failures"],
+            hb["other_net_failures"]
+        );
+        for pid in calls.lines().filter_map(|l| l.split_whitespace().next()) {
+            let cmd = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            assert!(
+                !String::from_utf8_lossy(&cmd).contains("300"),
+                "hung rclone {pid} is still running"
+            );
+        }
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

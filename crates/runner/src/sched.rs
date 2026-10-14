@@ -5,7 +5,8 @@
 //! - `format: 2`, `run_id`, `run_seed`, `deadline_utc` (optional), `threads` (null = the usable
 //!   cores), `bin_sha` (checked against the machine's `BIN_SHA`), `inputs` (`name:
 //!   "sha256:<hex>"`, fetched from `inputs/sha256/<hex>` and verified), `upload_every_s` (≤ 600,
-//!   default 600), `heartbeat_every_s` (default 30), *`benchmark_seconds` (start-up benchmark,
+//!   default 600: the done-list and the running chunks' live files), `heartbeat_every_s` (default
+//!   30), *`benchmark_seconds` (start-up benchmark,
 //!   default 60, 0 = none);
 //! - per stream: `name`, `priority` (lower first), `kind`, `params`, `chunks` (a number, or
 //!   `"until_decided"` for an `arena_blocks` stream with `params.sprt`);

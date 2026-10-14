@@ -31,10 +31,15 @@
 //! count); `rejection` is the engine-based oracle (same distribution, no counts).
 //! `worlds` is the yardstick builder and the method runner: every (decision, world) task of the
 //! run goes through one work queue on `--threads` threads (longest expected first), and one JSON
-//! line per decision is appended to `--out` in that order; decisions already there are skipped,
-//! so an interrupted chunk resumes. The file is byte-identical for any thread count; timings go to
-//! `<out>.times.jsonl`. `--progress FILE` is rewritten every 2 s with the counts done (for the
-//! runner's heartbeat). Exact worlds are the yardstick (label 1); a method's own worlds use
+//! line per decision is appended to `--out` in that order; each world is also appended to the
+//! checkpoint `<out>.ckpt` as soon as it finishes. A rerun skips the decisions already in `--out`
+//! and the worlds already in the checkpoint, so an interrupted chunk loses only the worlds that
+//! were being solved; the checkpoint is deleted once every decision is in `--out`. The file is
+//! byte-identical for any thread count and any interruptions; timings go to
+//! `<out>.times.jsonl`. `--progress FILE` is rewritten every 2 s with the counts done, the worlds
+//! restored at the start, and the progress estimate (`eta`: work done weighted by each world's
+//! expected cost, refined by measured times, and the seconds left; `search::eta`) for the
+//! runner's heartbeat. Exact worlds are the yardstick (label 1); a method's own worlds use
 //! another label. `--ids` restricts the run to chosen decisions; with `--from-world A` (A = the
 //! worlds already saved) it extends them: the new worlds are appended as new records (to the same
 //! file or another), and `agree`, `curves` and `score` join every record of a decision, so they
@@ -217,6 +222,13 @@ fn write_progress(
         "decisions_total": ld(&p.decisions_total),
         "worlds_done": ld(&p.worlds_done),
         "worlds_total": ld(&p.worlds_total),
+        "decisions_resumed": ld(&p.decisions_resumed),
+        "worlds_resumed": ld(&p.worlds_resumed),
+        "worlds_valued": ld(&p.worlds_valued),
+        "eta": p.eta().map(|e| serde_json::json!({
+            "done_frac": e.done_frac, "remaining_s": e.remaining_s, "measured": e.measured,
+            "basis": e.basis, "work_thread_s": e.work_s, "done_thread_s": e.done_s,
+        })),
         "par_tasks_done": ld(&p.par.tasks_done),
         "par_tasks_total": ld(&p.par.tasks_total),
         "planned": p.planned.load(Ordering::Relaxed),

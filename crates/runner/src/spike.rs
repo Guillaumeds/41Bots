@@ -318,11 +318,14 @@ fn quick_table(ctx: &mut Ctx, params: &Value, want: &str) -> Option<(PathBuf, &'
     }
     let table = ctx.root.join("equity-v0.npy");
     let key = format!("inputs/sha256/{want}");
-    let store = crate::remote::from_env();
-    if let Some(r) = &store
-        && matches!(r.exists(&key), Ok(true))
-        && r.get(&key, &table).is_ok()
-    {
+    // The network calls run beside the heartbeat (`Ctx::blocking`), each with hard limits.
+    let store: Option<std::sync::Arc<dyn crate::remote::Remote>> =
+        crate::remote::from_env().map(std::sync::Arc::from);
+    let fetched = store.clone().is_some_and(|r| {
+        let (k, t) = (key.clone(), table.clone());
+        ctx.blocking(move || matches!(r.exists(&k), Ok(true)) && r.get(&k, &t).is_ok())
+    });
+    if fetched {
         if verified(&table, want) {
             return Some((table, "remote store"));
         }
@@ -347,11 +350,18 @@ fn quick_table(ctx: &mut Ctx, params: &Value, want: &str) -> Option<(PathBuf, &'
         eprintln!("runner: table from the repository's model failed its check; estimating");
         return None;
     }
-    if let Some(r) = &store
-        && !matches!(r.exists(&key), Ok(true))
-        && let Err(e) = r.put(&table, &key, true)
-    {
-        eprintln!("runner: could not share table v0 as {key}: {e}");
+    if let Some(r) = store {
+        let (k, t) = (key.clone(), table.clone());
+        let shared = ctx.blocking(move || {
+            if matches!(r.exists(&k), Ok(true)) {
+                Ok(())
+            } else {
+                r.put(&t, &k, true)
+            }
+        });
+        if let Err(e) = shared {
+            eprintln!("runner: could not share table v0 as {key}: {e}");
+        }
     }
     Some((table, "built from the repository's model"))
 }

@@ -10,6 +10,8 @@
 //! - [`measure`]: stratified decision sets and the early-trick yardstick measurements (§13.1).
 //! - [`curves`]: N-curves from saved per-world values: money loss against N, power-law fits,
 //!   held-out checks and the N each scenario needs (§13.1 item 10).
+//! - [`eta`]: honest progress for a worlds run: work done weighted by expected cost per task,
+//!   refined by measured times, and the time and money to the end.
 //! - [`plan`]: position-aware threads and tables per exact world, and the runner that packs
 //!   them onto the machine (§13.1 item 11).
 //! - [`t1bench`]: the trick-1 machine bench: exact-solve work per second and per dollar with
@@ -22,6 +24,7 @@
 
 pub mod bot;
 pub mod curves;
+pub mod eta;
 pub mod measure;
 pub mod pimc;
 pub mod plan;
