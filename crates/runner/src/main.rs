@@ -484,7 +484,18 @@ impl Ctx {
 
     /// Runs a child process to completion, heartbeating meanwhile and killing it at the deadline.
     /// Its stdout and stderr are appended to `out/<log>`.
-    fn run_child(&mut self, mut cmd: Command, log: &str) -> Result<(), String> {
+    fn run_child(&mut self, cmd: Command, log: &str) -> Result<(), String> {
+        self.run_child_with(cmd, log, &mut |_| {})
+    }
+
+    /// [`Ctx::run_child`], calling `poll` every half second before the heartbeat check, so it can
+    /// update `progress` from the child's own progress file.
+    fn run_child_with(
+        &mut self,
+        mut cmd: Command,
+        log: &str,
+        poll: &mut dyn FnMut(&mut Ctx),
+    ) -> Result<(), String> {
         let log_path = self.root.join("out").join(log);
         fs::create_dir_all(self.root.join("out")).map_err(|e| e.to_string())?;
         let f = fs::OpenOptions::new()
@@ -500,7 +511,7 @@ impl Ctx {
             .map_err(|e| format!("cannot start {cmd:?}: {e}"))?;
         self.child = Some(child.id());
         self.cpu.prime_tree(child.id());
-        let outcome = self.wait_child(&mut child, &cmd, log);
+        let outcome = self.wait_child(&mut child, &cmd, log, poll);
         self.child = None;
         outcome
     }
@@ -510,8 +521,10 @@ impl Ctx {
         child: &mut std::process::Child,
         cmd: &Command,
         log: &str,
+        poll: &mut dyn FnMut(&mut Ctx),
     ) -> Result<(), String> {
         loop {
+            poll(self);
             if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
                 return if status.success() {
                     Ok(())

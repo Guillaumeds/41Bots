@@ -5,24 +5,33 @@
 //! search worlds    --decisions FILE --method exact|rollout --to N --out FILE
 //!                  [--from-world A] [--label L] [--seed S] [--first I] [--last J]
 //!                  [--threads K] [--solve-threads K] [--tt-mb M] --equity TABLE
-//! search agree     --worlds FILE [--grid 10,20,40,80,160,320]
+//!                  [--progress FILE]
+//! search agree     --worlds FILE [--grid 10,20,40,80,160,320] [--json FILE]
 //! search score     --yardstick FILE --n N --method FILE:N [--method FILE:N …]
 //! search teacher   --hands N --out DIR --equity TABLE [--seed S] [--config NAME] [--start-hands H]
 //! ```
-//! `worlds` is the yardstick builder and the method runner: it appends one JSON line per decision
-//! to `--out` and skips decisions already there, so an interrupted chunk resumes. Exact worlds are
-//! the yardstick (label 1); a method's own worlds use another label. `agree` and `score` report
-//! per trick and per position in the trick (§13.1 item 6).
+//! `worlds` is the yardstick builder and the method runner: every (decision, world) task of the
+//! run goes through one work queue on `--threads` threads (longest expected first), and one JSON
+//! line per decision is appended to `--out` in that order; decisions already there are skipped,
+//! so an interrupted chunk resumes. The file is byte-identical for any thread count; timings go to
+//! `<out>.times.jsonl`. `--progress FILE` is rewritten every 2 s with the counts done (for the
+//! runner's heartbeat). Exact worlds are the yardstick (label 1); a method's own worlds use
+//! another label. `agree` reports per trick, per position in the trick (§13.1 item 6), per
+//! match-state stratum and per log2 world-count band (item 8) and per hand-type band (item 9);
+//! `score` per position and stratum.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use search::bot::{PimcFactory, PimcSpec, load_equity};
 use search::measure::{
-    DecisionSpec, WorldRows, agreement_curve, build_decisions, collect_starts, paired, score,
-    stratum_of, summarise, world_rows,
+    BatchProgress, DecisionSpec, DecisionTiming, WorldRows, WorldsJob, agreement_curve,
+    build_decisions, collect_starts, paired, read_jsonl, score, stratum_of, summarise, timing_path,
+    worlds_file,
 };
 use search::pimc::{Ctx, Method, SearchConfig, SharedLeaf};
 use search::teacher::{decisions_npy, teacher_deck, teacher_hand};
@@ -57,19 +66,7 @@ impl Args {
 }
 
 fn read_lines<T: serde::de::DeserializeOwned>(path: &str) -> Result<Vec<T>, String> {
-    let f = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
-    let mut out = Vec::new();
-    for l in std::io::BufReader::new(f).lines() {
-        let l = l.map_err(|e| e.to_string())?;
-        if l.trim().is_empty() {
-            continue;
-        }
-        // A torn last line (killed mid-write) is skipped; the decision is redone.
-        if let Ok(v) = serde_json::from_str(&l) {
-            out.push(v);
-        }
-    }
-    Ok(out)
+    read_jsonl(Path::new(path))
 }
 
 fn main() -> ExitCode {
@@ -107,6 +104,41 @@ fn decisions(a: &Args) -> Result<(), String> {
     std::fs::write(a.req("--out")?, out).map_err(|e| e.to_string())
 }
 
+/// Rewrite the progress file (write a temporary file, then rename it over the old one, so a
+/// reader never sees half a file).
+fn write_progress(
+    path: &Path,
+    p: &BatchProgress,
+    job: &WorldsJob,
+    cfg: &SearchConfig,
+    t0: Instant,
+    finished: bool,
+) {
+    let ld = |x: &std::sync::atomic::AtomicU64| x.load(Ordering::Relaxed);
+    let v = serde_json::json!({
+        "method": search::measure::method_name(job.method),
+        "label": job.label,
+        "from": job.from,
+        "to": job.to,
+        "threads": ld(&p.threads),
+        "solve_threads": cfg.solve_threads,
+        "decisions_done": ld(&p.decisions_done),
+        "decisions_total": ld(&p.decisions_total),
+        "worlds_done": ld(&p.worlds_done),
+        "worlds_total": ld(&p.worlds_total),
+        "par_tasks_done": ld(&p.par.tasks_done),
+        "par_tasks_total": ld(&p.par.tasks_total),
+        "elapsed_s": t0.elapsed().as_secs(),
+        "finished": finished,
+    });
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    if std::fs::write(&tmp, v.to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
 fn worlds(a: &Args) -> Result<(), String> {
     let ds: Vec<DecisionSpec> = read_lines(a.req("--decisions")?)?;
     let method = match a.req("--method")? {
@@ -114,6 +146,7 @@ fn worlds(a: &Args) -> Result<(), String> {
         "rollout" => Method::RolloutPimc,
         m => return Err(format!("unknown method {m}")),
     };
+    let t0 = Instant::now();
     let table = load_equity(a.req("--equity")?)?;
     let leaf: Arc<SharedLeaf> = Arc::new(table);
     let src = RejectionSource::new();
@@ -129,44 +162,71 @@ fn worlds(a: &Args) -> Result<(), String> {
         ..SearchConfig::default()
     };
     let (from, to) = (a.num("--from-world", 0)?, a.num("--to", 10)?);
-    let label = a.num("--label", 1)?;
-    let seed = a.num("--seed", 1)?;
+    if to < from {
+        return Err(format!("--to {to} is below --from-world {from}"));
+    }
+    let job = WorldsJob {
+        method,
+        label: a.num("--label", 1)?,
+        seed: a.num("--seed", 1)?,
+        from,
+        to,
+    };
     let (first, last) = (a.num("--first", 0)?, a.num("--last", u64::MAX)?);
-    let out = a.req("--out")?;
-    let done: Vec<WorldRows> = read_lines(out).unwrap_or_default();
-    // Rewrite the file without a torn line, then append.
-    let mut text = String::new();
-    for r in &done {
-        text.push_str(&serde_json::to_string(r).map_err(|e| e.to_string())?);
-        text.push('\n');
-    }
-    std::fs::write(out, text).map_err(|e| e.to_string())?;
-    let mut f = std::fs::OpenOptions::new()
-        .append(true)
-        .open(out)
-        .map_err(|e| e.to_string())?;
-    for d in ds.iter().filter(|d| d.id >= first && d.id <= last) {
-        if done.iter().any(|r| r.id == d.id) {
-            continue;
+    let ds: Vec<DecisionSpec> = ds
+        .into_iter()
+        .filter(|d| d.id >= first && d.id <= last)
+        .collect();
+    let out = Path::new(a.req("--out")?);
+    let progress_path = a.get("--progress").map(PathBuf::from);
+    let prog = BatchProgress::default();
+    let finished = AtomicBool::new(false);
+    eprintln!(
+        "worlds: {} decisions, worlds {from}..{to}, {} threads, {} solve threads (table loaded in {:.1} s)",
+        ds.len(),
+        cfg.threads,
+        cfg.solve_threads,
+        t0.elapsed().as_secs_f64()
+    );
+    let n = std::thread::scope(|s| {
+        if let Some(p) = &progress_path {
+            let (prog, finished, job, cfg) = (&prog, &finished, &job, &cfg);
+            s.spawn(move || {
+                while !finished.load(Ordering::Relaxed) {
+                    write_progress(p, prog, job, cfg, t0, false);
+                    for _ in 0..20 {
+                        if finished.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                }
+            });
         }
-        let r = world_rows(d, method, label, seed, from, to, &ctx, &cfg);
-        eprintln!(
-            "decision {} trick {} pos {} cands {}: {} ms ({:.1} ms/world)",
-            d.id,
-            d.trick,
-            d.position + 1,
-            r.cands.len(),
-            r.ms,
-            r.ms as f64 / (to - from) as f64
-        );
-        writeln!(
-            f,
-            "{}",
-            serde_json::to_string(&r).map_err(|e| e.to_string())?
-        )
-        .map_err(|e| e.to_string())?;
-        f.flush().map_err(|e| e.to_string())?;
+        let r = worlds_file(out, &ds, &job, &ctx, &cfg, Some(&prog), |r, t| {
+            eprintln!(
+                "decision {} trick {} pos {} cands {}: {:.1} ms per world (slowest {:.1} ms); {}/{} decisions, {:.0} s",
+                r.id,
+                r.trick,
+                r.position + 1,
+                r.cands.len(),
+                t.world_us as f64 / 1000.0 / t.worlds.max(1) as f64,
+                t.max_world_us as f64 / 1000.0,
+                prog.decisions_done.load(Ordering::Relaxed) + 1,
+                prog.decisions_total.load(Ordering::Relaxed),
+                t0.elapsed().as_secs_f64()
+            );
+        });
+        finished.store(true, Ordering::Relaxed);
+        r
+    })?;
+    if let Some(p) = &progress_path {
+        write_progress(p, &prog, &job, &cfg, t0, true);
     }
+    eprintln!(
+        "worlds: {n} decisions valued in {:.1} s",
+        t0.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 
@@ -178,39 +238,97 @@ fn grid(a: &Args) -> Result<Vec<usize>, String> {
         .collect()
 }
 
+/// The fewest decisions a reported cell should have (§13.1 item 8).
+const MIN_CELL: usize = 25;
+
 fn agree(a: &Args) -> Result<(), String> {
-    let rows: Vec<WorldRows> = read_lines(a.req("--worlds")?)?;
-    let g = grid(a)?;
-    let mut groups: BTreeMap<(u8, String), Vec<WorldRows>> = BTreeMap::new();
-    for r in &rows {
-        groups
-            .entry((r.trick, "all".into()))
-            .or_default()
-            .push(r.clone());
-        groups
-            .entry((r.trick, format!("pos{}", r.position + 1)))
-            .or_default()
-            .push(r.clone());
-        groups
-            .entry((
-                r.trick,
-                format!("pair{}-{}", r.position / 2 * 2 + 1, r.position / 2 * 2 + 2),
-            ))
-            .or_default()
-            .push(r.clone());
+    let path = a.req("--worlds")?;
+    let rows: Vec<WorldRows> = read_lines(path)?;
+    // Timings (the last record per decision), when the timing file is there.
+    let mut times: BTreeMap<u64, DecisionTiming> = BTreeMap::new();
+    if let Ok(ts) = read_jsonl::<DecisionTiming>(&timing_path(Path::new(path))) {
+        for t in ts {
+            times.insert(t.id, t);
+        }
     }
+    let g = grid(a)?;
+    // Groups by (trick, kind, index): all, position, position pair, stratum, log2 world-count band.
+    let mut groups: BTreeMap<(u8, u8, u32), Vec<&WorldRows>> = BTreeMap::new();
+    for r in &rows {
+        let p = u32::from(r.position);
+        let mut keys = vec![
+            (0, 0),
+            (1, p + 1),
+            (2, p / 2 * 2 + 1),
+            (3, u32::from(r.stratum)),
+        ];
+        if let Some(b) = r.log2_worlds {
+            keys.push((4, b));
+        }
+        if let Some(h) = r.hand_type {
+            let [t, top, plain] = h.bands();
+            keys.extend([
+                (5, u32::from(t)),
+                (6, u32::from(top)),
+                (7, u32::from(plain)),
+            ]);
+        }
+        for (kind, i) in keys {
+            groups.entry((r.trick, kind, i)).or_default().push(r);
+        }
+    }
+    let name = |kind: u8, i: u32| match kind {
+        0 => "all".to_string(),
+        1 => format!("pos{i}"),
+        2 => format!("pair{i}-{}", i + 1),
+        3 => format!("S{i}"),
+        4 => format!("log2worlds{i}"),
+        5 => format!("trumps{i}{}", if i == 3 { "+" } else { "" }),
+        6 => format!("top{i}{}", if i == 2 { "+" } else { "" }),
+        _ => match i {
+            1 => "plain0-1".to_string(),
+            3 => "plain3+".to_string(),
+            _ => format!("plain{i}"),
+        },
+    };
     let mut report = serde_json::Map::new();
-    for ((trick, group), rs) in &groups {
-        let (steps, plateau) = agreement_curve(rs, &g);
-        let ms: f64 = rs
+    let mut last_kind = None;
+    for (&(trick, kind, i), rs) in &groups {
+        if last_kind != Some((trick, kind)) {
+            last_kind = Some((trick, kind));
+            println!(
+                "== trick {trick}, by {} ==",
+                [
+                    "all",
+                    "position",
+                    "position pair",
+                    "stratum",
+                    "log2 world count",
+                    "hand type: trumps held",
+                    "hand type: top trumps held (5, J, Joker, A♥, ace of trumps)",
+                    "hand type: longest plain suit",
+                ][usize::from(kind)]
+            );
+        }
+        let group = name(kind, i);
+        let owned: Vec<WorldRows> = rs.iter().map(|r| (*r).clone()).collect();
+        let (steps, plateau) = agreement_curve(&owned, &g);
+        let timed: Vec<f64> = rs
             .iter()
-            .map(|r| r.ms as f64 / r.rows.len() as f64)
-            .sum::<f64>()
-            / rs.len() as f64;
+            .filter_map(|r| times.get(&r.id))
+            .map(|t| t.world_us as f64 / 1000.0 / t.worlds.max(1) as f64)
+            .collect();
+        let ms = (!timed.is_empty()).then(|| timed.iter().sum::<f64>() / timed.len() as f64);
+        let enough = rs.len() >= MIN_CELL;
         println!(
-            "trick {trick} {group}: {} decisions, {:.1} ms per world, plateau N = {}",
+            "trick {trick} {group}: {} decisions{}, {} per world, plateau N = {}",
             rs.len(),
-            ms,
+            if enough {
+                String::new()
+            } else {
+                format!(" (under {MIN_CELL}: too few to set N)")
+            },
+            ms.map_or("n/a ms".to_string(), |m| format!("{m:.1} ms")),
             plateau.map_or("none on this grid".to_string(), |n| n.to_string())
         );
         println!("   N→2N  change%  |Δmean|   loss(±SE)");
@@ -228,8 +346,18 @@ fn agree(a: &Args) -> Result<(), String> {
         }
         report.insert(
             format!("trick{trick}-{group}"),
-            serde_json::json!({ "decisions": rs.len(), "ms_per_world": ms, "plateau": plateau, "steps": steps }),
+            serde_json::json!({ "decisions": rs.len(), "enough_decisions": enough,
+                                "ms_per_world": ms, "plateau": plateau, "steps": steps }),
         );
+    }
+    let tricks: std::collections::BTreeSet<u8> = rows.iter().map(|r| r.trick).collect();
+    for t in tricks {
+        if !rows.iter().any(|r| r.trick == t && r.log2_worlds.is_some()) {
+            println!(
+                "trick {t} by log2 world count: n/a (the world source cannot count worlds; needs crates/belief)"
+            );
+            report.insert(format!("trick{t}-log2worlds"), serde_json::json!("n/a"));
+        }
     }
     if let Some(p) = a.get("--json") {
         std::fs::write(
@@ -255,17 +383,22 @@ fn score_cmd(a: &Args) -> Result<(), String> {
             "{m}: {}",
             serde_json::to_string(&sum).map_err(|e| e.to_string())?
         );
-        let mut by_pos: BTreeMap<u8, Vec<search::measure::Scored>> = BTreeMap::new();
+        // Per position in the trick, then per stratum.
+        let mut cells: BTreeMap<(u8, u8), Vec<search::measure::Scored>> = BTreeMap::new();
         for x in &s {
             if let Some(y) = yard.iter().find(|y| y.id == x.id) {
-                by_pos.entry(y.position).or_default().push(x.clone());
+                cells
+                    .entry((0, y.position + 1))
+                    .or_default()
+                    .push(x.clone());
+                cells.entry((1, y.stratum)).or_default().push(x.clone());
             }
         }
-        for (p, v) in &by_pos {
+        for (&(kind, i), v) in &cells {
             let ps = summarise(v);
             println!(
-                "  pos {}: n={} agree={:.3} loss={:.5}±{:.5}",
-                p + 1,
+                "  {} {i}: n={} agree={:.3} loss={:.5}±{:.5}",
+                if kind == 0 { "pos" } else { "S" },
                 ps.decisions,
                 ps.agreement.0,
                 ps.mean_loss.0,
