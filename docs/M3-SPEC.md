@@ -32,7 +32,7 @@ Terms used below, in plain words:
    impl Match { pub fn from_hand_start(s: HandStartState, deck: [Card; DECK_SIZE], seed: u64, rules: Rules)
                     -> Result<Match, StateError>; }
    ```
-   It validates the state (reachable scores; `bonus_taken[t] == (scores[t] % 5 == 1)`; no team at 41 or more; games won ≤ 1 each, and at most 2 teams at 1 game since the match is not over; `dealer < 8`) and deals `deck` as hand `hand_index`. Later hands are shuffled from `Rng::new(seed)`. `MatchRecord` gains an optional `start: Option<HandStartState>` (format version 2; version-1 records still read) so a record starting mid-match replays.
+   It validates the state (reachable scores; `bonus_taken[t] == (scores[t] % 5 == 1)`; no team at 41 or more; games won ≤ 1 each (any number of teams may hold one game while the match continues); `dealer < 8`) and deals `deck` as hand `hand_index`. Later hands are shuffled from `Rng::new(seed)`. `MatchRecord` gains an optional `start: Option<HandStartState>` (format version 2; version-1 records still read) so a record starting mid-match replays.
    - Test `from_hand_start_equals_played_match`: for 500 seeds, play a match with `rules-v1` to the start of some hand, rebuild it with `from_hand_start` from that hand's public state and deck, then play both on: every event and every `SeatView` agree.
 2. **Hidden burns in a view.** `PublicState` already has `burn_counts`; add `burn_order: Vec<(u8 /*seat*/, BurnKind)>` with `enum BurnKind { JokerTake, AceRobAtOnce, RobAtTurn }`, in burn order, so the tracker can tell the dealer's pre-trump burn (`JokerTake`) from a rob burn without parsing events. Covered by the difftest (the reference derives the same field) and a transcript check on transcripts 15–18.
 
@@ -491,3 +491,10 @@ The yardstick is for **measuring only, not training**. Its size is set by measur
 4. **Trick 1:** cost = decisions × N × measured seconds per deal. The 384-core EPYC measured 7–140 s per deal, about $0.28 per decision at N = 20. **The trick-1 set is priced with the owner before it runs.**
 5. **Repeatability:** re-solve 20 decisions with fresh deals at the chosen N. The chosen card must match in at least 95% of them, or N is raised.
 6. **Position in the trick (owner, 2026-10-14).** The plateau N is measured and set **per trick and per position in the trick** (1st to 8th to play). The leader of trick 1 has the most unknowns; the 8th player has seen 7 cards. Decisions are stratified equally across positions. Positions may be pooled into pairs (1–2, 3–4, 5–6, 7–8) only if their plateaus agree within one doubling step. Time per deal is also reported per position.
+7. **Tricks 3 and 4 too (owner, 2026-10-14).** The same agreement curve, with 200 decisions (25 per position) and N up to 320, is measured for tricks 3 and 4. Exact solves are cheap there, about 9 ms per world at trick 3. This replaces the assumed N for the exact-PIMC teacher at tricks 3–4 with a measured one. Trick 5 has no decisions, since each player has one card left, so it needs no N.
+8. **Match situation and uncertainty (owner, 2026-10-14).**
+   - Decisions are stratified equally over the four match-state strata S1–S4 (§5), as well as over positions, and the plateau is reported **per stratum** as well as per position. Near the money, values are more extreme, so a small difference can flip the choice.
+   - The plateau is also reported against the decision's **number of consistent worlds** (log2, from the belief counter): what N must cover is the uncertainty about the hidden cards.
+   - **Rule:** N is set per trick and position. If any stratum or world-count band needs a larger N than that, the larger N is used for that band.
+   - The decision count is raised until every reported cell has at least 25 decisions.
+   - The golden set is built with the same stratification.
