@@ -22,6 +22,9 @@ on:
       min_cores:
         description: "Minimum effective CPU cores"
         default: "16"
+      min_ram_gb:
+        description: "Minimum RAM in GB (e.g. 480 for the one-deal-per-thread table measurement)"
+        default: "32"
       max_minutes:
         description: "Hard time limit (minutes) for the run, which may exceed GitHub's 6 hours (the machine is handed over to vast-cleanup at 330 min)"
         default: "30"
@@ -100,6 +103,7 @@ jobs:
         env:
           MANIFEST: ${{ inputs.manifest }}
           MIN_CORES: ${{ inputs.min_cores }}
+          MIN_RAM_GB: ${{ inputs.min_ram_gb }}
           MAX_MINUTES: ${{ inputs.max_minutes }}
           LOW_CPU_PCT: ${{ inputs.low_cpu_pct }}
           LOW_CPU_S: ${{ inputs.low_cpu_s }}
@@ -127,7 +131,7 @@ jobs:
           fi
           if [ "$DRY_RUN" = "true" ]; then
             # Prints the offer that would be rented (the named one with offer_id, else the search's choice); rents nothing.
-            python3 python/launcher/launch.py plan --min-cores "$MIN_CORES" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} ${{ inputs.cheapest && '--cheapest' || '' }} $OFFER_ARGS
+            python3 python/launcher/launch.py plan --min-cores "$MIN_CORES" --min-ram-gb "${MIN_RAM_GB:-32}" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} ${{ inputs.cheapest && '--cheapest' || '' }} $OFFER_ARGS
             exit 0
           fi
           # A blank run_id gets a timestamp from the launcher; resume_from goes into the manifest unless it has one.
@@ -146,7 +150,7 @@ jobs:
           print(json.dumps(m))
           PY
           )
-          python3 python/launcher/launch.py run --manifest "$MANIFEST" --min-cores "$MIN_CORES" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} \
+          python3 python/launcher/launch.py run --manifest "$MANIFEST" --min-cores "$MIN_CORES" --min-ram-gb "${MIN_RAM_GB:-32}" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} \
             --max-minutes "$MAX_MINUTES" --low-cpu-pct "$LOW_CPU_PCT" --low-cpu-s "${LOW_CPU_S:-300}" --poll-s "${POLL_S:-60}" --max-dollars "${MAX_DOLLARS:-0}" \
             --image "$IMAGE" --bin-sha "$BIN_SHA" --state-file instance-id.txt ${{ inputs.cheapest && '--cheapest' || '' }} --handover-min 330 \
             $OFFER_ARGS
