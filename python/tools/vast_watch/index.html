@@ -3,309 +3,501 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Vast machine watcher</title>
+<meta name="token" content="__TOKEN__">
+<title>Vast machine dashboard</title>
 <style>
   :root {
-    --bg: #f6f7f9; --card: #ffffff; --ink: #1c2330; --muted: #5d6879; --line: #d9dee6;
-    --accent: #1f6feb; --good: #1a7f37; --bad: #b42318; --new: #fff4cc;
+    --bg: #f4f6f9; --card: #fff; --ink: #1b2330; --muted: #5b6678; --line: #d8dee8; --accent: #1f6feb;
+    --good: #1a7f37; --bad: #b42318; --new: #fff3c4; --est: #b26a00; --chip: #eef2f7;
   }
   @media (prefers-color-scheme: dark) {
-    :root { --bg: #12161d; --card: #1b212b; --ink: #e8ecf2; --muted: #9aa6b8; --line: #2c3544;
-            --accent: #5aa2ff; --good: #4ac26b; --bad: #ff7b72; --new: #4a3f12; }
+    :root { --bg: #11151c; --card: #1a202a; --ink: #e8ecf2; --muted: #9aa6b8; --line: #2b3443; --accent: #5aa2ff;
+            --good: #4ac26b; --bad: #ff7b72; --new: #4a3f12; --est: #f0a640; --chip: #243044; }
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--ink);
-         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
-  h1 { font-size: 20px; margin: 4px 0 2px; }
-  .sub { color: var(--muted); margin: 0 0 14px; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
-          padding: 14px; margin-bottom: 14px; }
-  .row { display: flex; flex-wrap: wrap; gap: 12px 18px; align-items: end; }
-  label.f { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 3px; }
-  label.f input[type=text], label.f input[type=number], label.f select {
-    font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
-    border-radius: 6px; padding: 6px 8px; }
-  label.f input[type=text] { width: 280px; max-width: 100%; }
-  label.f input[type=number] { width: 100px; }
-  label.c { display: flex; gap: 6px; align-items: center; font-size: 14px; }
-  button { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
-           border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1500px; margin: 0 auto; padding: 14px 16px 40px; }
+  h1 { font-size: 19px; margin: 0; }
+  h2 { font-size: 15px; margin: 0 0 8px; }
+  .top { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: var(--muted); font-size: 13px; }
+  .chip { background: var(--chip); border-radius: 12px; padding: 2px 10px; }
+  .chip.err { background: var(--bad); color: #fff; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
+  .grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 12px; margin-bottom: 12px; }
+  .grid3 .card { margin: 0; }
+  .sub { color: var(--muted); font-size: 12px; margin: 0 0 8px; }
+  .rank { border-top: 1px solid var(--line); padding: 8px 0; }
+  .rank:first-of-type { border-top: 0; }
+  .rank .h { font-weight: 600; }
+  .rank .d { color: var(--muted); font-size: 13px; }
+  .tag { display: inline-block; font-size: 11px; font-weight: 700; border-radius: 8px; padding: 0 6px; margin-left: 6px; background: var(--chip); }
+  .tag.m { background: var(--good); color: #fff; } .tag.e { background: var(--est); color: #fff; } .tag.f { background: #6f7fa0; color: #fff; }
+  .tag.live { background: var(--good); color: #fff; } .tag.gone { background: var(--muted); color: #fff; }
+  .tag.new { background: var(--accent); color: #fff; }
+  .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 8px 0 2px; }
+  button { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; cursor: pointer; }
   button:hover { border-color: var(--accent); }
-  .presets { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-  /* on/off switch */
-  .switch { display: flex; align-items: center; gap: 12px; }
+  button.small { font-size: 12px; padding: 1px 7px; }
+  /* switch */
+  .switch { display: flex; align-items: center; gap: 10px; }
   .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
-  .track { width: 58px; height: 30px; border-radius: 15px; background: var(--line);
-           position: relative; transition: background .15s; cursor: pointer; flex: none; }
-  .track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 24px; height: 24px;
-                  border-radius: 50%; background: #fff; transition: left .15s; box-shadow: 0 1px 3px #0005; }
+  .track { width: 58px; height: 30px; border-radius: 15px; background: var(--line); position: relative; transition: background .15s; cursor: pointer; flex: none; }
+  .track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 24px; height: 24px; border-radius: 50%; background: #fff; transition: left .15s; box-shadow: 0 1px 3px #0005; }
   .switch input:checked + .track { background: var(--good); }
   .switch input:checked + .track::after { left: 31px; }
   .switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .state { font-weight: 600; min-width: 190px; }
-  .status { font-size: 13px; color: var(--muted); }
-  .status.err { color: var(--bad); }
-  .warn { color: var(--bad); font-size: 13px; margin-top: 8px; }
-  table { width: 100%; border-collapse: collapse; font-size: 14px; }
-  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  th { font-size: 12px; color: var(--muted); font-weight: 600; }
-  td.n, th.n { text-align: right; white-space: nowrap; }
+  .state { font-weight: 700; min-width: 150px; }
+  .ctl { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+  .banner { background: var(--est); color: #fff; border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; font-weight: 600; }
+  details > summary { cursor: pointer; font-weight: 600; font-size: 15px; }
+  .nrows { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 10px 22px; margin-top: 10px; }
+  .nrow { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .nrow .t { font-weight: 600; margin-bottom: 4px; }
+  .nrow label { display: inline-flex; gap: 5px; align-items: center; margin-right: 12px; font-size: 13px; }
+  input[type=text], input[type=number], select { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; }
+  input[type=number] { width: 84px; } input[type=text] { width: 220px; max-width: 100%; }
+  .filters { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: end; margin-bottom: 8px; }
+  .filters label.f { display: flex; flex-direction: column; font-size: 11px; color: var(--muted); gap: 2px; }
+  .filters label.c { display: inline-flex; gap: 5px; align-items: center; font-size: 13px; }
+  .tw { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 5px 7px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { font-size: 11px; color: var(--muted); font-weight: 700; cursor: pointer; user-select: none; position: sticky; top: 0; background: var(--card); }
+  th.sorted { color: var(--accent); }
+  td.n, th.n { text-align: right; }
   tr.new td { background: var(--new); }
-  .badge { font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 8px; background: var(--accent);
-           color: #fff; margin-left: 6px; }
-  .ok { color: var(--good); } .no { color: var(--muted); }
-  .empty { color: var(--muted); padding: 14px 4px; }
+  tr.top1 td:first-child { box-shadow: inset 3px 0 0 var(--good); }
+  .ok { color: var(--good); font-weight: 600; } .no { color: var(--muted); }
+  .est { color: var(--est); }
+  .ev { border-top: 1px solid var(--line); padding: 5px 0; font-size: 13px; }
+  .ev:first-child { border-top: 0; }
+  .warn { color: var(--bad); font-size: 13px; margin-top: 6px; }
+  .note { color: var(--muted); font-size: 12px; margin-top: 8px; }
   small { color: var(--muted); }
 </style>
 </head>
 <body>
 <main>
-  <h1>Vast machine watcher</h1>
-  <p class="sub">Tells you when a machine you are waiting for appears on the vast.ai market. It only searches; it never rents anything.</p>
-
-  <section class="card" aria-label="Notifications">
-    <div class="row">
+  <div class="top">
+    <div>
+      <h1>Vast machine dashboard</h1>
+      <div class="chips" id="chips"></div>
+    </div>
+    <div class="ctl">
       <div class="switch">
-        <input type="checkbox" id="notify" role="switch">
+        <input type="checkbox" id="watch" role="switch" aria-label="Watching the market">
+        <label class="track" for="watch" aria-hidden="true"></label>
+        <span class="state" id="watchState">Watching…</span>
+        <button id="quit" type="button" title="Ends the program on your computer">Stop program</button>
+      </div>
+      <div class="switch">
+        <input type="checkbox" id="notify" role="switch" aria-label="Desktop notifications">
         <label class="track" for="notify" aria-hidden="true"></label>
         <span class="state" id="notifyState">Notifications off</span>
+        <button id="test" type="button">Test</button>
       </div>
-      <button id="test" type="button">Send a test notification</button>
-      <label class="c"><input type="checkbox" id="sound"> beep too</label>
-      <label class="f">Check every
-        <select id="every">
-          <option value="15">15 seconds</option>
-          <option value="30" selected>30 seconds</option>
-          <option value="60">60 seconds</option>
-        </select>
-      </label>
     </div>
-    <div class="status" id="status" role="status">Starting…</div>
-    <div class="warn" id="permWarn" hidden></div>
+  </div>
+  <div class="banner" id="paused" hidden>Paused. Nothing is running: this page is not asking and the program is not searching vast.ai. Switch "Watching" on to continue.</div>
+  <div class="warn" id="permWarn" hidden></div>
+
+  <div class="grid3" id="cats"></div>
+
+  <details class="card" id="nset">
+    <summary>Notification settings and refresh</summary>
+    <div class="nrows">
+      <div class="nrow"><div class="t">Page refresh and job size</div>
+        <label>Ask the program every
+          <select id="every"><option value="5">5 s</option><option value="10">10 s</option><option value="15">15 s</option><option value="30">30 s</option><option value="60">60 s</option></select></label>
+        <label>Job size <input type="number" id="jobSize" min="0.1" step="0.1"> ×10¹² nodes</label>
+        <label>Real-schedule multiplier <input type="number" id="mult" min="1" step="0.1"></label>
+        <label><input type="checkbox" id="sound"> beep with notifications</label>
+        <div class="note">The program itself searches vast.ai every <span id="srvEvery">?</span> s. The default job is the trick-1 agreement run (32 decisions × 80 worlds ≈ 5.9×10¹² nodes); the real schedule runs about 2–3× slower than the full-machine speed.</div></div>
+      <div class="nrow"><div class="t">1. A new all-time record is set</div>
+        <label><input type="checkbox" data-n="recCheapest"> cheapest</label>
+        <label><input type="checkbox" data-n="recFast"> cheapest among the fast</label>
+        <label><input type="checkbox" data-n="recBalanced"> best balanced</label>
+        <div class="note">A machine enters the saved best-two of a category, or the same machine gets cheaper.</div></div>
+      <div class="nrow"><div class="t">2. A machine enters today's top two</div>
+        <label><input type="checkbox" data-n="topCheapest"> cheapest</label>
+        <label><input type="checkbox" data-n="topFast"> cheapest among the fast</label>
+        <label><input type="checkbox" data-n="topBalanced"> best balanced</label>
+        <div class="note">Compared with the market now, not with the all-time records. Noisier.</div></div>
+      <div class="nrow"><div class="t">3. A machine costs at or below</div>
+        <label><input type="checkbox" data-n="thrOn"> on</label>
+        <label>$ <input type="number" id="thrCost" min="0" step="0.01"> per 10¹² nodes</label>
+        <label>and at least <input type="number" id="thrThreads" min="0" step="8"> threads</label>
+        <div class="note">Only machines our launcher can rent. Our best so far: $0.28.</div></div>
+      <div class="nrow"><div class="t">4. My watch rule</div>
+        <label><input type="checkbox" data-n="watchOn"> on</label>
+        <label>CPU <input type="text" id="wCpu" spellcheck="false" placeholder="regex, e.g. 9995WX|7995WX"></label><br>
+        <label>min threads <input type="number" id="wThreads" min="0"></label>
+        <label>min RAM GB <input type="number" id="wRam" min="0"></label>
+        <label>max $/h <input type="number" id="wPrice" min="0" step="0.05"></label>
+        <label><input type="checkbox" id="wRentable"> launcher can rent</label></div>
+      <div class="nrow"><div class="t">Which estimates count</div>
+        <label><input type="checkbox" data-n="allowEst"> also notify for chips we have not benchmarked (estimates, about ±15–50%)</label>
+        <div class="note">Measured = our own bench runs. Family = a sibling model was measured. Estimate = from the speed model.</div></div>
+    </div>
+  </details>
+
+  <section class="card">
+    <h2>Market table <small id="tcount"></small></h2>
+    <div class="filters">
+      <label class="f">CPU contains (regex)<input type="text" id="fCpu" spellcheck="false"></label>
+      <label class="f">Min threads<input type="number" id="fThreads" min="0"></label>
+      <label class="f">Min RAM GB<input type="number" id="fRam" min="0"></label>
+      <label class="f">Max $/h<input type="number" id="fPrice" min="0" step="0.1"></label>
+      <label class="f">Max $ per 10¹²<input type="number" id="fCost" min="0" step="0.05"></label>
+      <label class="f">Min speed (billion nodes/s)<input type="number" id="fSpeed" min="0" step="0.1"></label>
+      <label class="c"><input type="checkbox" id="fRent"> our launcher can rent</label>
+      <label class="c"><input type="checkbox" id="fMeas"> measured/family only</label>
+      <label class="c"><input type="checkbox" id="fWhole"> whole machines</label>
+      <button type="button" id="fReset">Reset filters</button>
+    </div>
+    <div class="tw"><table id="tbl"><thead id="thead"></thead><tbody id="tbody"></tbody></table></div>
+    <div class="note" id="tnote"></div>
   </section>
 
-  <section class="card" aria-label="What to wait for">
-    <div class="row">
-      <label class="f">CPU name contains (text or regex)
-        <input type="text" id="cpu" spellcheck="false" placeholder="e.g. Threadripper PRO (9995|7995)WX">
-      </label>
-      <label class="f">Min threads <input type="number" id="minThreads" min="0" step="1"></label>
-      <label class="f">Min RAM (GB) <input type="number" id="minRam" min="0" step="1"></label>
-      <label class="f">Max $ per hour <input type="number" id="maxPrice" min="0" step="0.05"></label>
-    </div>
-    <div class="row" style="margin-top:10px">
-      <label class="c"><input type="checkbox" id="whole"> whole machine only (not shared)</label>
-      <label class="c"><input type="checkbox" id="verified"> verified hosts only</label>
-      <label class="c"><input type="checkbox" id="reliable"> reliability above 0.98</label>
-    </div>
-    <div class="presets">
-      <button type="button" data-preset="best">Cheapest class: Threadripper PRO 9995WX / 7995WX</button>
-      <button type="button" data-preset="tr">Any Threadripper, 120+ threads</button>
-      <button type="button" data-preset="big">Anything with 180+ threads under $1.50/h</button>
-    </div>
+  <section class="card">
+    <h2>Record log <small>(newest first; saved on disk by the program)</small></h2>
+    <div id="events"></div>
   </section>
 
-  <section class="card" aria-label="Matching machines">
-    <div id="summary" style="margin-bottom:8px"><strong id="count">0</strong> matching machines
-      <small id="of"></small></div>
-    <div id="tableWrap"></div>
+  <section class="card note" style="margin-top:0">
+    <b>How the numbers are made.</b> Every listing's cost per 10¹² nodes [positions the exact solver examines; our work is counted in them] =
+    price per hour ÷ (usable threads × measured speed per thread × 3600) × 10¹². Speed per thread is from our own bench runs for the CPU models we have measured
+    (green <b>measured</b>), from a sibling model (grey <b>family</b>), or from the speed model (orange <b>estimate</b>). It is then adjusted for how small the
+    solver's memory tables would be on that machine's RAM. Usable threads are 95.8% of the advertised ones. The three categories rank only machines our launcher can rent
+    (whole, verified, reliability above 0.98, network at most $0.10/GB) with enough threads. "Fast" means at least <span id="fastGn">1</span> billion nodes per second.
+    "Best balanced" is the lowest cost × time. Search every few seconds is the program's; keep it running to keep the records.
   </section>
 </main>
 
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const DEFAULTS = { cpu: "Threadripper PRO (9995|7995)WX", minThreads: 150, minRam: 100, maxPrice: 3,
-                   whole: true, verified: true, reliable: true, every: 30, notify: false, sound: false };
-const PRESETS = {
-  best: { cpu: "Threadripper PRO (9995|7995)WX", minThreads: 150, minRam: 100, maxPrice: 3 },
-  tr:   { cpu: "Threadripper", minThreads: 120, minRam: 60, maxPrice: 4 },
-  big:  { cpu: "", minThreads: 180, minRam: 100, maxPrice: 1.5 },
-};
+const TOKEN = (document.querySelector('meta[name="token"]') || {}).content || "";
+const post = (path, body) => fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({ token: TOKEN }, body)) });
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
 
-function load() {
-  try { return Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem("vastWatch") || "{}")); }
-  catch (e) { return Object.assign({}, DEFAULTS); }
-}
-function save() {
-  try { localStorage.setItem("vastWatch", JSON.stringify(settings)); } catch (e) { /* private window: fine */ }
-}
-const settings = load();
+/* ---------------- settings ---------------- */
+const DEF = { every: 5, jobSize: 5.9, mult: 2.3, sound: false, notify: false,
+  recCheapest: true, recFast: true, recBalanced: true, topCheapest: false, topFast: false, topBalanced: false,
+  thrOn: true, thrCost: 0.4, thrThreads: 64, watchOn: false, wCpu: "9995WX|7995WX", wThreads: 150, wRam: 100, wPrice: 3, wRentable: true,
+  allowEst: true,
+  fCpu: "", fThreads: 0, fRam: 0, fPrice: 0, fCost: 0, fSpeed: 0, fRent: false, fMeas: false, fWhole: false,
+  sortKey: "cost", sortDir: 1, lastEvent: null };
+let S;
+try { S = Object.assign({}, DEF, JSON.parse(localStorage.getItem("vastDash2") || "{}")); } catch (e) { S = Object.assign({}, DEF); }
+const save = () => { try { localStorage.setItem("vastDash2", JSON.stringify(S)); } catch (e) { /* private window */ } };
+const NUM_IDS = ["jobSize", "mult", "thrCost", "thrThreads", "wThreads", "wRam", "wPrice", "fThreads", "fRam", "fPrice", "fCost", "fSpeed"];
+const TXT_IDS = ["wCpu", "fCpu"];
+const CHK_IDS = ["sound", "wRentable", "fRent", "fMeas", "fWhole"];
 
+function writeForm() {
+  $("every").value = String(S.every);
+  NUM_IDS.forEach((i) => { $(i).value = S[i]; });
+  TXT_IDS.forEach((i) => { $(i).value = S[i]; });
+  CHK_IDS.forEach((i) => { $(i).checked = !!S[i]; });
+  document.querySelectorAll("[data-n]").forEach((c) => { c.checked = !!S[c.dataset.n]; });
+}
 function readForm() {
-  settings.cpu = $("cpu").value.trim();
-  settings.minThreads = Number($("minThreads").value) || 0;
-  settings.minRam = Number($("minRam").value) || 0;
-  settings.maxPrice = Number($("maxPrice").value) || 0;
-  settings.whole = $("whole").checked;
-  settings.verified = $("verified").checked;
-  settings.reliable = $("reliable").checked;
-  settings.every = Number($("every").value) || 30;
-  settings.sound = $("sound").checked;
+  S.every = Number($("every").value) || 5;
+  NUM_IDS.forEach((i) => { S[i] = Number($(i).value) || 0; });
+  if (!(S.jobSize > 0)) S.jobSize = DEF.jobSize;
+  if (!(S.mult >= 1)) S.mult = DEF.mult;
+  TXT_IDS.forEach((i) => { S[i] = $(i).value.trim(); });
+  CHK_IDS.forEach((i) => { S[i] = $(i).checked; });
+  document.querySelectorAll("[data-n]").forEach((c) => { S[c.dataset.n] = c.checked; });
   save();
 }
-function writeForm() {
-  $("cpu").value = settings.cpu; $("minThreads").value = settings.minThreads;
-  $("minRam").value = settings.minRam; $("maxPrice").value = settings.maxPrice;
-  $("whole").checked = settings.whole; $("verified").checked = settings.verified;
-  $("reliable").checked = settings.reliable; $("every").value = String(settings.every);
-  $("sound").checked = settings.sound;
-}
 
-function cpuMatcher() {
-  const t = settings.cpu;
-  if (!t) return () => true;
-  try { const re = new RegExp(t, "i"); return (s) => re.test(s || ""); }
-  catch (e) { const low = t.toLowerCase(); return (s) => (s || "").toLowerCase().includes(low); }
-}
-function matches(o, cpuOk) {
-  return cpuOk(o.cpu_name) && (o.threads || 0) >= settings.minThreads && (o.ram_gb || 0) >= settings.minRam &&
-    (!settings.maxPrice || o.dph_total <= settings.maxPrice) &&
-    (!settings.whole || (o.gpu_frac || 0) >= 1) &&
-    (!settings.verified || o.verification === "verified") &&
-    (!settings.reliable || (o.reliability2 || 0) > 0.98);
-}
-// Can our launcher (python/launcher/launch.py) rent it? Whole machine, verified, reliable, network price at most 0.10 $/GB.
-function launcherOk(o) {
-  return (o.gpu_frac || 0) >= 1 && o.verification === "verified" && (o.reliability2 || 0) > 0.98 &&
-    (o.inet_down_cost || 0) <= 0.1 && (o.inet_up_cost || 0) <= 0.1;
-}
+/* ---------------- helpers ---------------- */
 function cleanCpu(s) {
-  return (s || "?").replace(/^AMD\s+Ryzen\s+/i, "AMD ").replace(/\s+\d+-Core(s)?( Processor)?\s*$/i, "").replace(/\s+Processor\s*$/i, "").trim();
+  return (s || "?").replace(/^AMD\s+Ryzen\s+/i, "AMD ").replace(/Xeon®/g, "Xeon").replace(/™/g, "")
+    .replace(/\s+\d+-Cores?( Processor)?\s*$/i, "").replace(/\s+Processor\s*$/i, "").replace(/\s+CPU @ [\d.]+GHz/i, "").trim();
 }
-
-let seen = null;          // ids of matches at the last check; null until the first successful check
-let timer = null;
-let lastIds = new Set();
-
-function describe(o) {
-  return cleanCpu(o.cpu_name) + " · " + o.threads + " threads · " + Math.round(o.ram_gb) + " GB RAM · $" +
-    o.dph_total.toFixed(2) + "/h · " + (o.geolocation || "?") + " (offer " + o.id + ")";
+const fmt = (x, d = 2) => (x === null || x === undefined || !isFinite(x)) ? "–" : Number(x).toFixed(d);
+function ago(s) { s = Math.round(s); if (s < 90) return s + " s"; if (s < 5400) return Math.round(s / 60) + " min"; if (s < 172800) return (s / 3600).toFixed(1) + " h"; return Math.round(s / 86400) + " days"; }
+function jobOf(r) {
+  if (!r.nps) return { h: null, usd: null };
+  const h = S.jobSize * 1e12 / r.nps / 3600 * S.mult;
+  return { h, usd: h * r.dph_total };
 }
+function srcTag(src) {
+  const t = el("span", "tag " + (src === "measured" ? "m" : src === "estimated" ? "e" : "f"), src === "estimated" ? "estimate" : src);
+  return t;
+}
+function line1(r) { return cleanCpu(r.cpu_name) + " · " + Math.round(r.usable || r.threads) + " threads · " + Math.round(r.ram_gb) + " GB RAM · $" + fmt(r.dph_total) + "/h"; }
+function rentText(r) {
+  const j = jobOf(r);
+  return "Rent offer " + r.id + ": " + line1(r) + " (" + (r.geolocation || "?") + ", " + (r.num_gpus || 0) + "× " + (r.gpu_name || "?") + " ignored). " +
+    "Estimated $" + fmt(r.cost, 3) + " per 10^12 nodes (" + r.source + "), about " + fmt((r.nps || 0) / 1e9) + " billion nodes/s. " +
+    "Job of " + S.jobSize + "×10^12 nodes: about " + fmt(j.h, 1) + " h and $" + fmt(j.usd, 2) + " on the real schedule; suggested cap $" + (j.usd ? Math.ceil(j.usd * 1.5) : "?") + ".";
+}
+async function copy(text, btn) {
+  try { await navigator.clipboard.writeText(text); }
+  catch (e) { const t = document.createElement("textarea"); t.value = text; document.body.appendChild(t); t.select(); try { document.execCommand("copy"); } catch (e2) { /* ignore */ } t.remove(); }
+  const old = btn.textContent; btn.textContent = "Copied"; setTimeout(() => { btn.textContent = old; }, 1200);
+}
+function copyBtn(r) { const b = el("button", "small", "Copy rent request"); b.type = "button"; b.addEventListener("click", () => copy(rentText(r), b)); return b; }
 
+/* ---------------- notifications ---------------- */
+function canNotify() { return S.notify && ("Notification" in window) && Notification.permission === "granted"; }
 function beep() {
-  try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const osc = ctx.createOscillator(), g = ctx.createGain();
-    osc.frequency.value = 880; g.gain.value = 0.08; osc.connect(g); g.connect(ctx.destination);
-    osc.start(); osc.stop(ctx.currentTime + 0.25);
-  } catch (e) { /* no sound: fine */ }
+  try { const c = new (window.AudioContext || window.webkitAudioContext)(); const o = c.createOscillator(), g = c.createGain();
+    o.frequency.value = 880; g.gain.value = 0.08; o.connect(g); g.connect(c.destination); o.start(); o.stop(c.currentTime + 0.25); } catch (e) { /* no sound */ }
 }
-
 function notify(title, body, tag) {
-  if (!settings.notify || !("Notification" in window) || Notification.permission !== "granted") return;
+  if (!canNotify()) return;
   try { new Notification(title, { body: body, tag: tag, requireInteraction: true }); } catch (e) { /* ignore */ }
-  if (settings.sound) beep();
+  if (S.sound) beep();
 }
+function describe(r) { return line1(r) + " · est. $" + fmt(r.cost, 3) + " per 10¹² (" + r.source + ") · " + fmt((r.nps || 0) / 1e9) + " bn nodes/s · " + (r.geolocation || "?") + " · offer " + r.id; }
+const CAT_FLAGS = { cheapest: ["recCheapest", "topCheapest", "Cheapest"], fast_cheap: ["recFast", "topFast", "Cheapest among the fast"], balanced: ["recBalanced", "topBalanced", "Best balanced"] };
 
-function render(matched, total, newIds) {
-  $("count").textContent = String(matched.length);
-  $("of").textContent = total ? "(of " + total + " machines on the market)" : "";
-  const wrap = $("tableWrap");
-  wrap.textContent = "";
-  if (!matched.length) {
-    const d = document.createElement("div"); d.className = "empty";
-    d.textContent = "Nothing matches right now. This page keeps checking.";
-    wrap.appendChild(d); return;
+let prev = null;   // what the last poll saw: top-two ids, cheap ids, watch ids
+function estOk(r) { return S.allowEst || r.source !== "estimated"; }
+function watchMatch(o) {
+  if (!S.watchOn) return false;
+  let re = null; try { re = S.wCpu ? new RegExp(S.wCpu, "i") : null; } catch (e) { re = null; }
+  return (!re || re.test(o.cpu_name || "")) && (o.threads || 0) >= S.wThreads && (o.ram_gb || 0) >= S.wRam &&
+    (!S.wPrice || o.dph_total <= S.wPrice) && (!S.wRentable || o.launcher_ok);
+}
+function processNotifications(st) {
+  const cur = { top: {}, cheap: new Set(), watch: new Set() };
+  for (const c of Object.keys(CAT_FLAGS)) cur.top[c] = new Set(st.live[c].map((r) => r.id));
+  st.offers.forEach((o) => {
+    if (o.launcher_ok && o.cost !== null && o.cost <= S.thrCost && (o.threads || 0) >= S.thrThreads) cur.cheap.add(o.id);
+    if (watchMatch(o)) cur.watch.add(o.id);
+  });
+  const byId = new Map(st.offers.map((o) => [o.id, o]));
+  // 1. records: events newer than the last one this browser has seen
+  const last = st.history.last_event;
+  if (S.lastEvent === null) { S.lastEvent = last; save(); }
+  else if (last > S.lastEvent) {
+    const fresh = st.history.events.filter((e) => e.id > S.lastEvent && e.why !== "baseline").reverse();
+    S.lastEvent = last; save();
+    const out = fresh.filter((e) => S[{ cheapest: "recCheapest", fast_cheap: "recFast", balanced: "recBalanced" }[e.category]] && estOk(e.record));
+    // one notification per machine, even when it set records in several categories
+    const groups = new Map();
+    out.forEach((e) => { const k = e.record.id; if (!groups.has(k)) groups.set(k, { rec: e.record, tags: [], cheaper: false, id: e.id }); const g = groups.get(k);
+      g.tags.push(CAT_FLAGS[e.category][2] + " #" + e.rank); if (e.why === "same machine, lower cost") g.cheaper = true; });
+    const list = [...groups.values()];
+    if (list.length > 3) notify(list.length + " new all-time records", list.slice(0, 3).map((g) => g.tags.join(", ") + ": " + describe(g.rec)).join("\n"), "vast-rec-many");
+    else list.forEach((g) => notify("New all-time record · " + g.tags.join(" · ") + (g.cheaper ? " (cheaper)" : ""), describe(g.rec), "vast-rec-" + g.id));
   }
-  const tbl = document.createElement("table");
-  const head = document.createElement("tr");
-  [["Machine", ""], ["Threads", "n"], ["RAM", "n"], ["$ per hour", "n"], ["Reliability", "n"], ["GPU (ignored)", ""],
-   ["Where", ""], ["Offer", "n"], ["Our launcher can rent it", ""]].forEach(([h, c]) => {
-    const th = document.createElement("th"); th.textContent = h; if (c) th.className = c; head.appendChild(th);
-  });
-  tbl.appendChild(head);
-  matched.forEach((o) => {
-    const tr = document.createElement("tr");
-    if (newIds.has(o.id)) tr.className = "new";
-    const cell = (text, cls) => { const td = document.createElement("td"); td.textContent = text; if (cls) td.className = cls; tr.appendChild(td); return td; };
-    const m = cell(cleanCpu(o.cpu_name));
-    if (newIds.has(o.id)) { const b = document.createElement("span"); b.className = "badge"; b.textContent = "NEW"; m.appendChild(b); }
-    cell(String(o.threads), "n"); cell(Math.round(o.ram_gb) + " GB", "n"); cell("$" + o.dph_total.toFixed(2), "n");
-    cell((o.reliability2 || 0).toFixed(3), "n");
-    cell((o.num_gpus || 0) + "× " + (o.gpu_name || "?") + ((o.gpu_frac || 0) < 1 ? " (shared)" : ""));
-    cell(o.geolocation || "?"); cell(String(o.id), "n");
-    const ok = launcherOk(o); cell(ok ? "yes" : "no (" + (o.verification !== "verified" ? "not verified" : (o.gpu_frac || 0) < 1 ? "shared" : "check price/reliability") + ")", ok ? "ok" : "no");
-    tbl.appendChild(tr);
-  });
-  wrap.appendChild(tbl);
-}
-
-async function check() {
-  readForm();
-  const st = $("status");
-  try {
-    const r = await fetch("/api/offers", { cache: "no-store" });
-    if (!r.ok) throw new Error("the watcher program answered " + r.status);
-    const data = await r.json();
-    const cpuOk = cpuMatcher();
-    const matched = data.offers.filter((o) => matches(o, cpuOk)).sort((a, b) => a.dph_total - b.dph_total);
-    const ids = new Set(matched.map((o) => o.id));
-    const newIds = new Set();
-    if (seen !== null) matched.forEach((o) => { if (!seen.has(o.id)) newIds.add(o.id); });
-    if (newIds.size) {
-      const list = matched.filter((o) => newIds.has(o.id));
-      if (list.length <= 3) list.forEach((o) => notify("New match on vast.ai", describe(o), "vast-" + o.id));
-      else notify(list.length + " new matches on vast.ai", list.slice(0, 3).map(describe).join("\n") + "\n…", "vast-many");
+  if (prev) {
+    for (const [c, f] of Object.entries(CAT_FLAGS)) {
+      if (!S[f[1]]) continue;
+      st.live[c].filter((r) => !prev.top[c].has(r.id) && estOk(r)).forEach((r) => notify("Enters today's top two · " + f[2], describe(r), "vast-top-" + c + r.id));
     }
-    seen = ids; lastIds = ids;
-    render(matched, data.count, newIds);
-    document.title = (matched.length ? "(" + matched.length + ") " : "") + "Vast machine watcher";
-    const t = new Date().toLocaleTimeString();
-    st.className = "status" + (data.error ? " err" : "");
-    st.textContent = data.error ? "vast.ai did not answer (" + data.error + "); showing the last list. Checked " + t + "."
-      : "Last checked " + t + " · next check in up to " + settings.every + " s · " + data.count + " machines on the market · " + matched.length + " match.";
-  } catch (e) {
-    st.className = "status err";
-    st.textContent = "Cannot reach the watcher program (" + e.message + "). Is watch.py still running?";
+    if (S.thrOn) [...cur.cheap].filter((id) => !prev.cheap.has(id)).map((id) => byId.get(id)).filter((o) => o && estOk(o))
+      .slice(0, 3).forEach((o) => notify("Cost at or below $" + S.thrCost + " per 10¹²", describe(o), "vast-thr-" + o.id));
+    if (S.watchOn) [...cur.watch].filter((id) => !prev.watch.has(id)).map((id) => byId.get(id)).filter(Boolean)
+      .slice(0, 3).forEach((o) => notify("Watch rule match", describe(o), "vast-watch-" + o.id));
   }
+  prev = cur;
 }
-
-function schedule() {
-  if (timer) clearInterval(timer);
-  timer = setInterval(check, settings.every * 1000);
-}
-
 function setNotifyUi() {
-  $("notify").checked = settings.notify;
-  $("notifyState").textContent = settings.notify ? "Notifications ON" : "Notifications off";
+  $("notify").checked = S.notify;
+  $("notifyState").textContent = S.notify ? "Notifications ON" : "Notifications off";
   const w = $("permWarn");
   if (!("Notification" in window)) { w.hidden = false; w.textContent = "This browser does not support desktop notifications."; }
-  else if (Notification.permission === "denied") {
-    w.hidden = false;
-    w.textContent = "The browser is blocking notifications for this page. Click the lock icon next to the address, set Notifications to Allow, then switch on again.";
-  } else w.hidden = true;
+  else if (Notification.permission === "denied") { w.hidden = false; w.textContent = "The browser is blocking notifications for this page. Click the lock icon next to the address, set Notifications to Allow, then switch on again."; }
+  else w.hidden = true;
 }
-
 $("notify").addEventListener("change", async () => {
   if ($("notify").checked) {
     if (!("Notification" in window)) { $("notify").checked = false; setNotifyUi(); return; }
     if (Notification.permission === "default") { try { await Notification.requestPermission(); } catch (e) { /* ignore */ } }
-    settings.notify = Notification.permission === "granted";
-    if (settings.notify) notify("Notifications are on", "You will be told when a new machine matches.", "vast-on");
-  } else settings.notify = false;
+    S.notify = Notification.permission === "granted";
+    if (S.notify) notify("Notifications are on", "You will be told about the events you ticked in the settings.", "vast-on");
+  } else S.notify = false;
   save(); setNotifyUi();
 });
 $("test").addEventListener("click", async () => {
   if ("Notification" in window && Notification.permission === "default") { try { await Notification.requestPermission(); } catch (e) { /* ignore */ } }
   setNotifyUi();
   if (!("Notification" in window) || Notification.permission !== "granted") return;
-  const was = settings.notify; settings.notify = true;
-  notify("Test notification", "This is what a new match will look like.", "vast-test");
-  settings.notify = was;
+  const was = S.notify; S.notify = true; notify("Test notification", "This is what an alert looks like.", "vast-test"); S.notify = was;
 });
-["cpu", "minThreads", "minRam", "maxPrice", "whole", "verified", "reliable", "sound"].forEach((id) =>
-  $(id).addEventListener("change", () => { readForm(); seen = null; check(); }));
-$("cpu").addEventListener("input", () => { readForm(); });
-$("every").addEventListener("change", () => { readForm(); schedule(); });
-document.querySelectorAll("[data-preset]").forEach((b) => b.addEventListener("click", () => {
-  Object.assign(settings, PRESETS[b.dataset.preset]); writeForm(); save(); seen = null; check();
-}));
 
-writeForm(); setNotifyUi();
-if (settings.notify && (!("Notification" in window) || Notification.permission !== "granted")) { settings.notify = false; save(); setNotifyUi(); }
-check(); schedule();
+/* ---------------- categories ---------------- */
+function recBlock(r, rank, kind) {
+  const d = el("div", "rank");
+  const h = el("div", "h", "#" + rank + "  " + line1(r)); h.appendChild(srcTag(r.source));
+  if (kind === "hist") h.appendChild(el("span", "tag " + (r.still_listed ? "live" : "gone"), r.still_listed ? "listed now" : "gone"));
+  d.appendChild(h);
+  const j = jobOf(r);
+  d.appendChild(el("div", "d", "est. $" + fmt(r.cost, 3) + " per 10¹² · " + fmt((r.nps || 0) / 1e9) + " bn nodes/s · job ≈ " + fmt(j.h, 1) + " h, $" + fmt(j.usd, 0) + " · " + (r.geolocation || "?") + " · offer " + r.id));
+  if (kind === "hist") d.appendChild(el("div", "d", "first seen " + new Date((r.seen_at || 0) * 1000).toLocaleString() + " (" + ago(Date.now() / 1000 - (r.seen_at || 0)) + " ago)"));
+  if (kind === "live" || r.still_listed) d.appendChild(copyBtn(r));
+  return d;
+}
+function renderCats(st) {
+  const box = $("cats"); box.textContent = "";
+  for (const c of ["cheapest", "fast_cheap", "balanced"]) {
+    const card = el("div", "card");
+    card.appendChild(el("h2", "", st.params.labels[c]));
+    card.appendChild(el("div", "sub", c === "cheapest" ? "lowest estimated cost per 10¹² nodes; speed does not matter" : c === "fast_cheap" ? "lowest cost among machines of at least " + st.params.fast_gn + " billion nodes/s" : "lowest cost × time: cheap and quick together"));
+    card.appendChild(el("div", "lbl", "On the market now"));
+    if (!st.live[c].length) card.appendChild(el("div", "d", "none that our launcher can rent"));
+    st.live[c].forEach((r, i) => card.appendChild(recBlock(r, i + 1, "live")));
+    card.appendChild(el("div", "lbl", "Best ever seen (saved)"));
+    if (!st.history.records[c].length) card.appendChild(el("div", "d", "nothing saved yet"));
+    st.history.records[c].forEach((r, i) => card.appendChild(recBlock(r, i + 1, "hist")));
+    box.appendChild(card);
+  }
+}
+
+/* ---------------- table ---------------- */
+const COLS = [
+  ["cpu", "Machine", (o) => cleanCpu(o.cpu_name), false],
+  ["threads", "Threads", (o) => o.usable || o.threads, true],
+  ["ram_gb", "RAM GB", (o) => o.ram_gb, true],
+  ["gbt", "GB / thread", (o) => o.gb_per_thread, true],
+  ["dph_total", "$ / hour", (o) => o.dph_total, true],
+  ["cost", "Est. $ per 10¹²", (o) => o.cost, true],
+  ["nps", "Speed bn nodes/s", (o) => (o.nps || 0) / 1e9, true],
+  ["jobh", "Job hours", (o) => jobOf(o).h, true],
+  ["jobusd", "Job $", (o) => jobOf(o).usd, true],
+  ["score", "Cost × time", (o) => o.score, true],
+  ["gpu", "GPU (ignored)", (o) => (o.num_gpus || 0) + "× " + (o.gpu_name || "?"), false],
+  ["geo", "Where", (o) => o.geolocation || "", false],
+  ["rel", "Reliability", (o) => o.reliability2, true],
+  ["rent", "Launcher can rent", (o) => (o.launcher_ok ? 1 : 0), false],
+  ["listed", "Listed for", (o) => o.listed_s, true],
+  ["id", "Offer", (o) => o.id, true],
+];
+function buildHead() {
+  const tr = el("tr");
+  COLS.forEach(([k, name, , num]) => {
+    const th = el("th", (num ? "n " : "") + (S.sortKey === k ? "sorted" : ""), name + (S.sortKey === k ? (S.sortDir > 0 ? " ▲" : " ▼") : ""));
+    th.addEventListener("click", () => { if (S.sortKey === k) S.sortDir = -S.sortDir; else { S.sortKey = k; S.sortDir = 1; } save(); buildHead(); renderTable(); });
+    tr.appendChild(th);
+  });
+  tr.appendChild(el("th", "", ""));
+  const h = $("thead"); h.textContent = ""; h.appendChild(tr);
+}
+function filtered(st) {
+  let re = null; try { re = S.fCpu ? new RegExp(S.fCpu, "i") : null; } catch (e) { re = null; }
+  return st.offers.filter((o) => (!re || re.test(o.cpu_name || "")) && (o.threads || 0) >= S.fThreads && (o.ram_gb || 0) >= S.fRam &&
+    (!S.fPrice || o.dph_total <= S.fPrice) && (!S.fCost || (o.cost !== null && o.cost <= S.fCost)) && ((o.nps || 0) / 1e9 >= S.fSpeed) &&
+    (!S.fRent || o.launcher_ok) && (!S.fMeas || o.source !== "estimated") && (!S.fWhole || (o.gpu_frac || 0) >= 1));
+}
+let LAST = null;
+function renderTable() {
+  if (!LAST) return;
+  const st = LAST;
+  const col = COLS.find((c) => c[0] === S.sortKey) || COLS[5];
+  const rows = filtered(st).slice().sort((a, b) => {
+    const x = col[2](a), y = col[2](b);
+    const nx = x === null || x === undefined || (typeof x === "number" && isNaN(x)), ny = y === null || y === undefined || (typeof y === "number" && isNaN(y));
+    if (nx || ny) return nx === ny ? 0 : nx ? 1 : -1;
+    return (typeof x === "string" ? x.localeCompare(y) : x - y) * S.sortDir || a.id - b.id;
+  });
+  const top = new Set([...st.live.cheapest, ...st.live.fast_cheap, ...st.live.balanced].map((r) => r.id));
+  const body = $("tbody"); body.textContent = "";
+  const LIMIT = 400;
+  rows.slice(0, LIMIT).forEach((o) => {
+    const tr = el("tr", (o.listed_s < 120 ? "new " : "") + (top.has(o.id) ? "top1" : ""));
+    const td = (t, c) => { const d = el("td", c || "", t); tr.appendChild(d); return d; };
+    const m = td(cleanCpu(o.cpu_name)); if ((o.gpu_frac || 0) < 1) m.appendChild(el("span", "tag", "shared")); if (o.listed_s < 120) m.appendChild(el("span", "tag new", "new"));
+    td(String(Math.round(o.usable || o.threads)), "n"); td(String(Math.round(o.ram_gb)), "n"); td(fmt(o.gb_per_thread, 1), "n"); td("$" + fmt(o.dph_total), "n");
+    const c = td("", "n"); c.appendChild(document.createTextNode(o.cost === null ? "–" : "$" + fmt(o.cost, 3) + " ")); c.appendChild(srcTag(o.source));
+    td(fmt((o.nps || 0) / 1e9), "n"); const j = jobOf(o); td(fmt(j.h, 1), "n"); td(j.usd === null ? "–" : "$" + fmt(j.usd, 0), "n"); td(fmt(o.score, 2), "n");
+    td((o.num_gpus || 0) + "× " + (o.gpu_name || "?")); td(o.geolocation || "?"); td(fmt(o.reliability2, 3), "n");
+    td(o.launcher_ok ? "yes" : "no", o.launcher_ok ? "ok" : "no"); td(ago(o.listed_s), "n"); td(String(o.id), "n");
+    const a = el("td"); a.appendChild(copyBtn(o)); tr.appendChild(a);
+    body.appendChild(tr);
+  });
+  $("tcount").textContent = "· " + rows.length + " of " + st.count + " machines" + (rows.length > LIMIT ? " (first " + LIMIT + " shown)" : "");
+  $("tnote").textContent = "Click a column title to sort. Highlighted left edge = in a category's top two now; yellow = listed for less than 2 minutes. Estimates (orange) are for chips we have not benchmarked.";
+}
+
+/* ---------------- record log ---------------- */
+function renderEvents(st) {
+  const box = $("events"); box.textContent = "";
+  if (!st.history.events.length) { box.appendChild(el("div", "d", "No records yet.")); return; }
+  st.history.events.slice(0, 40).forEach((e) => {
+    const d = el("div", "ev");
+    const t = new Date(e.t * 1000).toLocaleString();
+    d.appendChild(el("span", "", t + " · " + st.params.labels[e.category] + " #" + e.rank + (e.why === "baseline" ? " (starting baseline)" : e.why === "same machine, lower cost" ? " (same machine got cheaper)" : "") + ": "));
+    d.appendChild(el("span", "", describe(e.record))); box.appendChild(d);
+  });
+}
+
+/* ---------------- polling ---------------- */
+let timer = null, watching = true;
+function setWatchUi() {
+  $("watch").checked = watching;
+  $("watchState").textContent = watching ? "Watching the market" : "Paused";
+  $("paused").hidden = watching;
+}
+function stopTimer() { if (timer) { clearTimeout(timer); timer = null; } }
+async function poll() {
+  stopTimer();
+  let delay = S.every * 1000;
+  try {
+    const r = await fetch("/api/state", { cache: "no-store" });
+    if (!r.ok) throw new Error("the program answered " + r.status);
+    const st = await r.json();
+    watching = st.watching !== false; setWatchUi();
+    if (!st.ready) setChips(null, watching ? (st.error ? "waiting for vast.ai: " + st.error : "starting…") : "paused");
+    else {
+      LAST = st; $("srvEvery").textContent = st.params.refresh_s; $("fastGn").textContent = st.params.fast_gn;
+      if (watching) processNotifications(st);
+      renderCats(st); renderTable(); renderEvents(st); setChips(st, null);
+      document.title = (watching ? "" : "(paused) ") + "Vast dashboard · best $" + fmt(st.live.cheapest[0] && st.live.cheapest[0].cost, 2);
+    }
+    if (!watching) { setChips(LAST, "paused: nothing is running"); return; }   // paused: no more requests at all
+  } catch (e) { setChips(null, "cannot reach the dashboard program (" + e.message + "). Is watch.py running? Trying again every 30 s."); delay = 30000; }
+  timer = setTimeout(poll, delay);
+}
+$("watch").addEventListener("change", async () => {
+  const on = $("watch").checked;
+  stopTimer();
+  try { await post("/api/watching", { on: on }); } catch (e) { /* the program is gone: the next poll says so */ }
+  watching = on; prev = null; setWatchUi();
+  if (on) poll(); else setChips(LAST, "paused: nothing is running");
+});
+$("quit").addEventListener("click", async () => {
+  if (!confirm("Stop the dashboard program on your computer? Nothing will run until you start it again.")) return;
+  stopTimer(); watching = false;
+  try { await post("/api/quit", {}); } catch (e) { /* ignore */ }
+  $("watch").checked = false; $("watchState").textContent = "Program stopped"; $("paused").hidden = false;
+  $("paused").textContent = "The program has been stopped. Nothing is running. To start again: python3 python/tools/vast_watch/watch.py";
+  setChips(null, "program stopped");
+});
+function setChips(st, msg) {
+  const c = $("chips"); c.textContent = "";
+  if (msg) {
+    c.appendChild(el("span", "chip err", msg));
+    if (st && st.checked_at) c.appendChild(el("span", "chip", "last data " + ago(Date.now() / 1000 - st.checked_at) + " old"));
+    return;
+  }
+  const age = Date.now() / 1000 - st.checked_at;
+  c.appendChild(el("span", "chip", "market data " + Math.max(0, Math.round(age)) + " s old"));
+  c.appendChild(el("span", "chip", st.count + " machines"));
+  c.appendChild(el("span", "chip", "program searches every " + st.params.refresh_s + " s (took " + st.took_s + " s)"));
+  c.appendChild(el("span", "chip", "page asks every " + S.every + " s"));
+  c.appendChild(el("span", "chip", "records saved in " + (st.params.data_dir || "memory only")));
+  if (st.error) c.appendChild(el("span", "chip err", "vast.ai did not answer: " + st.error + " (showing last list)"));
+}
+
+/* ---------------- wiring ---------------- */
+function onChange() { readForm(); prev = null; renderTable(); }
+$("every").addEventListener("change", () => { readForm(); if (watching) { stopTimer(); timer = setTimeout(poll, 50); } });
+[...NUM_IDS, ...TXT_IDS, ...CHK_IDS].forEach((i) => $(i).addEventListener("input", () => { readForm(); if (i[0] === "f") renderTable(); else { prev = null; if (LAST) { renderCats(LAST); renderTable(); } } }));
+document.querySelectorAll("[data-n]").forEach((c) => c.addEventListener("change", () => { readForm(); prev = null; }));
+$("fReset").addEventListener("click", () => { Object.assign(S, { fCpu: "", fThreads: 0, fRam: 0, fPrice: 0, fCost: 0, fSpeed: 0, fRent: false, fMeas: false, fWhole: false }); save(); writeForm(); renderTable(); });
+
+writeForm(); buildHead(); setNotifyUi();
+if (S.notify && (!("Notification" in window) || Notification.permission !== "granted")) { S.notify = false; save(); setNotifyUi(); }
+poll();
 </script>
 </body>
 </html>
