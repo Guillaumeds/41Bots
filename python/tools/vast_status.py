@@ -6,6 +6,7 @@
     python3 python/tools/vast_status.py RUN_ID --watch --every 15 --cap 4.00
     python3 python/tools/vast_status.py --market-only   # only the second-machine check (no R2 keys; used by the
                                                         # "market-check" GitHub workflow)
+    python3 python/tools/vast_status.py --market-only --watch   # keep checking every 30 s, bell + banner on a YES
 
 Shows: where the run is (decisions, worlds, percent), time left and the finish time in Mauritius time,
 cost so far and the forecast, speed, CPU use, upload health; and whether the market now has a second
@@ -318,10 +319,26 @@ def main(argv=None) -> int:
     model = M.Model()
     if a.market_only:
         ref = {"cost": a.ref_cost, "nps": a.ref_gn * 1e9, "source": "given reference"}
-        plain: list[str] = []
-        print("\n".join(market_panel(model, ref, a, c, plain)))
-        github_summary(plain)
-        return 0
+        last_yes = None
+        while True:
+            plain: list[str] = []
+            lines = market_panel(model, ref, a, c, plain)
+            if a.watch and c.on:
+                sys.stdout.write("\033[H\033[2J")
+            print("\n".join(lines))
+            github_summary(plain)
+            result = next((x for x in lines if x.startswith("RESULT:")), "RESULT: ?")
+            if not a.watch:
+                return 0
+            if result.startswith("RESULT: YES") and result != last_yes:
+                sys.stdout.write("\a")  # terminal bell, once per new best machine
+                print(c("1;32", "\n*** A COMPARABLE MACHINE IS AVAILABLE: tell Claude to start run A on it ***"))
+            last_yes = result if result.startswith("RESULT: YES") else None
+            print(c("2", f"\n(checks every {a.every:.0f} s; Ctrl-C to stop. Nothing is rented by this view.)"), flush=True)
+            try:
+                time.sleep(a.every)
+            except KeyboardInterrupt:
+                return 0
     r2 = R2()
     run = a.run or latest_run(r2)
     while True:
