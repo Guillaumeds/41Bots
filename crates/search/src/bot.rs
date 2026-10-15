@@ -282,6 +282,12 @@ pub fn set_equity_path(path: &str) {
 
 /// Load an equity table and check its sha256 against the production table.
 pub fn load_equity(path: &str) -> Result<EquityTable, String> {
+    load_equity_sha(path).map(|(t, _)| t)
+}
+
+/// [`load_equity`], also returning the table's SHA-256 (hex): the worlds files and checkpoints
+/// record it, so a run is never resumed with another table.
+pub fn load_equity_sha(path: &str) -> Result<(EquityTable, String), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     let sha = equity::sha256::sha256_hex(&bytes);
     if sha != EQUITY_SHA256 {
@@ -289,7 +295,8 @@ pub fn load_equity(path: &str) -> Result<EquityTable, String> {
             "{path}: sha256 {sha} is not the production equity table {EQUITY_SHA256}"
         ));
     }
-    EquityTable::from_npy(&bytes).map_err(|e| format!("{path}: {e}"))
+    let table = EquityTable::from_npy(&bytes).map_err(|e| format!("{path}: {e}"))?;
+    Ok((table, sha))
 }
 
 /// The shared production equity table (loaded once).

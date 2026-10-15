@@ -59,13 +59,16 @@ on:
         type: boolean
         default: true
       offer_id:
-        description: "Rent exactly this vast.ai offer number, with NO search and none of the filters (blank = normal search). Needs offer_dph and offer_cores."
+        description: "Rent exactly this vast.ai offer number (blank = normal search): one search by its id checks it (verified host, reliability >= 0.98, whole machine, on-demand); an offer failing a check is not rented. With dry_run: prints the offer, rents nothing."
         default: ""
       offer_dph:
-        description: "With offer_id: the offer's price per hour as shown on vast.ai"
+        description: "With offer_id (optional): the price per hour you saw on vast.ai; a warning if vast reports another"
         default: ""
       offer_cores:
-        description: "With offer_id: its CPU cores as shown on vast.ai (e.g. 384)"
+        description: "With offer_id (optional): the CPU cores you saw on vast.ai (e.g. 384); a warning if vast reports another"
+        default: ""
+      resume_from:
+        description: "Format 1 only: the run id whose out/ (or partial/out/) this run continues from (search_measure chunks resume world by world; refused if the settings differ). Put into the manifest unless it already has resume_from."
         default: ""
       market_check:
         description: "Only check the market for a second machine comparable to the Threadripper PRO 9995WX: prints YES/NO with offer details at the top of the run page; rents nothing (type any text in image)"
@@ -110,22 +113,43 @@ jobs:
           OFFER_ID: ${{ inputs.offer_id }}
           OFFER_DPH: ${{ inputs.offer_dph }}
           OFFER_CORES: ${{ inputs.offer_cores }}
+          RESUME_FROM: ${{ inputs.resume_from }}
         run: |
           set -euo pipefail
           if [ "$MARKET_CHECK" = "true" ]; then
             python3 python/tools/vast_status.py --market-only --color off
             exit 0
           fi
+          # --offer-id: the one offer the owner named, checked by id (no other search); blank: the normal search.
+          OFFER_ARGS=""
+          if [ -n "$OFFER_ID" ]; then
+            OFFER_ARGS="--offer-id $OFFER_ID ${OFFER_DPH:+--offer-dph $OFFER_DPH} ${OFFER_CORES:+--offer-cores $OFFER_CORES}"
+          fi
           if [ "$DRY_RUN" = "true" ]; then
-            python3 python/launcher/launch.py plan --min-cores "$MIN_CORES" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} ${{ inputs.cheapest && '--cheapest' || '' }}
+            # Prints the offer that would be rented (the named one with offer_id, else the search's choice); rents nothing.
+            python3 python/launcher/launch.py plan --min-cores "$MIN_CORES" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} ${{ inputs.cheapest && '--cheapest' || '' }} $OFFER_ARGS
             exit 0
           fi
-          # A blank run_id gets a timestamp from the launcher.
-          MANIFEST=$(python3 -c 'import json,os,sys; t=os.environ["MANIFEST"]; m=json.loads(t if t.lstrip().startswith("{") else open(t).read()); m["run_id"]=m.get("run_id") or "gh-${{ github.run_id }}"; print(json.dumps(m))')
+          # A blank run_id gets a timestamp from the launcher; resume_from goes into the manifest unless it has one.
+          MANIFEST=$(python3 - <<'PY'
+          import json, os, sys
+          t = os.environ["MANIFEST"]
+          m = json.loads(t if t.lstrip().startswith("{") else open(t).read())
+          m["run_id"] = m.get("run_id") or "gh-${{ github.run_id }}"
+          r = os.environ.get("RESUME_FROM", "").strip()
+          chunk = m.get("chunk") if isinstance(m.get("chunk"), dict) else {}
+          has = m.get("resume_from") or any(isinstance(p, dict) and p.get("resume_from") for p in chunk.values())
+          if r and not has:
+              m["resume_from"] = r
+          elif r and has:
+              print(f"::warning::resume_from input {r!r} ignored: the manifest already has one", file=sys.stderr)
+          print(json.dumps(m))
+          PY
+          )
           python3 python/launcher/launch.py run --manifest "$MANIFEST" --min-cores "$MIN_CORES" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} \
             --max-minutes "$MAX_MINUTES" --low-cpu-pct "$LOW_CPU_PCT" --low-cpu-s "${LOW_CPU_S:-300}" --poll-s "${POLL_S:-60}" --max-dollars "${MAX_DOLLARS:-0}" \
             --image "$IMAGE" --bin-sha "$BIN_SHA" --state-file instance-id.txt ${{ inputs.cheapest && '--cheapest' || '' }} --handover-min 330 \
-            $( [ -n "$OFFER_ID" ] && echo "--offer-id $OFFER_ID --offer-dph $OFFER_DPH --offer-cores $OFFER_CORES" )
+            $OFFER_ARGS
       - name: Cancelled - ask the run to stop and wait (at most 5 minutes) for it to upload what it finished
         if: cancelled() && hashFiles('instance-id.txt.run-id') != ''
         shell: bash

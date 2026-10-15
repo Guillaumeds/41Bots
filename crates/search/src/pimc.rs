@@ -466,6 +466,34 @@ pub fn world_row(
     }
 }
 
+/// [`world_row`] with the solver nodes the world took (0 for a rollout or forced world): the
+/// machine-cost records of the runner count work in nodes (docs/VAST-MACHINES.md, "Measured on
+/// our runs"). The values are exactly [`world_row`]'s.
+#[allow(clippy::too_many_arguments)]
+pub fn world_row_counted(
+    view: &SeatView,
+    worlds: &dyn Worlds,
+    cands: &[Candidate],
+    method: Method,
+    w: u64,
+    dseed: u64,
+    ctx: &Ctx,
+    cfg: &SearchConfig,
+    par: Option<&ParProgress>,
+    mem: &mut SolveMem,
+) -> (Vec<MoneyChance>, u64) {
+    if method != Method::ExactPimc {
+        return (
+            world_row(view, worlds, cands, method, w, dseed, ctx, cfg, par, mem),
+            0,
+        );
+    }
+    let mut run = WorldSolve::default();
+    let v = exact_world_row(view, worlds, cands, w, dseed, ctx, cfg, par, mem, &mut run)
+        .expect("nothing stops a solve here");
+    (v, run.stats.nodes)
+}
+
 /// The values of every candidate in worlds `from..to` of the decision with seed `dseed`, one row
 /// per world in world order. Thread count never changes the result.
 #[allow(clippy::too_many_arguments)]

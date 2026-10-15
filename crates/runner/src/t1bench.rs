@@ -27,7 +27,8 @@
 //!    fill window's, so `out/t1bench/fill-sweep-<mb>.json` can be compared world by world: the
 //!    results' `sweep` section gives, per size, the nodes and wall time of the worlds finished in
 //!    both it and the fill window, and any value that differs fails the chunk (table size changes
-//!    speed only). Only short worlds (mostly positions 5-8) finish in the windows.
+//!    speed only). Only worlds short enough to finish in the windows are compared: worlds from
+//!    every position, but the longest worlds of the early positions are usually missing.
 //! 5. **Results**: `out/t1bench/results.json` (`search::t1bench::analyse`, plus the table, setup
 //!    time, warnings and any failure), `out/t1bench/summary.txt` (plain English), and each
 //!    window's raw record `out/t1bench/fill.json`, `prod.json`. A world finished in both windows

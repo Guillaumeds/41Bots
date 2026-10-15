@@ -14,7 +14,9 @@
 //!    world; the output file is byte-identical for any thread count. [`worlds_file`] also appends
 //!    each world to a checkpoint ([`ckpt_path`]) the moment it finishes, so a run that is killed
 //!    and resumed (here or on another machine, from an uploaded copy) redoes only the worlds that
-//!    were being solved, and still writes the same bytes. Progress is estimated by [`crate::eta`].
+//!    were being solved, and still writes the same bytes. Every record and checkpoint line carries
+//!    a fingerprint ([`RowFp`]: seed, decision, world source, equity table) and a resumed run takes
+//!    nothing made under other settings. Progress is estimated by [`crate::eta`].
 //! 3. [`agreement_curve`]: the plateau rule of §13.1 on nested world sets.
 //! 4. [`score`]: a method against the yardstick (exact PIMC at the plateau N): agreement, mean
 //!    money-chance loss, loss distribution, and paired comparisons with confidence intervals.
@@ -38,7 +40,8 @@ use solver::{ParProgress, SolveMem};
 use crate::eta::{Eta, EtaClass, EtaTracker, MIN_PRIOR_S};
 use crate::labels;
 use crate::pimc::{
-    Candidate, Ctx, Method, SearchConfig, aggregate, candidates, solves_per_world, world_row,
+    Candidate, Ctx, Method, SearchConfig, aggregate, candidates, solves_per_world,
+    world_row_counted,
 };
 use crate::plan::{AutoParams, ExecProgress, PlanTask, Planned, WorldPlan, plan_auto, run_planned};
 use crate::worlds::Worlds;
@@ -362,6 +365,25 @@ pub struct WorldRows {
     /// The deciding seat's hand type (§13.1 item 9), once trumps are known.
     #[serde(default)]
     pub hand_type: Option<HandType>,
+    /// What else decided the values (2026-10-15): a resumed or extended run takes this record
+    /// for its own only when every field matches its job. Absent in records made before it
+    /// existed (such a file is still read by `agree`, `curves` and `score`, but never resumed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fp: Option<RowFp>,
+}
+
+/// A record's fingerprint: the inputs, besides the method, label and world range, that decide
+/// its values.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RowFp {
+    /// Master seed.
+    pub seed: u64,
+    /// The decision's fingerprint ([`decision_fingerprint`]: start state, deck, actions, seat).
+    pub decision: u64,
+    /// The world source's name.
+    pub source: String,
+    /// The equity table's SHA-256 (hex).
+    pub table: String,
 }
 
 /// How long one decision's worlds took (reports only; never part of a result).
@@ -387,6 +409,10 @@ pub struct DecisionTiming {
     /// Solver threads per world, in a position-aware run ([`Schedule::Auto`]); absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threads: Option<u64>,
+    /// Solver nodes summed over its worlds (0 for rollouts; absent in files made before
+    /// 2026-10-16). The runner's machine-cost records count work in nodes.
+    #[serde(default)]
+    pub nodes: u64,
 }
 
 /// How a worlds run is spread over the machine. Values never depend on it.
@@ -406,7 +432,7 @@ pub enum Schedule {
 }
 
 /// One worlds job: which worlds of every decision, valued by which method.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorldsJob {
     /// Exact or rollout PIMC.
     pub method: Method,
@@ -418,6 +444,9 @@ pub struct WorldsJob {
     pub from: u64,
     /// One past the last world.
     pub to: u64,
+    /// The equity table's SHA-256 (hex): part of every record's and checkpoint line's
+    /// fingerprint, so a file made with another table is never resumed.
+    pub table: String,
 }
 
 /// The name a method is recorded under.
@@ -448,6 +477,9 @@ pub struct BatchProgress {
     pub worlds_resumed: AtomicU64,
     /// Worlds valued by this process (so `worlds_total - worlds_resumed` once it is done).
     pub worlds_valued: AtomicU64,
+    /// Solver nodes of the worlds valued by this process (the machine's own work, for its cost
+    /// per node; restored worlds are not counted).
+    pub nodes_valued: AtomicU64,
     /// Worker threads in use (a position-aware run: all its threads).
     pub threads: AtomicU64,
     /// The parallel exact solve now running, when one worker runs `solve_fast_par`
@@ -530,6 +562,8 @@ pub struct DoneWorld {
     pub v: Vec<[u64; 4]>,
     /// Microseconds it took (timings only).
     pub us: u64,
+    /// Solver nodes it took (timings only; 0 when unknown).
+    pub nodes: u64,
 }
 
 /// What a resumed run already has. Both only shorten the work: no value, row or order depends
@@ -545,8 +579,10 @@ pub struct Resume {
 /// Receives each world as it finishes, on the one thread that collects results, before the
 /// decision it belongs to is handed on. [`worlds_file`]'s checkpoint is one.
 pub trait WorldSink {
-    /// World `w` of decision `id` finished with these values, in `us` microseconds.
-    fn world(&mut self, id: u64, w: u64, v: &[[u64; 4]], us: u64) -> Result<(), String>;
+    /// World `w` of decision `id` finished with these values, in `us` microseconds and `nodes`
+    /// solver nodes.
+    fn world(&mut self, id: u64, w: u64, v: &[[u64; 4]], us: u64, nodes: u64)
+    -> Result<(), String>;
     /// Decision `id` has been handed on complete: its worlds are no longer needed.
     fn decision(&mut self, _id: u64) -> Result<(), String> {
         Ok(())
@@ -559,7 +595,7 @@ pub trait WorldSink {
 
 /// No checkpoint.
 impl WorldSink for () {
-    fn world(&mut self, _: u64, _: u64, _: &[[u64; 4]], _: u64) -> Result<(), String> {
+    fn world(&mut self, _: u64, _: u64, _: &[[u64; 4]], _: u64, _: u64) -> Result<(), String> {
         Ok(())
     }
 }
@@ -767,6 +803,8 @@ struct Collect {
     left: Vec<usize>,
     /// Total and slowest world (µs) of each decision.
     us: Vec<(u64, u64)>,
+    /// Solver nodes of each decision's worlds.
+    nodes: Vec<u64>,
     /// Solver threads per world of each decision, in a position-aware run.
     threads: Vec<Option<u64>>,
     /// The next decision to hand on.
@@ -787,6 +825,7 @@ impl Collect {
             rows: vec![vec![None; nw]; n],
             left: vec![nw; n],
             us: vec![(0, 0); n],
+            nodes: vec![0; n],
             threads: vec![None; n],
             next: 0,
             restored: 0,
@@ -803,6 +842,7 @@ impl Collect {
                     c.rows[j][i] = Some(d.v.clone());
                     c.left[j] -= 1;
                     c.us[j] = (c.us[j].0 + d.us, c.us[j].1.max(d.us));
+                    c.nodes[j] += d.nodes;
                     c.restored += 1;
                     c.restored_per[j] += 1;
                 }
@@ -818,20 +858,23 @@ impl Collect {
             .collect()
     }
 
-    /// Task `k` finished with values `v` in `us` µs: report it to `ws`, then keep it.
+    /// Task `k` finished with values `v` in `us` µs and `nodes` solver nodes: report it to
+    /// `ws`, then keep it.
     fn put(
         &mut self,
         k: usize,
         v: Vec<[u64; 4]>,
         us: u64,
+        nodes: u64,
         ws: &mut dyn WorldSink,
     ) -> Result<(), String> {
         let (j, i) = (k / self.nw, k % self.nw);
-        ws.world(self.ids[j], self.from + i as u64, &v, us)?;
+        ws.world(self.ids[j], self.from + i as u64, &v, us, nodes)?;
         debug_assert!(self.rows[j][i].is_none(), "each task is valued once");
         self.rows[j][i] = Some(v);
         self.left[j] -= 1;
         self.us[j] = (self.us[j].0 + us, self.us[j].1.max(us));
+        self.nodes[j] += nodes;
         Ok(())
     }
 
@@ -846,9 +889,11 @@ impl Collect {
             let (r, t) = records(
                 &b.preps[j],
                 b.job,
+                b.ctx.source.name(),
                 &*b.worlds[j],
                 rows,
                 self.us[j],
+                self.nodes[j],
                 self.threads[j],
             );
             sink(r, t)?;
@@ -896,7 +941,7 @@ fn batch_path(
     let eta = &*eta;
     let next = AtomicUsize::new(0);
     let stop = AtomicBool::new(false);
-    type Msg = (usize, Vec<[u64; 4]>, u64);
+    type Msg = (usize, Vec<[u64; 4]>, u64, u64);
     let work = |worker: usize, tx: mpsc::Sender<Msg>| {
         // One solver memory per worker for the whole run: its transposition table is allocated
         // once and emptied in O(1) between worlds, not allocated, first-touched and freed per
@@ -912,7 +957,7 @@ fn batch_path(
             let (class, prior) = b.cost.per_prep[j];
             let slot = eta.begin(worker, class, prior, world_threads);
             let t0 = Instant::now();
-            let v = world_row(
+            let (v, nodes) = world_row_counted(
                 &p.view,
                 &*b.worlds[j],
                 &p.cands,
@@ -929,9 +974,10 @@ fn batch_path(
             if let Some(pr) = b.progress {
                 pr.worlds_done.fetch_add(1, Ordering::Relaxed);
                 pr.worlds_valued.fetch_add(1, Ordering::Relaxed);
+                pr.nodes_valued.fetch_add(nodes, Ordering::Relaxed);
             }
             let v: Vec<[u64; 4]> = v.into_iter().map(|x| x.0).collect();
-            if tx.send((k, v, wall.as_micros() as u64)).is_err() {
+            if tx.send((k, v, wall.as_micros() as u64, nodes)).is_err() {
                 // The collector has stopped (a sink error).
                 break;
             }
@@ -951,12 +997,12 @@ fn batch_path(
                 return Ok(());
             }
             // Every worker has stopped (one panicked); the scope re-raises the panic.
-            let Ok((k, v, us)) = rx.recv() else {
+            let Ok((k, v, us, nodes)) = rx.recv() else {
                 return Ok(());
             };
-            col.put(k, v, us, ws)?;
-            while let Ok((k, v, us)) = rx.try_recv() {
-                col.put(k, v, us, ws)?;
+            col.put(k, v, us, nodes, ws)?;
+            while let Ok((k, v, us, nodes)) = rx.try_recv() {
+                col.put(k, v, us, nodes, ws)?;
             }
             ws.flush()?;
         })();
@@ -1005,7 +1051,7 @@ fn planned_path(
             tt_mb: plan.tt_mb,
             ..*cfg
         };
-        let v = world_row(
+        let (v, nodes) = world_row_counted(
             &p.view,
             &*b.worlds[j],
             &p.cands,
@@ -1018,7 +1064,7 @@ fn planned_path(
             mem,
         );
         eta.end(slot, class, prior, plan.threads, t0.elapsed().as_secs_f64());
-        v.into_iter().map(|x| x.0).collect::<Vec<[u64; 4]>>()
+        (v.into_iter().map(|x| x.0).collect::<Vec<[u64; 4]>>(), nodes)
     };
     run_planned(
         &planned.order,
@@ -1028,12 +1074,13 @@ fn planned_path(
         &stop,
         b.progress.map(|p| &p.exec),
         work,
-        |n, v, ran| {
+        |n, (v, nodes), ran| {
             if let Some(p) = b.progress {
                 p.worlds_done.fetch_add(1, Ordering::Relaxed);
                 p.worlds_valued.fetch_add(1, Ordering::Relaxed);
+                p.nodes_valued.fetch_add(nodes, Ordering::Relaxed);
             }
-            col.put(todo[n], v, (ran.wall_s * 1e6) as u64, ws)?;
+            col.put(todo[n], v, (ran.wall_s * 1e6) as u64, nodes, ws)?;
             ws.flush()?;
             col.emit(b, ws, sink)
         },
@@ -1061,12 +1108,15 @@ fn prepare_batch<'d>(ds: &'d [DecisionSpec], job: &WorldsJob) -> Vec<Prepared<'d
 }
 
 /// The worlds record and timing of a finished decision (`us`: total and slowest world in µs).
+#[allow(clippy::too_many_arguments)]
 fn records(
     p: &Prepared,
     job: &WorldsJob,
+    source: &str,
     worlds: &dyn Worlds,
     rows: Vec<Vec<[u64; 4]>>,
     us: (u64, u64),
+    nodes: u64,
     threads: Option<u64>,
 ) -> (WorldRows, DecisionTiming) {
     let nw = rows.len() as u64;
@@ -1083,6 +1133,12 @@ fn records(
         rows,
         log2_worlds: worlds.count().map(|c| c.max(1).ilog2()),
         hand_type: view_hand_type(&p.view),
+        fp: Some(RowFp {
+            seed: job.seed,
+            decision: decision_fingerprint(p.d),
+            source: source.to_string(),
+            table: job.table.clone(),
+        }),
     };
     let t = DecisionTiming {
         id: p.d.id,
@@ -1094,6 +1150,7 @@ fn records(
         world_us: us.0,
         max_world_us: us.1,
         threads,
+        nodes,
     };
     (r, t)
 }
@@ -1126,7 +1183,8 @@ pub fn world_rows_sched(
     )
 }
 
-/// Value every candidate of `d` in worlds `from..to` by `method` (a batch of one decision).
+/// Value every candidate of `d` in worlds `from..to` by `method` (a batch of one decision;
+/// `table` is the equity table's SHA-256, recorded in the record's fingerprint).
 #[allow(clippy::too_many_arguments)]
 pub fn world_rows(
     d: &DecisionSpec,
@@ -1135,6 +1193,7 @@ pub fn world_rows(
     seed: u64,
     from: u64,
     to: u64,
+    table: &str,
     ctx: &Ctx,
     cfg: &SearchConfig,
 ) -> WorldRows {
@@ -1144,6 +1203,7 @@ pub fn world_rows(
         seed,
         from,
         to,
+        table: table.to_string(),
     };
     let mut out = None;
     world_rows_batch(std::slice::from_ref(d), &job, ctx, cfg, None, |r, _| {
@@ -1255,12 +1315,18 @@ pub struct CkptRow {
     pub seed: u64,
     /// The world source's name.
     pub source: String,
+    /// The equity table's SHA-256 (hex); empty in checkpoints made before 2026-10-15 (refused).
+    #[serde(default)]
+    pub table: String,
     /// World number.
     pub w: u64,
     /// The candidates' values in this world (four u64 each).
     pub v: Vec<[u64; 4]>,
     /// Microseconds the world took (timings only).
     pub us: u64,
+    /// Solver nodes the world took (timings only; 0 in lines made before 2026-10-16).
+    #[serde(default)]
+    pub nodes: u64,
 }
 
 /// A decision's fingerprint: 64-bit FNV-1a of the JSON of what defines it (start state, deck,
@@ -1303,9 +1369,11 @@ struct CkptRead {
     other: Vec<String>,
 }
 
-/// Reads the checkpoint `path` for `job`. Torn lines are skipped and repeated worlds kept once;
-/// worlds of decisions already in the output are dropped. Lines made with other settings, or for
-/// a decision that differs from this run's decision of the same id, are an error.
+/// Reads the checkpoint `path` for `job`. Torn lines are skipped and repeated worlds kept once
+/// (two lines for the same world must hold the same values, else the checkpoint is corrupt and
+/// refused); worlds of decisions already in the output are dropped. Lines made with other
+/// settings (method, label, seed, world source, equity table), or for a decision that differs
+/// from this run's decision of the same id, are an error.
 fn read_ckpt(
     path: &Path,
     job: &WorldsJob,
@@ -1317,23 +1385,30 @@ fn read_ckpt(
     if !path.exists() {
         return Ok(r);
     }
-    let mut seen = BTreeSet::new();
+    let mut seen: BTreeMap<(u64, u64), Vec<[u64; 4]>> = BTreeMap::new();
     for row in read_jsonl::<CkptRow>(path)? {
         if row.method != method_name(job.method)
             || row.label != job.label
             || row.seed != job.seed
             || row.source != source
+            || row.table != job.table
         {
             return Err(format!(
                 "{}: world {} of decision {} was made with other settings ({} label {} seed {} \
-                 source {}); use another output file, or delete the checkpoint",
+                 source {} table {}; this run: {} label {} seed {} source {source} table {}); \
+                 use another output file, or delete the checkpoint",
                 path.display(),
                 row.w,
                 row.id,
                 row.method,
                 row.label,
                 row.seed,
-                row.source
+                row.source,
+                short_sha(&row.table),
+                method_name(job.method),
+                job.label,
+                job.seed,
+                short_sha(&job.table),
             ));
         }
         if fps.get(&row.id).is_some_and(|&fp| fp != row.fp) {
@@ -1344,8 +1419,21 @@ fn read_ckpt(
                 row.id
             ));
         }
-        if !seen.insert((row.id, row.w)) {
-            continue;
+        match seen.get(&(row.id, row.w)) {
+            Some(v) if *v == row.v => continue,
+            Some(_) => {
+                return Err(format!(
+                    "{}: world {} of decision {} appears twice with different values, so the \
+                     checkpoint cannot be trusted; delete it (the worlds of unfinished decisions \
+                     are then valued again)",
+                    path.display(),
+                    row.w,
+                    row.id
+                ));
+            }
+            None => {
+                seen.insert((row.id, row.w), row.v.clone());
+            }
         }
         let in_range = (job.from..job.to).contains(&row.w);
         if in_range && done.contains(&row.id) {
@@ -1359,6 +1447,7 @@ fn read_ckpt(
                 DoneWorld {
                     v: row.v,
                     us: row.us,
+                    nodes: row.nodes,
                 },
             );
         } else {
@@ -1432,7 +1521,7 @@ impl Ckpt {
             // Replaced just below, once the file has been rewritten.
             f: std::io::BufWriter::new(append(path)?),
             fps,
-            job: *job,
+            job: job.clone(),
             source: source.to_string(),
             live: read.live,
             live_lines,
@@ -1471,7 +1560,14 @@ impl Ckpt {
 }
 
 impl WorldSink for Ckpt {
-    fn world(&mut self, id: u64, w: u64, v: &[[u64; 4]], us: u64) -> Result<(), String> {
+    fn world(
+        &mut self,
+        id: u64,
+        w: u64,
+        v: &[[u64; 4]],
+        us: u64,
+        nodes: u64,
+    ) -> Result<(), String> {
         let row = CkptRow {
             id,
             fp: self.fps.get(&id).copied().unwrap_or(0),
@@ -1479,9 +1575,11 @@ impl WorldSink for Ckpt {
             label: self.job.label,
             seed: self.job.seed,
             source: self.source.clone(),
+            table: self.job.table.clone(),
             w,
             v: v.to_vec(),
             us,
+            nodes,
         };
         let line = serde_json::to_string(&row).map_err(|e| e.to_string())?;
         writeln!(self.f, "{line}").map_err(|e| format!("{}: {e}", self.path.display()))?;
@@ -1559,6 +1657,7 @@ fn worlds_file_knobs(
             job.to
         ));
     }
+    check_fingerprints(out, &done, ds, job, ctx.source.name())?;
     // Rewrite the file without a torn line (a new file renamed over the old, so a kill here
     // never loses a decision), then append.
     let mut text = String::new();
@@ -1629,6 +1728,67 @@ fn worlds_file_knobs(
     Ok(n)
 }
 
+/// The first 12 characters of a SHA-256 (or the whole of a shorter text), for messages.
+fn short_sha(s: &str) -> &str {
+    if s.is_empty() {
+        return "(none)";
+    }
+    s.get(..12).unwrap_or(s)
+}
+
+/// Refuses the records of `out` that a job must not take for its own (or build on): a record of
+/// one of this run's decisions that was written before records carried a fingerprint, or under
+/// another seed, equity table, world source or decision (another decision set with the same
+/// ids). Records of decisions outside `ds` are left alone. A run that is refused has changed
+/// nothing yet.
+fn check_fingerprints(
+    out: &Path,
+    done: &[WorldRows],
+    ds: &[DecisionSpec],
+    job: &WorldsJob,
+    source: &str,
+) -> Result<(), String> {
+    let fps: BTreeMap<u64, u64> = ds.iter().map(|d| (d.id, decision_fingerprint(d))).collect();
+    for r in done {
+        let Some(&want) = fps.get(&r.id) else {
+            continue;
+        };
+        let Some(fp) = &r.fp else {
+            return Err(format!(
+                "{}: decision {} was written before records carried a fingerprint (2026-10-15), \
+                 so it cannot be checked against this run's seed, decisions and equity table; \
+                 resume it with the binaries that made it, or use another output file",
+                out.display(),
+                r.id
+            ));
+        };
+        let differs = if fp.seed != job.seed {
+            Some(format!("seed {} (this run: seed {})", fp.seed, job.seed))
+        } else if fp.table != job.table {
+            Some(format!(
+                "equity table {} (this run: {})",
+                short_sha(&fp.table),
+                short_sha(&job.table)
+            ))
+        } else if fp.source != source {
+            Some(format!("world source {} (this run: {source})", fp.source))
+        } else if fp.decision != want {
+            Some("a different decision of the same id (another decision set?)".to_string())
+        } else {
+            None
+        };
+        if let Some(what) = differs {
+            return Err(format!(
+                "{}: decision {} was made with {what}, so this run cannot reuse or extend it; use \
+                 another output file, or the settings that made it",
+                out.display(),
+                r.id
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Join the records of one or more worlds files (§13.1 item 10): records of the same decision,
 /// method and label whose world ranges continue or overlap each other become one record holding
 /// every world from the first on, so N worlds are always the first N. Decisions keep the order in
@@ -1672,6 +1832,23 @@ pub fn merge_rows(recs: Vec<WorldRows>) -> Result<(Vec<WorldRows>, Vec<String>),
                 return Err(format!(
                     "decision {}: records disagree on the decision itself (other decision set?)",
                     s.id
+                ));
+            }
+            if let (Some(a), Some(b)) = (&cur.fp, &s.fp)
+                && a != b
+            {
+                return Err(format!(
+                    "decision {} ({} label {}): records were made under other settings (seed {} vs \
+                     {}, equity table {} vs {}, world source {} vs {}); they cannot be joined",
+                    s.id,
+                    s.method,
+                    s.label,
+                    a.seed,
+                    b.seed,
+                    short_sha(&a.table),
+                    short_sha(&b.table),
+                    a.source,
+                    b.source
                 ));
             }
             let skip = (end - s.from) as usize;
@@ -1903,7 +2080,8 @@ pub struct ScoreSummary {
     pub mean_loss: (f64, f64),
     /// Mean loss in units of 2^-32.
     pub mean_loss_units: f64,
-    /// Mean loss in stakes per player (8 × money chance: a match is worth +6 or −2 stakes).
+    /// Mean loss in stakes per team (8 × money chance: a match is worth +6 or −2 stakes to a
+    /// team; per player that is +3 or −1, half as much).
     pub mean_loss_stakes: f64,
     /// Loss distribution: share with zero loss, then quantiles p50, p90, p99 and the maximum, in
     /// money chance.
@@ -2045,6 +2223,9 @@ mod tests {
         std::fs::read(path).expect("written")
     }
 
+    /// The equity table hash the tests' jobs carry (any fixed text).
+    const TABLE: &str = "test-table-sha256";
+
     fn clean(p: &Path) {
         let _ = std::fs::remove_file(p);
         let _ = std::fs::remove_file(timing_path(p));
@@ -2073,6 +2254,7 @@ mod tests {
                 seed: 7,
                 from: 1,
                 to: 5,
+                table: TABLE.to_string(),
             };
             let mut files = Vec::new();
             for threads in [1, 3, 8] {
@@ -2114,7 +2296,10 @@ mod tests {
                 source: &src,
                 rules: Rules::HOUSE,
             };
-            let other = WorldsJob { label: 9, ..job };
+            let other = WorldsJob {
+                label: 9,
+                ..job.clone()
+            };
             let cfg = SearchConfig::default();
             assert!(worlds_file(&p, &ds, &other, &ctx, &cfg, None, |_, _| {}).is_err());
             clean(&p);
@@ -2170,6 +2355,7 @@ mod tests {
             seed: 11,
             from: 0,
             to: 3,
+            table: TABLE.to_string(),
         };
         let base = tmp("plan-base");
         clean(&base);
@@ -2293,6 +2479,7 @@ mod tests {
                 seed: 13,
                 from: 0,
                 to: nw,
+                table: TABLE.to_string(),
             };
             let base = tmp(&format!("pw{c}-base"));
             clean(&base);
@@ -2378,6 +2565,7 @@ mod tests {
             seed: 13,
             from: 0,
             to: nw,
+            table: TABLE.to_string(),
         };
         let cfg = SearchConfig::default();
         let knobs = CkptKnobs {
@@ -2397,9 +2585,69 @@ mod tests {
         )
         .expect_err("stopped");
         let _ = std::fs::remove_file(&p);
-        let other = WorldsJob { seed: 14, ..job };
+        let other = WorldsJob {
+            seed: 14,
+            ..job.clone()
+        };
         let e = worlds_file(&p, &ds, &other, &ctx, &cfg, None, |_, _| {}).expect_err("refused");
         assert!(e.contains("other settings"), "{e}");
+        clean(&p);
+        // A complete worlds file is resumed only under the settings that made it: the same job
+        // changes nothing and values nothing; another seed, equity table or decision set (the
+        // same ids, other decisions) is refused before the file is touched.
+        let p = tmp("pw-fp");
+        clean(&p);
+        let want = run(&p, &ds, &job, 2, 4);
+        let n = worlds_file(&p, &ds, &job, &ctx, &cfg, None, |_, _| {}).expect("same job");
+        assert_eq!(n, 0, "nothing left to value");
+        assert_eq!(
+            std::fs::read(&p).expect("read"),
+            want,
+            "a matching resume keeps the bytes"
+        );
+        let wrong_seed = WorldsJob {
+            seed: 14,
+            ..job.clone()
+        };
+        let e = worlds_file(&p, &ds, &wrong_seed, &ctx, &cfg, None, |_, _| {}).expect_err("seed");
+        assert!(e.contains("seed 13 (this run: seed 14)"), "{e}");
+        let wrong_table = WorldsJob {
+            table: "0123456789abcdef0123".to_string(),
+            ..job.clone()
+        };
+        let e = worlds_file(&p, &ds, &wrong_table, &ctx, &cfg, None, |_, _| {}).expect_err("table");
+        assert!(
+            e.contains("equity table test-table-s (this run: 0123456789ab)"),
+            "{e}"
+        );
+        let mut swapped = ds.clone();
+        let (a, b) = (swapped[0].id, swapped[1].id);
+        swapped[0].id = b;
+        swapped[1].id = a;
+        let e = worlds_file(&p, &swapped, &job, &ctx, &cfg, None, |_, _| {}).expect_err("decision");
+        assert!(e.contains("different decision of the same id"), "{e}");
+        assert_eq!(
+            std::fs::read(&p).expect("read"),
+            want,
+            "a refused run changed nothing"
+        );
+        // A record without a fingerprint (made before 2026-10-15) is read but never resumed.
+        let text = std::fs::read_to_string(&p).expect("read");
+        let old: String = text
+            .lines()
+            .map(|l| {
+                let mut v: serde_json::Value = serde_json::from_str(l).expect("row");
+                v.as_object_mut().expect("object").remove("fp");
+                v.to_string() + "\n"
+            })
+            .collect();
+        std::fs::write(&p, &old).expect("write");
+        let rows: Vec<WorldRows> = read_jsonl(&p).expect("reads");
+        assert!(rows.iter().all(|r| r.fp.is_none()) && rows.len() == ds.len());
+        let e =
+            worlds_file(&p, &ds, &job, &ctx, &cfg, None, |_, _| {}).expect_err("unfingerprinted");
+        assert!(e.contains("before records carried a fingerprint"), "{e}");
+        assert_eq!(std::fs::read_to_string(&p).expect("read"), old);
         clean(&p);
     }
 
@@ -2420,6 +2668,7 @@ mod tests {
             seed: 7,
             from,
             to,
+            table: TABLE.to_string(),
         };
         let long = tmp("ext-long");
         clean(&long);
@@ -2746,6 +2995,7 @@ mod tests {
                 cands,
                 rows: Vec::new(),
                 log2_worlds: None,
+                fp: None,
                 // As written before the features existed.
                 hand_type: Some(HandType {
                     has_five: None,

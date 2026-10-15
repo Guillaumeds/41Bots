@@ -429,9 +429,14 @@ impl Remote for RcloneRemote {
         let (st, out) = run_limited(c, self.limit, read_all)?;
         let out = out?;
         if !st.success() {
-            // A missing prefix is an empty listing on S3; other errors show in the log.
-            eprintln!("runner: rclone lsf {prefix}: exit {st}");
-            return Ok(vec![]);
+            // rclone's exit code 3 is "directory not found": a prefix nothing was ever written
+            // under lists as empty. Any other failure (network, credentials, a killed call) is an
+            // error: a listing that came back empty by mistake would make a resume restore
+            // nothing and redo the work in silence.
+            if st.code() == Some(3) {
+                return Ok(vec![]);
+            }
+            return Err(format!("rclone lsf {prefix} failed ({st})"));
         }
         let mut v = Vec::new();
         for l in String::from_utf8_lossy(&out).lines() {

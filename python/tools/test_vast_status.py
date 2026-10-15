@@ -58,5 +58,27 @@ class Comparable(unittest.TestCase):
         self.assertEqual(V.comparable(self.m, market, self.ref, 5.0, 0.3, measured_only=True)[0], [])
 
 
+class Endpoint(unittest.TestCase):
+    def test_r2_reads_the_workflow_endpoint_name_first(self):
+        base = {"R2_BUCKET": "b", "R2_ACCESS_KEY_ID": "k", "R2_SECRET_ACCESS_KEY": "s"}
+        old = {k: os.environ.pop(k, None) for k in ("R2_S3_ENDPOINT", "R2_ENDPOINT", *base)}
+        try:
+            os.environ.update(base, R2_S3_ENDPOINT="https://s3.example.invalid/")
+            self.assertEqual(V.R2().ep, "https://s3.example.invalid")
+            del os.environ["R2_S3_ENDPOINT"]
+            os.environ["R2_ENDPOINT"] = "https://old.example.invalid"
+            self.assertEqual(V.R2().ep, "https://old.example.invalid")
+            del os.environ["R2_ENDPOINT"]
+            with self.assertRaises(SystemExit) as e:
+                V.R2()
+            self.assertIn("R2_S3_ENDPOINT", str(e.exception))
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+
 if __name__ == "__main__":
     unittest.main()

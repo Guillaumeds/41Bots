@@ -13,7 +13,7 @@ cost so far and the forecast, speed, CPU use, upload health; and whether the mar
 machine of comparable cost and speed that our launcher can rent (yes/no, and if yes its offer number
 and details), so you can say "start run A on that one".
 
-Reads the run's files from R2 (environment: R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID,
+Reads the run's files from R2 (environment: R2_S3_ENDPOINT, or R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID,
 R2_SECRET_ACCESS_KEY, the same as the launcher) and searches vast.ai offers (no key needed).
 Read-only: it never rents or destroys anything. Standard library only.
 
@@ -49,11 +49,13 @@ MU = dt.timezone(dt.timedelta(hours=4))  # Mauritius
 class R2:
     def __init__(self):
         try:
-            self.ep = os.environ["R2_ENDPOINT"].rstrip("/")
+            # The workflows and the launcher call it R2_S3_ENDPOINT; R2_ENDPOINT is the older name.
+            self.ep = (os.environ.get("R2_S3_ENDPOINT") or os.environ["R2_ENDPOINT"]).rstrip("/")
             self.bucket = os.environ["R2_BUCKET"]
             self.ak, self.sk = os.environ["R2_ACCESS_KEY_ID"], os.environ["R2_SECRET_ACCESS_KEY"]
         except KeyError as e:
-            sys.exit(f"missing environment variable {e}: set R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY")
+            sys.exit(f"missing environment variable {e}: set R2_S3_ENDPOINT (or R2_ENDPOINT), R2_BUCKET, R2_ACCESS_KEY_ID, "
+                     f"R2_SECRET_ACCESS_KEY")
         self.host = urllib.parse.urlparse(self.ep).netloc
 
     @staticmethod

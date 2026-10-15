@@ -1081,8 +1081,9 @@ pub fn analyse(fill: Option<&WindowRun>, prod: Option<&WindowRun>, p: &AnalysePa
 /// table that forgets more makes the solver re-search positions, which still counts as nodes),
 /// so each run is compared with the reference on the worlds that **finished in both**: the nodes
 /// and the wall time those worlds took, and whether their values are byte-identical (table size
-/// must change speed only). Only worlds short enough to finish inside the windows are paired,
-/// which are mostly positions 5-8; the big positions 1-3 are not covered.
+/// must change speed only). Only worlds short enough to finish inside the windows are paired:
+/// worlds from every position, but the longest worlds of the early positions are usually
+/// missing, so the largest tables are not covered.
 pub fn analyse_sweep(reference: &WindowRun, runs: &[WindowRun]) -> Value {
     let key = |w: &WorldRec| (w.id, w.world);
     let base: BTreeMap<(u64, u64), &WorldRec> = reference
@@ -1141,8 +1142,10 @@ pub fn analyse_sweep(reference: &WindowRun, runs: &[WindowRun]) -> Value {
         "reference_tt_mb": reference.tt_mb,
         "runs": entries,
         "mismatches": all_mismatches,
-        "note": "paired on worlds finished in both the reference and the sweep window (short worlds, \
-                 mostly positions 5-8); ratios above 1 mean the smaller or larger table needed more",
+        "note": "paired on worlds finished in both the reference and the sweep window: the worlds \
+                 short enough to finish in the window, from every position among them (the longest \
+                 worlds of the early positions are usually missing); ratios above 1 mean the \
+                 smaller or larger table needed more",
     })
 }
 
@@ -1355,8 +1358,9 @@ pub fn summary_text(a: &Value) -> String {
     if let Some(sw) = a.get("sweep").filter(|v| v.is_object()) {
         s.push_str(&format!(
             "\nTable-size sweep (the same worlds at each table size; reference window: {} MB per thread). \
-             Compared on worlds finished in both runs, which are mostly the short ones (positions 5-8); \
-             the big early-trick worlds are not covered:\n",
+             Compared on the worlds short enough to finish in both runs (from every position, but \
+             the longest worlds of the early positions are usually missing, so the largest tables \
+             are not covered):\n",
             sw["reference_tt_mb"]
         ));
         for r in sw["runs"].as_array().into_iter().flatten() {

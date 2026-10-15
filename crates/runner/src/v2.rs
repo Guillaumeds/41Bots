@@ -11,8 +11,10 @@
 //!
 //! Resume: on start the highest done-list is read; listed chunks whose remote bundles still match
 //! are skipped, everything else is redone from its seed (local leftovers are deleted first). A
-//! chunk's bundle depends only on its seed and parameters, so a redone chunk reproduces the same
-//! bytes and the same key.
+//! chunk's bundle depends only on its seed and parameters, so a chunk redone from scratch
+//! reproduces the same bytes and the same key. A `search_measure` chunk that continues from
+//! its live files (below) is the exception: its worlds file is byte-identical, but its timing
+//! file and the `resumed` counts in its result differ, so its bundle and key do too.
 //!
 //! Live files: every `upload_every_s` the running chunks' changed `out/` files go, in the
 //! background, to `runs/<run>/partial/<stream>/<index:06>/out/` (mutable keys, checkpoints
@@ -714,15 +716,24 @@ impl Run {
         fs::create_dir_all(&logs).map_err(|e| e.to_string())?;
         if s.kind == "search_measure" {
             // Continue where an earlier machine stopped: its files as last uploaded, with the
-            // checkpoint of the worlds finished since its last complete decision.
+            // checkpoint of the worlds finished since its last complete decision. A store that
+            // cannot be read is retried three times; if it still fails, the chunk starts from
+            // scratch (the same bytes, the saved worlds valued again) and the log says so loudly.
             let (name, live, out) = (s.name.clone(), self.live_prefix(k, index), dir.join("out"));
             let l2 = live.clone();
-            match self.net_call(move |r| net::restore(r, &[l2], &out)) {
-                Ok((0, _)) => {}
-                Ok((n, bytes)) => println!(
-                    "runner: chunk {name}/{index}: restored {n} files ({bytes} bytes) from {live}"
+            match self
+                .net_call(move |r| retry(3, || net::restore(r, std::slice::from_ref(&l2), &out)))
+            {
+                Ok(got) if got.listed == 0 => {}
+                Ok(got) => println!(
+                    "runner: chunk {name}/{index}: {} files listed, {} files ({} bytes) restored \
+                     from {live}",
+                    got.listed, got.files, got.bytes
                 ),
-                Err(e) => eprintln!("runner: chunk {name}/{index}: restoring {live}: {e}"),
+                Err(e) => eprintln!(
+                    "runner: WARNING: chunk {name}/{index}: could not restore {live} after 3 \
+                     tries ({e}); the chunk starts from scratch and values the saved worlds again"
+                ),
             }
         }
         let s = &self.m.streams[k];

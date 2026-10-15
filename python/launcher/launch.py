@@ -27,14 +27,20 @@ Rules applied:
   destroy, never stop.
 - Container start failures are caught at the next poll: while waiting for the first heartbeat, an
   instance whose status shows a container error ("Error response from daemon", "failed to
-  inject", "OCI runtime", or actual_status exited/offline) is destroyed at once and the next offer
-  is rented (counted as a replacement, for format 1 too: nothing ran on it), instead of waiting
-  for --startup-minutes.
+  inject", "OCI runtime") is destroyed at once and the next offer is rented (counted as a
+  replacement, for format 1 too: nothing ran on it), instead of waiting for --startup-minutes;
+  one that vast shows exited, offline or not listed is treated the same once that is confirmed.
+- No single answer from vast can say a machine is gone (2026-10-15): a failed call or an
+  unreadable reply means "unknown" and changes nothing; a machine is declared gone (dead before
+  DONE, stopped before its first heartbeat, destroyed itself) only after 3 consecutive readings
+  showing it exited, offline or absent from the instance list, spanning at least 90 s.
 - A silent machine (no new heartbeat for 3 minutes) is checked through the vast API first, and its
-  container log tail printed (redacted): gone, exited or idle (vast CPU below --busy-cpu-pct, 50%)
-  is destroyed at once; running and busy is treated as an upload problem (run m3-agree-t1-b lost
-  172 minutes of work that way): the launcher waits up to --silent-busy-min (15) more minutes for
-  heartbeats to resume, logging each poll, then asks it to stop and upload as below.
+  container log tail printed (redacted): confirmed gone, or running but idle (vast CPU below
+  --busy-cpu-pct, 50%), is destroyed at once; running and busy is treated as an upload problem
+  (run m3-agree-t1-b lost 172 minutes of work that way), and so is a machine vast cannot tell us
+  about: the launcher waits up to --silent-busy-min (15) more minutes for heartbeats to resume,
+  logging each poll, then asks it to stop and upload as below. A failed R2 call while polling
+  counts as "no new heartbeat this poll" (logged), never as an error that ends the watch.
 - Budget: --max-dollars (0 = none) stops the run (stop and upload, then destroy) once the money
   spent on its machines reaches it, and rents no replacement past it. A heartbeat's progress.eta
   (done_frac, eta_utc, projected_usd, basis) is shown on each poll line, with a warning once if
@@ -51,7 +57,15 @@ Rules applied:
   and leaves the wait, the destroy and the key deletion to the workflow's cleanup steps
   (`launch.py stop RUN_ID --instance ID`; the run id is kept in <state-file>.run-id).
 - If creating the instance fails (typically the offer was taken between search and create, which
-  vast reports as an empty answer), the next-best offer is tried, up to 5 offers.
+  vast reports as an empty answer), the account's instances are listed first: one labelled
+  41bots-<run_id> means vast rented it after all and it is adopted (never a second rental); if
+  the list cannot be read either, the run stops. Otherwise the next-best offer is tried, up to 5.
+- --offer-id (an offer the owner picked on vast's website): one search by that id checks the
+  same things as the normal search (a verified host, reliability at least 0.98, the whole
+  machine, on-demand); an offer that fails any of them, or that cannot be checked, is not rented.
+- Destroying is verified: "destroyed (verified)" only once a later status call shows the instance
+  exited, offline or absent; when that call fails 3 times the destroy is reported as unverified
+  (in the log, the report and the step summary), never counted as done.
 - Format-2 manifests (docs/M3-SPEC.md section 7.3) resume: when the heartbeat goes missing for 3
   minutes, the machine never starts, or the instance dies before DONE, the launcher destroys it
   and rents a replacement (another machine) with the same manifest, which carries on from the
@@ -104,6 +118,9 @@ STOP_WAIT_S = 300  # default; --stop-wait-s overrides: how long a stopped machin
 STOP_POLL_S = 10
 SILENT_BUSY_MIN = 15  # default; --silent-busy-min overrides
 BUSY_CPU_PCT = 50.0  # default; --busy-cpu-pct overrides
+GONE_CONFIRMATIONS = 3  # readings showing an instance exited/offline/absent before it counts as gone
+GONE_SPAN_S = 90  # ...spanning at least this long
+MIN_RELIABILITY = 0.98
 # GitHub ends a job after 6 hours (vast-run.yml timeout-minutes: 360). Longer runs are handed over
 # before that: the machine keeps working and the run-aware cleanup (cleanup.py, every 15 minutes)
 # watches it from then on, through runs/<run>/watch.json and watch/<run>.json.
@@ -291,20 +308,81 @@ def describe(o: dict) -> str:
             f"rate {o['_rate']:.2f} ({unit}), cost/work {o['_cost_per_work']:.5f}")
 
 
+def offer_check_failures(o: dict) -> list[str]:
+    """Why an offer fails the launcher's safety checks (what the search query filters on, applied
+    to one offer's record): a verified host, reliability at least 0.98, the whole machine (no
+    sharing), on-demand and rentable. Empty when it passes."""
+    failed = []
+    if o.get("verified") is not True and (o.get("verification") or "") != "verified":
+        failed.append(f"host not verified ({o.get('verification') or o.get('verified')})")
+    try:
+        rel = float(o.get("reliability2") if o.get("reliability2") is not None else o.get("reliability") or 0)
+    except (TypeError, ValueError):
+        rel = 0.0
+    if rel < MIN_RELIABILITY:
+        failed.append(f"reliability {rel:.3f} below {MIN_RELIABILITY}")
+    try:
+        frac = float(o.get("gpu_frac") if o.get("gpu_frac") is not None else 0)
+    except (TypeError, ValueError):
+        frac = 0.0
+    if frac < 1.0:
+        failed.append(f"shared machine (gpu_frac {o.get('gpu_frac')})")
+    if o.get("is_bid"):
+        failed.append("an interruptible (bid) offer, not on-demand")
+    if o.get("rentable") is False:
+        failed.append("not rentable")
+    return failed
+
+
+def lookup_offer(a) -> dict:
+    """The one offer the owner named (--offer-id), read back from vast by its id (one search,
+    `id=N`, on-demand) and checked like every searched offer (`offer_check_failures`). Stops the
+    run with a plain message when the offer is gone, fails a check, or cannot be read: the checks
+    are never skipped."""
+    oid = int(a.offer_id)
+    try:
+        rows = vast("search", "offers", f"id={oid}", "--type", "on-demand", "--limit", "5")
+    except RuntimeError as e:
+        sys.exit(f"launch: offer {oid} could not be checked (vast's search failed: {redact(str(e))[:200]}); the checks "
+                 f"(verified host, reliability >= {MIN_RELIABILITY}, whole machine) cannot be skipped, so nothing was rented")
+    if not isinstance(rows, list):
+        sys.exit(f"launch: offer {oid} could not be checked (vast's search answered {LAST_VAST_OUTPUT!r}); nothing was rented")
+    row = next((o for o in rows if isinstance(o, dict) and o.get("id") == oid), None)
+    if row is None:
+        sys.exit(f"launch: offer {oid} is not on offer (on-demand) any more; nothing was rented")
+    failed = offer_check_failures(row)
+    if failed:
+        sys.exit(f"launch: offer {oid} fails the launcher's checks: {'; '.join(failed)}; nothing was rented")
+    best = dict(row)
+    best.setdefault("machine_id", a.offer_machine or oid)
+    if best.get("reliability2") is None:
+        best["reliability2"] = float(best.get("reliability") or 0)
+    best["dph_total"] = float(best.get("dph_total") or a.offer_dph or 0)
+    best["cpu_cores_effective"] = float(best.get("cpu_cores_effective") or a.offer_cores or 0)
+    if not (best["dph_total"] and best["cpu_cores_effective"]):
+        sys.exit(f"launch: offer {oid}: vast reports no price or no cores for it; nothing was rented")
+    for name, given, have in (("--offer-dph", a.offer_dph, best["dph_total"]),
+                              ("--offer-cores", a.offer_cores, best["cpu_cores_effective"])):
+        if given and abs(float(given) - have) > 0.1 * max(have, 1e-9):
+            log(f"::warning::{name} {given} differs from what vast reports for offer {oid} ({have}); vast's value is used")
+    return best
+
+
 def choose(a) -> dict | None:
     if getattr(a, "offer_id", None):
-        # An offer the owner picked (2026-10-15, on vast's own website, when the account's daily search quota was
-        # used up): rent exactly this one and never search. It is offered once; a failed create, or a replacement
-        # after the machine dies, finds nothing and the run stops instead of falling back to a search.
+        # An offer the owner picked on vast's own website (2026-10-15): one search by its id checks it
+        # like any other (verified, reliability, whole machine), nothing else is searched. It is offered
+        # once; a failed create, or a replacement after the machine dies, finds nothing and the run stops
+        # instead of falling back to a full search.
         if getattr(a, "_offer_given_used", False):
             return None
         a._offer_given_used = True
-        if not (a.offer_dph and a.offer_cores):
-            sys.exit("launch: --offer-id needs --offer-dph and --offer-cores (price per hour and CPU cores shown on vast's website)")
-        best = {"id": int(a.offer_id), "machine_id": int(a.offer_machine or a.offer_id), "dph_total": float(a.offer_dph),
-                "cpu_cores_effective": float(a.offer_cores), "cpu_name": a.offer_cpu or "(offer chosen by id)", "gpu_name": None}
-        log(f"offer {best['id']} chosen by the owner, no search: ${best['dph_total']:.3f}/h, {best['cpu_cores_effective']:.0f} cores, "
-            f"{best['cpu_name']}; its filters (verified, reliability, shared) are NOT checked")
+        best = lookup_offer(a)
+        best["_rate"], best["_measured"] = 1.0, False
+        best["_work_per_hour"] = best["cpu_cores_effective"]
+        best["_cost_per_work"] = best["dph_total"] / max(best["cpu_cores_effective"], 1e-9)
+        log(f"offer {best['id']} chosen by the owner and checked by id (verified host, reliability "
+            f"{float(best.get('reliability2') or 0):.3f}, whole machine): {describe(best)}")
         return best
     offers = search_offers(a)
     have_r2 = all(os.environ.get(n) for n in ("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET", "R2_S3_ENDPOINT"))
@@ -324,7 +402,8 @@ def choose(a) -> dict | None:
 
 # ------------------------------------------------------------------ run
 
-def instance_env(run_id: str, ncpu: int, dph: float, bin_sha: str, image: str = "", destroy_key: str = "") -> str:
+def instance_env(run_id: str, ncpu: int, dph: float, bin_sha: str, image: str = "", destroy_key: str = "",
+                 offer: dict | None = None) -> str:
     kv = {
         "RUN_ID": run_id, "NCPU": str(ncpu), "DPH": f"{dph:.5f}", "BIN_SHA": bin_sha,
         "R2_BUCKET": os.environ["R2_BUCKET"], "R2_S3_ENDPOINT": os.environ["R2_S3_ENDPOINT"],
@@ -339,27 +418,122 @@ def instance_env(run_id: str, ncpu: int, dph: float, bin_sha: str, image: str = 
         kv["IMAGE"] = image
     if destroy_key:
         kv["VAST_DESTROY_KEY"] = destroy_key
+    # The offer, host and machine numbers, for the runner's machine-cost record (machines/<run>.json).
+    for key, field in (("OFFER_ID", "id"), ("HOST_ID", "host_id"), ("MACHINE_ID", "machine_id")):
+        if offer and offer.get(field) is not None:
+            kv[key] = str(offer[field])
     for k, v in kv.items():
         if not re.fullmatch(r"[A-Za-z0-9_.:/+=-]*", v):
             sys.exit(f"launch: environment value for {k} has characters vast's --env cannot carry")
     return " ".join(f"-e {k}={v}" for k, v in kv.items())
 
 
-def destroy(instance_id: int) -> None:
+def destroy(instance_id: int) -> str:
+    """Destroys the instance and checks that it is gone. Returns "verified" (a later status call
+    showed it exited, offline or absent from the instance list), "unverified" (the destroy call
+    went through, but vast's status could not be read in 3 tries: check the console) or "failed"
+    (the destroy call itself failed 5 times). An unreadable status is never counted as destroyed."""
     for attempt in range(5):
         try:
             # -y: without it vastai asks "Are you sure?" on stdin, reads EOF and silently does nothing.
             vast("destroy", "instance", str(instance_id), "-y", raw=False)
-            time.sleep(5)
-            info = instance_status(instance_id)
-            if info is None or info.get("actual_status") in (None, "exited", "offline", "destroyed"):
-                log(f"destroyed instance {instance_id} (verified)")
-                return
-            log(f"destroy attempt {attempt + 1}: instance {instance_id} still {info.get('actual_status')}")
         except RuntimeError as e:
             log(f"destroy attempt {attempt + 1} failed: {e}")
             time.sleep(10)
+            continue
+        time.sleep(5)
+        unread = 0
+        while unread < 3:
+            state, info = instance_state(instance_id)
+            if state == "unknown":
+                unread += 1
+                time.sleep(10)
+                continue
+            if state == "dead":
+                log(f"destroyed instance {instance_id} (verified: {info_word(info)})")
+                return "verified"
+            log(f"destroy attempt {attempt + 1}: instance {instance_id} still {info_word(info)}")
+            break
+        else:
+            log(f"::warning::destroy of instance {instance_id} was sent, but vast's status could not be read in "
+                f"3 tries, so it is NOT verified: check the vast.ai console (the cleanup workflow also checks)")
+            return "unverified"
     log(f"::error::could not destroy instance {instance_id}; destroy it by hand in the vast.ai console")
+    return "failed"
+
+
+def info_word(info: dict | None) -> str:
+    if info is None:
+        return "not listed"
+    return f"actual_status {info.get('actual_status')}"
+
+
+def instance_listed(instance_id: int) -> dict | None:
+    """The instance's row in `vastai show instances`: {} when a successful listing does not hold
+    it (not listed), None when the listing failed or could not be read (unknown)."""
+    try:
+        rows = vast("show", "instances")
+    except RuntimeError as e:
+        log(f"show instances failed: {e}")
+        return None
+    if not isinstance(rows, list):
+        return None
+    for r in rows:
+        if isinstance(r, dict) and r.get("id") == instance_id:
+            return r
+    return {}
+
+
+def instance_state(instance_id: int) -> tuple[str, dict | None]:
+    """One reading of an instance: ("alive" | "dead" | "unknown", vast's record). Dead means
+    vast shows it exited or offline, or a successful listing of the account's instances does not
+    hold it. Unknown means no call could be read; it is never taken for dead."""
+    info = instance_status(instance_id)
+    if info is None:
+        row = instance_listed(instance_id)
+        if row is None:
+            return "unknown", None
+        if not row:
+            return "dead", None
+        info = row
+    status = info.get("actual_status")
+    if status in ("exited", "offline", "destroyed") or (status is None and info.get("intended_status") == "stopped"):
+        return "dead", info
+    return "alive", info
+
+
+class Liveness:
+    """Whether one instance is still there, read so that no single answer from vast can say
+    "gone": it is declared gone only after GONE_CONFIRMATIONS consecutive readings showing it dead
+    (exited, offline or absent from the instance list) spanning at least GONE_SPAN_S seconds. A
+    reading that shows it alive clears the count; a failed call or an unreadable reply is
+    "unknown" and changes nothing."""
+
+    def __init__(self, instance_id: int):
+        self.id = instance_id
+        self.count = 0
+        self.first: float | None = None
+        self.detail = ""
+
+    def check(self) -> tuple[str, dict | None]:
+        """("alive" | "gone" | "dying" | "unknown", vast's record); dying = dead by this reading
+        but not yet confirmed."""
+        now = time.time()
+        state, info = instance_state(self.id)
+        if state == "unknown":
+            self.detail = "vast could not be read"
+            return "unknown", None
+        if state == "alive":
+            self.count, self.first = 0, None
+            self.detail = ""
+            return "alive", info
+        self.count += 1
+        self.first = now if self.first is None else self.first
+        span = now - self.first
+        self.detail = f"{info_word(info)}: reading {self.count} of {GONE_CONFIRMATIONS} over {span:.0f} s"
+        if self.count >= GONE_CONFIRMATIONS and span >= GONE_SPAN_S:
+            return "gone", info
+        return "dying", info
 
 
 # The run's destroy-only key: the destroy endpoint and nothing else (no reads, no creating
@@ -464,14 +638,6 @@ def print_logs(instance_id: int, lines: int = 200) -> None:
         log("::endgroup::")
 
 
-def instance_gone(instance_id: int) -> bool:
-    try:
-        info = vast("show", "instance", str(instance_id))
-    except RuntimeError:
-        return True
-    return not info or (info.get("actual_status") in (None, "exited", "offline") and info.get("intended_status") == "stopped")
-
-
 # Signs in an instance's status that its container cannot start: the image or its configuration
 # failed on the host (e.g. 2026-10-14: "Error response from daemon: failed to create task for
 # container: failed to inject ... OCI runtime create failed"). Such an instance never heartbeats.
@@ -481,15 +647,13 @@ START_FAILED = "container failed to start"
 
 def container_start_error(info: dict | None) -> str | None:
     """Why an instance that has not heartbeated yet cannot start, or None: a container error in
-    its status message, or a stopped state (actual_status exited or offline)."""
+    its status message. (An exited or offline state is not read here: one reading never counts,
+    `Liveness` confirms it.) No record means unknown, not an error."""
     if not info:
         return None
     msg = str(info.get("status_msg") or "").strip().replace("\n", " ")
     if any(e in msg.lower() for e in CONTAINER_ERRORS):
         return msg[:300]
-    status = info.get("actual_status")
-    if status in ("exited", "offline"):
-        return f"actual_status {status}" + (f": {msg[:250]}" if msg else "")
     return None
 
 
@@ -508,14 +672,16 @@ def vast_cpu_pct(info: dict | None) -> float | None:
 
 
 def silent_state(info: dict | None, busy_pct: float) -> tuple[str, str]:
-    """What a machine whose heartbeats stopped is doing, from vast's view of it: ("gone" |
-    "idle" | "busy", detail). Busy means running with CPU at or above `busy_pct`; no CPU reading
-    counts as idle (destroyed at once, as before)."""
+    """What a machine whose heartbeats stopped is doing, from one reading of vast's record of it
+    (a reading that shows it alive, see `Liveness`): ("unknown" | "idle" | "busy", detail). Busy
+    means running with CPU at or above `busy_pct`; running with no CPU reading counts as idle
+    (destroyed at once, as before); no record, or a state other than running (loading, created),
+    is unknown and gets the busy machine's grace."""
     if not info:
-        return "gone", "vast no longer reports it"
+        return "unknown", "vast gave no readable answer"
     status = info.get("actual_status")
     if status != "running":
-        return "gone", f"actual_status {status}"
+        return "unknown", f"actual_status {status}"
     pct = vast_cpu_pct(info)
     raw = info.get("cpu_util")
     if pct is None:
@@ -561,6 +727,8 @@ def poll_line(hb: dict, minutes: float, spent: float, cpu) -> str:
 
 
 def latest_heartbeat(run_id: str) -> tuple[str | None, dict | None]:
+    """(key, record) of the run's newest heartbeat, or (None, None). Raises RuntimeError when R2
+    cannot be listed; `watch` treats that as no new heartbeat this poll."""
     keys = sorted(k for k in r2_list(f"runs/{run_id}/heartbeat/") if k.endswith(".json"))
     if not keys:
         return None, None
@@ -661,12 +829,14 @@ def rent_and_watch(a, run_id: str, best: dict | None, resumable: bool, run_start
             reason = (f"{reason}; " if reason else "") + "no offer could be rented"
             log(f"::error::{reason}")
             break
+        a.known_instances = getattr(a, "known_instances", set()) | {instance_id}
         ncpu = int(best["cpu_cores_effective"])
         dph = float(best["dph_total"])
         created = time.time()
         write_watch(a, run_id, instance_id, best, dph, spent, created)
         final, reason, replaceable, graceful = "", "", False, False
         self_destroyed = None
+        destroyed = "left running"  # handed over: the cleanup watches it
         try:
             final, reason, replaceable, graceful = watch(a, run_id, instance_id, created, run_start, cpu_samples,
                                                          dph=dph, spent_before=spent)
@@ -699,21 +869,23 @@ def rent_and_watch(a, run_id: str, best: dict | None, resumable: bool, run_start
                     log(f"last status before destroy: {redact(status_line(instance_status(instance_id)))}")
                     print_logs(instance_id)
                 if final:
-                    # The runner destroys itself after uploading; give it two minutes, then make sure.
+                    # The runner destroys itself after uploading; give it a few readings over 90 s
+                    # (gone only when confirmed, `Liveness`), then make sure.
                     self_destroyed = False
+                    live = Liveness(instance_id)
                     for _ in range(4):
-                        if instance_gone(instance_id):
+                        if live.check()[0] == "gone":
                             self_destroyed = True
                             break
                         time.sleep(30)
-                    log(f"instance {instance_id} {'destroyed itself' if self_destroyed else 'did NOT destroy itself within 2 minutes of ' + final}")
-                destroy(instance_id)
+                    log(f"instance {instance_id} {'destroyed itself (' + live.detail + ')' if self_destroyed else 'did NOT destroy itself (confirmed) within 90 s of ' + final}")
+                destroyed = destroy(instance_id)
         ended = time.time()
         attempts.append({"instance_id": instance_id, "offer_id": best["id"], "cpu_name": best.get("cpu_name"),
                          "gpu_name": best.get("gpu_name"), "cores_effective": ncpu, "dph": dph,
                          "minutes": round((ended - created) / 60, 1),
                          "dollars_est": round((ended - created) / 3600 * dph, 4), "ended": final or reason,
-                         "self_destroyed": self_destroyed})
+                         "self_destroyed": self_destroyed, "destroy": destroyed})
         if reason == HANDOVER:
             log(f"instance {instance_id} keeps working; the vast-cleanup workflow watches it from now on")
             break
@@ -755,6 +927,7 @@ def report_run(a, run_id: str, resumable: bool, run_start: float, attempts: list
         "outcome": ("STOPPED" if getattr(a, "stopped", False) else final
                     or ("HANDED_OVER" if reason == HANDOVER else "KILLED")),
         "self_destroyed": last.get("self_destroyed"),
+        "destroy": last.get("destroy"),
         "reason": reason, "cpu_name": last["cpu_name"], "gpu_name": last["gpu_name"],
         "cores_effective": last["cores_effective"], "dph": last["dph"],
         "elapsed_min": round((time.time() - run_start) / 60, 1), "dollars_est": round(dollars, 4), "matches": matches,
@@ -846,6 +1019,10 @@ def summary_markdown(run_id: str, report: dict, saved: list[tuple[str, int, int]
              f"- **Outcome:** {report['outcome']}: {report.get('reason')}",
              f"- **Time:** {report.get('elapsed_min')} minutes on {machines} machine(s); "
              f"**cost:** about ${report.get('dollars_est', 0):.2f}"]
+    unverified = [str(x.get("instance_id")) for x in report.get("attempts") or [] if x.get("destroy") in ("unverified", "failed")]
+    if unverified:
+        lines.append(f"- **WARNING: destroy not verified** for instance(s) {', '.join(unverified)}: check the vast.ai console "
+                     f"(the vast-cleanup workflow also checks every 15 minutes)")
     for prefix, files, size in saved:
         what = f"{files} file(s), {human_bytes(size)}" if files else "nothing (no outputs were saved)"
         lines.append(f"- **Saved in R2** `{prefix}`: {what}")
@@ -856,7 +1033,11 @@ def summary_markdown(run_id: str, report: dict, saved: list[tuple[str, int, int]
 
 def run_benchmarks(run_id: str, resumable: bool) -> list[dict]:
     """The run's start-up benchmarks: one per machine for format 2 (benchmark/<utc>.json)."""
-    keys = sorted(r2_list(f"runs/{run_id}/benchmark/")) if resumable else [f"runs/{run_id}/benchmark.json"]
+    try:
+        keys = sorted(r2_list(f"runs/{run_id}/benchmark/")) if resumable else [f"runs/{run_id}/benchmark.json"]
+    except (RuntimeError, OSError, ValueError) as e:
+        log(f"could not list the run's benchmarks: {e}")
+        return []
     out = []
     for k in keys:
         try:
@@ -883,9 +1064,45 @@ def rent(a, run_id: str, first: dict | None = None) -> tuple[dict | None, int | 
             instance_id, why = None, str(e)
         if instance_id:
             return best, instance_id
+        # vast may have rented the machine although its answer could not be read: never rent twice.
+        adopted = adopt_instance(a, run_id, best)
+        if adopted:
+            return best, adopted
         log(f"create on offer {best['id']} failed ({why}); trying the next-best offer ({attempt}/{MAX_CREATE_TRIES})")
         a.exclude_offers.add(best["id"])
     return None, None
+
+
+def adopt_instance(a, run_id: str, best: dict) -> int | None:
+    """After a create call whose answer could not be read (or that failed): lists the account's
+    instances and adopts one labelled 41bots-<run_id>, which means vast rented it after all.
+    Returns None when a readable listing holds none. When the listing cannot be read in 3 tries
+    the run stops: renting another offer could be a second rental."""
+    label = f"41bots-{run_id}"
+    # Never an earlier machine of this run (a replacement is being rented because it died).
+    known = getattr(a, "known_instances", set())
+    for attempt in range(3):
+        rows = None
+        try:
+            rows = vast("show", "instances")
+        except RuntimeError as e:
+            log(f"show instances failed ({attempt + 1}/3): {e}")
+        if isinstance(rows, list):
+            for r in rows:
+                if (isinstance(r, dict) and r.get("label") == label and r.get("id") and int(r["id"]) not in known
+                        and r.get("actual_status") not in ("exited", "offline", "destroyed")):
+                    iid = int(r["id"])
+                    log(f"adopting instance {iid}: vast rented it for run {run_id} (offer {best['id']}) although its "
+                        f"answer to the create call could not be read")
+                    if a.state_file:
+                        with open(a.state_file, "w") as fh:
+                            fh.write(str(iid))
+                    return iid
+            return None
+        time.sleep(10)
+    sys.exit(f"launch: the create call's answer could not be read, and neither could the instance list, so the "
+             f"launcher cannot tell whether a machine was rented; renting another could be a second rental. "
+             f"Check the vast.ai console for an instance labelled {label}.")
 
 
 def create_instance(a, best: dict, run_id: str, ncpu: int, dph: float) -> int | None:
@@ -893,7 +1110,7 @@ def create_instance(a, best: dict, run_id: str, ncpu: int, dph: float) -> int | 
     # ssh/jupyter modes replace the image's ENTRYPOINT/CMD with their own init, so the boot script
     # never ran (run 38509301077). --entrypoint names the boot script; an empty --args (must be the
     # very last token) selects runtype "args". On-demand: never pass --bid_price.
-    env = instance_env(run_id, ncpu, dph, a.bin_sha, a.image, getattr(a, "destroy_key", ""))
+    env = instance_env(run_id, ncpu, dph, a.bin_sha, a.image, getattr(a, "destroy_key", ""), offer=best)
     res = vast("create", "instance", str(best["id"]), "--image", a.image, "--disk", str(a.disk_gb),
                "--env", env, "--label", f"41bots-{run_id}",
                "--entrypoint", BOOT_PATH, "--cancel-unavail", tail=("--args",))
@@ -948,11 +1165,20 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
     gone one is destroyed at once). `dph` is this machine's price, `spent_before` the dollars of
     the run's earlier machines."""
     low_since, last_key, last_change = None, None, created
+    last_hb: dict | None = None
     warned: set[str] = set()
     silent_logged = False
     eta_warned = False
+    live = Liveness(instance_id)
     # Heartbeats of an earlier machine of this run do not count as this one's.
-    first_key, _ = latest_heartbeat(run_id)
+    first_key = None
+    for attempt in range(3):
+        try:
+            first_key, _ = latest_heartbeat(run_id)
+            break
+        except (RuntimeError, OSError, ValueError) as e:
+            log(f"::warning::could not read the run's heartbeats ({attempt + 1}/3): {redact(str(e))[:200]}")
+            time.sleep(5)
     while True:
         time.sleep(a.poll_s)
         now = time.time()
@@ -966,48 +1192,64 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
             return "", f"budget reached: ${spent:.2f} of ${a.max_dollars:.2f} spent", False, True
         if getattr(a, "handover_min", 0) and now - run_start > a.handover_min * 60:
             return "", HANDOVER, False, False
-        key, hb = latest_heartbeat(run_id)
+        try:
+            key, hb = latest_heartbeat(run_id)
+        except (RuntimeError, OSError, ValueError) as e:
+            # R2 could not be read: no new heartbeat this poll, nothing more.
+            log(f"::warning::could not read the run's heartbeats this poll ({redact(str(e))[:200]}); "
+                f"counting it as no new heartbeat")
+            key, hb = last_key, last_hb
         if key == first_key:
             key = None
         if key != last_key:
             last_key, last_change = key, now
+        last_hb = hb
         if key is None:
             if now - created > a.startup_minutes * 60:
                 return "", f"no heartbeat within {a.startup_minutes} minutes of renting", True, False
-            info = instance_status(instance_id)
+            state, info = live.check()
             bad = container_start_error(info)
             if bad:
                 log(f"::warning::instance {instance_id} cannot start its container: {redact(bad)}")
                 return "", f"{START_FAILED} ({redact(bad)[:200]})", True, False
-            if instance_gone(instance_id):
-                return "", "instance stopped before the first heartbeat", True, False
-            log(f"waiting for the machine to start (image download and boot): {redact(status_line(info))}")
+            if state == "gone":
+                # Nothing ran on it, so even a format-1 run is safe to retry on another offer.
+                return "", f"{START_FAILED}: instance gone before the first heartbeat ({live.detail})", True, False
+            log(f"waiting for the machine to start (image download and boot): {redact(status_line(info))}"
+                + (f"; {live.detail}" if state != "alive" else ""))
             continue
         silent_s = now - last_change
         if silent_s > HEARTBEAT_STALE_S:
-            info = instance_status(instance_id)
-            state, detail = silent_state(info, a.busy_cpu_pct)
+            state, info = live.check()
+            if state == "alive":
+                state, detail = silent_state(info, a.busy_cpu_pct)
+            else:
+                detail = live.detail
             if not silent_logged:
                 silent_logged = True
                 log(f"::warning::no new heartbeat for {silent_s / 60:.1f} minutes; vast: {redact(status_line(info))}; "
-                    f"{redact(detail)}")
+                    f"{state}: {redact(detail)}")
                 print_logs(instance_id, 100)
-            if state != "busy":
+            if state in ("gone", "idle"):
                 return "", f"heartbeat missing for {silent_s / 60:.0f} minutes and the instance is {state} ({redact(detail)})", True, False
+            # Busy (an upload problem), dying (dead by one reading, not yet confirmed) or unknown
+            # (vast could not be read): give it time, then ask it to stop and upload.
             waited_min = (silent_s - HEARTBEAT_STALE_S) / 60
             if waited_min >= a.silent_busy_min:
-                # Still busy but silent: its uploads are stuck. Ask it to stop and upload.
-                return "", (f"heartbeat missing for {silent_s / 60:.0f} minutes while the machine stayed busy "
+                return "", (f"heartbeat missing for {silent_s / 60:.0f} minutes while the machine stayed {state} "
                             f"({redact(detail)}): uploads stuck"), True, True
-            log(f"::warning::no heartbeat for {silent_s / 60:.1f} min but the instance is busy ({redact(detail)}): "
+            log(f"::warning::no heartbeat for {silent_s / 60:.1f} min but the instance is {state} ({redact(detail)}): "
                 f"treating it as an upload problem; waiting {a.silent_busy_min - waited_min:.0f} more min "
                 f"for heartbeats to resume (${spent:.2f} so far)")
             continue
         if silent_logged:
             silent_logged = False
             log("heartbeats resumed")
-        if instance_gone(instance_id):
-            return "", "instance died before DONE", True, False
+        state, _ = live.check()
+        if state == "gone":
+            return "", f"instance died before DONE ({live.detail})", True, False
+        if state == "dying":
+            log(f"instance {instance_id} looks dead ({live.detail}); not yet confirmed")
         hb = hb or {}
         cpu = hb.get("cpu_util_pct")
         if cpu is None:
@@ -1064,8 +1306,7 @@ def cmd_put_input(a) -> int:
 
 def cmd_destroy(a) -> int:
     need_env("VAST_API_KEY")
-    destroy(int(a.instance_id))
-    return 0
+    return 0 if destroy(int(a.instance_id)) == "verified" else 1
 
 
 def cmd_stop(a) -> int:
@@ -1077,8 +1318,8 @@ def cmd_stop(a) -> int:
         sys.exit("launch: run_id may only use letters, digits, - _ .")
     marker = stop_and_wait(a.run_id, a.reason, a.wait_s)
     log(f"run {a.run_id}: {marker or 'no marker'}")
-    if a.instance:
-        destroy(int(a.instance))
+    if a.instance and destroy(int(a.instance)) != "verified":
+        return 1
     return 0
 
 
@@ -1104,10 +1345,12 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("--cpu-only", action="store_true",
                        help="CPU-only job: drop the GPU compute-capability/CUDA filters (they only matter for PyTorch training)")
         s.add_argument("--offer-id", type=int, default=None,
-                       help="rent exactly this vast.ai offer, with NO search and none of the filters (verified, reliability, whole machine); "
-                            "needs --offer-dph and --offer-cores")
-        s.add_argument("--offer-dph", type=float, default=None, help="with --offer-id: the offer's price per hour")
-        s.add_argument("--offer-cores", type=int, default=None, help="with --offer-id: its CPU cores as vast shows them (e.g. 384)")
+                       help="rent exactly this vast.ai offer: one search by its id checks it (verified host, reliability >= 0.98, "
+                            "whole machine, on-demand) and nothing else is searched; an offer failing a check is not rented")
+        s.add_argument("--offer-dph", type=float, default=None,
+                       help="with --offer-id: the price per hour you saw (optional; a warning if vast reports another)")
+        s.add_argument("--offer-cores", type=int, default=None,
+                       help="with --offer-id: the CPU cores you saw (optional; a warning if vast reports another)")
         s.add_argument("--offer-machine", type=int, default=None, help="with --offer-id: its machine id (optional)")
         s.add_argument("--offer-cpu", default="", help="with --offer-id: the CPU name, for the report (optional)")
 
