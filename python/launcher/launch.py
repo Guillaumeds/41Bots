@@ -58,9 +58,14 @@ Rules applied:
   done-list. At most 3 replacements per run, then it stops and reports. A format-2 manifest's
   `inputs` (sha256 content hashes) must already be in R2 at inputs/sha256/<hex> (`put-input`);
   the launcher checks before renting anything.
-- Destroying: the launcher always destroys the instance itself (on DONE/FAILED, a stale
-  heartbeat, a dead instance or --max-minutes), and vast-cleanup.yml destroys any 41bots-
-  instance left after 2 hours: that is the mechanism that does not depend on the machine. The
+- Long runs (--handover-min): GitHub ends a job after 6 hours, so a longer run is handed over
+  before that: the launcher stops watching, leaves the machine working, and writes
+  runs/<run_id>/watch.json and watch/<run_id>.json (instance, price, dollar cap, deadline).
+- Destroying: the launcher destroys the instance itself (on DONE/FAILED, a stale heartbeat, a
+  dead instance or --max-minutes) unless it handed it over, and vast-cleanup.yml (cleanup.py,
+  every 15 minutes) destroys a 41bots- instance whose run ended 10 minutes ago, went silent for
+  20 minutes, never heartbeated in 45 minutes, passed its deadline or its dollar cap (after a
+  stop request): that is the mechanism that does not depend on the machine. The
   machine also tries to destroy itself last. vast.ai documents a per-instance key in
   CONTAINER_API_KEY that "can only start, stop, or destroy that specific instance"
   (docs.vast.ai/api-reference/hello-world), but in args launch mode it answered that key with
@@ -99,6 +104,10 @@ STOP_WAIT_S = 300  # default; --stop-wait-s overrides: how long a stopped machin
 STOP_POLL_S = 10
 SILENT_BUSY_MIN = 15  # default; --silent-busy-min overrides
 BUSY_CPU_PCT = 50.0  # default; --busy-cpu-pct overrides
+# GitHub ends a job after 6 hours (vast-run.yml timeout-minutes: 360). Longer runs are handed over
+# before that: the machine keeps working and the run-aware cleanup (cleanup.py, every 15 minutes)
+# watches it from then on, through runs/<run>/watch.json and watch/<run>.json.
+HANDOVER = "handed over to the cleanup"
 MAURITIUS = timezone(timedelta(hours=4))
 
 
@@ -600,6 +609,7 @@ def cmd_run(a) -> int:
     # No "threads" here: the runner derives the usable cores from the container's cgroup CPU quota
     # (vast's cpu_cores_effective is a fraction of the host; NCPU below is recorded for comparison).
     manifest.setdefault("deadline_utc", datetime.fromtimestamp(time.time() + a.max_minutes * 60 - 120, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    a.deadline_utc = manifest["deadline_utc"]
     a.exclude_machines = set()
     a.exclude_offers = set()
     best = choose(a)
@@ -614,6 +624,7 @@ def cmd_run(a) -> int:
     cpu_samples: list[float] = []
     dkey = None if a.no_destroy_key else create_destroy_key(run_id)
     a.destroy_key = dkey["key"] if dkey else ""
+    a.destroy_key_id = dkey["id"] if dkey else None
     a.stopped = False
     if a.state_file:
         # For the workflow's cleanup step (`launch.py stop`), should this process be cancelled.
@@ -653,10 +664,14 @@ def rent_and_watch(a, run_id: str, best: dict | None, resumable: bool, run_start
         ncpu = int(best["cpu_cores_effective"])
         dph = float(best["dph_total"])
         created = time.time()
+        write_watch(a, run_id, instance_id, best, dph, spent, created)
         final, reason, replaceable, graceful = "", "", False, False
+        self_destroyed = None
         try:
             final, reason, replaceable, graceful = watch(a, run_id, instance_id, created, run_start, cpu_samples,
                                                          dph=dph, spent_before=spent)
+            if reason == HANDOVER:
+                hand_over(a, run_id, instance_id, best, dph, spent, created)
         except KeyboardInterrupt:
             # A cancelled workflow or Ctrl-C: let the machine upload what it finished first.
             reason, graceful = "cancelled", True
@@ -685,16 +700,23 @@ def rent_and_watch(a, run_id: str, best: dict | None, resumable: bool, run_start
                     print_logs(instance_id)
                 if final:
                     # The runner destroys itself after uploading; give it two minutes, then make sure.
+                    self_destroyed = False
                     for _ in range(4):
                         if instance_gone(instance_id):
+                            self_destroyed = True
                             break
                         time.sleep(30)
+                    log(f"instance {instance_id} {'destroyed itself' if self_destroyed else 'did NOT destroy itself within 2 minutes of ' + final}")
                 destroy(instance_id)
         ended = time.time()
         attempts.append({"instance_id": instance_id, "offer_id": best["id"], "cpu_name": best.get("cpu_name"),
                          "gpu_name": best.get("gpu_name"), "cores_effective": ncpu, "dph": dph,
                          "minutes": round((ended - created) / 60, 1),
-                         "dollars_est": round((ended - created) / 3600 * dph, 4), "ended": final or reason})
+                         "dollars_est": round((ended - created) / 3600 * dph, 4), "ended": final or reason,
+                         "self_destroyed": self_destroyed})
+        if reason == HANDOVER:
+            log(f"instance {instance_id} keeps working; the vast-cleanup workflow watches it from now on")
+            break
         log(f"instance {instance_id} ended: {reason}")
         # A container that never started ran nothing, so even a format-1 run is safe to retry.
         start_failed = reason.startswith(START_FAILED)
@@ -730,7 +752,9 @@ def report_run(a, run_id: str, resumable: bool, run_start: float, attempts: list
     matches = result.get("matches") or 0
     report = {
         "run_id": run_id, "instance_id": last["instance_id"], "offer_id": last["offer_id"],
-        "outcome": "STOPPED" if getattr(a, "stopped", False) else final or "KILLED",
+        "outcome": ("STOPPED" if getattr(a, "stopped", False) else final
+                    or ("HANDED_OVER" if reason == HANDOVER else "KILLED")),
+        "self_destroyed": last.get("self_destroyed"),
         "reason": reason, "cpu_name": last["cpu_name"], "gpu_name": last["gpu_name"],
         "cores_effective": last["cores_effective"], "dph": last["dph"],
         "elapsed_min": round((time.time() - run_start) / 60, 1), "dollars_est": round(dollars, 4), "matches": matches,
@@ -750,7 +774,45 @@ def report_run(a, run_id: str, resumable: bool, run_start: float, attempts: list
     if summary:
         with open(summary, "a") as fh:
             fh.write(summary_markdown(run_id, report, saved_files(run_id)))
-    return 0 if final == "DONE" and not getattr(a, "stopped", False) else 1
+    return 0 if (final == "DONE" or reason == HANDOVER) and not getattr(a, "stopped", False) else 1
+
+
+def watch_record(a, run_id: str, instance_id: int, best: dict, dph: float, spent_before: float,
+                 created: float, handed_over: bool) -> dict:
+    return {"run_id": run_id, "instance_id": instance_id, "offer_id": best.get("id"), "cpu_name": best.get("cpu_name"),
+            "dph": dph, "max_dollars": a.max_dollars, "spent_before": round(spent_before, 4),
+            "created_utc": datetime.fromtimestamp(created, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "deadline_utc": getattr(a, "deadline_utc", None), "handed_over": handed_over,
+            "destroy_key_id": getattr(a, "destroy_key_id", None),
+            "github_run": os.environ.get("GITHUB_RUN_ID"),
+            "utc": datetime.fromtimestamp(time.time(), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+
+def write_watch(a, run_id: str, instance_id: int, best: dict, dph: float, spent_before: float, created: float) -> None:
+    """runs/<run>/watch.json: what the cleanup needs to enforce the run's dollar cap and deadline,
+    should the launcher be gone (written for every machine, handed over or not)."""
+    try:
+        r2_put(f"runs/{run_id}/watch.json",
+               json.dumps(watch_record(a, run_id, instance_id, best, dph, spent_before, created, False), indent=2).encode())
+    except RuntimeError as e:
+        log(f"::warning::could not write runs/{run_id}/watch.json: {e}")
+
+
+def hand_over(a, run_id: str, instance_id: int, best: dict, dph: float, spent_before: float, created: float) -> None:
+    """Leaves the machine working: the cleanup watches it from now on (watch/<run>.json lists it),
+    and the workflow's safety-net steps must not destroy it or delete its key."""
+    rec = json.dumps(watch_record(a, run_id, instance_id, best, dph, spent_before, created, True), indent=2).encode()
+    r2_put(f"runs/{run_id}/watch.json", rec)
+    r2_put(f"watch/{run_id}.json", rec)
+    a.handed_over = True
+    if a.state_file:
+        for suffix in ("", ".run-id", ".destroy-key"):
+            with contextlib.suppress(OSError):
+                os.remove(f"{a.state_file}{suffix}")
+    spent = spent_before + (time.time() - created) / 3600 * dph
+    log(f"::notice::handed instance {instance_id} over after {a.handover_min} minutes (${spent:.2f} so far): it runs "
+        f"on until DONE, its deadline {getattr(a, 'deadline_utc', None)} or its cap ${a.max_dollars:.2f}; the "
+        f"vast-cleanup workflow (every 15 minutes) watches it and writes runs/{run_id}/closed.json when it is gone")
 
 
 def saved_files(run_id: str) -> list[tuple[str, int, int]]:
@@ -902,6 +964,8 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
         spent = spent_before + (now - created) / 3600 * dph
         if a.max_dollars and spent >= a.max_dollars:
             return "", f"budget reached: ${spent:.2f} of ${a.max_dollars:.2f} spent", False, True
+        if getattr(a, "handover_min", 0) and now - run_start > a.handover_min * 60:
+            return "", HANDOVER, False, False
         key, hb = latest_heartbeat(run_id)
         if key == first_key:
             key = None
@@ -1074,6 +1138,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="before destroying a machine that is still working (time limit, low CPU, Ctrl-C), ask it to "
                         "stop and wait this long for it to upload what it finished")
     s.add_argument("--state-file", help="write the instance id here (for a cleanup step)")
+    s.add_argument("--handover-min", type=float, default=0,
+                   help="after this many minutes, stop watching but leave the machine working: the vast-cleanup "
+                        "workflow watches it from then on (GitHub ends jobs at 6 hours; 0 = never hand over)")
     s.add_argument("--dry-run", action="store_true", help="choose the offer, but create nothing")
     s.add_argument("--no-destroy-key", action="store_true",
                    help="do not create the run's destroy-only key (machines are then destroyed by the launcher only)")

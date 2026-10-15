@@ -8,6 +8,9 @@ name: vast-run
 # the done-list (at most 3). Format-2 inputs must be in R2 first (launch.py put-input FILE).
 # If the chosen offer is taken before it can be rented, the next-best offer is tried.
 # Set dry_run to only print the offer that would be chosen.
+# Runs longer than this job's 6-hour limit: after 330 minutes the launcher hands the machine over
+# (it keeps working until DONE, its deadline from max_minutes, or max_dollars) and vast-cleanup.yml
+# watches it every 15 minutes; runs/<run_id>/closed.json records how it ended.
 
 on:
   workflow_dispatch:
@@ -20,7 +23,7 @@ on:
         description: "Minimum effective CPU cores"
         default: "16"
       max_minutes:
-        description: "Hard time limit (minutes) before the machine is destroyed"
+        description: "Hard time limit (minutes) for the run, which may exceed GitHub's 6 hours (the machine is handed over to vast-cleanup at 330 min)"
         default: "30"
       cpu_only:
         description: "CPU-only job: ignore the GPU type when choosing a machine"
@@ -121,7 +124,7 @@ jobs:
           MANIFEST=$(python3 -c 'import json,os,sys; t=os.environ["MANIFEST"]; m=json.loads(t if t.lstrip().startswith("{") else open(t).read()); m["run_id"]=m.get("run_id") or "gh-${{ github.run_id }}"; print(json.dumps(m))')
           python3 python/launcher/launch.py run --manifest "$MANIFEST" --min-cores "$MIN_CORES" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} \
             --max-minutes "$MAX_MINUTES" --low-cpu-pct "$LOW_CPU_PCT" --low-cpu-s "${LOW_CPU_S:-300}" --poll-s "${POLL_S:-60}" --max-dollars "${MAX_DOLLARS:-0}" \
-            --image "$IMAGE" --bin-sha "$BIN_SHA" --state-file instance-id.txt ${{ inputs.cheapest && '--cheapest' || '' }} \
+            --image "$IMAGE" --bin-sha "$BIN_SHA" --state-file instance-id.txt ${{ inputs.cheapest && '--cheapest' || '' }} --handover-min 330 \
             $( [ -n "$OFFER_ID" ] && echo "--offer-id $OFFER_ID --offer-dph $OFFER_DPH --offer-cores $OFFER_CORES" )
       - name: Cancelled - ask the run to stop and wait (at most 5 minutes) for it to upload what it finished
         if: cancelled() && hashFiles('instance-id.txt.run-id') != ''

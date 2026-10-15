@@ -578,6 +578,35 @@ class LauncherTest(unittest.TestCase):
         finally:
             launch.watch = saved_watch
 
+    def test_long_run_is_handed_over_and_keeps_working(self):
+        # GitHub's 6-hour limit: after --handover-min the launcher leaves the machine working,
+        # tells the cleanup (watch/<run>.json) and clears the workflow's safety-net files.
+        import tempfile
+        w = World([offer(1, 11, 1.0)], ["work:0"])
+        with tempfile.TemporaryDirectory() as d:
+            state = os.path.join(d, "instance-id.txt")
+            code, report = self.run_launch(w, {"format": 2, "run_id": RUN, "run_seed": 1, "streams": []},
+                                           "--state-file", state, "--handover-min", "30", "--max-dollars", "20")
+            self.assertEqual([f for f in os.listdir(d)], [])
+        self.assertEqual((code, report["outcome"]), (0, "HANDED_OVER"))
+        self.assertTrue(w.instances[100]["alive"])
+        self.assertNotIn(f"runs/{RUN}/STOP", w.store)
+        self.assertEqual(w.deleted_keys, [])  # the machine still needs its key to destroy itself
+        rec = json.loads(w.store[f"watch/{RUN}.json"])
+        self.assertEqual(rec, json.loads(w.store[f"runs/{RUN}/watch.json"]))
+        self.assertEqual((rec["instance_id"], rec["dph"], rec["max_dollars"], rec["handed_over"], rec["destroy_key_id"]),
+                         (100, 1.0, 20.0, True, 77))
+        self.assertTrue(rec["deadline_utc"])
+
+    def test_every_machine_gets_a_watch_record_and_self_destroy_is_reported(self):
+        w = World([offer(1, 11, 1.0)], ["done:2"])
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 10, "seed": 1}}},
+                                       "--max-dollars", "5")
+        self.assertEqual((code, report["outcome"], report["self_destroyed"]), (0, "DONE", True))
+        rec = json.loads(w.store[f"runs/{RUN}/watch.json"])
+        self.assertEqual((rec["max_dollars"], rec["handed_over"]), (5.0, False))
+        self.assertNotIn(f"watch/{RUN}.json", w.store)
+
     def run_launch_minutes(self, world: World, manifest: dict, minutes: int) -> tuple[int, dict]:
         saved = {n: getattr(launch, n) for n in ("vast", "r2_get", "r2_put", "r2_list", "r2_exists", "time")}
         launch.vast = world.vast

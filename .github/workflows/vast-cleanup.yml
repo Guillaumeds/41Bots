@@ -1,45 +1,46 @@
-# Destroy vast.ai instances labelled "41bots-" that are older than the 2-hour cap or exited.
-# Safety net in case a run leaves a machine billing. Owner-approved hourly schedule (2026-10-14).
+# Run-aware safety net for vast.ai machines labelled "41bots-" (python/launcher/cleanup.py).
+# A healthy run is never touched, however long it lasts. A machine is destroyed when its run
+# ended (DONE/FAILED) 10 minutes ago, went 20 minutes without a heartbeat, never heartbeated in
+# 45 minutes, is exited/offline, is 30 minutes past its deadline, or passed its dollar cap (it is
+# asked to stop and upload first, and destroyed 15 minutes later). It also takes over the watching
+# of runs the launcher handed over at GitHub's 6-hour limit. Owner-approved (2026-10-15); replaces
+# the age-based rule that destroyed every machine older than 2 hours.
 name: vast-cleanup
 on:
   workflow_dispatch:
     inputs:
       all:
-        description: "Destroy every 41bots- instance regardless of age"
+        description: "Destroy every 41bots- instance regardless of its run"
+        type: boolean
+        default: false
+      dry_run:
+        description: "Only print what would be done"
         type: boolean
         default: false
   schedule:
-    - cron: "17 * * * *"
+    - cron: "*/15 * * * *"
 permissions:
   contents: read
+concurrency:
+  group: vast-cleanup
+  cancel-in-progress: false
 jobs:
   cleanup:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
+    env:
+      VAST_API_KEY: ${{ secrets.VAST_API_KEY }}
+      R2_ACCESS_KEY_ID: ${{ vars.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+      R2_S3_ENDPOINT: ${{ vars.R2_S3_ENDPOINT }}
     steps:
-      - name: Install vastai
-        run: pip install vastai==1.8.3
-      - name: Destroy stale labelled instances
-        env:
-          VAST_API_KEY: ${{ secrets.VAST_API_KEY }}
-          ALL: ${{ inputs.all || false }}
+      - uses: actions/checkout@v4
+      - name: Install the vast.ai CLI
+        run: pip install --quiet "vastai==1.8.3"
+      - name: Check every 41bots- machine against its run
+        shell: bash
         run: |
           set -euo pipefail
-          vastai show instances --raw --api-key "$VAST_API_KEY" > inst.json
-          python3 - <<'PY' > ids.txt
-          import json, os, time
-          now = time.time()
-          everything = os.environ.get("ALL") == "true"
-          for i in json.load(open("inst.json")):
-              label = i.get("label") or ""
-              age = now - float(i.get("start_date") or now)
-              if label.startswith("41bots-") and (everything or age > 7200 or i.get("actual_status") in ("exited", "offline")):
-                  print(i["id"])
-          PY
-          if [ ! -s ids.txt ]; then echo "nothing to destroy"; exit 0; fi
-          while read -r id; do
-            echo "destroying $id"
-            vastai destroy instance "$id" -y --api-key "$VAST_API_KEY"
-          done < ids.txt
-          sleep 10
-          vastai show instances --api-key "$VAST_API_KEY"
+          python3 python/launcher/cleanup.py ${{ inputs.all && '--all' || '' }} ${{ inputs.dry_run && '--dry-run' || '' }}
+          vastai show instances --api-key "$VAST_API_KEY" || true
