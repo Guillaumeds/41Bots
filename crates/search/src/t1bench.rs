@@ -270,6 +270,10 @@ pub struct WorldRec {
     /// little-endian), when finished.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hash: Option<String>,
+    /// The seat (not the decision-maker) that robs later in trick 1 in this world, if any (its
+    /// burn is searched inside the solve).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub robber: Option<u8>,
 }
 
 /// One fill thread.
@@ -629,6 +633,7 @@ fn fill(
                 finished: v.is_some(),
                 nodes,
                 hash: v.as_deref().map(values_hash),
+                robber: solve.robber,
             });
         }
         (row, recs)
@@ -804,6 +809,7 @@ fn prod(
             finished: v.is_some(),
             nodes: solve.stats.nodes,
             hash: v.as_deref().map(values_hash),
+            robber: solve.robber,
         })
     };
     let (r, samples, reason) = std::thread::scope(|s| {
@@ -1455,6 +1461,7 @@ mod tests {
             finished: true,
             nodes,
             hash: Some(hash.to_string()),
+            robber: None,
         }
     }
 
@@ -1831,6 +1838,7 @@ mod tests {
             finished: true,
             nodes: 10,
             hash: Some(h.into()),
+            robber: None,
         };
         let mut f = w.clone();
         f.worlds = vec![rec("aa")];

@@ -7,6 +7,9 @@
 //!                  [--ids 3,17,42 | --ids FILE] [--threads K] [--solve-threads K] [--tt-mb M]
 //!                  [--schedule fixed|auto] [--tt-budget-mb B] [--sched-json JSON|FILE]
 //!                  --equity TABLE [--progress FILE]
+//! search robber-burn [--trick 1] [--count 32] [--seed 1] [--start-hands 20000] [--position 0]
+//!                  [--share-worlds 1000] [--worlds 4] [--equity TABLE] [--tt-mb 512] [--label 1]
+//!                  [--source belief|rejection]
 //! search bench-t1  --mode fill|prod --decisions FILE --equity TABLE --json OUT --threads T
 //!                  [--window-s 240] [--tt-mb 512 (fill)] [--tt-budget-mb B]
 //!                  [--worlds-per-decision 800] [--sched-json …] (prod) [--seed 1] [--label 1]
@@ -136,8 +139,9 @@ fn main() -> ExitCode {
         Some("score") => score_cmd(&a),
         Some("teacher") => teacher(&a),
         Some("bench-t1") => bench_t1(&a),
+        Some("robber-burn") => robber_burn(&a),
         _ => Err(
-            "usage: search decisions|worlds|agree|curves|score|teacher|bench-t1 … (see the source docs)"
+            "usage: search decisions|worlds|agree|curves|score|teacher|bench-t1|robber-burn … (see the source docs)"
                 .into(),
         ),
     };
@@ -1031,5 +1035,111 @@ fn teacher(a: &Args) -> Result<(), String> {
     std::fs::write(dir.join(format!("decisions-{}.npy", h(&npy))), &npy)
         .map_err(|e| e.to_string())?;
     println!("{hands} hands, {} decisions", rows.len());
+    Ok(())
+}
+
+/// `search robber-burn`: the cost of searching another seat's rob burn inside the exact solve.
+/// From the decision set (`--trick`, `--count`, `--seed`, `--start-hands`, as `search decisions`)
+/// the decisions at `--position` (0 = leader) are taken. For each, `--share-worlds` yardstick
+/// worlds (label `--label`) are sampled to give the share where another seat robs later in the
+/// trick (no solve). With `--equity TABLE`, the first `--worlds` worlds of each decision are also
+/// solved exactly twice, with the burn searched (the yardstick) and with the `rules-v1` burn,
+/// and the node counts compared (the multiplier is searched nodes / rules-burn nodes).
+fn robber_burn(a: &Args) -> Result<(), String> {
+    use search::pimc::{WorldSolve, candidates, exact_world_row, world_robber};
+    let trick = a.num("--trick", 1)? as u8;
+    let seed = a.num("--seed", 1)?;
+    let label = a.num("--label", 1)?;
+    let position = a.num("--position", 0)? as u8;
+    let starts = collect_starts(a.num("--start-hands", 20_000)?, seed);
+    let ds: Vec<DecisionSpec> = build_decisions(trick, a.num("--count", 32)?, seed, &starts)
+        .into_iter()
+        .filter(|d| d.position == position)
+        .collect();
+    let share_worlds = a.num("--share-worlds", 1000)?;
+    let solve_worlds = a.num("--worlds", 4)?;
+    let table = a.get("--equity").map(load_equity).transpose()?;
+    let src = world_source(a)?;
+    let fallback: Arc<SharedLeaf> = Arc::new(solver::FnLeaf(|_: &equity::MatchState| {
+        equity::MoneyChance::even()
+    }));
+    let leaf: Arc<SharedLeaf> = match table {
+        Some(t) => Arc::new(t),
+        None => fallback,
+    };
+    let ctx = Ctx {
+        leaf: &*leaf,
+        source: &*src,
+        rules: engine::game::Rules::HOUSE,
+    };
+    let cfg = SearchConfig {
+        tt_mb: a.num("--tt-mb", 512)? as usize,
+        ..SearchConfig::default()
+    };
+    println!(
+        "robber-burn: trick {trick}, position {position}: {} decisions",
+        ds.len()
+    );
+    let (mut robbed, mut total) = (0u64, 0u64);
+    let (mut n_search, mut n_rules) = (0u64, 0u64);
+    for d in &ds {
+        let (_, view, legal) = d.replay();
+        let (_, cands) = candidates(&view, &legal);
+        let worlds = ctx.source.prepare(&view, ctx.rules);
+        let dseed = search::measure::measure_seed(seed, label, d.id);
+        let mut r = 0u64;
+        for w in 0..share_worlds {
+            r += u64::from(world_robber(&view, &*worlds, w, dseed, &ctx).is_some());
+        }
+        robbed += r;
+        total += share_worlds;
+        println!(
+            "decision {}: another seat robs in {r} of {share_worlds} worlds",
+            d.id
+        );
+        if a.get("--equity").is_none() {
+            continue;
+        }
+        for w in 0..solve_worlds {
+            let mut nodes = [0u64; 2];
+            for (k, rules_burn) in [false, true].into_iter().enumerate() {
+                let c = SearchConfig {
+                    rules_robber_burn: rules_burn,
+                    ..cfg
+                };
+                let mut mem = solver::SolveMem::new();
+                let mut run = WorldSolve::default();
+                let t = Instant::now();
+                exact_world_row(
+                    &view, &*worlds, &cands, w, dseed, &ctx, &c, None, &mut mem, &mut run,
+                )
+                .expect("not stopped");
+                nodes[k] = run.stats.nodes;
+                println!(
+                    "  world {w} {}: robber {:?}, {} nodes, {:.1} s",
+                    if rules_burn {
+                        "rules burn "
+                    } else {
+                        "burn search"
+                    },
+                    run.robber,
+                    run.stats.nodes,
+                    t.elapsed().as_secs_f64()
+                );
+            }
+            n_search += nodes[0];
+            n_rules += nodes[1];
+        }
+    }
+    println!(
+        "share of worlds where another seat robs: {robbed} / {total} = {:.2}%",
+        100.0 * robbed as f64 / total.max(1) as f64
+    );
+    if n_rules > 0 {
+        println!(
+            "nodes: burn searched {n_search}, rules burn {n_rules}, multiplier {:.3}",
+            n_search as f64 / n_rules as f64
+        );
+    }
     Ok(())
 }

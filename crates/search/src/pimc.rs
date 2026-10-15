@@ -130,6 +130,10 @@ pub struct SearchConfig {
     pub solve_threads: usize,
     /// Transposition-table megabytes per exact solve.
     pub tt_mb: usize,
+    /// Exact PIMC: when another seat robs in a world, burn as `rules-v1` would (the old
+    /// yardstick, kept only to measure the cost of the searched burn) instead of searching the
+    /// burn inside the solve (the default).
+    pub rules_robber_burn: bool,
 }
 
 impl Default for SearchConfig {
@@ -144,6 +148,7 @@ impl Default for SearchConfig {
             threads: 1,
             solve_threads: 1,
             tt_mb: 64,
+            rules_robber_burn: false,
         }
     }
 }
@@ -256,13 +261,32 @@ fn rollout_world(m: &Match, cands: &[Candidate], ctx: &Ctx) -> Vec<MoneyChance> 
         .collect()
 }
 
-/// The solver position of a match awaiting a play, with a future robber's rob resolved: the
-/// robber's burn is the inner player's (`rules-v1`) burn, which depends only on the robber's own
-/// cards and the trump suit, so it is found by playing the hand on with `rules-v1` up to the rob.
-fn solver_position(m: &Match, rules: Rules) -> (solver::Position, solver::MatchCtx) {
+/// The solver position of a match awaiting a play, and the seat that robs later in trick 1, if
+/// any (never the seat to act: the decision-maker's own burn is a candidate of its decision).
+/// By default that seat's burn is a decision node of the exact solve ([`solver::Rob`]: its
+/// team's best burn, any card but the ace of trumps, rule 21, H3). With `rules_burn` it is the
+/// inner player's (`rules-v1`) burn instead, which depends only on the robber's own cards and
+/// the trump suit, so it is found by playing the hand on with `rules-v1` up to the rob.
+fn solver_position(
+    m: &Match,
+    rules: Rules,
+    rules_burn: bool,
+) -> (solver::Position, solver::MatchCtx, Option<u8>) {
     let (mut pos, mctx, pending) = from_match(m).expect("awaiting a play with trumps known");
     if let Some(s) = pending {
         let table = m.public().table_card.expect("turned card on the table");
+        debug_assert_ne!(
+            s,
+            pos.to_act(),
+            "the decision-maker's rob is resolved first"
+        );
+        if !rules_burn {
+            pos.rob = Some(solver::Rob {
+                seat: s,
+                card: table,
+            });
+            return (pos, mctx, pending);
+        }
         let mut mm = m.clone();
         let burn = loop {
             match mm.phase() {
@@ -284,7 +308,7 @@ fn solver_position(m: &Match, rules: Rules) -> (solver::Position, solver::MatchC
         debug_assert!(engine::cards::has(legal_burns(h, Some(pos.trump)), burn));
         pos.hands[usize::from(s)] = h & !bit(burn);
     }
-    (pos, mctx)
+    (pos, mctx, pending)
 }
 
 /// Counters of the exact solves of one world (read by the trick-1 bench; they never change a
@@ -296,6 +320,8 @@ pub struct WorldSolve {
     pub stats: Stats,
     /// Solves made.
     pub solves: u32,
+    /// The seat (not the decision-maker) that robs later in trick 1 in this world, if any.
+    pub robber: Option<u8>,
 }
 
 impl WorldSolve {
@@ -376,7 +402,8 @@ fn exact_world(
         match cands[i] {
             (Action::Play(_), None) => {
                 // One solve values every root card.
-                let (pos, mctx) = solver_position(m, ctx.rules);
+                let (pos, mctx, robber) = solver_position(m, ctx.rules, cfg.rules_robber_burn);
+                run.robber = robber;
                 let ch = solve(&pos, mctx, ctx, cfg, par, mem, run)?;
                 for (j, &(a, _)) in cands.iter().enumerate() {
                     out[j] = pick(&ch, a.card());
@@ -387,7 +414,9 @@ fn exact_world(
                 // One solve per burn values every play after it.
                 let mut mm = m.clone();
                 mm.apply(Action::Burn(b)).expect("legal burn");
-                let (pos, mctx) = solver_position(&mm, ctx.rules);
+                let (pos, mctx, robber) = solver_position(&mm, ctx.rules, cfg.rules_robber_burn);
+                debug_assert!(robber.is_none(), "one rob per trick 1 after a Joker's");
+                run.robber = robber;
                 let ch = solve(&pos, mctx, ctx, cfg, par, mem, run)?;
                 while i < cands.len() && cands[i].0 == Action::Burn(b) {
                     out[i] = pick(&ch, cands[i].1.expect("joint"));
@@ -416,6 +445,24 @@ pub fn solves_per_world(cands: &[Candidate]) -> u32 {
         .collect();
     burns.dedup();
     (burns.len() as u32).max(1)
+}
+
+/// The seat other than the decision-maker that robs later in trick 1 in world `w` of the
+/// decision with seed `dseed` (`worlds` prepared from `view`), if any: the seat whose burn exact
+/// PIMC searches inside the solve. Cheap (no solve).
+pub fn world_robber(
+    view: &SeatView,
+    worlds: &dyn Worlds,
+    w: u64,
+    dseed: u64,
+    ctx: &Ctx,
+) -> Option<u8> {
+    let world = worlds.sample(&mut world_rng(dseed, w));
+    let m = rebuild(view, &world, ctx.rules, dseed ^ w).expect("sampled worlds rebuild");
+    match from_match(&m) {
+        Ok((pos, _, Some(s))) if s != pos.to_act() => Some(s),
+        _ => None,
+    }
 }
 
 /// [`world_row`] for exact PIMC, with a stop flag (`par`'s `abort`) and the solves' counters
