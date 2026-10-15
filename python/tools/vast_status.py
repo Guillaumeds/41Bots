@@ -4,6 +4,8 @@
     python3 python/tools/vast_status.py                 # the newest run, once
     python3 python/tools/vast_status.py RUN_ID --watch  # refresh every 30 s until Ctrl-C
     python3 python/tools/vast_status.py RUN_ID --watch --every 15 --cap 4.00
+    python3 python/tools/vast_status.py --market-only   # only the second-machine check (no R2 keys; used by the
+                                                        # "market-check" GitHub workflow)
 
 Shows: where the run is (decisions, worlds, percent), time left and the finish time in Mauritius time,
 cost so far and the forecast, speed, CPU use, upload health; and whether the market now has a second
@@ -241,13 +243,12 @@ def run_panel(r2: R2, run: str, cap: float | None, c: C) -> tuple[list[str], dic
     return lines, ref
 
 
-def market_panel(model: M.Model, ref_info: dict | None, a, c: C) -> list[str]:
+def market_panel(model: M.Model, ref: dict | None, a, c: C, plain: list[str] | None = None) -> list[str]:
+    """The second-machine check. `ref` = {cost, nps, source} of the machine in use. `plain` collects the same
+    result as plain text lines (for the GitHub run summary)."""
     lines = ["", c("1", "SECOND MACHINE FOR RUN A")]
-    if not ref_info:
-        return lines + ["  (needs the run's price and hardware; try again in a minute)"]
-    ref = reference_machine(model, ref_info["hw"], ref_info["dph"])
     if not ref:
-        return lines + ["  (cannot read this machine's hardware yet)"]
+        return lines + ["  (cannot read this machine's hardware yet; try again in a minute)"]
     try:
         offers = search_market()
     except Exception as e:
@@ -255,18 +256,47 @@ def market_panel(model: M.Model, ref_info: dict | None, a, c: C) -> list[str]:
     ok, closest = comparable(model, offers, ref, a.max_cost_ratio, a.min_speed_ratio, a.measured_only)
     lines.append(f"  This run's machine: est. ${ref['cost']:.3f} per 10¹² nodes, {ref['nps'] / 1e9:.2f} billion nodes/s ({ref['source']}).")
     lines.append(f"  Comparable = cost at most ${ref['cost'] * a.max_cost_ratio:.3f} and speed at least {ref['nps'] * a.min_speed_ratio / 1e9:.2f} billion nodes/s, verified whole machine.")
-    stamp = f"checked {clock(dt.datetime.now(dt.timezone.utc))} Mauritius, {len(offers)} machines on the market"
+    now = dt.datetime.now(dt.timezone.utc)
+    stamp = f"checked {clock(now)} Mauritius, {len(offers)} machines on the market"
+    if plain is not None:
+        plain.append(f"checked {clock(now)} Mauritius ({now:%H:%M} UTC), {len(offers)} machines on the market. Comparable = at most "
+                     f"${ref['cost'] * a.max_cost_ratio:.3f} per 10¹² nodes and at least {ref['nps'] * a.min_speed_ratio / 1e9:.2f} billion nodes/s, verified whole machine.")
     if ok:
         lines.append(c("1;32", f"  AVAILABLE: YES  ({len(ok)} found; {stamp})"))
         for i, o in enumerate(ok[:3], 1):
             lines.append(f"   {i}. offer {c('1', str(o['id']))}: {words(o)} · {o.get('geolocation')}")
             lines.append(f"      est. ${o['cost']:.3f} per 10¹² nodes, {o['nps'] / 1e9:.2f} billion nodes/s ({o['source']}), reliability {o.get('reliability2'):.3f}")
+            if plain is not None:
+                plain.append(f"{i}. **offer {o['id']}**: {words(o)} · {o.get('geolocation')}: est. ${o['cost']:.3f} per 10¹² nodes, {o['nps'] / 1e9:.2f} billion nodes/s ({o['source']})")
         lines.append(c("32", f"  -> tell Claude: \"start run A on offer {ok[0]['id']}\""))
+        lines.append("RESULT: YES offer " + str(ok[0]["id"]))
     else:
         lines.append(c("1;31", f"  AVAILABLE: NO  ({stamp})"))
         for i, o in enumerate(closest, 1):
-            lines.append(f"   closest {i}: offer {o['id']}: {words(o)} · {o.get('geolocation')} · est. ${o['cost']:.3f} per 10¹² nodes, {o['nps'] / 1e9:.2f} bn nodes/s ({o['source']})")
+            txt = f"offer {o['id']}: {words(o)} · {o.get('geolocation')} · est. ${o['cost']:.3f} per 10¹² nodes, {o['nps'] / 1e9:.2f} bn nodes/s ({o['source']})"
+            lines.append(f"   closest {i}: {txt}")
+            if plain is not None:
+                plain.append(f"closest {i}: {txt}")
+        lines.append("RESULT: NO")
+    if plain is not None:
+        plain.insert(0, "YES" if ok else "NO")
     return lines
+
+
+def github_summary(plain: list[str]):
+    """Put the result at the top of the GitHub run page (and as a notice when a machine is available)."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path or not plain:
+        return
+    verdict = plain[0]
+    md = [f"## Second machine for run A: {'YES, available' if verdict == 'YES' else 'NO, nothing comparable right now'}", ""]
+    md += [f"- {x}" for x in plain[1:]]
+    if verdict == "YES":
+        md += ["", "Tell Claude: **start run A on offer <the first offer number above>**."]
+    with open(path, "a", encoding="utf-8") as f:
+        f.write("\n".join(md) + "\n")
+    if verdict == "YES":
+        print("::notice title=Comparable machine available::" + (plain[2] if len(plain) > 2 else plain[1])[:200].replace("\n", " "))
 
 
 def main(argv=None) -> int:
@@ -279,17 +309,26 @@ def main(argv=None) -> int:
     ap.add_argument("--min-speed-ratio", type=float, default=0.7, help="and must be at least this fast, relative (default 0.7)")
     ap.add_argument("--measured-only", action="store_true", help="only count machines whose chip we have benchmarked")
     ap.add_argument("--no-market", action="store_true", help="skip the second-machine check")
+    ap.add_argument("--market-only", action="store_true", help="only the second-machine check, against --ref-cost/--ref-gn (no R2 keys needed)")
+    ap.add_argument("--ref-cost", type=float, default=0.285, help="with --market-only: the running machine's $ per 10^12 nodes (default 0.285, the 9995WX)")
+    ap.add_argument("--ref-gn", type=float, default=1.24, help="with --market-only: its speed in billion nodes/s (default 1.24)")
     ap.add_argument("--color", choices=["auto", "on", "off"], default="auto")
     a = ap.parse_args(argv)
     c = C(a.color == "on" or (a.color == "auto" and sys.stdout.isatty()))
+    model = M.Model()
+    if a.market_only:
+        ref = {"cost": a.ref_cost, "nps": a.ref_gn * 1e9, "source": "given reference"}
+        plain: list[str] = []
+        print("\n".join(market_panel(model, ref, a, c, plain)))
+        github_summary(plain)
+        return 0
     r2 = R2()
     run = a.run or latest_run(r2)
-    model = M.Model()
     while True:
         try:
             lines, ref = run_panel(r2, run, a.cap, c)
             if not a.no_market and ref and ref.get("state") == "RUNNING":
-                lines += market_panel(model, ref, a, c)
+                lines += market_panel(model, reference_machine(model, ref["hw"], ref["dph"]), a, c)
             elif not a.no_market and ref:
                 lines += ["", c("1", "SECOND MACHINE FOR RUN A"), "  (the run has ended; ask for a fresh market check when you want to start run A)"]
         except Exception as e:  # keep the loop alive through a network blip

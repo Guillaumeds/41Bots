@@ -1,0 +1,50 @@
+name: market-check
+
+# Click "Run workflow": searches the vast.ai market once and prints, at the top of the run page and in the log,
+# whether a second machine comparable to the one running (default: the Threadripper PRO 9995WX, $0.285 per
+# 10^12 nodes and 1.24 billion nodes/s) is available: YES with the offer numbers and details, or NO with the
+# closest few. Read-only: it rents nothing and needs no secrets. Same code as python/tools/vast_status.py.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref_cost:
+        description: "Cost per 10^12 nodes of the machine already running (dollars)"
+        default: "0.285"
+      ref_gn:
+        description: "Its speed in billion nodes per second"
+        default: "1.24"
+      max_cost_ratio:
+        description: "A second machine may cost up to this many times per node"
+        default: "1.3"
+      min_speed_ratio:
+        description: "... and must be at least this fast, relative to the running machine"
+        default: "0.7"
+      measured_only:
+        description: "Only count machines whose CPU we have benchmarked (no estimates)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Search the market and print YES or NO
+        shell: bash
+        env:
+          REF_COST: ${{ inputs.ref_cost }}
+          REF_GN: ${{ inputs.ref_gn }}
+          MAX_COST_RATIO: ${{ inputs.max_cost_ratio }}
+          MIN_SPEED_RATIO: ${{ inputs.min_speed_ratio }}
+          MEASURED_ONLY: ${{ inputs.measured_only }}
+        run: |
+          set -euo pipefail
+          python3 python/tools/vast_status.py --market-only --color off \
+            --ref-cost "$REF_COST" --ref-gn "$REF_GN" \
+            --max-cost-ratio "$MAX_COST_RATIO" --min-speed-ratio "$MIN_SPEED_RATIO" \
+            $( [ "$MEASURED_ONLY" = "true" ] && echo --measured-only )
