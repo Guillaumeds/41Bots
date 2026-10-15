@@ -22,10 +22,11 @@
 //! - **each plain suit**, ranked by the plain order of rules 9–10 (red: K Q J 10 … 2 A; black:
 //!   K Q J A 2 … 10); the A♥ never belongs to plain hearts (rule 11).
 //!
-//! Two cards of the mover's hand are equivalent when they are in the same class and **no other
+//! Two cards of the mover's hand are equivalent when they are in the same class, **no other
 //! live card** (a card still in any hand, or already on the table in the current trick) of that
-//! class ranks between them. Cards played in earlier tricks are gone, so they make the remaining
-//! cards adjacent.
+//! class ranks between them, and **no other card of the mover's hand lies between them in the
+//! tie order** (card index). Cards played in earlier tricks are gone, so they make the remaining
+//! cards adjacent. A group is a chain of such pairs (consecutive in rank).
 //!
 //! # Why this is exact
 //! Swap the two cards `a` and `b` (same hand, same class, adjacent among live cards) everywhere
@@ -45,6 +46,16 @@
 //!   (A trump played in an earlier trick may rank between `a` and `b`; that changes which of
 //!   them becomes "best so far" first, but not which team holds the best trump when the bonus is
 //!   paid.)
+//! - *Tie order*: every seat breaks ties between equally good cards by card index (the naive
+//!   solver's position-only rule), and a tie for the mover's team can hide different values for
+//!   the other teams. So the swap must also keep the tie order: whenever the holder later
+//!   chooses between the one of `a`, `b` it still holds and another card `x` of its hand, `x`
+//!   must come before both or after both. That holds exactly when no card of the hand lies
+//!   between `a` and `b` in card index (the hand only loses cards from here on; a pending
+//!   robber's hand is taken with the turned card at its burn). Without this condition merging
+//!   gave wrong values: with clubs trumps, a hand 4♣ 5♣ 7♣ with the 6♣ gone merged the 4♣ and the
+//!   7♣, but keeping the 4♣ puts it before the 5♣ in the tie order and keeping the 7♣ puts it
+//!   after (test `merged_cards_have_identical_naive_values` in `tests/probe.rs`).
 //!
 //! The tests check this against the naive solver on many random worlds, plus hand-made decks
 //! that must (positive) and must not (negative) be merged.
@@ -221,9 +232,12 @@ impl Classes {
     /// above it to the next live bit; that bit is set in the sum when it is a hand bit (its own
     /// bit plus the carry: it then carries on upwards), so `sum & h` marks every hand card whose
     /// next live card below it in rank is also in the hand, that is, every hand card that
-    /// continues a group. The other hand bits start the groups.
+    /// continues a group. The other hand bits start the groups. A run is then cut wherever
+    /// another hand card lies between two rank-consecutive members in card index (the tie-order
+    /// condition of the module notes). `hand` holds at most 16 cards (the solver's at most 6).
     pub fn groups(&self, hand: Bits, live: Bits, out: &mut [Bits; 16]) -> usize {
         debug_assert_eq!(hand & !live, 0, "the hand is live");
+        debug_assert!(hand.count_ones() <= 16, "at most one group per card");
         let mut n = 0;
         let five = bit(self.five);
         if hand & five != 0 {
@@ -237,6 +251,7 @@ impl Classes {
                 self.tops_to_rank(live),
                 3,
                 |r| self.tops_to_cards(r),
+                hand,
                 out,
                 n,
             );
@@ -244,7 +259,7 @@ impl Classes {
         for f in &self.fields {
             let h = f.to_rank(hand);
             if h != 0 {
-                n = emit(h, f.to_rank(live), f.len, |r| f.to_cards(r), out, n);
+                n = emit(h, f.to_rank(live), f.len, |r| f.to_cards(r), hand, out, n);
             }
         }
         n
@@ -276,10 +291,20 @@ fn groups_walk(trump: Suit, hand: Bits, live: Bits, out: &mut [Bits; 16]) -> usi
         let mut n = 0;
         for (list, &len) in lists.iter().zip(&lens) {
             let mut cur: Bits = 0;
+            let mut prev: Card = 0;
             for &c in &list[..usize::from(len)] {
                 let b = bit(c);
                 if hand & b != 0 {
+                    // Another hand card between this one and the previous member in card
+                    // index ends the group (the tie-order condition).
+                    let (lo, hi) = (prev.min(c), prev.max(c));
+                    if cur != 0 && (lo + 1..hi).any(|x| hand & bit(x) != 0) {
+                        out[n] = cur;
+                        n += 1;
+                        cur = 0;
+                    }
                     cur |= b;
+                    prev = c;
                 } else if live & b != 0 && cur != 0 {
                     out[n] = cur;
                     n += 1;
@@ -296,13 +321,16 @@ fn groups_walk(trump: Suit, hand: Bits, live: Bits, out: &mut [Bits; 16]) -> usi
 }
 
 /// The groups of one class in rank space (see [`Classes::groups`]): `h` the hand cards (not
-/// empty), `o` the live cards, `len` the class size; each group goes through `back` into
-/// `out[n..]`, best group first. Returns the new count.
+/// empty), `o` the live cards, `len` the class size, `hand` the whole hand as cards; each group
+/// goes through `back` into `out[n..]`, best group first. A run of rank-adjacent hand cards is
+/// cut wherever another card of `hand` lies between two consecutive members in card index (the
+/// tie-order condition of the module notes). Returns the new count.
 fn emit(
     h: u32,
     o: u32,
     len: u8,
     back: impl Fn(u32) -> Bits,
+    hand: Bits,
     out: &mut [Bits; 16],
     n: usize,
 ) -> usize {
@@ -315,16 +343,44 @@ fn emit(
     while starts != 0 {
         let s = starts.isolate_lowest_one();
         starts ^= s;
-        // The group: the hand bits from this start up to the next.
+        // The run: the hand bits from this start up to the next.
         let below_next = if starts == 0 {
             span
         } else {
             starts.isolate_lowest_one() - 1
         };
-        out[n] = back(h & below_next & !(s - 1));
+        let run = h & below_next & !(s - 1);
+        if run == s {
+            out[n] = back(run);
+            n += 1;
+            continue;
+        }
+        // Walk the run best first, cutting it where the tie order separates two members.
+        let mut rest = run;
+        let mut cur: Bits = 0;
+        let mut prev: Bits = 0;
+        while rest != 0 {
+            let j = rest.isolate_lowest_one();
+            rest ^= j;
+            let cb = back(j);
+            if cur != 0 && hand & strictly_between(prev, cb) != 0 {
+                out[n] = cur;
+                n += 1;
+                cur = 0;
+            }
+            cur |= cb;
+            prev = cb;
+        }
+        out[n] = cur;
         n += 1;
     }
     n
+}
+
+/// The card bits strictly between two distinct single-card bits.
+fn strictly_between(x: Bits, y: Bits) -> Bits {
+    let (lo, hi) = if x < y { (x, y) } else { (y, x) };
+    (hi - 1) & !(lo | (lo - 1))
 }
 
 /// The bit of the first card of a non-empty set in the tie order.
@@ -368,6 +424,10 @@ mod tests {
                         } else {
                             0x1FFF << (13 * (i % 4))
                         });
+                }
+                // At most 16 cards, so at most 16 groups (the solver's hands hold at most 6).
+                while hand.count_ones() > 16 {
+                    hand &= rng.next_u64() | rng.next_u64();
                 }
                 let mut a = [0; 16];
                 let mut b = [0; 16];

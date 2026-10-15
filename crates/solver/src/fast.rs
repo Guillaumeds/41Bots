@@ -604,9 +604,10 @@ impl<L: Leaf> Search<'_, L> {
     /// equivalent burns merged. Each burn group is searched exactly (no bound) through its first
     /// card in the tie order, and the robber's team's best is kept, the first strictly best in
     /// the tie order among equals, exactly as the naive solver. Merging is sound: two cards of
-    /// one equivalence group of the robber's hand (no live card between them in rank) map onto
-    /// each other by swapping them, so burning either leaves positions of the same value
-    /// (vector included); the group's first card is the one the naive order would keep. The
+    /// one equivalence group of the robber's hand (no live card between them in rank, no card
+    /// of that hand between them in the tie order) map onto each other by swapping them, so
+    /// burning either leaves positions of the same value (vector included); the group's first
+    /// card is the one the naive order would keep. The
     /// ace of trumps may share a group with cards that may be burned; it is simply left out.
     /// Values are exact, so the parent's bound is not needed (an exact value is always a valid
     /// answer to a bounded call).
