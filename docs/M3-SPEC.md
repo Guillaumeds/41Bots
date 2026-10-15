@@ -367,6 +367,7 @@ Each value carries its SE. The report adds:
 - **Uploads:** output bundles go to `runs/<run>/out/<stream>/<index:06>-<sha16>.tar.zst` with `rclone copy --immutable`.
 - **End:** `rclone check` → manifest uploaded last (git commit, image digest, binary build v2/v3, seeds, threads, versions) → `DONE` → self-destroy (M1 behaviour).
 - **Resume:** on start, the runner reads the highest done-list. It skips listed chunks (verifying their remote sha256) and redoes any chunk that is missing or incomplete from its seed. Partial local outputs of unlisted chunks are deleted first.
+- **Table memory** (2026-10-15): a solver table never holds more than its cap (the solver reserves the whole cap when it makes a table and grows into it without reallocating), so the memory plan (`crates/runner/src/mem.rs`) budgets tables at exactly their size, one slot of 32 bytes per entry. **Huge pages**: `deploy/docker/boot.sh` exports `GLIBC_TUNABLES=glibc.malloc.hugetlb=1` when the instance environment has `RUNNER_HUGEPAGES=1`, which makes glibc ask for transparent huge pages on its large allocations (the tables); untested on vast.ai, to be tried on one machine against the same run without it before it becomes the default.
 - **Launcher** (`python/launcher/launch.py`):
   - on a missing heartbeat (3 min) or a dead instance before `DONE`, it destroys the instance and rents a replacement with the same manifest, which resumes;
   - at most 3 replacements per run, then it stops and reports;

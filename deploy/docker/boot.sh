@@ -106,6 +106,15 @@ trap - ERR
 # which then stops its work, uploads what it finished and writes its marker
 # (crates/runner/src/stop.rs); this script waits for that before it exits.
 status=0
+# Optional: back the solver's big tables with huge pages through glibc's allocator
+# (RUNNER_HUGEPAGES=1 in the instance's environment). glibc 2.35+ then asks the kernel for
+# transparent huge pages on its large allocations (madvise), which can cut page-table misses
+# on tables of gigabytes; the pages are still touched only as a table grows. Untested on
+# vast.ai: try it on one machine against the same run without it before making it the default.
+if [[ "${RUNNER_HUGEPAGES:-0}" == "1" ]]; then
+  export GLIBC_TUNABLES="${GLIBC_TUNABLES:+$GLIBC_TUNABLES:}glibc.malloc.hugetlb=1"
+  echo "boot: RUNNER_HUGEPAGES=1: GLIBC_TUNABLES=$GLIBC_TUNABLES"
+fi
 ./bin/runner run run-manifest.json --work-dir "$W/work" &
 runner_pid=$!
 trap 'kill -TERM "$runner_pid" 2>/dev/null || true' TERM INT HUP
