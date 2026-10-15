@@ -131,3 +131,18 @@ M1 adds the table manager, the arena (14-way duplicate block, generalised SPRT, 
 - Golden set (128 decisions x 200 worlds, 5.9e13 nodes) at fill speed: $16.9 / 13.3 h on the 9995WX, $53.5 / 14.3 h on the 9754. The real schedule runs at about half the fill rate on both (splitting a world over threads costs extra nodes; only 1 of 5–6 production worlds finished in the 2-minute window, so that rate is rough).
 - Memory was not the limit: 83–105 GB used of 241 GB on the 9995WX; its fill tables were lowered 512 -> 448 MB per thread to fit.
 - The owner's wave-2 offers 53756039 (9995WX, 503 GB, $2.81) and 56056919 (EPYC 9754, 512 threads, $9.08) were gone from the market by 08:40 UTC. Nothing rented since wave 1.
+
+## 2026-10-15 (Mauritius afternoon): speed-test wave 2 (about $0.80) and the table-size sweep
+- Wave 2 (runs `t1bench-9654p-w2`, `t1bench-9734-w2`, `t1bench-e5-w2`; 15-minute limit, $1.50 cap; vast showed 0 instances afterwards): all three kept every thread busy; the E5's production window was stopped by the 80% CPU check at 83% (its fill results are complete), as designed.
+
+  | Machine | $/h | Threads | RAM | Fill $/10^12 nodes | Score $/10^12 | Per thread (M nodes/s) | Production / fill rate |
+  |---|---|---|---|---|---|---|---|
+  | Threadripper PRO 9995WX (wave 1) | 1.27 | 184 | 241 GB | 0.308 | 0.287 | 6.7 | 0.49 |
+  | EPYC 9734 (Zen 4c dense) | 3.34 | 215 | 125 GB | 0.826 | 0.779 | 5.2 | 0.44 |
+  | EPYC 9654P (Zen 4) | 2.94 | 184 | 251 GB | 0.843 | 0.799 | 5.3 | 0.53 |
+  | EPYC 9754 (wave 1) | 3.74 | 245 | 483 GB | 0.944 | 0.910 | 4.7 | 0.54 |
+  | Xeon E5-2695 v4 | 0.41 | 69 | 504 GB | 0.542 | 0.527 | 3.0 | stopped at 83% CPU |
+
+- The speed model predicted the three new machines within 11% ($/10^12: 9654P 0.72 -> 0.80, 9734 0.78 -> 0.78, E5 0.58 -> 0.53), so offers of known CPU models can be ranked without testing each one; test new CPU models only.
+- The 9734 ran at only 224 MB tables per thread (0.6 GB of RAM per thread) with no loss of nodes per second, but nodes per second is blind to a small table making the solver search positions again: that is what the new sweep measures.
+- **Table-size sweep added to the bench** (M3-SPEC §13.1 item 11): `sweep_mb`, `sweep_s`; `analyse_sweep` in `search::t1bench`; fmt, clippy -D warnings and `cargo test --workspace` pass; local end-to-end run on 4 threads works mechanically (no world finishes in 12 s there, so nothing paired).

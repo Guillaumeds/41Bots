@@ -1075,6 +1075,77 @@ pub fn analyse(fill: Option<&WindowRun>, prod: Option<&WindowRun>, p: &AnalysePa
     })
 }
 
+/// The table-size sweep (`t1bench` settings `sweep_mb`, `sweep_s`): extra fill windows that run the
+/// same worlds in the same order as the reference fill window (`fill_task` is fixed), each with a
+/// different table size. Speed in nodes per second cannot show what a small table costs (a
+/// table that forgets more makes the solver re-search positions, which still counts as nodes),
+/// so each run is compared with the reference on the worlds that **finished in both**: the nodes
+/// and the wall time those worlds took, and whether their values are byte-identical (table size
+/// must change speed only). Only worlds short enough to finish inside the windows are paired,
+/// which are mostly positions 5-8; the big positions 1-3 are not covered.
+pub fn analyse_sweep(reference: &WindowRun, runs: &[WindowRun]) -> Value {
+    let key = |w: &WorldRec| (w.id, w.world);
+    let base: BTreeMap<(u64, u64), &WorldRec> = reference
+        .worlds
+        .iter()
+        .filter(|w| w.finished)
+        .map(|w| (key(w), w))
+        .collect();
+    let one = |r: &WindowRun| {
+        let (mut n, mut nodes, mut base_nodes, mut wall, mut base_wall) =
+            (0u64, 0f64, 0f64, 0f64, 0f64);
+        let mut positions = std::collections::BTreeSet::new();
+        let mut mismatches = Vec::new();
+        for w in r.worlds.iter().filter(|w| w.finished) {
+            let Some(b) = base.get(&key(w)) else { continue };
+            n += 1;
+            nodes += w.nodes as f64;
+            base_nodes += b.nodes as f64;
+            wall += w.wall_s;
+            base_wall += b.wall_s;
+            positions.insert(u32::from(w.position) + 1);
+            if let (Some(h), Some(h0)) = (&w.hash, &b.hash)
+                && h != h0
+            {
+                mismatches.push(
+                    json!({ "decision": w.id, "world": w.world, "tt_mb": r.tt_mb,
+                                        "reference": h0, "sweep": h }),
+                );
+            }
+        }
+        let rate = r.nodes() as f64 / r.wall_s.max(1e-9);
+        let ratio = |a: f64, b: f64| (b > 0.0).then(|| r3(a / b));
+        (
+            json!({
+                "tt_mb": r.tt_mb,
+                "window_s": r.window_s,
+                "nodes_per_s": rate.round(),
+                "nodes_per_s_per_thread": (rate / r.threads.max(1) as f64).round(),
+                "worlds_finished": r.worlds.iter().filter(|w| w.finished).count(),
+                "paired_worlds": n,
+                "paired_positions": positions,
+                "nodes_vs_reference": ratio(nodes, base_nodes),
+                "wall_vs_reference": ratio(wall, base_wall),
+            }),
+            mismatches,
+        )
+    };
+    let mut entries = Vec::new();
+    let mut all_mismatches = Vec::new();
+    for r in runs {
+        let (e, m) = one(r);
+        entries.push(e);
+        all_mismatches.extend(m);
+    }
+    json!({
+        "reference_tt_mb": reference.tt_mb,
+        "runs": entries,
+        "mismatches": all_mismatches,
+        "note": "paired on worlds finished in both the reference and the sweep window (short worlds, \
+                 mostly positions 5-8); ratios above 1 mean the smaller or larger table needed more",
+    })
+}
+
 fn sci(x: f64) -> String {
     if x >= 1e9 {
         format!("{:.2} billion", x / 1e9)
@@ -1281,6 +1352,25 @@ pub fn summary_text(a: &Value) -> String {
             opt(&g["dollars"], |d| format!(" (${d:.2})"))
         ));
     }
+    if let Some(sw) = a.get("sweep").filter(|v| v.is_object()) {
+        s.push_str(&format!(
+            "\nTable-size sweep (the same worlds at each table size; reference window: {} MB per thread). \
+             Compared on worlds finished in both runs, which are mostly the short ones (positions 5-8); \
+             the big early-trick worlds are not covered:\n",
+            sw["reference_tt_mb"]
+        ));
+        for r in sw["runs"].as_array().into_iter().flatten() {
+            s.push_str(&format!(
+                "  {} MB per thread: {} per second, {} worlds finished; against the reference on {} shared world(s): {} the nodes, {} the time.\n",
+                r["tt_mb"],
+                opt(&r["nodes_per_s"], sci),
+                r["worlds_finished"],
+                r["paired_worlds"],
+                opt(&r["nodes_vs_reference"], |x| format!("{x:.2}x")),
+                opt(&r["wall_vs_reference"], |x| format!("{x:.2}x")),
+            ));
+        }
+    }
     if let Some(src) = a["position_nodes"]["source"].as_str() {
         s.push_str(&format!(
             "Position work shares come from the {src} node counts per world (results.json, \
@@ -1348,6 +1438,82 @@ mod tests {
 
     /// Fill assignment: position `k mod 8`, every world of a position taken by one thread only,
     /// the same on every run, and the supply never runs out.
+    fn rec(id: u64, world: u64, pos: u8, nodes: u64, wall: f64, hash: &str) -> WorldRec {
+        WorldRec {
+            id,
+            position: pos,
+            world,
+            threads: 1,
+            tt_mb: 0,
+            thread: Some(0),
+            start_s: 0.0,
+            wall_s: wall,
+            finished: true,
+            nodes,
+            hash: Some(hash.to_string()),
+        }
+    }
+
+    fn win(tt_mb: usize, wall_s: f64, worlds: Vec<WorldRec>) -> WindowRun {
+        WindowRun {
+            mode: Mode::Fill,
+            window_s: wall_s,
+            wall_s,
+            threads: 4,
+            usable_cores: 4.0,
+            tt_mb: Some(tt_mb),
+            plan: None,
+            worlds_per_decision: None,
+            stopped: None,
+            cpu_s: None,
+            peak_rss_mb: None,
+            samples: Vec::new(),
+            thread_rows: Vec::new(),
+            worlds,
+        }
+    }
+
+    #[test]
+    fn sweep_pairs_finished_worlds() {
+        let base = win(
+            512,
+            240.0,
+            vec![
+                rec(1, 0, 5, 1000, 10.0, "aa"),
+                rec(1, 1, 6, 2000, 20.0, "bb"),
+                rec(2, 0, 7, 3000, 30.0, "cc"),
+            ],
+        );
+        // A small table: the shared worlds need 1.5x the nodes and 1.4x the time; the world only
+        // it finished (3, 0) is not paired; one value differs.
+        let small = win(
+            64,
+            90.0,
+            vec![
+                rec(1, 0, 5, 1500, 14.0, "aa"),
+                rec(1, 1, 6, 3000, 28.0, "XX"),
+                rec(3, 0, 8, 10, 1.0, "dd"),
+            ],
+        );
+        let r = analyse_sweep(&base, &[small]);
+        assert_eq!(r["reference_tt_mb"], 512);
+        let e = &r["runs"][0];
+        assert_eq!(e["tt_mb"], 64);
+        assert_eq!(e["paired_worlds"], 2);
+        assert_eq!(e["nodes_vs_reference"], 1.5);
+        assert_eq!(e["wall_vs_reference"], 1.4);
+        assert_eq!(e["paired_positions"], json!([6, 7])); // 1-based; stored 0-based
+        assert_eq!(e["worlds_finished"], 3);
+        assert_eq!(r["mismatches"].as_array().map(Vec::len), Some(1));
+        let a = json!({ "machine": {}, "ok": true, "identity": {}, "golden": {},
+                        "position_nodes": {}, "sweep": r });
+        let text = summary_text(&a);
+        assert!(
+            text.contains("64 MB per thread") && text.contains("1.50x the nodes"),
+            "{text}"
+        );
+    }
+
     #[test]
     fn fill_assignment() {
         for t in [1usize, 4, 8, 13, 64, 245, 384] {

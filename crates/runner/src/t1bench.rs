@@ -5,6 +5,7 @@
 //!
 //! ```json
 //! { "t1bench": { "dph": 1.25, "fill_s": 240, "prod_s": 120, "fill_tt_mb": 512,
+//!                "sweep_mb": [64, 256, 1024, 2048], "sweep_s": 90,
 //!                "min_cpu_pct": 80, "golden": [128, 200],
 //!                "position_nodes": [1e10, 4.6e9, 2.2e9, 1e9, 2.8e8, 8e7, 1e8, 1.25e8] } }
 //! ```
@@ -20,7 +21,14 @@
 //! 3. **Production window** (`prod_s`, 120 s): the position-aware schedule with the memory budget
 //!    of the real runs (`schedule` overrides its settings) on every decision × `prod_worlds`
 //!    worlds (default: as many world solves as the golden set, so the plan is the golden run's).
-//! 4. **Results**: `out/t1bench/results.json` (`search::t1bench::analyse`, plus the table, setup
+//! 4. **Table-size sweep** (only if `sweep_mb` is given; after the main windows): one more fill
+//!    window of `sweep_s` (90) seconds per listed table size (MB per thread, lowered to fit the
+//!    memory with a warning; a size already run is skipped). The worlds and their order are the
+//!    fill window's, so `out/t1bench/fill-sweep-<mb>.json` can be compared world by world: the
+//!    results' `sweep` section gives, per size, the nodes and wall time of the worlds finished in
+//!    both it and the fill window, and any value that differs fails the chunk (table size changes
+//!    speed only). Only short worlds (mostly positions 5-8) finish in the windows.
+//! 5. **Results**: `out/t1bench/results.json` (`search::t1bench::analyse`, plus the table, setup
 //!    time, warnings and any failure), `out/t1bench/summary.txt` (plain English), and each
 //!    window's raw record `out/t1bench/fill.json`, `prod.json`. A world finished in both windows
 //!    must have byte-identical values, or the chunk fails after writing them.
@@ -43,7 +51,8 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use search::t1bench::{
-    AnalyseParams, DEFAULT_POSITION_NODES, Mode, POSITIONS, WindowRun, analyse, summary_text,
+    AnalyseParams, DEFAULT_POSITION_NODES, Mode, POSITIONS, WindowRun, analyse, analyse_sweep,
+    summary_text,
 };
 use serde_json::{Value, json};
 
@@ -53,11 +62,13 @@ use crate::{Ctx, HEARTBEAT_EVERY, clk_tck, hardware, sibling, stop, tree_ticks};
 
 /// The settings a `t1bench` chunk takes (anything else is refused: the configuration sweep's
 /// settings were removed on 2026-10-14).
-const KEYS: [&str; 16] = [
+const KEYS: [&str; 18] = [
     "dph",
     "fill_s",
     "prod_s",
     "fill_tt_mb",
+    "sweep_mb",
+    "sweep_s",
     "min_cpu_pct",
     "ramp_s",
     "busy_streak_s",
@@ -157,6 +168,8 @@ impl CpuWatch {
 /// One window's settings.
 struct Win<'a> {
     mode: Mode,
+    /// Added to the record's file name (`fill-sweep-64.json`), so extra windows keep their own.
+    tag: String,
     window_s: f64,
     dec: &'a Path,
     table: &'a Path,
@@ -184,7 +197,7 @@ fn window_progress(mode: Mode, threads: usize, pr: &Value, warnings: &[String]) 
 /// Runs one window (`search bench-t1`) and reads its record.
 fn window(ctx: &mut Ctx, w: &Win, warnings: &[String]) -> Result<WindowRun, String> {
     let name = w.mode.name();
-    let json_path = w.out.join(format!("{name}.json"));
+    let json_path = w.out.join(format!("{name}{}.json", w.tag));
     let progress = ctx.root.join("t1bench-progress.json");
     let stop_file = ctx.root.join("t1bench-stop");
     for p in [&json_path, &progress, &stop_file] {
@@ -321,6 +334,16 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
     let t = ctx.threads;
     let fill_s = f(p, "fill_s", 240.0)?;
     let prod_s = f(p, "prod_s", 120.0)?;
+    let sweep_s = f(p, "sweep_s", 90.0)?;
+    let sweep_mb: Vec<u64> = match p.get("sweep_mb") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(v) => v
+            .as_array()
+            .and_then(|a| a.iter().map(|x| x.as_u64().filter(|n| *n > 0)).collect())
+            .ok_or(
+                "t1bench: sweep_mb must be a list of table sizes in MB (whole numbers, at least 1)",
+            )?,
+    };
     let min_cpu_pct = f(p, "min_cpu_pct", 80.0)?;
     let ramp_s = f(p, "ramp_s", 20.0)?;
     let busy_streak_s = f(p, "busy_streak_s", 10.0)?;
@@ -377,8 +400,9 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         }
         prod_extra.extend(["--sched-json".to_string(), s.to_string()]);
     }
-    let win = |mode: Mode, window_s: f64, extra: Vec<String>| Win {
+    let win = |mode: Mode, tag: String, window_s: f64, extra: Vec<String>| Win {
         mode,
+        tag,
         window_s,
         dec: &dec,
         table: &table,
@@ -394,6 +418,7 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         ctx,
         &win(
             Mode::Fill,
+            String::new(),
             fill_s,
             vec!["--tt-mb".into(), tt.tt_mb.to_string()],
         ),
@@ -402,7 +427,11 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
     let mut failure = fill.stopped.clone();
     let prod = if failure.is_none() {
         // A failed production window still leaves the fill window's results written.
-        match window(ctx, &win(Mode::Prod, prod_s, prod_extra), &warnings) {
+        match window(
+            ctx,
+            &win(Mode::Prod, String::new(), prod_s, prod_extra),
+            &warnings,
+        ) {
             Ok(r) => {
                 failure = r.stopped.clone();
                 Some(r)
@@ -415,6 +444,53 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
     } else {
         None
     };
+    // The table-size sweep: after the main windows, so it cannot disturb them. Each size runs
+    // the same worlds as the fill window (see `search::t1bench::analyse_sweep`); a size the
+    // memory plan lowers to one already run is skipped, and a failed sweep window ends the sweep
+    // with a warning (the main results are already complete).
+    let mut sweep_runs: Vec<WindowRun> = Vec::new();
+    if failure.is_none() {
+        let mut done = vec![tt.tt_mb];
+        for &mb in &sweep_mb {
+            let used = mem::plan_here(
+                Requested::Mb(mb),
+                Tables::Own { count: t as u64 },
+                &table,
+                "t1bench sweep",
+            );
+            if let Some(w) = &used.warning {
+                warnings.push(format!("sweep {mb} MB: {w}"));
+            }
+            if done.contains(&used.tt_mb) {
+                warnings.push(format!(
+                    "sweep {mb} MB: skipped (table size {} MB was already run)",
+                    used.tt_mb
+                ));
+                continue;
+            }
+            done.push(used.tt_mb);
+            let w = win(
+                Mode::Fill,
+                format!("-sweep-{}", used.tt_mb),
+                sweep_s,
+                vec!["--tt-mb".into(), used.tt_mb.to_string()],
+            );
+            match window(ctx, &w, &warnings) {
+                Ok(r) => {
+                    let stopped = r.stopped.clone();
+                    sweep_runs.push(r);
+                    if let Some(why) = stopped {
+                        warnings.push(format!("sweep {mb} MB stopped early: {why}; no more sizes"));
+                        break;
+                    }
+                }
+                Err(e) => {
+                    warnings.push(format!("sweep {mb} MB failed: {e}; no more sizes"));
+                    break;
+                }
+            }
+        }
+    }
     // Analysis.
     let hw = hardware();
     let dph = p
@@ -435,6 +511,18 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         busy_skip_s: 5.0,
     };
     let mut a = analyse(Some(&fill), prod.as_ref(), &params);
+    if !sweep_runs.is_empty() {
+        let sw = analyse_sweep(&fill, &sweep_runs);
+        let bad: Vec<Value> = sw["mismatches"].as_array().cloned().unwrap_or_default();
+        if !bad.is_empty() {
+            // Table size must change speed only, never a value.
+            a["ok"] = json!(false);
+            if let Some(m) = a["identity"]["mismatches"].as_array_mut() {
+                m.extend(bad);
+            }
+        }
+        a["sweep"] = sw;
+    }
     a["failure"] = json!(failure);
     a["setup_s"] = json!((setup_s * 10.0).round() / 10.0);
     a["table"] = table_rec.clone();
@@ -443,6 +531,7 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
     a["warnings"] = json!(warnings);
     a["settings"] = json!({
         "fill_s": fill_s, "prod_s": prod_s, "fill_tt_mb_requested": p.get("fill_tt_mb"),
+        "sweep_mb": sweep_mb, "sweep_s": sweep_s,
         "min_cpu_pct": min_cpu_pct, "ramp_s": ramp_s, "busy_streak_s": busy_streak_s,
         "min_busy_pct": min_busy_pct, "prod_worlds": prod_worlds, "count": count, "seed": seed, "schedule": p.get("schedule"),
     });
