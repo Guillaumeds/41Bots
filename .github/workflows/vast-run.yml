@@ -55,6 +55,10 @@ on:
         description: "Only search and print the chosen offer; rent nothing"
         type: boolean
         default: true
+      market_check:
+        description: "Only check the market for a second machine comparable to the Threadripper PRO 9995WX: prints YES/NO with offer details at the top of the run page; rents nothing (type any text in image)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -90,8 +94,13 @@ jobs:
           IMAGE: ${{ inputs.image }}
           BIN_SHA: ${{ inputs.bin_sha || github.sha }}
           DRY_RUN: ${{ inputs.dry_run }}
+          MARKET_CHECK: ${{ inputs.market_check }}
         run: |
           set -euo pipefail
+          if [ "$MARKET_CHECK" = "true" ]; then
+            python3 python/tools/vast_status.py --market-only --color off
+            exit 0
+          fi
           if [ "$DRY_RUN" = "true" ]; then
             python3 python/launcher/launch.py plan --min-cores "$MIN_CORES" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} ${{ inputs.cheapest && '--cheapest' || '' }}
             exit 0
