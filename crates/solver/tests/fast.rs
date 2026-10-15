@@ -356,6 +356,8 @@ fn equivalent_cards_positive_decks() {
     assert!(merged(Hearts, "JK AH", "KH", "JK", "AH"));
     // Black trumps: 2 then 3 (black numbers run 2 up to 10).
     assert!(merged(Spades, "2S 3S", "4S", "2S", "3S"));
+    // Black trumps 4 and 7 with the 6 gone, and no hand card between them in card index.
+    assert!(merged(Clubs, "4C 7C KD", "8C", "4C", "7C"));
 }
 
 #[test]
@@ -380,6 +382,13 @@ fn equivalent_cards_negative_decks() {
     assert!(!merged(Diamonds, "10H 2H", "5H", "10H", "2H"));
     // The A♥ is never plain: with spades trumps, it is not merged with the 2♥.
     assert!(!merged(Spades, "AH 2H", "", "AH", "2H"));
+    // The tie order (card index) must not separate them: the 5♣ lies between the 4♣ and the
+    // 7♣, so keeping the 4♣ or the 7♣ ranks differently against it when ties are broken.
+    assert!(!merged(Clubs, "4C 5C 7C", "8C", "4C", "7C"));
+    // Red trumps Q and 10 (the J is a top trump) with the J♦ in the same hand between them.
+    assert!(!merged(Diamonds, "QD JD 10D", "9D", "QD", "10D"));
+    // Black plain J and 2 with the A gone, and the 10 (lower, live) between them in index.
+    assert!(!merged(Diamonds, "JS 2S 10S", "9S", "JS", "2S"));
 }
 
 // ---------- forced denial (test-only scenario check) ----------
