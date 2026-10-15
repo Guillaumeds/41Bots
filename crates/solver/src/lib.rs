@@ -308,6 +308,11 @@ impl Position {
         for &c in &self.trick[..usize::from(self.n_played)] {
             live |= bit(c);
         }
+        // A pending robber's turned card is live until the burn: it may stay in play, so no
+        // card may be merged across it (the burnt card leaves play in [`Position::burnt`]).
+        if let Some(r) = self.rob {
+            live |= bit(r.card);
+        }
         live
     }
 

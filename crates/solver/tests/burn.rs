@@ -302,3 +302,50 @@ fn pending_rob_from_real_matches() {
     assert!(found >= 50, "{found}");
     assert!(after_joker >= 1, "no Joker-then-ordinary case met");
 }
+
+/// The turned card lies between two of the root mover's cards of one suit: it is live until
+/// the burn, so equivalent-card merging must not merge across it (this once gave wrong values).
+#[test]
+fn identity_when_turned_card_splits_a_group() {
+    use engine::cards::suit_of;
+    let mut found = 0;
+    for seed in 0..400u64 {
+        for k in [4u8, 5] {
+            let Some((mut pos, ctx)) = with_rob(seed, k, 0, false) else {
+                continue;
+            };
+            let live = pos.live();
+            let five = engine::rules::five_of(pos.trump);
+            let a = ace_of_trumps(pos.trump);
+            let h = pos.hands[usize::from(pos.to_act())];
+            // A dead card (not the five or the ace of trumps) between two hand cards of its suit.
+            let mut pick = None;
+            for c in 0..JOKER {
+                if has(live, c) || c == five || c == a {
+                    continue;
+                }
+                let s = suit_of(c);
+                let below = (0..c).any(|d| has(h, d) && suit_of(d) == s);
+                let above = (c + 1..JOKER).any(|d| has(h, d) && suit_of(d) == s);
+                if below && above {
+                    pick = Some(c);
+                    break;
+                }
+            }
+            let Some(t) = pick else {
+                continue;
+            };
+            let seat = pos.rob.expect("pending rob").seat;
+            pos.rob = Some(Rob { seat, card: t });
+            found += 1;
+            identity(
+                &pos,
+                ctx,
+                &leaf(),
+                &[15, 1, 2, 4, 8],
+                &format!("split seed {seed} t{k}"),
+            );
+        }
+    }
+    assert!(found >= 20, "{found}");
+}
