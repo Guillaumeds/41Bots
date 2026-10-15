@@ -8,16 +8,23 @@ the watching. A machine labelled 41bots-<run> is left alone while its run is hea
 destroyed only when one of these holds:
 
 - its run wrote DONE or FAILED more than 10 minutes ago (the runner should have destroyed itself);
-- its run has heartbeated since the machine started, but not for 20 minutes;
-- it never heartbeated and is older than 45 minutes;
+- its run has heartbeated since the machine started, but not for 20 minutes, or it never
+  heartbeated and is older than 45 minutes; in both cases only when vast shows it idle (CPU below
+  50%) or not running. A silent machine that vast shows running and busy (CPU at least 50%, or no
+  CPU reading) is treated as an upload or network problem (2026-10-15): it is asked to stop and
+  upload what it finished (runs/<run>/STOP) and destroyed only if still silent 15 minutes later;
 - vast shows it exited or offline;
 - the run is 30 minutes past its own deadline (the runner stops itself at the deadline);
 - the run's machines cost more than its dollar cap (watch.json): first it is asked to stop and
   upload what it finished (runs/<run>/STOP), then destroyed if still alive 15 minutes later;
 - --all (the workflow's "all" input).
 
-Machines without the 41bots- label are never touched. For each handed-over run whose machine is
-gone, it writes runs/<run>/closed.json, saying whether the machine destroyed itself.
+Machines without the 41bots- label are never touched. Before any destroy (except --all) the
+machine is read again from vast (`show instance`) and the decision re-made on the fresh record;
+if vast cannot be read, nothing is destroyed this round (a healthy machine is never destroyed on
+a single bad answer). A destroy is verified by a later status call and logged as unverified
+when that cannot be read. For each handed-over run whose machine is gone, it writes
+runs/<run>/closed.json, saying whether the machine destroyed itself.
 Self-contained on purpose (vastai and aws CLIs only): it runs from main, whatever launch.py is there.
 """
 
@@ -40,6 +47,7 @@ NO_HEARTBEAT_S = 45 * 60
 STOP_GRACE_S = 15 * 60
 DEADLINE_GRACE_S = 30 * 60
 DEAD_STATES = ("exited", "offline")
+BUSY_CPU_PCT = 50.0
 
 
 def log(msg: str) -> None:
@@ -66,6 +74,15 @@ def parse_time(s) -> float | None:
 
 # ------------------------------------------------------------------ the decision (pure, tested)
 
+def cpu_pct(inst: dict) -> float | None:
+    """vast's `cpu_util` as a percentage of the container, or None when absent or unreadable."""
+    try:
+        v = float(inst.get("cpu_util"))
+    except (TypeError, ValueError):
+        return None
+    return None if v < 0 else min(v, 100.0)
+
+
 def decide(inst: dict, state: dict, now: float, everything: bool = False) -> tuple[str, str]:
     """("keep" | "stop" | "destroy", why) for one labelled instance.
 
@@ -82,12 +99,27 @@ def decide(inst: dict, state: dict, now: float, everything: bool = False) -> tup
     start = parse_time(inst.get("start_date")) or now
     # Heartbeats of an earlier machine of the same run do not count as this one's.
     beats = [t for t in state.get("heartbeats") or [] if t >= start - 60]
+    silent_why = None
     if beats:
         silent = now - max(beats)
         if silent > SILENT_S:
-            return "destroy", f"no heartbeat for {silent / 60:.0f} min"
+            silent_why = f"no heartbeat for {silent / 60:.0f} min"
     elif now - start > NO_HEARTBEAT_S:
-        return "destroy", f"no heartbeat at all in its {(now - start) / 60:.0f} min of life"
+        silent_why = f"no heartbeat at all in its {(now - start) / 60:.0f} min of life"
+    if silent_why:
+        cpu = cpu_pct(inst)
+        cpu_text = "no CPU reading" if cpu is None else f"CPU {cpu:.0f}%"
+        # Running and busy (or with no CPU reading to say otherwise): an upload or network
+        # problem, not a dead run. Ask it to stop and upload; destroy only if still silent later.
+        if status == "running" and (cpu is None or cpu >= BUSY_CPU_PCT):
+            stop = state.get("stop")
+            if stop is None:
+                return "stop", f"{silent_why} but vast shows it running and busy ({cpu_text}): asking it to stop and upload"
+            if now - stop > STOP_GRACE_S:
+                return "destroy", (f"{silent_why}, busy ({cpu_text}) but still silent "
+                                   f"{(now - stop) / 60:.0f} min after the stop request")
+            return "keep", f"{silent_why}, busy ({cpu_text}): stop requested {(now - stop) / 60:.0f} min ago, waiting for its upload"
+        return "destroy", f"{silent_why} and vast shows it {status} with {cpu_text}"
     w = state.get("watch") or {}
     deadline = parse_time(w.get("deadline_utc"))
     if deadline and now - deadline > DEADLINE_GRACE_S:
@@ -180,15 +212,38 @@ def run_state(r2, run_id: str) -> dict:
     }
 
 
+def instance_now(instance_id) -> dict | None:
+    """A fresh `show instance` record, or None when vast cannot be read (never a guess)."""
+    try:
+        info = vast("show", "instance", str(instance_id))
+    except RuntimeError as e:
+        log(f"show instance {instance_id} failed: {e}")
+        return None
+    return info if isinstance(info, dict) else None
+
+
 def destroy(instance_id) -> bool:
+    """Destroys the instance; True when the destroy call went through. A later status call
+    verifies it (logged as verified, or as unverified when vast cannot be read in 3 tries)."""
     for attempt in range(3):
         try:
             # -y: without it vastai asks "Are you sure?" on stdin and does nothing.
             vast("destroy", "instance", str(instance_id), "-y", raw=False)
-            return True
         except RuntimeError as e:
             log(f"destroy attempt {attempt + 1} of {instance_id} failed: {e}")
             time.sleep(10)
+            continue
+        time.sleep(5)
+        for _ in range(3):
+            info = instance_now(instance_id)
+            if info is not None:
+                status = info.get("actual_status")
+                word = "verified" if status in DEAD_STATES + (None, "destroyed") else f"NOT verified: still {status}"
+                log(f"destroyed instance {instance_id} ({word})")
+                return True
+            time.sleep(10)
+        log(f"destroyed instance {instance_id} (unverified: vast's status could not be read in 3 tries; check the console)")
+        return True
     return False
 
 
@@ -221,6 +276,16 @@ def sweep(r2, instances: list[dict], now: float, everything: bool, dry_run: bool
         live_ids.add(int(inst["id"]))
         state = run_state(r2, run_id)
         action, why = decide(inst, state, now, everything)
+        if action == "destroy" and not everything and not dry_run:
+            # Never on one reading: read the machine again and decide on the fresh record; if
+            # vast cannot be read, leave it until the next round.
+            fresh = instance_now(inst["id"])
+            if fresh is None:
+                action, why = "keep", f"would destroy ({why}) but vast could not be read again; left for the next round"
+            else:
+                again, why2 = decide({**inst, **fresh}, state, now)
+                if again != "destroy":
+                    action, why = again, f"on a second reading {why2} (the first said: {why})"
         rows.append((inst["id"], run_id, inst.get("actual_status"), action, why))
         log(f"instance {inst['id']} run {run_id} ({inst.get('actual_status')}): {action.upper()} - {why}")
         if dry_run or action == "keep":

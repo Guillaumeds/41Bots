@@ -37,11 +37,16 @@ class World:
         self.keys: dict[int, str] = {}  # destroy-only keys alive in the account
         self.deleted_keys: list[int] = []
         self.searches = 0
-        self.forbid_search = False  # the account's daily search quota is used up: any search is a bug
+        self.id_lookups = 0  # searches by offer id (`id=N`), the one search --offer-id makes
+        self.forbid_search = False  # the account's daily search quota is used up: any full search is a bug
+        self.status_fails = False  # `show instance` fails (vast's API down)
+        self.listing_fails = False  # `show instances` fails
+        self.r2_list_fails_until = 0.0  # r2_list raises while the clock is below this
         self.poll = launch.POLL_S  # the launcher's poll interval in this test (--poll-s)
         self.progress = None  # a heartbeat's progress object (e.g. with an eta), if set
         self.outputs: dict[str, bytes] = {}  # files a finishing run uploads before its DONE
         self.destroyed_at: dict[int, float] = {}  # instance id -> clock at its destroy
+        self.id_lookup_fails = False  # the search by offer id fails
 
     # ---- clock
     def time(self) -> float:
@@ -114,6 +119,11 @@ class World:
     def vast(self, *args, raw=True, check=True, tail=()):
         cmd = args[:2]
         if cmd == ("search", "offers"):
+            if args[2].startswith("id="):
+                self.id_lookups += 1
+                if self.id_lookup_fails:
+                    raise RuntimeError("vastai search offers failed: 429 Too Many Requests")
+                return [dict(o) for o in self.offers if o["id"] == int(args[2][3:])]
             self.searches += 1
             if self.forbid_search:
                 raise AssertionError("a search was made")
@@ -128,10 +138,19 @@ class World:
             iid = self.next_id
             self.next_id += 1
             self.instances[iid] = {"alive": True, "polls": 0, "script": self.scripts.pop(0), "offer": oid,
-                                   "created": self.t}
+                                   "created": self.t, "label": args[args.index("--label") + 1]}
             self.created_on.append(oid)
             self.envs.append(args[args.index("--env") + 1])
+            if how == "unreadable":
+                return None  # vast rented it, but printed something that is not JSON
             return {"success": True, "new_contract": iid, "instance_api_key": "ik-secret"}
+        if cmd == ("show", "instances"):
+            if self.listing_fails:
+                raise RuntimeError("vastai show instances failed: 502 Bad Gateway")
+            # Destroyed instances leave the list; one that died (or ended) but was not destroyed stays, exited.
+            return [{"id": iid, "label": inst["label"], "actual_status": "running" if inst["alive"] else "exited",
+                     "intended_status": "running" if inst["alive"] else "stopped"}
+                    for iid, inst in self.instances.items() if not inst.get("destroyed")]
         if cmd == ("create", "api-key"):
             with open(args[args.index("--permission_file") + 1]) as fh:
                 perm = json.load(fh)
@@ -144,6 +163,8 @@ class World:
             self.deleted_keys.append(int(args[2]))
             return "{'success': True}"
         if cmd == ("show", "instance"):
+            if self.status_fails:
+                raise RuntimeError("vastai show instance failed: 502 Bad Gateway")
             inst = self.instances.get(int(args[2]))
             if not inst or not inst["alive"]:
                 return {"actual_status": "exited", "intended_status": "stopped"}
@@ -162,6 +183,7 @@ class World:
             inst = self.instances.get(int(args[2]))
             if inst:
                 inst["alive"] = False
+                inst["destroyed"] = True
                 self.destroyed_at.setdefault(int(args[2]), self.t)
             return ""
         if args[0] == "logs":
@@ -179,6 +201,8 @@ class World:
         self.store[key] = data
 
     def r2_list(self, prefix: str) -> list[str]:
+        if self.t < self.r2_list_fails_until and "heartbeat" in prefix:
+            raise RuntimeError("aws s3api list-objects-v2 failed: Could not connect to the endpoint URL")
         return sorted(k for k in self.store if k.startswith(prefix))
 
     def r2_list_sized(self, prefix: str) -> list[tuple[str, int]]:
@@ -188,9 +212,12 @@ class World:
         return key in self.store
 
 
-def offer(i: int, machine: int, dph: float) -> dict:
-    return {"id": i, "machine_id": machine, "dph_total": dph, "cpu_cores_effective": 32, "cpu_name": "EPYC 7B12",
-            "num_gpus": 1, "gpu_name": "GTX 1080", "reliability2": 0.99, "is_bid": False}
+def offer(i: int, machine: int, dph: float, **kw) -> dict:
+    o = {"id": i, "machine_id": machine, "dph_total": dph, "cpu_cores_effective": 32, "cpu_name": "EPYC 7B12",
+         "num_gpus": 1, "gpu_name": "GTX 1080", "reliability2": 0.99, "is_bid": False, "verification": "verified",
+         "gpu_frac": 1.0, "rentable": True}
+    o.update(kw)
+    return o
 
 
 class LauncherTest(unittest.TestCase):
@@ -201,6 +228,23 @@ class LauncherTest(unittest.TestCase):
 
     def tearDown(self):
         self.env.__exit__(None, None, None)
+
+    @contextlib.contextmanager
+    def patched(self, world: World):
+        """The launcher's vast, R2 and clock replaced by `world`."""
+        saved = {n: getattr(launch, n) for n in ("vast", "r2_get", "r2_put", "r2_list", "r2_list_sized", "r2_exists",
+                                                 "time")}
+        launch.vast = world.vast
+        launch.r2_get, launch.r2_put = world.r2_get, world.r2_put
+        launch.r2_list, launch.r2_exists = world.r2_list, world.r2_exists
+        launch.r2_list_sized = world.r2_list_sized
+        launch.time = world
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                yield
+        finally:
+            for n, v in saved.items():
+                setattr(launch, n, v)
 
     def run_launch(self, world: World, manifest: dict, *extra: str) -> tuple[int, dict]:
         saved = {n: getattr(launch, n) for n in ("vast", "r2_get", "r2_put", "r2_list", "r2_list_sized", "r2_exists",
@@ -232,25 +276,142 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(report["offer_id"], 3)
         self.assertEqual(report["replacements"], 0)
 
-    def test_offer_chosen_by_id_is_rented_without_any_search(self):
-        w = World([], ["done:2"])
+    def test_offer_chosen_by_id_is_checked_by_one_lookup_and_rented_without_a_search(self):
+        w = World([offer(1, 11, 0.5), offer(500, 50, 1.013, cpu_cores_effective=384)], ["done:2"])
         w.forbid_search = True
         code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 10, "seed": 1}}},
                                        "--offer-id", "500", "--offer-dph", "1.013", "--offer-cores", "384")
         self.assertEqual(code, 0)
         self.assertEqual(w.created_on, [500])
-        self.assertEqual(w.searches, 0)
-        self.assertEqual(report["offer_id"], 500)
-        self.assertIn("chosen by the owner, no search", self.log)
+        self.assertEqual((w.searches, w.id_lookups), (0, 1))
+        self.assertEqual((report["offer_id"], report["cores_effective"]), (500, 384))
+        self.assertIn("chosen by the owner and checked by id", self.log)
 
     def test_offer_chosen_by_id_that_is_gone_stops_without_searching(self):
-        w = World([offer(1, 11, 1.0)], [], create_fail={500: "none"})
+        w = World([offer(1, 11, 1.0), offer(500, 50, 1.013)], [], create_fail={500: "none"})
         w.forbid_search = True
         code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 10, "seed": 1}}},
                                        "--offer-id", "500", "--offer-dph", "1.013", "--offer-cores", "384")
         self.assertEqual(code, 1)
         self.assertEqual(w.created_on, [])
         self.assertEqual(w.searches, 0)
+
+    def test_offer_chosen_by_id_must_pass_the_same_checks(self):
+        # Unverified, shared, unreliable or interruptible: refused by name. Not on offer, or a
+        # lookup that fails: refused too (the checks are never skipped). Nothing is rented.
+        cases = [({"verification": "unverified"}, "host not verified"), ({"gpu_frac": 0.5}, "shared machine"),
+                 ({"reliability2": 0.95}, "reliability 0.950 below 0.98"), ({"is_bid": True}, "interruptible")]
+        for kw, word in cases:
+            w = World([offer(500, 50, 1.0, **kw)], ["done:1"])
+            w.forbid_search = True
+            with self.assertRaises(SystemExit) as e:
+                self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}}, "--offer-id", "500")
+            self.assertIn("fails the launcher's checks", str(e.exception), kw)
+            self.assertIn(word, str(e.exception), kw)
+            self.assertEqual(w.created_on, [], kw)
+        w = World([offer(1, 11, 1.0)], ["done:1"])
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}}, "--offer-id", "500")
+        self.assertIn("not on offer", str(e.exception))
+        w = World([offer(500, 50, 1.0)], ["done:1"])
+        w.id_lookup_fails = True
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}}, "--offer-id", "500")
+        self.assertIn("could not be checked", str(e.exception))
+        self.assertEqual(w.created_on, [])
+        self.assertEqual(launch.offer_check_failures(offer(7, 7, 1.0)), [])
+
+    def test_unreadable_create_answer_adopts_the_rented_instance(self):
+        # vast rented the machine but its answer could not be read: the launcher finds it by its
+        # label and adopts it instead of renting the next offer too.
+        w = World([offer(1, 11, 1.0), offer(2, 12, 1.5)], ["done:2"], create_fail={1: "unreadable"})
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 10, "seed": 1}}})
+        self.assertEqual((code, report["outcome"]), (0, "DONE"))
+        self.assertEqual(w.created_on, [1])
+        self.assertEqual(len(w.instances), 1)
+        self.assertIn("adopting instance 100", self.log)
+        # An unreadable answer and no machine: the next offer, as before.
+        w = World([offer(1, 11, 1.0), offer(2, 12, 1.5)], ["done:2"], create_fail={1: "none"})
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 10, "seed": 1}}})
+        self.assertEqual((code, w.created_on), (0, [2]))
+        # An unreadable answer and an unreadable instance list: stop, never rent another.
+        w = World([offer(1, 11, 1.0), offer(2, 12, 1.5)], ["done:2"], create_fail={1: "none"})
+        w.listing_fails = True
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 10, "seed": 1}}})
+        self.assertIn("second rental", str(e.exception))
+        self.assertEqual(w.created_on, [])
+
+    def test_replacement_with_unreadable_create_answer_adopts_the_new_machine_only(self):
+        # Format 2: the first machine dies; the replacement's create answer cannot be read, but
+        # vast rented it. The new machine is adopted (never the dead one, still listed as exited
+        # had its destroy not gone through) and the run finishes on it.
+        w = World([offer(1, 11, 1.0), offer(2, 12, 1.5)], ["die:2", "done:1"], create_fail={2: "unreadable"})
+        code, report = self.run_launch(w, {"format": 2, "run_id": RUN, "run_seed": 1, "streams": []})
+        self.assertEqual((code, report["outcome"], report["replacements"]), (0, "DONE", 1))
+        self.assertEqual(w.created_on, [1, 2])
+        self.assertEqual([x["instance_id"] for x in report["attempts"]], [100, 101])
+        self.assertIn("adopting instance 101", self.log)
+        self.assertNotIn("adopting instance 100", self.log)
+
+    def test_vast_errors_never_mean_gone(self):
+        # vast's API is down for the whole run: a healthy, working machine is never declared
+        # gone; the run ends at its time limit (stop and upload), and the destroy, whose
+        # verification cannot be read, is reported as unverified, not as done.
+        w = World([offer(1, 11, 1.0)], ["work:0"])
+        w.status_fails = w.listing_fails = True
+        code, report = self.run_launch_minutes(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}}, 5)
+        self.assertEqual((code, report["outcome"]), (1, "STOPPED"))
+        self.assertIn("max_minutes", report["reason"])
+        self.assertNotIn("died", report["reason"])
+        self.assertEqual(report["destroy"], "unverified")
+        self.assertEqual(report["attempts"][0]["destroy"], "unverified")
+        self.assertFalse(w.instances[100]["alive"])  # the destroy call itself went through
+        md = launch.summary_markdown(RUN, report, [])
+        self.assertIn("destroy not verified** for instance(s) 100", md)
+        # Verified when the status can be read.
+        w = World([offer(1, 11, 1.0)], ["done:1"])
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}})
+        self.assertEqual((code, report["destroy"]), (0, "verified"))
+        self.assertIn("(verified: actual_status exited)", self.log)
+
+    def test_dead_machine_is_declared_gone_only_after_three_readings_over_90_s(self):
+        w = World([offer(1, 11, 1.0)], ["die:2"])
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}})
+        self.assertEqual((code, report["outcome"]), (1, "KILLED"))
+        self.assertIn("instance died before DONE (actual_status exited: reading 3 of 3 over 120 s)", report["reason"])
+        self.assertIn("looks dead (actual_status exited: reading 1 of 3 over 0 s); not yet confirmed", self.log)
+        self.assertGreaterEqual(report["attempts"][0]["minutes"], 2 + 2)
+        # The pure parts: one reading never says gone; an unreadable one changes nothing.
+        with self.patched(w):
+            self.assertEqual(launch.instance_state(100)[0], "dead")
+            w.status_fails = w.listing_fails = True
+            self.assertEqual(launch.instance_state(100), ("unknown", None))
+            live = launch.Liveness(100)
+            self.assertEqual(live.check()[0], "unknown")
+            w.status_fails = w.listing_fails = False
+            self.assertEqual(live.check()[0], "dying")
+            w.status_fails = True
+            self.assertEqual(live.check()[0], "dying")  # not listed: a reading, 2 of 3
+            w.t += 100
+            self.assertEqual(live.check()[0], "gone")
+            self.assertIn("not listed: reading 3 of 3 over 100 s", live.detail)
+            # A reading that shows it alive clears the count.
+            w.instances[100]["alive"] = True
+            w.status_fails = False
+            self.assertEqual(live.check()[0], "alive")
+            self.assertEqual(live.count, 0)
+
+    def test_r2_failure_while_polling_is_no_new_heartbeat(self):
+        # R2 cannot be listed for the first three polls: logged, counted as no new heartbeat,
+        # and the run goes on to DONE (no exception reaches the destroy).
+        w = World([offer(1, 11, 1.0)], ["done:5"])
+        w.r2_list_fails_until = w.t + 3 * launch.POLL_S + 1
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 10, "seed": 1}}})
+        self.assertEqual((code, report["outcome"]), (0, "DONE"))
+        self.assertIn("could not read the run's heartbeats this poll", self.log)
+        self.assertIn("counting it as no new heartbeat", self.log)
+        self.assertNotIn("Traceback", self.log)
 
     def test_no_offer_left_stops(self):
         w = World([offer(1, 11, 1.0)], [], create_fail={1: "none"})
@@ -453,8 +614,9 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(c({"cpu_util": 75.0}), 75.0)
         self.assertEqual(c({"cpu_util": 103.0}), 100.0)  # clamped
         st = launch.silent_state
-        self.assertEqual(st(None, 50)[0], "gone")
-        self.assertEqual(st({"actual_status": "exited", "cpu_util": 99}, 50)[0], "gone")
+        # One reading never says gone: no record or a state other than running is unknown.
+        self.assertEqual(st(None, 50)[0], "unknown")
+        self.assertEqual(st({"actual_status": "exited", "cpu_util": 99}, 50)[0], "unknown")
         self.assertEqual(st({"actual_status": "running", "cpu_util": 60}, 50)[0], "busy")
         self.assertEqual(st({"actual_status": "running", "cpu_util": 10}, 50)[0], "idle")
         self.assertEqual(st({"actual_status": "running"}, 50)[0], "idle")
@@ -483,11 +645,11 @@ class LauncherTest(unittest.TestCase):
         self.assertNotIn("over the budget", self.log)
 
     def test_budget_rents_no_replacement(self):
-        # The first machine dies (at 4 minutes, $0.80 at $12/hour) just under the budget; with its
-        # destroy it has used the budget, so no replacement is rented.
+        # The first machine dies at 3 minutes and is confirmed gone at 6 ($1.20 at $12/hour), just
+        # under the budget; with its destroy it has used the budget, so no replacement is rented.
         w = World([offer(1, 11, 12.0), offer(2, 12, 12.0)], ["die:3", "done:1"])
         code, report = self.run_launch(w, {"format": 2, "run_id": RUN, "run_seed": 1, "streams": []},
-                                       "--max-dollars", "0.81")
+                                       "--max-dollars", "1.21")
         self.assertEqual(code, 1)
         self.assertEqual(w.created_on, [1])
         self.assertIn("no replacement", report["reason"])
@@ -518,8 +680,9 @@ class LauncherTest(unittest.TestCase):
         self.assertIsNone(e({"actual_status": "running", "status_msg": "success, running img"}))
         self.assertIn("OCI runtime", e({"actual_status": "created", "status_msg": "x: OCI runtime create failed"}))
         self.assertIn("failed to inject", e({"status_msg": "Failed To Inject CDI devices"}).lower())
-        self.assertEqual(e({"actual_status": "exited", "status_msg": ""}), "actual_status exited")
-        self.assertTrue(e({"actual_status": "offline", "status_msg": "host down"}).startswith("actual_status offline"))
+        # Exited or offline is not a container error by one reading: `Liveness` confirms it.
+        self.assertIsNone(e({"actual_status": "exited", "status_msg": ""}))
+        self.assertIsNone(e({"actual_status": "offline", "status_msg": "host down"}))
 
     def test_silent_machine_is_destroyed_without_waiting(self):
         w = World([offer(1, 11, 1.0)], ["stall:2"])

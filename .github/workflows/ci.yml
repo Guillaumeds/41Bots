@@ -45,14 +45,21 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
-      - name: Runner resume and stop tests (M3-SPEC 7.4, 13.1 item 11; release binaries)
+      - name: Runner resume and stop tests (M3-SPEC 7.3, 7.4, 13.1 item 11; release binaries)
         shell: bash
         run: |
           cargo build --release -p runner -p search -p equity -p difftest
           RUNNER_TEST_BIN_DIR=target/release cargo test --release -p runner --test resume_identity --test stop_partial -- --ignored
+      - name: Runner per-world resume test (resume_worlds, M3-SPEC 7.3; kill -9 mid-run, resume, byte-identical worlds file, refused resumes; about 2.5 minutes)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: RUNNER_TEST_BIN_DIR=target/release cargo test --release -p runner --test resume_worlds -- --ignored --nocapture
       - name: Launcher tests (simulated vast.ai and R2)
         if: runner.os == 'Linux'
         run: python3 -m unittest discover -s python/launcher -p "test_*.py"
+      - name: Tools tests (vast_status, vast_market)
+        if: runner.os == 'Linux'
+        run: python3 -m unittest discover -s python/tools -p "test_*.py"
       - name: Build engine with serde
         run: cargo build -p engine --features serde
       - name: Reference crate must not depend on the engine

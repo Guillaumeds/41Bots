@@ -1297,6 +1297,7 @@ mod tests {
             cands: (0..c).map(|j| (Action::Play(j as u8), None)).collect(),
             rows,
             log2_worlds: None,
+            fp: None,
             hand_type: Some(HandType {
                 trumps: (id % 4) as u8,
                 top_trumps: (id % 3) as u8,

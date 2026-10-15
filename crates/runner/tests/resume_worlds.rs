@@ -9,7 +9,9 @@
 //!
 //! In both, the resumed run must value exactly the worlds that were not in the uploaded copy
 //! (`resumed.worlds_valued` = all worlds - the saved ones), so only the worlds in flight (or
-//! finished after the last upload) are redone. Like `resume_identity` it needs release binaries,
+//! finished after the last upload) are redone. A resume under other settings is refused: another
+//! seed, and an uploaded copy made with another equity table, both end FAILED with a message
+//! naming the field, and nothing is valued. Like `resume_identity` it needs release binaries,
 //! so it is `#[ignore]`d in the plain `cargo test --workspace`:
 //! ```text
 //! cargo build --release -p runner -p search -p equity -p difftest
@@ -243,6 +245,43 @@ fn kill9_then_resume_world_by_world() {
     );
     assert_eq!(r["worlds"], json!(uploaded), "{res}");
     assert_eq!(r["worlds_valued"], json!(total - uploaded), "{res}");
+
+    // A resume under other settings is refused, by name, before anything is valued: another
+    // seed, and an uploaded copy whose fingerprint names another equity table.
+    let refused = |work: &str, run: &str, m: &Value, word: &str| {
+        let mut x = start(&bins, &dir, work, m);
+        assert!(!wait_exit(&mut x, 600).success(), "{run} should fail");
+        let log = fs::read_to_string(dir.join(format!("{work}.log"))).unwrap();
+        assert!(
+            log.contains("resume refused") && log.contains(word),
+            "{run}: the log does not name {word}:\n{log}"
+        );
+        assert!(
+            dir.join(format!("remote/runs/{run}/FAILED")).is_file(),
+            "{run}: no FAILED marker"
+        );
+        assert!(
+            !dir.join(format!("{work}/{run}/out")).join(WORLDS).exists()
+                || lines(&dir.join(format!("{work}/{run}/out")).join(WORLDS)).len()
+                    == lines(&up.join(WORLDS)).len(),
+            "{run}: valued worlds after refusing"
+        );
+    };
+    let mut other_seed = f1("rw-c-seed", json!({ "resume_from": "rw-b" }));
+    other_seed["chunk"]["search_measure"]["seed"] = json!(2);
+    refused("c-seed", "rw-c-seed", &other_seed, "seed");
+    let fp_path = up.join("measure/fingerprint.json");
+    let mut fp: Value = serde_json::from_str(&fs::read_to_string(&fp_path).unwrap()).unwrap();
+    let real_table = fp["table_sha256"].clone();
+    fp["table_sha256"] = json!("0000000000000000000000000000000000000000000000000000000000000000");
+    fs::write(&fp_path, fp.to_string()).unwrap();
+    let m = f1("rw-c-table", json!({ "resume_from": "rw-b" }));
+    refused("c-table", "rw-c-table", &m, "table_sha256");
+    fp["table_sha256"] = real_table;
+    fs::write(&fp_path, fp.to_string()).unwrap();
+    println!(
+        "format 1: a resume with another seed, and from a copy made with another table, were refused"
+    );
 
     // Format 2: killed mid-way, then the same manifest on an empty work directory.
     let mut p = measure_params();

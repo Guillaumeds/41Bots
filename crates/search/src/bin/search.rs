@@ -69,7 +69,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use search::bot::{PimcFactory, PimcSpec, load_equity};
+use search::bot::{PimcFactory, PimcSpec, load_equity, load_equity_sha};
 use search::curves::{CurveParams, N_CAP, TrickReport, analyse, score_groups};
 use search::measure::{
     BatchProgress, DecisionSpec, DecisionTiming, Schedule, WorldRows, WorldsJob, agreement_curve,
@@ -254,7 +254,7 @@ fn worlds(a: &Args) -> Result<(), String> {
         m => return Err(format!("unknown method {m}")),
     };
     let t0 = Instant::now();
-    let table = load_equity(a.req("--equity")?)?;
+    let (table, table_sha) = load_equity_sha(a.req("--equity")?)?;
     let leaf: Arc<SharedLeaf> = Arc::new(table);
     let src = world_source(a)?;
     let ctx = Ctx {
@@ -279,6 +279,7 @@ fn worlds(a: &Args) -> Result<(), String> {
         seed: a.num("--seed", 1)?,
         from,
         to,
+        table: table_sha,
     };
     let (first, last) = (a.num("--first", 0)?, a.num("--last", u64::MAX)?);
     let ids = a.get("--ids").map(parse_ids).transpose()?;

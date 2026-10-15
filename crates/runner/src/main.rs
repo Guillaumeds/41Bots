@@ -1171,7 +1171,9 @@ fn resume_from(manifest: &Value, params: &Value) -> Result<Option<String>, Strin
 /// before the chunk starts: its final `out/` where it got that far (uploaded at its end or stop),
 /// else its partial uploads (`partial/out/`, every `upload_every_s`). A `search_measure` chunk
 /// then continues from its worlds file and checkpoint, redoing only the worlds that were being
-/// solved (or finished after the last upload). Local files at least as large are kept.
+/// solved (or finished after the last upload). Local files at least as large are kept. A store
+/// that cannot be listed, or a run with nothing under either prefix, is an error: a resume that
+/// restored nothing would redo the whole run in silence.
 fn resume_out(ctx: &mut Ctx, from: &str) -> Result<Value, String> {
     let r = ctx
         .remote()
@@ -1179,9 +1181,20 @@ fn resume_out(ctx: &mut Ctx, from: &str) -> Result<Value, String> {
     ctx.set_phase("resume", json!({ "from": from }));
     let out = ctx.root.join("out");
     let prefixes = vec![format!("{from}/out"), format!("{from}/partial/out")];
-    let (files, bytes) = ctx.blocking(move || net::restore(&*r, &prefixes, &out))?;
-    println!("runner: resuming from {from}: {files} files ({bytes} bytes) restored into out/");
-    Ok(json!({ "from": from, "files": files, "bytes": bytes }))
+    let got = ctx
+        .blocking(move || net::restore(&*r, &prefixes, &out))
+        .map_err(|e| format!("resume_from {from}: {e}"))?;
+    if got.listed == 0 {
+        return Err(format!(
+            "resume_from {from}: nothing to resume under {from}/out/ or {from}/partial/out/ \
+             (is the run id right? did it upload anything?)"
+        ));
+    }
+    println!(
+        "runner: resuming from {from}: {} files listed, {} files ({} bytes) restored into out/",
+        got.listed, got.files, got.bytes
+    );
+    Ok(json!({ "from": from, "listed": got.listed, "files": got.files, "bytes": got.bytes }))
 }
 
 /// Runs one chunk of an existing (format-1) kind; also used by format-2 workers.

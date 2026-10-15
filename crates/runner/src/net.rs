@@ -246,11 +246,20 @@ pub fn is_ckpt(rel: &str) -> bool {
     rel.ends_with(".ckpt")
 }
 
-/// The files of `dir` in upload order: checkpoints first, then the others smallest first.
+/// Whether `rel` is a file still being written (`<file>.tmp`: a checkpoint or progress file
+/// being rewritten before it is renamed into place; `<file>.restore-tmp`: a download in
+/// progress). Never uploaded: a copy of it could be torn, and it is gone a moment later.
+pub fn is_temp(rel: &str) -> bool {
+    rel.ends_with(".tmp") || rel.ends_with(".restore-tmp")
+}
+
+/// The files of `dir` in upload order: checkpoints first, then the others smallest first;
+/// temporary files ([`is_temp`]) are left out.
 fn upload_order(dir: &Path) -> Vec<(String, u64, Option<SystemTime>)> {
     let mut v: Vec<(String, u64, Option<SystemTime>)> = crate::bundle::list_files(dir)
         .unwrap_or_default()
         .into_iter()
+        .filter(|rel| !is_temp(rel))
         .filter_map(|rel| {
             let m = fs::metadata(dir.join(&rel)).ok()?;
             Some((rel, m.len(), m.modified().ok()))
@@ -307,10 +316,23 @@ pub fn upload_changed(
     (ok, failed)
 }
 
+/// What [`restore`] found and did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Restored {
+    /// Files listed under the prefixes (whether or not they were downloaded).
+    pub listed: usize,
+    /// Files downloaded.
+    pub files: usize,
+    /// Bytes downloaded.
+    pub bytes: u64,
+}
+
 /// Downloads every file under `<prefix>/` into `dest/<relative path>`, unless the local copy
 /// is at least as large (append-only files: longer is newer). `prefixes` are tried in order and
-/// the first that holds a path wins. Returns the files and bytes downloaded.
-pub fn restore(r: &dyn Remote, prefixes: &[String], dest: &Path) -> Result<(usize, u64), String> {
+/// the first that holds a path wins. A listing that fails is an error (nothing is guessed to be
+/// absent); a prefix nothing was ever written under lists as empty. Temporary files
+/// ([`is_temp`]) are skipped.
+pub fn restore(r: &dyn Remote, prefixes: &[String], dest: &Path) -> Result<Restored, String> {
     let mut chosen: BTreeMap<String, (String, u64)> = BTreeMap::new();
     for p in prefixes {
         let p = p.trim_end_matches('/');
@@ -321,13 +343,17 @@ pub fn restore(r: &dyn Remote, prefixes: &[String], dest: &Path) -> Result<(usiz
             if rel
                 .split('/')
                 .any(|s| s.is_empty() || s == "." || s == "..")
+                || is_temp(rel)
             {
                 continue;
             }
             chosen.entry(rel.to_string()).or_insert((key, n));
         }
     }
-    let (mut files, mut bytes) = (0, 0);
+    let mut got = Restored {
+        listed: chosen.len(),
+        ..Restored::default()
+    };
     for (rel, (key, n)) in chosen {
         let local = rel.split('/').fold(dest.to_path_buf(), |p, s| p.join(s));
         if fs::metadata(&local).is_ok_and(|m| m.len() >= n) {
@@ -341,10 +367,10 @@ pub fn restore(r: &dyn Remote, prefixes: &[String], dest: &Path) -> Result<(usiz
             continue;
         }
         fs::rename(&tmp, &local).map_err(|e| format!("{}: {e}", local.display()))?;
-        files += 1;
-        bytes += n;
+        got.files += 1;
+        got.bytes += n;
     }
-    Ok((files, bytes))
+    Ok(got)
 }
 
 #[cfg(test)]
@@ -403,11 +429,15 @@ mod tests {
         fs::write(out.join("measure/w.jsonl"), "a\n").expect("write");
         fs::write(out.join("measure/w.jsonl.ckpt"), "c1\nc2\n").expect("write");
         fs::write(out.join("big.log"), "x".repeat(100)).expect("write");
+        // Files still being written are never uploaded.
+        fs::write(out.join("measure/w.jsonl.ckpt.tmp"), "c1\n").expect("write");
+        fs::write(out.join("measure/w.restore-tmp"), "half").expect("write");
         let r = DirRemote {
             root: d.join("remote"),
         };
         let sent = Mutex::new(BTreeMap::new());
         assert_eq!(upload_order(&out)[0].0, "measure/w.jsonl.ckpt");
+        assert_eq!(upload_order(&out).len(), 3, "{:?}", upload_order(&out));
         let snap = d.join("snap");
         assert_eq!(
             upload_changed(&r, &out, "runs/x/partial/out", &snap, &sent, None),
@@ -431,7 +461,22 @@ mod tests {
             .expect("put");
         let dest = d.join("dest");
         let prefixes = ["runs/x/out".to_string(), "runs/x/partial/out".to_string()];
-        assert_eq!(restore(&r, &prefixes, &dest).expect("restore"), (3, 160));
+        // A temporary file that reached the remote some other way is not restored either.
+        r.put(
+            &out.join("measure/w.restore-tmp"),
+            "runs/x/out/stray.tmp",
+            true,
+        )
+        .expect("put");
+        assert_eq!(
+            restore(&r, &prefixes, &dest).expect("restore"),
+            Restored {
+                listed: 3,
+                files: 3,
+                bytes: 160
+            }
+        );
+        assert!(!dest.join("stray.tmp").exists());
         assert_eq!(
             fs::read_to_string(dest.join("big.log")).expect("read"),
             "y".repeat(150)
@@ -442,7 +487,42 @@ mod tests {
         );
         // A longer local file is kept.
         fs::write(dest.join("measure/w.jsonl"), "a\nb\nc\n").expect("write");
-        assert_eq!(restore(&r, &prefixes, &dest).expect("restore"), (0, 0));
+        assert_eq!(
+            restore(&r, &prefixes, &dest).expect("restore"),
+            Restored {
+                listed: 3,
+                files: 0,
+                bytes: 0
+            }
+        );
+        // Nothing under a prefix: an empty answer, not an error; a failing store is an error.
+        let none = ["runs/none/out".to_string()];
+        assert_eq!(
+            restore(&r, &none, &dest).expect("empty"),
+            Restored::default()
+        );
+        struct Broken;
+        impl Remote for Broken {
+            fn describe(&self) -> String {
+                "broken".into()
+            }
+            fn put(&self, _: &Path, _: &str, _: bool) -> Result<(), String> {
+                Err("down".into())
+            }
+            fn get(&self, _: &str, _: &Path) -> Result<bool, String> {
+                Err("down".into())
+            }
+            fn list_sized(&self, _: &str) -> Result<Vec<(String, u64)>, String> {
+                Err("down".into())
+            }
+            fn sha256(&self, _: &str) -> Result<Option<(String, u64)>, String> {
+                Err("down".into())
+            }
+            fn exists(&self, _: &str) -> Result<bool, String> {
+                Err("down".into())
+            }
+        }
+        assert!(restore(&Broken, &prefixes, &dest).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 }

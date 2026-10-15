@@ -1,8 +1,10 @@
 # Run-aware safety net for vast.ai machines labelled "41bots-" (python/launcher/cleanup.py).
 # A healthy run is never touched, however long it lasts. A machine is destroyed when its run
-# ended (DONE/FAILED) 10 minutes ago, went 20 minutes without a heartbeat, never heartbeated in
-# 45 minutes, is exited/offline, is 30 minutes past its deadline, or passed its dollar cap (it is
-# asked to stop and upload first, and destroyed 15 minutes later). It also takes over the watching
+# ended (DONE/FAILED) 10 minutes ago, went 20 minutes without a heartbeat or never heartbeated in
+# 45 minutes (a silent machine vast shows busy is asked to stop and upload first, and destroyed
+# 15 minutes later if still silent), is exited/offline, is 30 minutes past its deadline, or passed
+# its dollar cap (asked to stop and upload first, destroyed 15 minutes later). Every destroy needs
+# a second reading of the machine from vast; an unreadable answer never destroys. It also takes over the watching
 # of runs the launcher handed over at GitHub's 6-hour limit. Owner-approved (2026-10-15); replaces
 # the age-based rule that destroyed every machine older than 2 hours.
 name: vast-cleanup

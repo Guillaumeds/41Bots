@@ -798,7 +798,7 @@ better choice but more time. How much money chance does a bot with N deals give 
 with a bot that could imagine every possible deal? And how many deals are needed to keep that loss below
 {thr_label(th[0])}, {thr_label(th[1])} or {thr_label(th[2])} money chance?</p>
 <p>(For scale: {thr_label(th[0])} money chance is a 1-in-10,000 chance of the match, about 0.0008 stakes per
-player per decision, since a match swings 8 stakes.)</p>
+team per decision, 0.0004 per player, since a match swings 8 stakes for a team: each player wins 3 or loses 1.)</p>
 </div>
 
 <h2>The short answer</h2>

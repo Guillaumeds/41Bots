@@ -55,7 +55,11 @@
 //!
 //! Resume: `search worlds` checkpoints every world as it finishes (`<worlds file>.ckpt`), so a
 //! killed chunk continues world by world: in format 1 from an earlier run's uploaded files
-//! (`resume_from`, see `main.rs`), in format 2 from the chunk's live files (`v2.rs`).
+//! (`resume_from`, see `main.rs`), in format 2 from the chunk's live files (`v2.rs`). The chunk
+//! writes `out/measure/fingerprint.json` (method, label, seed, trick, count, start_hands, ids,
+//! first/last, from, to, the equity table's SHA-256) before any worlds step; a resumed chunk that
+//! finds one with any field different stops with a plain message instead of building on files
+//! made under other settings (`search worlds` checks every record and checkpoint line as well).
 //! `result.json` records what was taken over (`resumed`: decisions, worlds, worlds valued here). `partial_cpu_ok` is set only for a
 //! heartbeat interval that was at least [`TAIL_SHARE_OK`] in a genuine tail: fewer tasks left in
 //! the queue than worker threads (the end of the step), or fewer subproblems left in the running
@@ -272,6 +276,14 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         return Err(format!("search_measure: from {from} must be below to {to}"));
     }
     let ids = ids_arg(p)?;
+    let start_hands = n(p, "start_hands", 20_000);
+    let fingerprint = json!({
+        "method": "exact", "label": 1, "seed": seed, "trick": trick, "count": count,
+        "start_hands": start_hands, "ids": ids, "first": n(p, "first", 0),
+        "last": n(p, "last", count.saturating_sub(1)), "from": from, "to": to,
+        "table_sha256": crate::bundle::sha256_file(&table)?.0,
+    });
+    check_fingerprint(&out.join("fingerprint.json"), &fingerprint)?;
     let sched_json = match p.get("schedule") {
         None | Some(Value::Null) => None,
         Some(v @ Value::Object(_)) => Some(v.to_string()),
@@ -314,7 +326,7 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
     let mut c = Command::new(sibling("search"));
     c.args(["decisions", "--trick", &trick.to_string()])
         .args(["--count", &count.to_string(), "--seed", &seed.to_string()])
-        .args(["--start-hands", &n(p, "start_hands", 20_000).to_string()])
+        .args(["--start-hands", &start_hands.to_string()])
         .arg("--out")
         .arg(&dec);
     if p.get("allow_uneven")
@@ -456,9 +468,59 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
     Ok(r)
 }
 
+/// Writes the chunk's fingerprint to `path`, or, when a restored one is there already (a
+/// resumed chunk), checks it field by field: any difference is an error naming the fields, so a
+/// run never builds on files made under other settings. A file that cannot be read is an error
+/// too (nothing is guessed).
+fn check_fingerprint(path: &Path, want: &Value) -> Result<(), String> {
+    if path.is_file() {
+        let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let have: Value = serde_json::from_str(&text)
+            .map_err(|e| format!("{}: not a fingerprint ({e})", path.display()))?;
+        let differ: Vec<String> = want
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(k, v)| have.get(*k) != Some(v))
+            .map(|(k, v)| format!("{k}: {} now {v}", have.get(k).unwrap_or(&Value::Null)))
+            .collect();
+        if !differ.is_empty() {
+            return Err(format!(
+                "resume refused: the files being resumed were made with other settings ({}); \
+                 resume with the same settings, or start a new run without resume_from",
+                differ.join("; ")
+            ));
+        }
+        return Ok(());
+    }
+    fs::write(path, want.to_string()).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fingerprint is written once and then checked: the same settings pass, a changed field
+    /// (the seed, the table) is refused by name, and an unreadable file is an error.
+    #[test]
+    fn fingerprint_refuses_other_settings() {
+        let d = std::env::temp_dir().join(format!("runner-fp-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).expect("mkdir");
+        let p = d.join("fingerprint.json");
+        let fp = json!({ "seed": 1, "trick": 2, "table_sha256": "abc" });
+        check_fingerprint(&p, &fp).expect("written");
+        check_fingerprint(&p, &fp).expect("same settings");
+        let e = check_fingerprint(&p, &json!({ "seed": 2, "trick": 2, "table_sha256": "abc" }))
+            .expect_err("seed");
+        assert!(e.contains("seed: 1 now 2") && !e.contains("table"), "{e}");
+        let e = check_fingerprint(&p, &json!({ "seed": 1, "trick": 2, "table_sha256": "def" }))
+            .expect_err("table");
+        assert!(e.contains("table_sha256: \"abc\" now \"def\""), "{e}");
+        fs::write(&p, "{not json").expect("write");
+        assert!(check_fingerprint(&p, &fp).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn ids_and_grids() {
