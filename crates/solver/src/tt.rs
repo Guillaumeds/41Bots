@@ -227,26 +227,24 @@ fn max_buckets_of(bytes: usize) -> u64 {
     ((bytes / BUCKET_BYTES) as u64).max(1)
 }
 
-/// Memory of one table, in bytes, from the growth rule ([`Table::put`], [`Table::grow`]).
+/// Memory of one table, in bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TableMemory {
     /// What the table holds once grown to its cap, and keeps between solves.
     pub cap: usize,
-    /// The most it can make the process hold: every block of its growth chain at once. Each
-    /// growth step reallocates the slot vector to the new size; unless the allocator extends the
-    /// block in place, the old block and the new one are both held while the slots are copied,
-    /// and the old block, though freed, may stay resident (glibc keeps freed blocks below its
-    /// mmap threshold in its heap for reuse). The chain is the start size doubled while below
-    /// the cap (the last of these, `old` buckets, is at least half the cap), then the cap, so
-    /// the peak is `cap + old + old/2 + … + start` = `cap + 2·old − start`: about 2 × cap when
-    /// the cap is an exact doubling of the start size, up to just under 3 × cap. It depends on
-    /// the growth rule only, never on the allocator, so no allocator can exceed it; glibc in
-    /// practice stays well below (blocks of 32 MiB and more are moved by `mremap`, not copied).
+    /// The most it can make the process hold: the same as `cap`. The bucket vector is reserved
+    /// to the cap when the table is made ([`Table::with_bytes`], [`Table::reset`]), as virtual
+    /// memory whose pages are touched only as the table grows into them, so growth never
+    /// reallocates: no block but the final one ever exists, and the process holds at most the
+    /// cap (plus the pages the kernel rounds up to). Earlier, growth reallocated at each
+    /// doubling, and the old and new blocks could be resident together, up to just under
+    /// 3 × cap; that is why `peak` is still a separate field (and `peak_factor` is kept for the
+    /// runner's records, where it now reads 1).
     pub peak: usize,
 }
 
 impl TableMemory {
-    /// `peak / cap` (1 when the table never grows).
+    /// `peak / cap` (1: see [`TableMemory::peak`]).
     pub fn peak_factor(&self) -> f64 {
         if self.cap == 0 {
             1.0
@@ -258,24 +256,13 @@ impl TableMemory {
 
 /// The memory of a [`Table`] capped at about `bytes` bytes ([`Table::with_bytes`]).
 pub fn table_memory(bytes: usize) -> TableMemory {
-    let max = max_buckets_of(bytes);
-    let mut b = max.min(START_BUCKETS);
-    let mut peak = b;
-    // The growth steps in order: b → min(2b, max) while below the cap; every block counted.
-    while b < max {
-        b = (b * 2).min(max);
-        peak += b;
-    }
-    TableMemory {
-        cap: max as usize * BUCKET_BYTES,
-        peak: peak as usize * BUCKET_BYTES,
-    }
+    let cap = max_buckets_of(bytes) as usize * BUCKET_BYTES;
+    TableMemory { cap, peak: cap }
 }
 
 /// The memory of a [`SharedTable`] of `mb` megabytes for `threads` threads
-/// ([`SharedTable::new`]): every shard is a [`Table`], each counted at its own cap and peak (a
-/// shard's old blocks may stay resident after it grows, so all shards can be at their peak at
-/// once), plus the shard locks.
+/// ([`SharedTable::new`]): every shard is a [`Table`], each counted at its cap, plus the shard
+/// locks.
 pub fn shared_table_memory(mb: usize, threads: usize) -> TableMemory {
     let (n, per) = shard_layout(mb, threads);
     let shard = table_memory(per);
@@ -303,8 +290,13 @@ impl Table {
     pub fn with_bytes(bytes: usize) -> Table {
         let max_buckets = max_buckets_of(bytes);
         let buckets = max_buckets.min(START_BUCKETS);
+        // The whole cap is reserved now (virtual memory: the kernel maps a page only when it is
+        // first written, which happens as the table grows into it), so growth never
+        // reallocates and the process never holds more than the cap for this table.
+        let mut slots = Vec::with_capacity(max_buckets as usize);
+        slots.resize(buckets as usize, EMPTY_BUCKET);
         Table {
-            slots: vec![EMPTY_BUCKET; buckets as usize],
+            slots,
             buckets,
             max_buckets,
             generation: 1,
@@ -315,8 +307,9 @@ impl Table {
 
     /// Empty the table for a new solve, now capped at about `bytes` bytes. It is then exactly a
     /// new table of that cap, keeping the memory it holds (memory above a lower cap is given
-    /// back). O(1), except when memory is given back or the generation number wraps around
-    /// (every 2^16 − 1 resets), when every slot is marked empty.
+    /// back; a higher cap is reserved now, as [`Table::with_bytes`] does). O(1), except when
+    /// the cap changes or the generation number wraps around (every 2^16 − 1 resets), when
+    /// every slot is marked empty.
     pub fn reset(&mut self, bytes: usize) {
         self.max_buckets = max_buckets_of(bytes);
         self.buckets = self.max_buckets.min(START_BUCKETS);
@@ -325,7 +318,11 @@ impl Table {
         let cap = self.max_buckets as usize;
         if self.slots.len() > cap {
             self.slots.truncate(cap);
-            self.slots.shrink_to_fit();
+        }
+        if self.slots.capacity() > cap {
+            self.slots.shrink_to(cap);
+        } else if self.slots.capacity() < cap {
+            self.slots.reserve_exact(cap - self.slots.len());
         }
         let need = self.buckets as usize;
         if self.slots.len() < need {
@@ -367,8 +364,9 @@ impl Table {
         let nb = (ob * 2).min(self.max_buckets);
         let need = nb as usize;
         if self.slots.len() < need {
-            // First growth to this size on this table: take the memory (exactly; kept after).
-            self.slots.reserve_exact(need - self.slots.len());
+            // First growth to this size on this table: within the capacity reserved at
+            // creation, so no reallocation (these pages are touched now, and kept after).
+            debug_assert!(self.slots.capacity() >= need);
             self.slots.resize(need, EMPTY_BUCKET);
         }
         self.buckets = nb;
@@ -881,43 +879,36 @@ mod tests {
         }
     }
 
-    /// [`table_memory`] against the table itself: filled past its cap, the blocks its slot
-    /// vector actually held (each capacity it had) sum to `peak`, and it ends holding `cap`.
+    /// [`table_memory`] against the table itself: the bucket vector holds exactly the cap from
+    /// the start, never reallocates while the table is filled past its cap (so the only block
+    /// that ever exists is the cap: `peak == cap`), and the same holds across resets to lower
+    /// and higher caps.
     #[test]
-    fn table_memory_matches_the_growth_chain() {
+    fn table_memory_matches_the_table() {
         let mut rng = Rng::new(17);
         let keys = universe(&mut rng, 20_000);
+        let mut t = Table::with_bytes(0);
         for &cap in &CAPS {
             for extra in [0, BUCKET_BYTES / 2] {
                 let bytes = cap * BUCKET_BYTES + extra;
                 let m = table_memory(bytes);
-                let mut t = Table::with_bytes(bytes);
-                let mut blocks = vec![t.slots.capacity()];
-                for (i, k) in keys.iter().enumerate() {
-                    t.put(*k, value(&mut rng, i));
-                    if t.slots.capacity() != *blocks.last().expect("one block") {
-                        blocks.push(t.slots.capacity());
+                assert_eq!(m.peak, m.cap, "cap {cap}: peak is the cap");
+                assert_eq!(m.peak_factor(), 1.0);
+                for (what, t) in [("new", &mut Table::with_bytes(bytes)), ("reset", &mut t)] {
+                    if what == "reset" {
+                        t.reset(bytes);
                     }
+                    let block = t.slots.as_ptr();
+                    assert_eq!(t.slots.capacity() * BUCKET_BYTES, m.cap, "{what} cap {cap}");
+                    for (i, k) in keys.iter().enumerate() {
+                        t.put(*k, value(&mut rng, i));
+                        assert_eq!(t.slots.capacity() * BUCKET_BYTES, m.cap, "{what} {cap}");
+                        assert_eq!(t.slots.as_ptr(), block, "{what} cap {cap}: moved");
+                    }
+                    assert_eq!(t.bytes(), m.cap, "{what} cap {cap}: grown to the cap");
                 }
-                assert_eq!(t.bytes(), m.cap, "cap {cap}: grown to the cap");
-                assert_eq!(
-                    t.slots.capacity() * BUCKET_BYTES,
-                    m.cap,
-                    "cap {cap}: no spare"
-                );
-                assert_eq!(
-                    blocks.iter().sum::<usize>() * BUCKET_BYTES,
-                    m.peak,
-                    "cap {cap}: blocks {blocks:?}"
-                );
             }
         }
-        // The factor: 1 without growth, about 2 at an exact doubling, under 3 just above one.
-        assert_eq!(table_memory(16 * BUCKET_BYTES).peak_factor(), 1.0);
-        let f = |b: usize| table_memory(b * BUCKET_BYTES).peak_factor();
-        assert!((f(1024) - (1024.0 + 2.0 * 512.0 - 16.0) / 1024.0).abs() < 1e-12);
-        assert!((f(1025) - (1025.0 + 2.0 * 1024.0 - 16.0) / 1025.0).abs() < 1e-12);
-        assert!(f(1025) < 3.0 && f(1024) < 2.0);
     }
 
     /// [`shared_table_memory`] against a shared table filled until every shard is at its cap.
@@ -935,7 +926,7 @@ mod tests {
             let locks = n * core::mem::size_of::<Mutex<Table>>();
             assert_eq!(s.bytes() + locks, m.cap, "{mb} MB, {threads} threads");
             assert_eq!(m.peak, n * table_memory(per).peak + locks);
-            assert!(m.cap <= (mb << 20) + locks && m.peak > m.cap);
+            assert!(m.cap <= (mb << 20) + locks && m.peak == m.cap);
         }
     }
 

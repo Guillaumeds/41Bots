@@ -162,8 +162,9 @@ impl AutoParams {
     }
 }
 
-/// The most memory the tables of one solve can make the process hold, from the solver's own
-/// growth rule (`threads` 1: a sequential solve's table, else a parallel solve's shared table).
+/// The most memory the tables of one solve can make the process hold: their cap (the solver
+/// reserves a table's whole cap when it makes it and never reallocates, so the peak is the
+/// cap; `threads` 1: a sequential solve's table, else a parallel solve's shared table).
 pub fn table_peak_bytes(tt_mb: usize, threads: usize) -> u64 {
     if threads <= 1 {
         solver::table_memory(tt_mb << 20).peak as u64

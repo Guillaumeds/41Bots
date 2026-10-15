@@ -14,10 +14,12 @@
 //!   use, allocator overhead), minus the other memory the solving process holds (the equity
 //!   table's size, [`PROCESS_BASE`], and a full stack per thread).
 //! - **Tables**: how many tables live at once (one per world solved at the same time; each kept
-//!   between worlds) times the peak of one table, from the solver's own growth rule
-//!   ([`solver::table_memory`], [`solver::shared_table_memory`]): every block of a table's
-//!   growth chain counted at once, between about 2 and 3 times its size. No allocator can make
-//!   a table hold more.
+//!   between worlds) times the peak of one table ([`solver::table_memory`],
+//!   [`solver::shared_table_memory`]). The peak is the table's cap: the solver reserves the
+//!   whole cap when it makes a table (pages are touched only as the table grows into them) and
+//!   never reallocates, so no block but the final one ever exists. (Before that change, growth
+//!   reallocated at each doubling and the old blocks could stay resident, so the peak was
+//!   between about 2 and 3 times the cap; the `peak_factor` in the record now reads 1.)
 //! - **Choice**: `tt_mb` absent or `"auto"` takes the largest size whose tables fit the budget.
 //!   An explicit size that does not fit is lowered to that size, with a warning in the heartbeat,
 //!   in `result.json` and on stderr; one that fits is used as given.
@@ -469,8 +471,10 @@ mod tests {
     }
 
     /// The run that was killed: 4 trick-1 worlds at once, 96 threads each, 45,000 MB tables on
-    /// a 251 GiB host. Its tables alone could reach far more than the host has; the plan lowers
-    /// them to a size whose peak fits, and says so.
+    /// a 251 GiB host. At the time, growth copies made its tables reach far more than the host
+    /// has; now that a table never holds more than its cap, that setting fits (180,000 MB
+    /// within the 224 GiB budget), and a request of 70,000 MB tables (280,000 MB) is what the
+    /// plan lowers to a size whose peak fits, saying so.
     #[test]
     fn the_killed_run_is_clamped_with_a_warning() {
         let host = limit(HOST_KB * 1024);
@@ -479,17 +483,16 @@ mod tests {
             solve_threads: 96,
         };
         let other = 76 * MIB + PROCESS_BASE + tables.threads() * STACK_PER_THREAD;
-        assert!(
-            tables.peak(45_000) > host.bytes,
-            "the old setting cannot fit"
-        );
-        let p = plan(Requested::Mb(45_000), tables, other, &host);
-        assert!(p.tt_mb < 45_000 && p.tt_mb > 10_000, "{}", p.tt_mb);
         let budget = host.bytes - host.margin() - other;
+        assert_eq!(tables.peak(45_000), tables.one(45_000).cap as u64 * 4);
+        assert!(tables.peak(45_000) <= budget, "the old setting now fits");
+        assert!(tables.peak(70_000) > host.bytes, "this setting cannot fit");
+        let p = plan(Requested::Mb(70_000), tables, other, &host);
+        assert!(p.tt_mb < 70_000 && p.tt_mb > 45_000, "{}", p.tt_mb);
         assert!(tables.peak(p.tt_mb) <= budget);
         assert!(tables.peak(p.tt_mb + 1) > budget, "the largest that fits");
         let w = p.warning.as_deref().expect("a warning");
-        assert!(w.contains("tt_mb 45000 lowered to"), "{w}");
+        assert!(w.contains("tt_mb 70000 lowered to"), "{w}");
         assert_eq!(p.record["clamped"], json!(true));
         assert_eq!(p.record["warning"], json!(w));
         assert_eq!(p.record["tables"], json!(4));
@@ -514,10 +517,12 @@ mod tests {
         let budget = 64 * GIB - 64 * GIB / 10 - other;
         assert_eq!(p.record["budget_mb"], json!(budget / MIB));
         assert!(t.peak(p.tt_mb) <= budget && t.peak(p.tt_mb + 1) > budget);
-        // Peak per table between 1 and 3 times its size.
+        // The peak per table is its size: the tables use the whole budget, slot for slot.
         let f = p.record["peak_factor"].as_f64().expect("factor");
-        assert!((1.0..3.0).contains(&f), "{f}");
+        assert_eq!(f, 1.0);
+        assert_eq!(p.record["table_peak_mb"], p.record["table_cap_mb"]);
         assert!(p.tt_mb * 8 * MIB <= budget, "never more than the budget");
+        assert!((p.tt_mb + 1) * 8 * MIB > budget, "and all of it");
         // Small machines: the margin is at least 2 GiB, at most half the limit.
         assert_eq!(limit(8 * GIB).margin(), 2 * GIB);
         assert_eq!(limit(GIB).margin(), GIB / 2);
