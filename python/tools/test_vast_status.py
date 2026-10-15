@@ -1,0 +1,62 @@
+"""Tests for the second-machine check of vast_status.py: python3 -m unittest test_vast_status (in python/tools)."""
+import os
+import sys
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(HERE, "vast_watch"))
+import model as M  # noqa: E402
+import vast_status as V  # noqa: E402
+
+
+def offer(id, cpu, threads, ram, dph, **kw):
+    o = {"id": id, "machine_id": id, "cpu_name": cpu, "threads": threads, "ram_gb": ram, "dph_total": dph, "reliability2": 0.995,
+         "verification": "verified", "gpu_frac": 1.0, "num_gpus": 1, "gpu_name": "RTX 4090", "geolocation": "Norway, NO",
+         "inet_down_cost": 0.01, "inet_up_cost": 0.01}
+    o.update(kw)
+    return o
+
+
+HW = {"cpu_model": "AMD Ryzen Threadripper PRO 9995WX 96-Cores", "cgroup_quota_cores": 184.32, "available_parallelism": 184,
+      "mem_total_kb": 263193936}
+
+
+class Comparable(unittest.TestCase):
+    def setUp(self):
+        self.m = M.Model()
+        self.ref = V.reference_machine(self.m, HW, 1.2685)
+
+    def test_reference_is_the_measured_9995wx(self):
+        self.assertEqual(self.ref["source"], "measured")
+        self.assertAlmostEqual(self.ref["cost"], 0.285, delta=0.015)
+        self.assertAlmostEqual(self.ref["nps"] / 1e9, 1.24, delta=0.06)
+
+    def test_no_when_only_dearer_machines(self):
+        market = [offer(1, "AMD EPYC 9654P 96-Core Processor", 192, 251, 2.94), offer(2, "AMD EPYC 9754 128-Core Processor", 256, 503, 3.75)]
+        ok, closest = V.comparable(self.m, market, self.ref, 1.3, 0.7)
+        self.assertEqual(ok, [])
+        self.assertEqual(len(closest), 2)
+
+    def test_yes_for_a_second_machine_of_the_same_class(self):
+        market = [offer(1, "AMD EPYC 9654P 96-Core Processor", 192, 251, 2.94),
+                  offer(7, "AMD Ryzen Threadripper PRO 9995WX 96-Cores", 192, 251, 1.30)]
+        ok, closest = V.comparable(self.m, market, self.ref, 1.3, 0.7)
+        self.assertEqual([o["id"] for o in ok], [7])
+        self.assertEqual(closest, [])
+
+    def test_unverified_shared_and_slow_machines_never_count(self):
+        cpu = "AMD Ryzen Threadripper PRO 9995WX 96-Cores"
+        market = [offer(1, cpu, 192, 251, 1.0, verification="deverified"), offer(2, cpu, 192, 251, 1.0, gpu_frac=0.5),
+                  offer(3, cpu, 192, 251, 1.0, reliability2=0.95), offer(4, cpu, 64, 80, 0.4)]   # 64 threads: too slow
+        ok, _ = V.comparable(self.m, market, self.ref, 1.3, 0.7)
+        self.assertEqual(ok, [])
+
+    def test_measured_only_filter(self):
+        market = [offer(5, "AMD EPYC 7J13 64-Core Processor", 128, 252, 0.3)]   # an absurdly cheap unbenchmarked machine
+        self.assertEqual([o["id"] for o in V.comparable(self.m, market, self.ref, 5.0, 0.3)[0]], [5])
+        self.assertEqual(V.comparable(self.m, market, self.ref, 5.0, 0.3, measured_only=True)[0], [])
+
+
+if __name__ == "__main__":
+    unittest.main()
