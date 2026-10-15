@@ -19,8 +19,11 @@ NOW = 2_000_000_000.0
 MIN = 60.0
 
 
-def inst(start_min_ago: float, status: str = "running", dph: float = 1.0, label: str = "41bots-r1", iid: int = 9):
-    return {"id": iid, "label": label, "actual_status": status, "start_date": NOW - start_min_ago * MIN, "dph_total": dph}
+def inst(start_min_ago: float, status: str = "running", dph: float = 1.0, label: str = "41bots-r1", iid: int = 9,
+         cpu=0.0):
+    """An instance row; `cpu` is vast's cpu_util (idle by default; None = no reading)."""
+    return {"id": iid, "label": label, "actual_status": status, "start_date": NOW - start_min_ago * MIN, "dph_total": dph,
+            "cpu_util": cpu}
 
 
 def state(beat_min_ago=None, markers=None, stop_min_ago=None, watch=None):
@@ -46,6 +49,22 @@ class DecideTest(unittest.TestCase):
     def test_silence(self):
         self.assertEqual(self.d(inst(300), state(19)), "keep")
         self.assertEqual(self.d(inst(300), state(21)), "destroy")
+
+    def test_silent_but_busy_is_asked_to_stop_first(self):
+        # Silent for 21 min but vast shows it running at 95% CPU (or gives no CPU reading): an
+        # upload problem. Stop first; destroy only if still silent 15 min after the stop request.
+        for cpu in (95.0, 50.0, None):
+            self.assertEqual(self.d(inst(300, cpu=cpu), state(21)), "stop", cpu)
+            self.assertEqual(self.d(inst(300, cpu=cpu), state(21, stop_min_ago=10)), "keep", cpu)
+            self.assertEqual(self.d(inst(300, cpu=cpu), state(36, stop_min_ago=16)), "destroy", cpu)
+            # The same for a machine that never heartbeated.
+            self.assertEqual(self.d(inst(46, cpu=cpu), state()), "stop", cpu)
+            self.assertEqual(self.d(inst(62, cpu=cpu), state(stop_min_ago=16)), "destroy", cpu)
+        # Idle, or not running: destroyed as before.
+        self.assertEqual(self.d(inst(300, cpu=49.9), state(21)), "destroy")
+        self.assertEqual(self.d(inst(300, "loading", cpu=99.0), state(21)), "destroy")
+        self.assertIn("busy (CPU 95%)", cleanup.decide(inst(300, cpu=95.0), state(21), NOW)[1])
+        self.assertIn("no CPU reading", cleanup.decide(inst(300, cpu=None), state(21), NOW)[1])
 
     def test_heartbeats_of_an_earlier_machine_do_not_count(self):
         # Replacement machine started 30 min ago; the only heartbeat is from before it.
@@ -108,12 +127,14 @@ class SweepTest(unittest.TestCase):
     def setUp(self):
         self.destroyed: list = []
         self.vast_calls: list = []
-        self.saved = cleanup.destroy, cleanup.vast
+        self.fresh: dict | None = {}  # what the second reading of an instance adds (None: vast unreadable)
+        self.saved = cleanup.destroy, cleanup.vast, cleanup.instance_now
         cleanup.destroy = lambda i: self.destroyed.append(i) or True
         cleanup.vast = lambda *a, raw=True: self.vast_calls.append(a)
+        cleanup.instance_now = lambda i: self.fresh
 
     def tearDown(self):
-        cleanup.destroy, cleanup.vast = self.saved
+        cleanup.destroy, cleanup.vast, cleanup.instance_now = self.saved
 
     def sweep(self, r2, instances, dry_run=False):
         with contextlib.redirect_stdout(io.StringIO()):
@@ -132,6 +153,25 @@ class SweepTest(unittest.TestCase):
         self.sweep(r2, [inst(180)])
         self.assertIn("cleanup", json.loads(r2.get("runs/r1/STOP"))["reason"])
         self.assertEqual(self.destroyed, [])
+
+    def test_destroy_needs_a_second_reading(self):
+        # Silent 30 min: destroyed only when a fresh reading agrees; when vast cannot be read
+        # again, nothing happens this round; when the fresh reading shows it busy, STOP is
+        # written instead.
+        r2 = FakeR2()
+        r2.put("runs/r1/heartbeat/000001.json", b"{}", NOW - 30 * MIN)
+        rows = self.sweep(r2, [inst(180)])
+        self.assertEqual((self.destroyed, rows[0][3]), ([9], "destroy"))
+        self.destroyed.clear()
+        self.fresh = None
+        rows = self.sweep(r2, [inst(180)])
+        self.assertEqual((self.destroyed, rows[0][3]), ([], "keep"))
+        self.assertIn("could not be read again", rows[0][4])
+        self.fresh = {"cpu_util": 97.0}
+        rows = self.sweep(r2, [inst(180)])
+        self.assertEqual((self.destroyed, rows[0][3]), ([], "stop"))
+        self.assertIn("cleanup", json.loads(r2.get("runs/r1/STOP"))["reason"])
+        self.assertIn("on a second reading", rows[0][4])
 
     def test_dry_run_changes_nothing(self):
         r2 = FakeR2()
