@@ -447,6 +447,10 @@ impl<L: Leaf> Search<'_, L> {
                 Step::GameWon(t) => return Err(self.game_won(t)),
                 Step::HandOver(s) => return Err(self.hand_over(s)),
             }
+            if q.burn_choice().is_some() {
+                // A pending robber's burn is a choice: stop here (its legal set is unused).
+                return Ok((q, 0));
+            }
             legal = q.legal();
             if q.n_played == 0 || legal.count_ones() != 1 {
                 return Ok((q, legal));
@@ -505,6 +509,9 @@ impl<L: Leaf> Search<'_, L> {
         if self.aborted {
             return Res::Abort;
         }
+        if p.burn_choice().is_some() {
+            return self.burn_node(p);
+        }
         let mut legal = p.legal();
         let chained;
         let p = if p.n_played > 0 && legal.count_ones() == 1 {
@@ -519,7 +526,10 @@ impl<L: Leaf> Search<'_, L> {
         } else {
             p
         };
-        let key = (self.tt.on() && p.n_played == 0).then(|| TtKey::of(p));
+        if p.burn_choice().is_some() {
+            return self.burn_node(p);
+        }
+        let key = (self.tt.on() && p.n_played == 0 && p.rob.is_none()).then(|| TtKey::of(p));
         if let Some(k) = &key {
             self.stats.tt_probes += 1;
             if let Some(v) = self.tt.get(k) {
@@ -589,6 +599,54 @@ impl<L: Leaf> Search<'_, L> {
         }
         Res::Exact(v)
     }
+
+    /// A pending robber's burn (`p.burn_choice()` is `Some`): the naive solver's burn node with
+    /// equivalent burns merged. Each burn group is searched exactly (no bound) through its first
+    /// card in the tie order, and the robber's team's best is kept, the first strictly best in
+    /// the tie order among equals, exactly as the naive solver. Merging is sound: two cards of
+    /// one equivalence group of the robber's hand (no live card between them in rank) map onto
+    /// each other by swapping them, so burning either leaves positions of the same value
+    /// (vector included); the group's first card is the one the naive order would keep. The
+    /// ace of trumps may share a group with cards that may be burned; it is simply left out.
+    /// Values are exact, so the parent's bound is not needed (an exact value is always a valid
+    /// answer to a bounded call).
+    fn burn_node(&mut self, p: &Position) -> Res {
+        let (h, burns) = p.burn_choice().expect("a burn is due");
+        let team = team_of(p.to_act());
+        let order = self.opts.order;
+        let set = if self.opts.equiv {
+            let mut q = *p;
+            q.hands[usize::from(p.to_act())] = h;
+            let mut g = [0 as Bits; 16];
+            let n = self.classes.groups(h, q.live(), &mut g);
+            let mut reps: Bits = 0;
+            for &grp in &g[..n] {
+                let l = grp & burns;
+                if l != 0 {
+                    reps |= crate::equiv::first_in_order(l, order);
+                }
+            }
+            self.stats.equiv_skipped += u64::from(burns.count_ones() - reps.count_ones());
+            reps
+        } else {
+            burns
+        };
+        let mut best: Option<MoneyChance> = None;
+        for b in ordered(set, order) {
+            let v = match self.node(&p.burnt(b), None) {
+                Res::Exact(v) => v,
+                Res::Cut => unreachable!("a burn's child gets no bound"),
+                Res::Abort => return Res::Abort,
+            };
+            if best.is_none_or(|x| v.get(team) > x.get(team)) {
+                best = Some(v);
+            }
+        }
+        if burns.count_ones() >= 2 {
+            self.stats.decision_nodes += 1;
+        }
+        Res::Exact(best.expect("a robber can always burn"))
+    }
 }
 
 /// Solve a position exactly with the speed-ups switched on in `opts`. The result equals
@@ -640,6 +698,10 @@ pub fn solve_fast_watched<L: Leaf>(
         progress,
     };
     s.stats.nodes += 1;
+    assert!(
+        pos.burn_choice().is_none(),
+        "the root mover's own burn is decided outside the solve"
+    );
     let mut values: Vec<(Card, MoneyChance)> = Vec::new();
     for l in root_groups(pos, s.classes, opts) {
         let rep = ordered(l, opts.order).next().expect("non-empty");
@@ -882,6 +944,10 @@ fn par_solve<L: Leaf + Sync>(
         progress: None,
     };
     exp.stats.nodes += 1;
+    assert!(
+        pos.burn_choice().is_none(),
+        "the root mover's own burn is decided outside the solve"
+    );
     let mut nodes: Vec<PNode> = Vec::new();
     let mut frontier: Vec<usize> = Vec::new();
     // The root's groups of equivalent legal cards, each searched through its first card.
@@ -900,6 +966,11 @@ fn par_solve<L: Leaf + Sync>(
             let PNode::Task(q) = nodes[i] else {
                 unreachable!("the frontier holds open positions only")
             };
+            if q.burn_choice().is_some() {
+                // A pending robber's burn stays one task (the workers' search decides it).
+                frontier.push(i);
+                continue;
+            }
             exp.stats.nodes += 1;
             let team = team_of(q.to_act());
             let mut cards = [0 as Card; 16];

@@ -49,7 +49,7 @@ use std::time::Instant;
 
 use engine::cards::{Bits, Card, Suit, bit, has};
 use engine::game::{Match, Phase};
-use engine::rules::{ace_of_trumps, five_of, legal_plays, trick_winner, trump_rank};
+use engine::rules::{ace_of_trumps, five_of, legal_burns, legal_plays, trick_winner, trump_rank};
 use engine::{SEATS, team_of};
 use equity::hand::{AfterHand, AfterTrick, InHand, Scoring};
 use equity::{EquityTable, MatchState, MoneyChance};
@@ -85,8 +85,20 @@ pub struct MatchCtx {
     pub dealer_team: u8,
 }
 
+/// A rob still to be made in trick 1 by a seat other than the root mover (rule 20, H2): at its
+/// first turn the seat takes `card` (the turned card) and burns any card but the ace of trumps
+/// (rule 21, H3), then plays. The burn is a decision node of the solve (see
+/// [`Position::burn_choice`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rob {
+    /// The robbing seat.
+    pub seat: u8,
+    /// The turned card it takes.
+    pub card: Card,
+}
+
 /// A fully known position inside a hand. Robbing must already be resolved (every hand holds
-/// exactly the cards it will play).
+/// exactly the cards it will play), except a pending rob recorded in [`Position::rob`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Position {
     /// Each seat's remaining cards.
@@ -103,6 +115,9 @@ pub struct Position {
     pub hand: InHand,
     /// The best trump played so far this hand: (its trump rank, the team that played it).
     pub best: Option<(u8, u8)>,
+    /// A rob still to be made in the current trick (`None` once made, or when there is none).
+    /// [`from_match`] leaves it `None`; a caller sets it from the pending seat it returns.
+    pub rob: Option<Rob>,
 }
 
 /// The order children are tried in (the tie rule: the first strictly best is kept).
@@ -227,6 +242,7 @@ pub fn from_match(m: &Match) -> Result<(Position, MatchCtx, Option<u8>), FromMat
             best: p
                 .best_trump
                 .map(|(c, s)| (trump_rank(c, trump), team_of(s))),
+            rob: None,
         },
         MatchCtx {
             games: p.games_won,
@@ -298,6 +314,30 @@ impl Position {
     /// The seat to play next.
     pub fn to_act(&self) -> u8 {
         (self.leader + self.n_played) % SEATS as u8
+    }
+
+    /// When the seat to act must rob first: its hand with the turned card taken, and the cards it
+    /// may burn (any but the ace of trumps: rule 21, H3). `None` otherwise. At such a position
+    /// the seat's choice is its burn (a node of the solve); [`Position::legal`] and
+    /// [`Position::play`] apply only after [`Position::burnt`].
+    pub fn burn_choice(&self) -> Option<(Bits, Bits)> {
+        let r = self.rob?;
+        if r.seat != self.to_act() {
+            return None;
+        }
+        let h = self.hands[usize::from(r.seat)] | bit(r.card);
+        Some((h, legal_burns(h, Some(self.trump))))
+    }
+
+    /// The position after the pending robber (the seat to act) takes the turned card and burns
+    /// `b` (which must be in [`Position::burn_choice`]'s burnable set).
+    pub fn burnt(&self, b: Card) -> Position {
+        let r = self.rob.expect("a rob is pending");
+        debug_assert_eq!(r.seat, self.to_act());
+        let mut q = *self;
+        q.hands[usize::from(r.seat)] = (q.hands[usize::from(r.seat)] | bit(r.card)) & !bit(b);
+        q.rob = None;
+        q
     }
 
     /// The legal cards of the seat to act (engine rules).
@@ -436,7 +476,10 @@ impl<L: Leaf> Search<'_, L> {
         if self.aborted {
             return None;
         }
-        let key = (self.opts.tt && p.n_played == 0).then(|| Key::of(p));
+        if let Some((_, burns)) = p.burn_choice() {
+            return self.burn_node(p, burns);
+        }
+        let key = (self.opts.tt && p.n_played == 0 && p.rob.is_none()).then(|| Key::of(p));
         if let Some(k) = &key {
             self.stats.tt_probes += 1;
             if let Some(v) = self.tt.get(k) {
@@ -474,6 +517,34 @@ impl<L: Leaf> Search<'_, L> {
         }
         Some(v)
     }
+
+    /// A pending robber's burn: every legal burn (any card but the ace of trumps) in the tie
+    /// order, the robber's team's best kept, the first strictly best among equals (the same
+    /// backup rule as a card).
+    fn burn_node(&mut self, p: &Position, burns: Bits) -> Option<MoneyChance> {
+        let team = team_of(p.to_act());
+        let mut best: Option<MoneyChance> = None;
+        let mut tied = 1u32;
+        for b in ordered(burns, self.opts.order) {
+            let v = self.node(&p.burnt(b))?;
+            match best {
+                None => best = Some(v),
+                Some(x) if v.get(team) > x.get(team) => {
+                    best = Some(v);
+                    tied = 1;
+                }
+                Some(x) if v.get(team) == x.get(team) => tied += 1,
+                Some(_) => {}
+            }
+        }
+        if burns.count_ones() >= 2 {
+            self.stats.decision_nodes += 1;
+            if tied >= 2 {
+                self.stats.tied_nodes += 1;
+            }
+        }
+        best
+    }
 }
 
 /// Solve a position exactly: every legal root card is valued and the mover's team's best is
@@ -489,6 +560,10 @@ pub fn solve<L: Leaf>(pos: &Position, ctx: MatchCtx, leaf: &L, opts: Options) ->
         aborted: false,
     };
     s.stats.nodes += 1;
+    assert!(
+        pos.burn_choice().is_none(),
+        "the root mover's own burn is decided outside the solve"
+    );
     let seat = pos.to_act();
     let team = team_of(seat);
     let legal = pos.legal();
