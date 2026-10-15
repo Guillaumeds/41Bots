@@ -371,6 +371,21 @@ def lookup_offer(a) -> dict:
     if row is None:
         sys.exit(f"launch: offer {oid} is not on offer (on-demand) any more; nothing was rented")
     failed = offer_check_failures(row)
+    # The run's own needs, as the normal search filters them (`offer_query`): vast's raw records
+    # give cpu_ram in MB. Review E (2026-10-16): the named offer was never checked against
+    # --min-ram-gb, so a table run needing 480 GB could be rented on a 251 GB machine.
+    try:
+        ram_mb = float(row.get("cpu_ram")) if row.get("cpu_ram") is not None else None
+    except (TypeError, ValueError):
+        ram_mb = None
+    if ram_mb is not None and ram_mb < a.min_ram_gb * 1000:
+        failed.append(f"{ram_mb / 1000:.0f} GB of RAM, below --min-ram-gb {a.min_ram_gb}")
+    try:
+        cores = float(row.get("cpu_cores_effective")) if row.get("cpu_cores_effective") is not None else None
+    except (TypeError, ValueError):
+        cores = None
+    if cores is not None and cores < a.min_cores:
+        failed.append(f"{cores:.0f} effective cores, below --min-cores {a.min_cores}")
     if failed:
         sys.exit(f"launch: offer {oid} fails the launcher's checks: {'; '.join(failed)}; nothing was rented")
     best = dict(row)
@@ -1000,6 +1015,8 @@ def report_run(a, run_id: str, resumable: bool, run_start: float, attempts: list
         "utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     r2_put(f"runs/{run_id}/report.json", json.dumps(report, indent=2).encode())
+    if reason != HANDOVER:
+        finalise_machine_record(run_id, report["outcome"], attempts)
     for i, b in enumerate(benches):
         if b.get("matches_per_sec_per_core"):
             name = run_id if len(benches) == 1 else f"{run_id}-{i}"
@@ -1010,6 +1027,30 @@ def report_run(a, run_id: str, resumable: bool, run_start: float, attempts: list
         with open(summary, "a") as fh:
             fh.write(summary_markdown(run_id, report, saved_files(run_id)))
     return 0 if (final == "DONE" or reason == HANDOVER) and not getattr(a, "stopped", False) else 1
+
+
+def finalise_machine_record(run_id: str, outcome: str, attempts: list[dict]) -> None:
+    """Marks the run's machine-cost record (machines/<run>.json) final when the runner could not
+    (a machine destroyed silent, idle or dead): before (review E, 2026-10-16) such a record stayed
+    `running` for ever, and `machines.py --live` listed the machine as running, stale. Minutes and
+    dollars come from the run's last heartbeat, else the launcher's own times (cleanup.py's rule)."""
+    try:
+        import cleanup  # the same directory: one rule for the launcher and the cleanup
+        rec = json.loads(r2_get(f"machines/{run_id}.json") or b"{}")
+        if not isinstance(rec, dict) or not rec or rec.get("state") == "final":
+            return
+        _, hb = latest_heartbeat(run_id)
+        last = attempts[-1]
+        w = {"dph": last["dph"], "spent_before": round(sum(x["dollars_est"] for x in attempts[:-1]), 4),
+             "created_utc": datetime.fromtimestamp(time.time() - last["minutes"] * 60, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+             "instance_id": last["instance_id"], "offer_id": last["offer_id"], "cpu_name": last.get("cpu_name")}
+        out = cleanup.finalise_machine_record(rec, run_id, outcome, w, hb or {}, time.time())
+        if out is not None:
+            out["finalised_by"] = "launcher"
+            r2_put(f"machines/{run_id}.json", json.dumps(out, indent=2).encode())
+            log(f"machine record of {run_id} marked final ({outcome}): {out['minutes']} min, ${out['usd']}")
+    except (RuntimeError, OSError, ValueError, KeyError) as e:
+        log(f"::warning::could not mark the machine record of {run_id} final: {e}")
 
 
 def watch_record(a, run_id: str, instance_id: int, best: dict, dph: float, spent_before: float,

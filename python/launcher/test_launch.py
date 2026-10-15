@@ -857,6 +857,39 @@ class LauncherTest(unittest.TestCase):
         m["streams"][0]["params"]["threads"] = m["streams"][0].pop("threads")
         self.assertEqual(launch.manifest_stream_errors(m), [])
 
+    def test_offer_chosen_by_id_must_have_the_ram_and_cores_asked_for(self):
+        # Review E: --min-ram-gb and --min-cores apply to a named offer too (vast's cpu_ram in MB).
+        m = {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}}
+        w = World([offer(500, 50, 1.0, cpu_ram=257_000)], ["done:1"])
+        w.forbid_search = True
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, m, "--offer-id", "500", "--min-ram-gb", "480")
+        self.assertIn("257 GB of RAM, below --min-ram-gb 480", str(e.exception))
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, m, "--offer-id", "500", "--min-cores", "64")
+        self.assertIn("32 effective cores, below --min-cores 64", str(e.exception))
+        self.assertEqual(w.created_on, [])
+        w = World([offer(500, 50, 1.0, cpu_ram=515_000)], ["done:1"])
+        w.forbid_search = True
+        code, _ = self.run_launch(w, m, "--offer-id", "500", "--min-ram-gb", "480")
+        self.assertEqual((code, w.created_on), (0, [500]))
+
+    def test_machine_record_of_a_destroyed_run_is_marked_final(self):
+        # Review E: a machine destroyed silent left its record `running` for ever.
+        w = World([offer(1, 11, 1.0)], ["silentidle:2"])
+        w.store[f"machines/{RUN}.json"] = json.dumps({"run_id": RUN, "state": "running", "nodes_total": 10 ** 12,
+                                                      "usd": 0.01, "minutes": 1.0}).encode()
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}})
+        self.assertEqual((code, report["outcome"]), (1, "KILLED"))
+        rec = json.loads(w.store[f"machines/{RUN}.json"])
+        self.assertEqual((rec["state"], rec["outcome"], rec["finalised_by"]), ("final", "KILLED", "launcher"))
+        self.assertIsNotNone(rec["usd_per_1e12_nodes"])
+        # A final record is left alone.
+        w = World([offer(1, 11, 1.0)], ["done:2"])
+        w.store[f"machines/{RUN}.json"] = json.dumps({"run_id": RUN, "state": "final", "outcome": "DONE"}).encode()
+        self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}})
+        self.assertEqual(json.loads(w.store[f"machines/{RUN}.json"]), {"run_id": RUN, "state": "final", "outcome": "DONE"})
+
     def test_failed_search_for_a_replacement_still_reports(self):
         # vast's daily search quota runs out (429) when a replacement is needed: nothing more is
         # rented and the run's report is written (before, the exception skipped it).
