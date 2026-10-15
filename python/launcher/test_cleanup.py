@@ -203,6 +203,38 @@ class SweepTest(unittest.TestCase):
         self.assertFalse(closed["self_destroyed"])
         self.assertIn("DONE", closed["why"])
 
+    def test_closing_finalises_the_machine_record(self):
+        # The runner wrote a running record and heartbeats, then its machine was destroyed: the record
+        # becomes final with the heartbeat's minutes and dollars, and the cost per node recomputed.
+        r2 = FakeR2()
+        r2.put("watch/r1.json", json.dumps({"instance_id": 9, "dph": 2.0, "offer_id": 55,
+                                            "created_utc": cleanup.utc(NOW - 600 * MIN)}).encode())
+        r2.put("runs/r1/FAILED", b"{}", NOW - 30 * MIN)
+        r2.put("runs/r1/heartbeat/000001.json", json.dumps({"elapsed_s": 60, "est_cost_usd": 0.03}).encode())
+        r2.put("runs/r1/heartbeat/000120.json", json.dumps(
+            {"elapsed_s": 7200, "est_cost_usd": 4.0, "progress": {"nodes_total": 5e12}}).encode())
+        r2.put("machines/r1.json", json.dumps({"run_id": "r1", "state": "running", "nodes_total": 4e12,
+                                               "worlds_finished": 40, "cpu_model": "X", "minutes": 100,
+                                               "usd": 3.33, "usd_per_1e12_nodes": 0.8325}).encode())
+        self.sweep(r2, [])
+        m = json.loads(r2.get("machines/r1.json"))
+        self.assertEqual((m["state"], m["outcome"], m["minutes"], m["usd"]), ("final", "FAILED", 120.0, 4.0))
+        self.assertEqual(m["nodes_total"], 4e12)  # the runner's own count, not the heartbeat's
+        self.assertEqual(m["usd_per_1e12_nodes"], 1.0)
+        self.assertEqual((m["cpu_model"], m["offer_id"], m["finalised_by"]), ("X", 55, "cleanup"))
+        # A record the runner already made final is left alone; a run without any record gets one
+        # from the launcher's watch data (an upper bound, said so).
+        r2.put("watch/r2.json", json.dumps({"instance_id": 10, "dph": 1.0, "created_utc": cleanup.utc(NOW - 120 * MIN)}).encode())
+        r2.put("machines/r2.json", json.dumps({"state": "final", "usd": 1.0, "minutes": 60}).encode())
+        r2.put("watch/r3.json", json.dumps({"instance_id": 11, "dph": 1.0, "created_utc": cleanup.utc(NOW - 120 * MIN)}).encode())
+        r2.put("runs/r3/DONE", b"{}", NOW - 30 * MIN)
+        self.sweep(r2, [])
+        self.assertEqual(json.loads(r2.get("machines/r2.json")), {"state": "final", "usd": 1.0, "minutes": 60})
+        m3 = json.loads(r2.get("machines/r3.json"))
+        self.assertEqual((m3["state"], m3["outcome"], m3["minutes"], m3["usd"], m3["nodes_total"]), ("final", "DONE", 120.0, 2.0, 0))
+        self.assertIsNone(m3["usd_per_1e12_nodes"])
+        self.assertIn("upper bound", m3["finalised_basis"])
+
     def test_handed_over_run_still_working_stays_watched(self):
         r2 = FakeR2()
         r2.put("watch/r1.json", json.dumps({"instance_id": 9, "dph": 1.0}).encode())
