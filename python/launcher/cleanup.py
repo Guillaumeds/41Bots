@@ -13,10 +13,12 @@ destroyed only when one of these holds:
 - its run wrote DONE or FAILED more than 10 minutes ago (the runner should have destroyed itself);
 - its run has heartbeated since the machine started, but not for 20 minutes, or it never
   heartbeated and is older than 45 minutes; in both cases only when vast shows it idle (CPU below
-  50%) or not running. A silent machine that vast shows running and busy (CPU at least 50%, or no
+  50%, or below the run's own busy threshold from watch.json when lower, e.g. 1% for a run that
+  keeps only a few cores busy) or not running. A silent machine that vast shows running and busy (CPU at least 50%, or no
   CPU reading) is treated as an upload or network problem (2026-10-15): it is asked to stop and
   upload what it finished (runs/<run>/STOP) and destroyed only if still silent 15 minutes later;
-- vast shows it exited or offline;
+- vast shows it exited, or offline with no heartbeat for 20 minutes (vast losing touch with a
+  host that still heartbeats to R2 is not a dead run);
 - the run is 30 minutes past its own deadline (the runner stops itself at the deadline);
 - the run's machines cost more than its dollar cap (watch.json): first it is asked to stop and
   upload what it finished (runs/<run>/STOP), then destroyed if still alive 15 minutes later;
@@ -94,14 +96,25 @@ def decide(inst: dict, state: dict, now: float, everything: bool = False) -> tup
     if everything:
         return "destroy", "the 'all' option"
     status = inst.get("actual_status")
-    if status in DEAD_STATES:
+    start = parse_time(inst.get("start_date")) or now
+    # Heartbeats of an earlier machine of the same run do not count as this one's.
+    beats = [t for t in state.get("heartbeats") or [] if t >= start - 60]
+    # Offline means vast has lost touch with the host; a run that still heartbeats to R2 is
+    # working (review E, 2026-10-16: destroying it lost the work since its last upload). It goes
+    # through the other rules (silence, markers, cap) like a running machine.
+    working_offline = status == "offline" and bool(beats) and now - max(beats) <= SILENT_S
+    if status in DEAD_STATES and not working_offline:
         return "destroy", f"vast shows it {status}"
     for marker, t in sorted((state.get("markers") or {}).items()):
         if t is not None and now - t > MARKER_GRACE_S:
             return "destroy", f"its run wrote {marker} {(now - t) / 60:.0f} min ago and the machine did not destroy itself"
-    start = parse_time(inst.get("start_date")) or now
-    # Heartbeats of an earlier machine of the same run do not count as this one's.
-    beats = [t for t in state.get("heartbeats") or [] if t >= start - 60]
+    w = state.get("watch") or {}
+    # The run's own idea of busy (launch.py busy_threshold): a run declared to use few cores
+    # (--low-cpu-pct 1) is busy at 17% CPU, so a hang of its uploads is not taken for a dead run.
+    try:
+        busy_pct = min(BUSY_CPU_PCT, float(w.get("busy_cpu_pct") if w.get("busy_cpu_pct") is not None else BUSY_CPU_PCT))
+    except (TypeError, ValueError):
+        busy_pct = BUSY_CPU_PCT
     silent_why = None
     if beats:
         silent = now - max(beats)
@@ -114,7 +127,7 @@ def decide(inst: dict, state: dict, now: float, everything: bool = False) -> tup
         cpu_text = "no CPU reading" if cpu is None else f"CPU {cpu:.0f}%"
         # Running and busy (or with no CPU reading to say otherwise): an upload or network
         # problem, not a dead run. Ask it to stop and upload; destroy only if still silent later.
-        if status == "running" and (cpu is None or cpu >= BUSY_CPU_PCT):
+        if status == "running" and (cpu is None or cpu >= busy_pct):
             stop = state.get("stop")
             if stop is None:
                 return "stop", f"{silent_why} but vast shows it running and busy ({cpu_text}): asking it to stop and upload"
@@ -123,7 +136,6 @@ def decide(inst: dict, state: dict, now: float, everything: bool = False) -> tup
                                    f"{(now - stop) / 60:.0f} min after the stop request")
             return "keep", f"{silent_why}, busy ({cpu_text}): stop requested {(now - stop) / 60:.0f} min ago, waiting for its upload"
         return "destroy", f"{silent_why} and vast shows it {status} with {cpu_text}"
-    w = state.get("watch") or {}
     deadline = parse_time(w.get("deadline_utc"))
     if deadline and now - deadline > DEADLINE_GRACE_S:
         return "destroy", f"its run is {(now - deadline) / 60:.0f} min past its deadline {w.get('deadline_utc')}"
@@ -347,6 +359,14 @@ def sweep(r2, instances: list[dict], now: float, everything: bool, dry_run: bool
         run_id = key[len("watch/"):].removesuffix(".json")
         w = get_json(r2, key)
         iid = int(w.get("instance_id") or 0)
+        if run_id not in destroyed and iid not in live_ids and not dry_run:
+            # Absent from the listing: make sure with a reading of its own before closing the run
+            # (an incomplete listing would otherwise close a working run and delete its key).
+            fresh = instance_now(iid) if iid else None
+            if fresh and fresh.get("actual_status") not in DEAD_STATES + (None, "destroyed"):
+                log(f"handed-over run {run_id}: instance {iid} missing from the listing but vast shows it "
+                    f"{fresh.get('actual_status')}: not closed")
+                continue
         if run_id in destroyed or iid not in live_ids:
             markers = [m for m in ("DONE", "FAILED") if r2.mtime(f"runs/{run_id}/{m}") is not None]
             if dry_run:
