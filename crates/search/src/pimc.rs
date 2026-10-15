@@ -216,13 +216,13 @@ pub struct Ctx<'a> {
 
 /// The value of a match once the current hand is over (docs/M3-SPEC.md §5.4).
 fn leaf_now(m: &Match, leaf: &SharedLeaf) -> MoneyChance {
-    if let Some(money) = m.money() {
-        let t = (0..4u8)
-            .max_by_key(|&t| (money[usize::from(t)], core::cmp::Reverse(t)))
-            .expect("four teams");
+    // The match winner is the team with two games (read from the games, not the money: with
+    // a stake of 0 every team's money is 0).
+    let state = MatchState::from_public(&m.public());
+    if let Some(t) = state.winner() {
         return MoneyChance::certain(t);
     }
-    leaf.value(&MatchState::from_public(&m.public()))
+    leaf.value(&state)
 }
 
 /// Play the hand out with `rules-v1` at every seat, each from its own view, and value the end.

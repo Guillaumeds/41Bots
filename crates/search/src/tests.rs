@@ -290,3 +290,42 @@ fn pimc_plays_whole_hands() {
         m.apply(a).expect("legal");
     }
 }
+
+/// A rollout that ends the match is certain money for the team with two games, whatever the
+/// stake (review B, 2026-10-15: the winner was read from the money, so a stake of 0 always
+/// named team 0).
+#[test]
+fn rollout_match_end_is_certain_for_the_two_game_team_at_any_stake() {
+    let l = leaf();
+    let mut found = 0;
+    let mut k = 0u64;
+    while found < 3 {
+        assert!(k < 400, "no match-ending rollouts found");
+        let mut m = Match::new(Rng::derive(0xB0B, &[k]).next_u64(), Rules { stake: 0 });
+        k += 1;
+        while m.phase() != Phase::MatchOver {
+            let p = m.public();
+            if p.trick_no == 1
+                && p.trick_cards.is_empty()
+                && matches!(m.phase(), Phase::AwaitPlay(_))
+            {
+                let mut r = m.clone();
+                let v = rollout(&mut r, &*l, Rules::HOUSE);
+                if r.phase() == Phase::MatchOver {
+                    let w = (0..4u8)
+                        .find(|&t| r.games_won()[usize::from(t)] == 2)
+                        .expect("a team with two games");
+                    assert_eq!(v, MoneyChance::certain(w));
+                    if w != 0 {
+                        found += 1;
+                    }
+                }
+            }
+            let seat = m.to_act().expect("to act");
+            let v = m.view(seat);
+            let legal = m.legal_actions();
+            let a = bots::decide(&v, &Rules::HOUSE, &legal).0;
+            m.apply(a).expect("legal");
+        }
+    }
+}
