@@ -47,7 +47,7 @@ self_destroy() {
     why=${why//"$key"/***}
     echo "boot: self-destroy with $name refused: ${why:-no confirmation from vastai}" >&2
   done
-  echo "boot: instance $CONTAINER_ID could not destroy itself; the launcher destroys it on DONE/FAILED or a stale heartbeat, vast-cleanup.yml after 2 hours" >&2
+  echo "boot: instance $CONTAINER_ID could not destroy itself; the launcher destroys it on DONE/FAILED or a stale heartbeat, vast-cleanup.yml 10 minutes after the marker" >&2
 }
 
 # rclone's configuration in memory only (rclone's documented /dev/null switch): the r2 remote
@@ -124,6 +124,13 @@ while true; do
   kill -0 "$runner_pid" 2>/dev/null || break
 done
 trap - TERM INT HUP
+# Exit status 2: the runner refused the manifest before starting (it writes no marker then).
+# Without a FAILED marker the launcher would take the vanished machine for a start failure and
+# rent the same manifest again, up to 3 more times (review E, 2026-10-16).
+if [[ $status == 2 ]]; then
+  printf '{"stage":"manifest","error":"the runner refused the manifest (exit status 2); see the container log"}\n' >FAILED || true
+  rclone copyto "${RC[@]}" FAILED "$R/runs/$RUN_ID/FAILED" || true
+fi
 # Only reached if the runner could not destroy the instance itself (e.g. it crashed).
 echo "boot: runner exited with $status" >&2
 self_destroy || true

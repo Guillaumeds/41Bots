@@ -69,7 +69,7 @@ use serde_json::{Value, json};
 
 use crate::bundle::{bundle_dir, sha256_file};
 use crate::net::{self, Net};
-use crate::remote::{DirRemote, Remote, UPLOAD_ENTRY, kill_point, retry};
+use crate::remote::{DirRemote, Remote, UPLOAD_ENTRY, kill_point, retry, retry_patient};
 use crate::sched::{
     Chunks, Manifest2, StreamState, chunk_seed, finished_median, latest_done, parse_v2, pick,
     size_note, sprt_prefix,
@@ -337,6 +337,8 @@ struct Running {
     seed: u64,
     dir: PathBuf,
     started: Instant,
+    /// The memory it was admitted with (`mem::chunk_need`).
+    mem: u64,
 }
 
 struct Run {
@@ -376,6 +378,10 @@ struct Run {
     last_partial: Instant,
     /// The progress estimates of the running chunks (`<stream>/<index>`: their `progress.eta`).
     chunk_etas: BTreeMap<String, Value>,
+    /// The container's memory, for the check that chunks running together fit in it.
+    limit: crate::mem::Limit,
+    /// Chunks whose wait for memory has been logged.
+    mem_waits: BTreeSet<(usize, u64)>,
 }
 
 fn compact_utc() -> String {
@@ -444,6 +450,8 @@ pub fn run(manifest: &Value, work: &Path) -> ExitCode {
         phase: "start".into(),
         last_partial: Instant::now(),
         chunk_etas: BTreeMap::new(),
+        limit: crate::mem::Sys::host().limit(),
+        mem_waits: BTreeSet::new(),
     };
     let outcome = r.go();
     let ok = outcome.is_ok();
@@ -505,6 +513,22 @@ impl Run {
         })
     }
 
+    /// The peak memory a chunk of stream `k` will hold (`mem::chunk_need`).
+    fn chunk_need(&self, k: usize) -> u64 {
+        let s = &self.m.streams[k];
+        let name = s
+            .params
+            .get("equity_input")
+            .and_then(Value::as_str)
+            .unwrap_or("equity");
+        let equity = self
+            .inputs
+            .get(name)
+            .and_then(|p| fs::metadata(p).ok())
+            .map_or(128 << 20, |m| m.len());
+        crate::mem::chunk_need(&s.kind, &s.params, s.threads as u64, equity, &self.limit)
+    }
+
     /// The live prefix of chunk `index` of stream `k`, where its files are uploaded as it runs
     /// (`runs/<run>/partial/<stream>/<index:06>/out`).
     fn live_prefix(&self, k: usize, index: u64) -> String {
@@ -530,7 +554,7 @@ impl Run {
         // Heartbeat numbering continues across machines.
         let hb_prefix = format!("{}/heartbeat/", self.prefix());
         self.hb_seq = self
-            .net_call(move |r| r.list(&hb_prefix))?
+            .net_call(move |r| retry(3, || r.list(&hb_prefix)))?
             .iter()
             .filter_map(|k| {
                 k.rsplit('/')
@@ -614,7 +638,7 @@ impl Run {
     /// back in full and hashed), so everything else is redone from its seed.
     fn resume(&mut self) -> Result<(), String> {
         let done_prefix = format!("done/{}/", self.m.run_id);
-        let keys = self.net_call(move |r| r.list(&done_prefix))?;
+        let keys = self.net_call(move |r| retry(3, || r.list(&done_prefix)))?;
         // Local leftovers of unfinished chunks are never reused.
         let _ = fs::remove_dir_all(self.root.join("chunks"));
         let _ = fs::remove_dir_all(self.root.join("bundles"));
@@ -765,6 +789,7 @@ impl Run {
             seed,
             dir,
             started: Instant::now(),
+            mem: 0,
         })
     }
 
@@ -859,12 +884,14 @@ impl Run {
         );
         let n = self.entries.len() as u64 + 1;
         UPLOAD_ENTRY.store(n, Ordering::Relaxed);
+        // A failure here ends the run (no new chunks, then FAILED), so a network failure of a
+        // few minutes is waited out (`retry_patient`; the heartbeat goes on meanwhile).
         let (l2, k2) = (local.clone(), key.clone());
-        self.net_call(move |rem| retry(3, || rem.put(&l2, &k2, true)))
+        self.net_call(move |rem| retry_patient(8, || rem.put(&l2, &k2, true)))
             .map_err(|e| format!("upload {key}: {e}"))?;
         // Read back in full and hash before listing it.
         let k2 = key.clone();
-        match self.net_call(move |rem| retry(3, || rem.sha256(&k2)))? {
+        match self.net_call(move |rem| retry_patient(8, || rem.sha256(&k2)))? {
             Some((h, b)) if h == sha && b == bytes => {}
             other => return Err(format!("upload check {key}: got {other:?}, want {sha}")),
         }
@@ -896,9 +923,26 @@ impl Run {
             println!("runner: {kind}: {note}");
         }
         if self.last_done_write.elapsed().as_secs() >= self.m.upload_every_s {
-            self.write_done()?;
+            self.write_done_periodic();
         }
         Ok(())
+    }
+
+    /// The periodic done-list write. A failure (the network down past `retry`'s three tries) is
+    /// logged and tried again at the next interval: the chunks' bundles are already uploaded and
+    /// verified, and the run's last write (`go`) must still succeed. Before review E
+    /// (2026-10-16) it ended the run: from the scheduler's loop it returned at once, dropping the
+    /// running chunks (their workers stop when the orchestrator lets go of them) and writing
+    /// FAILED, so a one-minute network failure lost every running chunk's unsaved work and ended
+    /// the run with no replacement.
+    fn write_done_periodic(&mut self) {
+        if let Err(e) = self.write_done() {
+            eprintln!(
+                "runner: WARNING: the done-list could not be written ({e}); trying again in {} s",
+                self.m.upload_every_s
+            );
+            self.last_done_write = Instant::now();
+        }
     }
 
     fn schedule(&mut self) -> Result<(), String> {
@@ -929,11 +973,13 @@ impl Run {
                     }
                 }
             }
-            // Start chunks while threads are free.
+            // Start chunks while threads are free and their memory fits beside the running ones.
             let mut used: usize = running
                 .iter()
                 .map(|r| self.m.streams[r.stream].threads)
                 .sum();
+            let mut held: u64 = running.iter().map(|r| r.mem).sum();
+            let mem_budget = crate::mem::budget(0, &self.limit).0;
             if error.is_none() && !stopped {
                 loop {
                     // A chunk needing more threads than the machine has still runs, alone.
@@ -947,7 +993,24 @@ impl Run {
                     else {
                         break;
                     };
-                    let r = self.spawn(k, i)?;
+                    // Lower-priority chunks never jump ahead of one that waits for memory.
+                    let need = self.chunk_need(k);
+                    if !fits_memory(held, need, running.len(), mem_budget) {
+                        if self.mem_waits.insert((k, i)) {
+                            println!(
+                                "runner: chunk {}/{i} waits for memory: it needs {} MB, the \
+                                 running chunks hold {} MB of the {} MB budget",
+                                self.m.streams[k].name,
+                                need >> 20,
+                                held >> 20,
+                                mem_budget >> 20
+                            );
+                        }
+                        break;
+                    }
+                    let mut r = self.spawn(k, i)?;
+                    r.mem = need;
+                    held += need;
                     used += self.m.streams[k].threads;
                     running.push(r);
                 }
@@ -1034,7 +1097,7 @@ impl Run {
                 }
             }
             if self.dirty && self.last_done_write.elapsed().as_secs() >= self.m.upload_every_s {
-                self.write_done()?;
+                self.write_done_periodic();
             }
             self.heartbeat(false, "chunks");
             std::thread::sleep(Duration::from_millis(100));
@@ -1249,6 +1312,13 @@ impl Run {
     }
 }
 
+/// Whether a chunk needing `need` bytes may start beside running chunks that hold `held`:
+/// always when none runs (a chunk sizes its own tables to the machine), else only within
+/// `budget` (the container's memory less the safety margin, `mem::budget`).
+fn fits_memory(held: u64, need: u64, running: usize, budget: u64) -> bool {
+    running == 0 || held.saturating_add(need) <= budget
+}
+
 /// Whether a running chunk's own heartbeat (written by its worker into the chunk directory)
 /// declares a stretch of deliberately partial CPU use.
 fn chunk_partial(dir: &Path) -> bool {
@@ -1303,4 +1373,84 @@ fn stop_child(c: &mut Child) {
     }
     let _ = c.kill();
     let _ = c.wait();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mem::Limit;
+
+    /// Review E (2026-10-16): the table measurement's three `search_measure` streams of 32
+    /// one-thread worlds at 12, 3 and 1 GB tables on a 500 GB machine. Their threads fit
+    /// together (96 of 190), but their tables (384 + 96 + 32 GB) do not: the 12 GB stream runs
+    /// first, alone, then the other two together, instead of all three at once into the kernel's
+    /// out-of-memory killer.
+    #[test]
+    fn streams_whose_tables_do_not_fit_together_run_one_after_another() {
+        let stream = |name: &str, priority: u64, tt: u64| {
+            json!({ "name": name, "priority": priority, "kind": "search_measure", "chunks": 1,
+                    "params": { "threads": 32, "trick": 1, "worlds_at_once": 32,
+                                "solve_threads": 1, "tt_mb": tt } })
+        };
+        let m = crate::sched::parse_v2(&json!({ "format": 2, "run_id": "t", "run_seed": 1,
+            "streams": [stream("tt12g", 1, 12_288), stream("tt3g", 2, 3_072),
+                        stream("tt1g", 3, 1_024)] }))
+        .expect("manifest");
+        let limit = Limit {
+            bytes: 500_000_000_000,
+            source: "test",
+            cgroup: None,
+            mem_total: Some(500_000_000_000),
+            mem_available: None,
+        };
+        let budget = crate::mem::budget(0, &limit).0;
+        let need = |k: usize| {
+            let s = &m.streams[k];
+            crate::mem::chunk_need(&s.kind, &s.params, s.threads as u64, 26 << 20, &limit)
+        };
+        let gib = |b: u64| b >> 30;
+        assert_eq!((gib(need(0)), gib(need(1)), gib(need(2))), (385, 97, 33));
+        // The scheduler's loop, with 190 threads: start chunks while threads and memory allow.
+        let mut states = vec![StreamState::default(); 3];
+        let wave = |states: &mut Vec<StreamState>, running: &mut Vec<usize>| {
+            let mut started = Vec::new();
+            loop {
+                let used: usize = running.iter().map(|&k| m.streams[k].threads).sum();
+                let held: u64 = running.iter().map(|&k| need(k)).sum();
+                let free = if used == 0 { usize::MAX } else { 190 - used };
+                let Some((k, i)) = crate::sched::pick(&m.streams, states, free, 0, None) else {
+                    break;
+                };
+                if !fits_memory(held, need(k), running.len(), budget) {
+                    break;
+                }
+                states[k].running.insert(i);
+                running.push(k);
+                started.push(k);
+            }
+            started
+        };
+        let mut running = Vec::new();
+        assert_eq!(
+            wave(&mut states, &mut running),
+            vec![0],
+            "the 12 GB stream alone"
+        );
+        // It finishes; the other two fit together.
+        running.clear();
+        states[0].running.clear();
+        states[0].done.insert(0, 1.0);
+        assert_eq!(wave(&mut states, &mut running), vec![1, 2]);
+        // Small kinds and a chunk with nothing beside it are never held back.
+        assert!(fits_memory(u64::MAX, 1, 0, 0));
+        assert_eq!(
+            crate::mem::chunk_need("teacher", &json!({}), 1, 0, &limit),
+            0
+        );
+        assert_eq!(
+            crate::mem::chunk_need("search_measure", &json!({ "tt_mb": "auto" }), 32, 0, &limit),
+            budget,
+            "auto tables take the machine"
+        );
+    }
 }

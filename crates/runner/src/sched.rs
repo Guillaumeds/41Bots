@@ -36,6 +36,19 @@ pub const KINDS: [&str; 11] = [
     "belief_bench",
 ];
 
+/// The keys of a stream object; everything else goes in `params`.
+pub const STREAM_KEYS: [&str; 5] = ["name", "priority", "kind", "params", "chunks"];
+
+/// Stream params the scheduler reads (the rest goes to the chunk kind): a stream-level copy of
+/// one of these is a misplaced param.
+const PARAMS_KEYS: [&str; 5] = [
+    "threads",
+    "chunk_sizes",
+    "est_seconds",
+    "blocks_per_chunk",
+    "sprt",
+];
+
 /// How many chunks a stream has.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Chunks {
@@ -239,6 +252,21 @@ pub fn parse_v2(v: &Value) -> Result<Manifest2, String> {
             .to_string();
         if !names.insert(name.clone()) {
             return Err(format!("stream name `{name}` is used twice"));
+        }
+        // A key the scheduler does not read would be ignored in silence (review E, 2026-10-16:
+        // a stream-level `"threads": 32` ran each chunk on one thread), so it is refused.
+        if let Some(o) = s.as_object()
+            && let Some(k) = o.keys().find(|k| !STREAM_KEYS.contains(&k.as_str()))
+        {
+            let hint = if PARAMS_KEYS.contains(&k.as_str()) {
+                format!(" (it belongs in the stream's params: `params.{k}`)")
+            } else {
+                String::new()
+            };
+            return Err(format!(
+                "stream `{name}`: unknown key `{k}`{hint}; a stream has only {}",
+                STREAM_KEYS.join(", ")
+            ));
         }
         let priority = s
             .get("priority")
@@ -612,6 +640,28 @@ mod tests {
             .is_err()
         );
         assert!(parse_v2(&json!({"format": 3})).is_err());
+        // A stream-level `threads` (review E: the table measurement's manifest) is refused, not
+        // silently run on one thread per chunk.
+        let e = parse_v2(&m2(
+            json!([{"name": "tt12g", "priority": 1, "kind": "search_measure",
+                                     "threads": 32, "chunks": 1, "params": {"tt_mb": 12288}}]),
+        ))
+        .expect_err("stream-level threads");
+        assert!(
+            e.contains("unknown key `threads`") && e.contains("params.threads"),
+            "{e}"
+        );
+        assert!(
+            parse_v2(&m2(json!([{"name": "a", "priority": 1, "kind": "difftest",
+                                     "chunks": 1, "note": "x"}])))
+            .is_err()
+        );
+        let ok = parse_v2(&m2(
+            json!([{"name": "tt12g", "priority": 1, "kind": "search_measure",
+                                      "chunks": 1, "params": {"threads": 32, "tt_mb": 12288}}]),
+        ))
+        .expect("params.threads");
+        assert_eq!(ok.streams[0].threads, 32);
     }
 
     fn streams(v: Value) -> Vec<Stream> {

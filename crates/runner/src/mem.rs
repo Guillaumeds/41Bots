@@ -347,6 +347,56 @@ pub(crate) fn other_bytes(equity: &Path, threads: u64) -> u64 {
     table + PROCESS_BASE + threads * STACK_PER_THREAD
 }
 
+/// The peak memory (bytes) one format-2 chunk will hold, for the orchestrator's check that the
+/// chunks it runs at the same time fit in memory together (`v2.rs`; review E, 2026-10-16). Each
+/// chunk sizes its tables as if it had the machine to itself (this module's plan), so without that
+/// check three `search_measure` chunks of 32 one-thread worlds at 12, 3 and 1 GB tables would all
+/// start at once on a 500 GB machine and need 512 GB.
+/// - `search_measure` with explicit numbers (`worlds_at_once`/`solve_threads`, a numeric `tt_mb`):
+///   its tables at the size its own plan will choose on this machine, plus its other memory;
+/// - `search_measure` with `"auto"` anywhere, `solver_spike` and `t1bench`: the whole budget
+///   (they size their tables to the machine), so they never run beside another such chunk;
+/// - every other kind: 0 (small, as before).
+pub(crate) fn chunk_need(
+    kind: &str,
+    params: &Value,
+    threads: u64,
+    equity_bytes: u64,
+    limit: &Limit,
+) -> u64 {
+    let whole = budget(0, limit).0;
+    match kind {
+        "search_measure" => {
+            let fixed = crate::measure::spread(params, threads);
+            let requested = Requested::from_param(params, "tt_mb");
+            match (fixed, requested) {
+                (
+                    Ok(crate::measure::Spread::Fixed {
+                        workers,
+                        solve_threads,
+                    }),
+                    Ok(req @ Requested::Mb(_)),
+                ) => {
+                    let tables = if solve_threads > 1 {
+                        Tables::Shared {
+                            count: workers,
+                            solve_threads,
+                        }
+                    } else {
+                        Tables::Own { count: workers }
+                    };
+                    let other = equity_bytes + PROCESS_BASE + tables.threads() * STACK_PER_THREAD;
+                    let p = plan(req, tables, other, limit);
+                    (tables.peak(p.tt_mb) + other).min(whole)
+                }
+                _ => whole,
+            }
+        }
+        "solver_spike" | "t1bench" => whole,
+        _ => 0,
+    }
+}
+
 /// Plans `tt_mb` on this machine and reports a warning on stderr.
 pub(crate) fn plan_here(requested: Requested, tables: Tables, equity: &Path, what: &str) -> Plan {
     let limit = Sys::host().limit();

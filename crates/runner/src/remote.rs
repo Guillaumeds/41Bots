@@ -599,9 +599,54 @@ pub fn retry<T>(attempts: u32, mut f: impl FnMut() -> Result<T, String>) -> Resu
     last
 }
 
+/// The pause before attempt `a` (from 1) of [`retry_patient`]: 2, 4, 8, 16, 32 s, then 60 s.
+pub fn backoff(a: u32) -> Duration {
+    Duration::from_secs((2u64 << a.saturating_sub(1).min(5)).min(60))
+}
+
+/// [`retry`] with growing pauses ([`backoff`]): for uploads whose failure would end the run (a
+/// finished chunk's bundle), so a network failure of a few minutes is waited out. Eight attempts
+/// wait about 3 minutes in all, besides the attempts themselves.
+pub fn retry_patient<T>(
+    attempts: u32,
+    mut f: impl FnMut() -> Result<T, String>,
+) -> Result<T, String> {
+    let mut last = Err("no attempt".to_string());
+    for a in 0..attempts.max(1) {
+        if a > 0 {
+            std::thread::sleep(backoff(a));
+        }
+        last = f();
+        match &last {
+            Ok(_) => break,
+            Err(e) => eprintln!("runner: network call failed (attempt {}): {e}", a + 1),
+        }
+    }
+    last
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn patient_backoff() {
+        let s: Vec<u64> = (1..=8).map(|a| backoff(a).as_secs()).collect();
+        assert_eq!(s, [2, 4, 8, 16, 32, 60, 60, 60]);
+        assert_eq!(
+            s[..7].iter().sum::<u64>(),
+            182,
+            "eight attempts wait about 3 minutes"
+        );
+        let mut n = 0;
+        assert_eq!(
+            retry_patient(3, || {
+                n += 1;
+                if n < 2 { Err("x".into()) } else { Ok(n) }
+            }),
+            Ok(2)
+        );
+    }
 
     #[test]
     fn dir_remote_immutable_and_list() {
