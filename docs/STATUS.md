@@ -147,7 +147,7 @@ M1 adds the table manager, the arena (14-way duplicate block, generalised SPRT, 
 - The 9734 ran at only 224 MB tables per thread (0.6 GB of RAM per thread) with no loss of nodes per second, but nodes per second is blind to a small table making the solver search positions again: that is what the new sweep measures.
 - **Table-size sweep added to the bench** (M3-SPEC §13.1 item 11): `sweep_mb`, `sweep_s`; `analyse_sweep` in `search::t1bench`; fmt, clippy -D warnings and `cargo test --workspace` pass; local end-to-end run on 4 threads works mechanically (no world finishes in 12 s there, so nothing paired).
 
-## 2026-10-15 (Mauritius afternoon): speed-test wave 3 (about $4) and the first table-size sweeps
+## 2026-10-15 (Mauritius afternoon): speed-test wave 3 (about $3) and the first table-size sweeps
 Five machines (15–30 minute limits, dollar caps, checked every 30 s; all destroyed, vast showed 0 instances afterwards). Binaries: commit 56851ce (adds the sweep). Results in R2 `runs/t1bench-*-w3/out/t1bench/`.
 
 | Machine | Threads, RAM, rate | Fill $/10^12 nodes | Score $/10^12 | Total speed (billion nodes/s) | Golden set at fill speed |
