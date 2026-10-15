@@ -261,11 +261,37 @@ impl Drop for Active<'_> {
     }
 }
 
+/// The leaf values of one solve, remembered. The match state around the hand (games won, the
+/// dealer's team) is fixed during a solve, so a game-won leaf depends only on the winning team
+/// and a hand-end leaf only on the four scores: each is taken from the leaf evaluator (the
+/// equity table: validate, rotate to canonical form, index, rotate back) once, then read from
+/// here. The hand-end memo is direct-mapped with [`LEAF_SLOTS`] entries keyed by the packed
+/// scores (bounded: 40 KB, allocated on the first hand-end leaf; a slot holding other scores is
+/// overwritten), and the whole key is compared on every read, so a hit is exactly the
+/// evaluator's value for those scores.
+struct LeafCache {
+    game: [Option<MoneyChance>; 4],
+    hand: Option<Box<[(u64, MoneyChance)]>>,
+}
+
+/// Hand-end memo entries (a power of two).
+const LEAF_SLOTS: usize = 1024;
+
+impl LeafCache {
+    fn new() -> LeafCache {
+        LeafCache {
+            game: [None; 4],
+            hand: None,
+        }
+    }
+}
+
 struct Search<'a, L: Leaf> {
     ctx: MatchCtx,
     leaf: &'a L,
     opts: FastOptions,
-    classes: Classes,
+    classes: &'static Classes,
+    leaves: LeafCache,
     tt: Tt<'a>,
     stats: Stats,
     start: Instant,
@@ -308,25 +334,43 @@ fn order_key(c: Card, p: &Position, winner: Option<(Card, u8, EffSuit)>, team: u
 impl<L: Leaf> Search<'_, L> {
     fn game_won(&mut self, team: u8) -> MoneyChance {
         self.stats.leaves += 1;
+        if let Some(v) = self.leaves.game[usize::from(team)] {
+            return v;
+        }
         let mut games = self.ctx.games;
         games[usize::from(team)] += 1;
-        if games[usize::from(team)] >= engine::game::GAMES_TO_WIN {
-            return MoneyChance::certain(team);
-        }
-        self.leaf.value(&MatchState {
-            scores: [0; 4],
-            games,
-            dealer_team: (self.ctx.dealer_team + 1) % 4,
-        })
+        let v = if games[usize::from(team)] >= engine::game::GAMES_TO_WIN {
+            MoneyChance::certain(team)
+        } else {
+            self.leaf.value(&MatchState {
+                scores: [0; 4],
+                games,
+                dealer_team: (self.ctx.dealer_team + 1) % 4,
+            })
+        };
+        self.leaves.game[usize::from(team)] = Some(v);
+        v
     }
 
     fn hand_over(&mut self, scores: [u8; 4]) -> MoneyChance {
         self.stats.leaves += 1;
-        self.leaf.value(&MatchState {
+        // The key: the four scores, with a bit above them so that no key is zero (an empty
+        // slot); the slot from a fixed mixing of the key.
+        let key = u64::from(u32::from_le_bytes(scores)) | 1 << 32;
+        let slot = ((key as u32).wrapping_mul(0x9E37_79B1) >> 22) as usize % LEAF_SLOTS;
+        let memo = self.leaves.hand.get_or_insert_with(|| {
+            vec![(0, MoneyChance::certain(0)); LEAF_SLOTS].into_boxed_slice()
+        });
+        if memo[slot].0 == key {
+            return memo[slot].1;
+        }
+        let v = self.leaf.value(&MatchState {
             scores,
             games: self.ctx.games,
             dealer_team: (self.ctx.dealer_team + 1) % 4,
-        })
+        });
+        memo[slot] = (key, v);
+        v
     }
 
     fn child(&mut self, p: &Position, c: Card, cut: Option<Cut>) -> Res {
@@ -583,7 +627,8 @@ pub fn solve_fast_watched<L: Leaf>(
         ctx,
         leaf,
         opts,
-        classes: Classes::new(pos.trump),
+        classes: Classes::shared(pos.trump),
+        leaves: LeafCache::new(),
         tt: if opts.tt {
             Tt::Own(mem.own(opts.tt_mb))
         } else {
@@ -596,7 +641,7 @@ pub fn solve_fast_watched<L: Leaf>(
     };
     s.stats.nodes += 1;
     let mut values: Vec<(Card, MoneyChance)> = Vec::new();
-    for l in root_groups(pos, &s.classes, opts) {
+    for l in root_groups(pos, s.classes, opts) {
         let rep = ordered(l, opts.order).next().expect("non-empty");
         match s.child(pos, rep, None) {
             Res::Exact(v) => {
@@ -828,7 +873,8 @@ fn par_solve<L: Leaf + Sync>(
         ctx,
         leaf,
         opts,
-        classes: Classes::new(pos.trump),
+        classes: Classes::shared(pos.trump),
+        leaves: LeafCache::new(),
         tt: Tt::Off,
         stats: Stats::default(),
         start,
@@ -840,7 +886,7 @@ fn par_solve<L: Leaf + Sync>(
     let mut frontier: Vec<usize> = Vec::new();
     // The root's groups of equivalent legal cards, each searched through its first card.
     let mut root: Vec<(Bits, usize)> = Vec::new();
-    for l in root_groups(pos, &exp.classes, opts) {
+    for l in root_groups(pos, exp.classes, opts) {
         let rep = ordered(l, opts.order).next().expect("non-empty");
         let i = par_push(&mut nodes, &mut frontier, &mut exp, pos, rep);
         root.push((l, i));
@@ -890,7 +936,8 @@ fn par_solve<L: Leaf + Sync>(
                         ctx,
                         leaf,
                         opts,
-                        classes: Classes::new(pos.trump),
+                        classes: Classes::shared(pos.trump),
+                        leaves: LeafCache::new(),
                         tt: if opts.tt { Tt::Shared(shared) } else { Tt::Off },
                         stats: Stats::default(),
                         start,
