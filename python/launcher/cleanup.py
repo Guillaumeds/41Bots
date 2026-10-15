@@ -4,7 +4,10 @@
 
 A run may last longer than GitHub's 6-hour job limit: the launcher then hands its machine over
 (runs/<run>/watch.json says so, and watch/<run>.json lists it here) and this script takes over
-the watching. A machine labelled 41bots-<run> is left alone while its run is healthy; it is
+the watching. When it closes a handed-over run it also marks the run's machine-cost record
+(machines/<run>.json, written by the runner every 10 minutes) final, with the outcome, minutes
+and dollars from the run's last heartbeat or its launcher data, if the runner could not do that
+itself. A machine labelled 41bots-<run> is left alone while its run is healthy; it is
 destroyed only when one of these holds:
 
 - its run wrote DONE or FAILED more than 10 minutes ago (the runner should have destroyed itself);
@@ -247,14 +250,59 @@ def destroy(instance_id) -> bool:
     return False
 
 
+def last_heartbeat(r2, run_id: str) -> dict:
+    keys = sorted(k for k, _ in r2.list(f"runs/{run_id}/heartbeat/") if k.endswith(".json"))
+    return get_json(r2, keys[-1]) if keys else {}
+
+
+def finalise_machine_record(rec: dict, run_id: str, outcome: str, w: dict, hb: dict, now: float) -> dict | None:
+    """The final form of a run's machine-cost record (machines/<run>.json, see crates/runner/src/machine.rs)
+    when the runner did not write one itself: minutes and dollars from the run's last heartbeat (the
+    runner's own clock and price), else from the launcher's watch record (an upper bound); the cost per
+    node is recomputed from them. None when the record is already final."""
+    if rec.get("state") == "final":
+        return None
+    out = dict(rec)
+    start = parse_time(w.get("created_utc"))
+    if hb.get("elapsed_s"):
+        minutes = float(hb["elapsed_s"]) / 60
+        usd = float(hb.get("est_cost_usd") or 0) or minutes / 60 * float(w.get("dph") or rec.get("dph") or 0)
+        basis = "the run's last heartbeat"
+    elif start:
+        minutes = max(0.0, now - start) / 60
+        usd = float(w.get("spent_before") or 0) + minutes / 60 * float(w.get("dph") or 0)
+        basis = "the launcher's watch record (an upper bound: the machine may have died earlier)"
+    else:
+        minutes, usd, basis = rec.get("minutes") or 0.0, rec.get("usd") or 0.0, "the runner's last record"
+    p = hb.get("progress") or {}
+    nodes = int(rec.get("nodes_total") or p.get("nodes_total") or 0)
+    out.update({"format": "41bots-machine-record", "version": 1, "run_id": run_id, "state": "final",
+                "outcome": outcome, "utc": utc(now), "minutes": round(minutes, 1), "usd": round(usd, 4),
+                "nodes_total": nodes, "worlds_finished": rec.get("worlds_finished") or p.get("worlds_finished") or 0,
+                "usd_per_1e12_nodes": round(usd / nodes * 1e12, 3) if nodes else None,
+                "finalised_by": "cleanup", "finalised_basis": basis})
+    out.setdefault("dph", w.get("dph"))
+    out.setdefault("instance_id", w.get("instance_id"))
+    out.setdefault("offer_id", w.get("offer_id"))
+    out.setdefault("cpu_model", w.get("cpu_name"))
+    out.setdefault("nodes_basis", "measured" if nodes else "none")
+    return out
+
+
 def close_run(r2, run_id: str, w: dict, marker: str | None, self_destroyed: bool, why: str, now: float) -> None:
-    """Records how a handed-over run ended and stops watching it."""
+    """Records how a handed-over run ended and stops watching it; marks its machine record final."""
     start = parse_time(w.get("created_utc"))
     rec = {"run_id": run_id, "instance_id": w.get("instance_id"), "outcome": marker or "none",
            "self_destroyed": self_destroyed, "why": why, "closed_utc": utc(now),
            "dollars_est_upper": round(float(w.get("spent_before") or 0)
                                       + (max(0.0, now - start) / 3600 * float(w.get("dph") or 0) if start else 0), 2)}
     r2.put(f"runs/{run_id}/closed.json", json.dumps(rec, indent=2).encode())
+    machine = finalise_machine_record(get_json(r2, f"machines/{run_id}.json"), run_id,
+                                      marker or "KILLED", w, last_heartbeat(r2, run_id), now)
+    if machine is not None:
+        r2.put(f"machines/{run_id}.json", json.dumps(machine, indent=2).encode())
+        log(f"machine record of {run_id} marked final: {machine['minutes']} min, ${machine['usd']}, "
+            f"{machine['nodes_total']} nodes ({machine['finalised_basis']})")
     if w.get("destroy_key_id"):
         try:
             vast("delete", "api-key", str(w["destroy_key_id"]), raw=False)
