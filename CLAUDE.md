@@ -48,6 +48,11 @@ You are building the strongest possible bots for the 8-player card game **41** (
 - **Secrets:** never commit secrets or tokens. R2 and vast.ai keys come in at checkpoint M1 via environment variables or GitHub secrets.
 - Work on a branch per checkpoint (e.g. `m0-engine`) and open a PR. CI must be green.
 
+## Who builds what (owner, 2026-10-16)
+- **Fable 5.1** reviews, specifies and owns quality; it does not do the big builds itself.
+- **Opus** does the difficult builds (solver, search, anything touching correctness or identity).
+- **Sonnet** does the basic builds (scripts, docs sync, small fixes, tooling).
+
 ## Talking to the owner
 - The owner knows the game deeply but not AI jargon. Write in plain English.
 - The first time you use a technical term, explain it in [square brackets] in plain words.
