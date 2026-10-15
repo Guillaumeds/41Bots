@@ -146,3 +146,24 @@ M1 adds the table manager, the arena (14-way duplicate block, generalised SPRT, 
 - The speed model predicted the three new machines within 11% ($/10^12: 9654P 0.72 -> 0.80, 9734 0.78 -> 0.78, E5 0.58 -> 0.53), so offers of known CPU models can be ranked without testing each one; test new CPU models only.
 - The 9734 ran at only 224 MB tables per thread (0.6 GB of RAM per thread) with no loss of nodes per second, but nodes per second is blind to a small table making the solver search positions again: that is what the new sweep measures.
 - **Table-size sweep added to the bench** (M3-SPEC §13.1 item 11): `sweep_mb`, `sweep_s`; `analyse_sweep` in `search::t1bench`; fmt, clippy -D warnings and `cargo test --workspace` pass; local end-to-end run on 4 threads works mechanically (no world finishes in 12 s there, so nothing paired).
+
+## 2026-10-15 (Mauritius afternoon): speed-test wave 3 (about $4) and the first table-size sweeps
+Five machines (15–30 minute limits, dollar caps, checked every 30 s; all destroyed, vast showed 0 instances afterwards). Binaries: commit 56851ce (adds the sweep). Results in R2 `runs/t1bench-*-w3/out/t1bench/`.
+
+| Machine | Threads, RAM, rate | Fill $/10^12 nodes | Score $/10^12 | Total speed (billion nodes/s) | Golden set at fill speed |
+|---|---|---|---|---|---|
+| AMD Threadripper PRO 9995WX workstation chip (repeat of wave 1) | 184, 241 GB, $1.27/h | 0.304 | **0.283** (wave 1: 0.287) | 1.25 | 13.1 h, $17 |
+| Intel Xeon E5-2695 v4 (2016 server) | 69, 504 GB, $0.41/h | 0.533 | 0.519 | 0.21 | 76 h, $31 |
+| Intel Xeon Gold 5220R (2020 server) | 92, 45 GB, $0.70/h | 0.594 | 0.571 | 0.34 | 48 h, $34 |
+| AMD EPYC 9554 server chip (Zen 4) | 245, 504 GB, $6.94/h | 1.202 | 1.134 | 1.70 | 9.6 h, $67 |
+| AMD pre-release Zen 5 "Turin" engineering sample | 491, 1.1 TB, $13.66/h | 1.501 | 1.436 | 2.64 | 6.2 h, $85 |
+
+- **Repeatability:** the 9995WX repeat gave 0.283 against 0.287: results repeat within 2%. It is 3 to 5 times cheaper per node than everything else tested, and the cost per node rises with machine size (the fastest machine costs 5 times the cheapest per node).
+- **Real schedule vs full-machine window:** production runs at 0.34 (Xeon Gold) to 0.40 (EPYC 9554), 0.36 (Turin sample) of the fill rate on the biggest machines, against 0.49–0.54 at 184–245 threads, so the golden-set figures above are optimistic by 2 to 3 times. Only 1 of 6 production worlds finishes in the 2-minute window, so these ratios are rough.
+- **Minimum RAM:** the 45 GB machine (0.5 GB per thread) ran the real schedule at 95% CPU: the biggest world got a 14 GB table. The floor is not a hard stop.
+- **Table-size sweep (9995WX, same worlds, against 448 MB per thread):** 256 MB: 1.07x the nodes, 1.06x the time; 128 MB: 1.21x, 1.16x; 64 MB: 1.88x, 1.54x; 32 MB: 3.2x, 2.3x. Nodes per second go UP as tables shrink (1.13 -> 1.63 billion/s), which is why nodes per second alone misleads. All values byte-identical.
+- **Larger tables (old Xeon, 504 GB, against 512 MB):** 1024 MB and 2048 MB: 0.99x the nodes, 1.00-1.03x the time. More RAM does not help the short worlds; tables of 256-512 MB per thread are enough there.
+- Corrections for small tables: the 45 GB machine ran 212 MB tables (about +8% cost, so about $0.62 per 10^12) and the 125 GB EPYC 9734 of wave 2 ran 224 MB (about +7%, about $0.83).
+- **Open question (79% of the work is positions 1-2):** the sweep covers worlds short enough to finish in 90-150 s (all eight positions appear among them, but not the long ones). Production gives position-1 worlds 14-32 GB tables, and what smaller tables cost there is unmeasured. Next test: a few position-1 worlds at several large table sizes on a big-RAM machine.
+- The sweep's summary line says "mostly positions 5-8"; wording to fix at the next code change.
+- Models: the speed model predicted the Zen 4 server and old Intel machines within about 11%; it was 40% too pessimistic for the Xeon Gold 5220R (no entry in the speed file) and about 20% too optimistic for the Turin sample.
