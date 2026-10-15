@@ -36,6 +36,8 @@ class World:
         self.key_answer = "api-key created {'id': 77, 'key': 'dk-0123456789abcdef', 'permissions': {'api': {}}}"
         self.keys: dict[int, str] = {}  # destroy-only keys alive in the account
         self.deleted_keys: list[int] = []
+        self.searches = 0
+        self.forbid_search = False  # the account's daily search quota is used up: any search is a bug
         self.poll = launch.POLL_S  # the launcher's poll interval in this test (--poll-s)
         self.progress = None  # a heartbeat's progress object (e.g. with an eta), if set
         self.outputs: dict[str, bytes] = {}  # files a finishing run uploads before its DONE
@@ -112,6 +114,9 @@ class World:
     def vast(self, *args, raw=True, check=True, tail=()):
         cmd = args[:2]
         if cmd == ("search", "offers"):
+            self.searches += 1
+            if self.forbid_search:
+                raise AssertionError("a search was made")
             return [dict(o) for o in self.offers]
         if cmd == ("create", "instance"):
             oid = int(args[2])
@@ -226,6 +231,26 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(report["outcome"], "DONE")
         self.assertEqual(report["offer_id"], 3)
         self.assertEqual(report["replacements"], 0)
+
+    def test_offer_chosen_by_id_is_rented_without_any_search(self):
+        w = World([], ["done:2"])
+        w.forbid_search = True
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 10, "seed": 1}}},
+                                       "--offer-id", "500", "--offer-dph", "1.013", "--offer-cores", "384")
+        self.assertEqual(code, 0)
+        self.assertEqual(w.created_on, [500])
+        self.assertEqual(w.searches, 0)
+        self.assertEqual(report["offer_id"], 500)
+        self.assertIn("chosen by the owner, no search", self.log)
+
+    def test_offer_chosen_by_id_that_is_gone_stops_without_searching(self):
+        w = World([offer(1, 11, 1.0)], [], create_fail={500: "none"})
+        w.forbid_search = True
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 10, "seed": 1}}},
+                                       "--offer-id", "500", "--offer-dph", "1.013", "--offer-cores", "384")
+        self.assertEqual(code, 1)
+        self.assertEqual(w.created_on, [])
+        self.assertEqual(w.searches, 0)
 
     def test_no_offer_left_stops(self):
         w = World([offer(1, 11, 1.0)], [], create_fail={1: "none"})

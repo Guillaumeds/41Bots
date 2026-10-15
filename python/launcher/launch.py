@@ -283,6 +283,20 @@ def describe(o: dict) -> str:
 
 
 def choose(a) -> dict | None:
+    if getattr(a, "offer_id", None):
+        # An offer the owner picked (2026-10-15, on vast's own website, when the account's daily search quota was
+        # used up): rent exactly this one and never search. It is offered once; a failed create, or a replacement
+        # after the machine dies, finds nothing and the run stops instead of falling back to a search.
+        if getattr(a, "_offer_given_used", False):
+            return None
+        a._offer_given_used = True
+        if not (a.offer_dph and a.offer_cores):
+            sys.exit("launch: --offer-id needs --offer-dph and --offer-cores (price per hour and CPU cores shown on vast's website)")
+        best = {"id": int(a.offer_id), "machine_id": int(a.offer_machine or a.offer_id), "dph_total": float(a.offer_dph),
+                "cpu_cores_effective": float(a.offer_cores), "cpu_name": a.offer_cpu or "(offer chosen by id)", "gpu_name": None}
+        log(f"offer {best['id']} chosen by the owner, no search: ${best['dph_total']:.3f}/h, {best['cpu_cores_effective']:.0f} cores, "
+            f"{best['cpu_name']}; its filters (verified, reliability, shared) are NOT checked")
+        return best
     offers = search_offers(a)
     have_r2 = all(os.environ.get(n) for n in ("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET", "R2_S3_ENDPOINT"))
     bench = load_bench(have_r2)
@@ -1025,6 +1039,13 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("--cheapest", action="store_true", help="test runs: take the cheapest $/hour offer, not the best cost per work")
         s.add_argument("--cpu-only", action="store_true",
                        help="CPU-only job: drop the GPU compute-capability/CUDA filters (they only matter for PyTorch training)")
+        s.add_argument("--offer-id", type=int, default=None,
+                       help="rent exactly this vast.ai offer, with NO search and none of the filters (verified, reliability, whole machine); "
+                            "needs --offer-dph and --offer-cores")
+        s.add_argument("--offer-dph", type=float, default=None, help="with --offer-id: the offer's price per hour")
+        s.add_argument("--offer-cores", type=int, default=None, help="with --offer-id: its CPU cores as vast shows them (e.g. 384)")
+        s.add_argument("--offer-machine", type=int, default=None, help="with --offer-id: its machine id (optional)")
+        s.add_argument("--offer-cpu", default="", help="with --offer-id: the CPU name, for the report (optional)")
 
     s = sub.add_parser("plan", help="dry run: rank offers and print the choice")
     offer_args(s)

@@ -55,6 +55,15 @@ on:
         description: "Only search and print the chosen offer; rent nothing"
         type: boolean
         default: true
+      offer_id:
+        description: "Rent exactly this vast.ai offer number, with NO search and none of the filters (blank = normal search). Needs offer_dph and offer_cores."
+        default: ""
+      offer_dph:
+        description: "With offer_id: the offer's price per hour as shown on vast.ai"
+        default: ""
+      offer_cores:
+        description: "With offer_id: its CPU cores as shown on vast.ai (e.g. 384)"
+        default: ""
       market_check:
         description: "Only check the market for a second machine comparable to the Threadripper PRO 9995WX: prints YES/NO with offer details at the top of the run page; rents nothing (type any text in image)"
         type: boolean
@@ -95,6 +104,9 @@ jobs:
           BIN_SHA: ${{ inputs.bin_sha || github.sha }}
           DRY_RUN: ${{ inputs.dry_run }}
           MARKET_CHECK: ${{ inputs.market_check }}
+          OFFER_ID: ${{ inputs.offer_id }}
+          OFFER_DPH: ${{ inputs.offer_dph }}
+          OFFER_CORES: ${{ inputs.offer_cores }}
         run: |
           set -euo pipefail
           if [ "$MARKET_CHECK" = "true" ]; then
@@ -109,7 +121,8 @@ jobs:
           MANIFEST=$(python3 -c 'import json,os,sys; t=os.environ["MANIFEST"]; m=json.loads(t if t.lstrip().startswith("{") else open(t).read()); m["run_id"]=m.get("run_id") or "gh-${{ github.run_id }}"; print(json.dumps(m))')
           python3 python/launcher/launch.py run --manifest "$MANIFEST" --min-cores "$MIN_CORES" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} \
             --max-minutes "$MAX_MINUTES" --low-cpu-pct "$LOW_CPU_PCT" --low-cpu-s "${LOW_CPU_S:-300}" --poll-s "${POLL_S:-60}" --max-dollars "${MAX_DOLLARS:-0}" \
-            --image "$IMAGE" --bin-sha "$BIN_SHA" --state-file instance-id.txt ${{ inputs.cheapest && '--cheapest' || '' }}
+            --image "$IMAGE" --bin-sha "$BIN_SHA" --state-file instance-id.txt ${{ inputs.cheapest && '--cheapest' || '' }} \
+            $( [ -n "$OFFER_ID" ] && echo "--offer-id $OFFER_ID --offer-dph $OFFER_DPH --offer-cores $OFFER_CORES" )
       - name: Cancelled - ask the run to stop and wait (at most 5 minutes) for it to upload what it finished
         if: cancelled() && hashFiles('instance-id.txt.run-id') != ''
         shell: bash
