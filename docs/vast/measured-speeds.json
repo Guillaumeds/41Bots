@@ -1,0 +1,175 @@
+{
+ "format": "41bots-measured-speeds",
+ "version": 1,
+ "updated": "2026-10-15",
+ "about": "Exact trick-1 solver speed per usable hardware thread, measured by the t1bench machine bench (position-weighted mix, every thread busy), averaged over the listed runs. Used by python/tools/vast_watch to turn a market listing into an estimated cost per 10^12 solver nodes. Add a model here after each new bench run; 'family' means the number was measured on a sibling model and is applied to this one until it is measured itself.",
+ "usable_thread_ratio": 0.958,
+ "default_k_nodes_per_s_per_speed_unit": 4500000.0,
+ "k_note": "For chips not listed: estimated per-thread speed = k x the 'tt' factor in docs/vast/speed-factors.json. k = 4.5e6 is the average of the measured/factor ratios of the measured chips (range 4.1e6 to 5.2e6, so estimates are about +-15%, and wider for chips with an uncertain factor).",
+ "table_time_vs_448mb": [
+  [
+   32,
+   2.296
+  ],
+  [
+   64,
+   1.541
+  ],
+  [
+   128,
+   1.158
+  ],
+  [
+   256,
+   1.06
+  ],
+  [
+   448,
+   1.0
+  ],
+  [
+   512,
+   1.0
+  ]
+ ],
+ "table_note": "Wall time of the same worlds at each table size per thread relative to 448 MB (9995WX table-size sweep, run t1bench-9995wx-w3). Larger tables (1-2 GB) gave no gain (old Xeon, t1bench-e5-w3).",
+ "models": [
+  {
+   "name": "AMD Threadripper PRO 9995WX",
+   "match": "9995WX",
+   "confidence": "measured",
+   "per_thread_nodes_per_s": 6721342,
+   "runs": [
+    "t1bench-9995wx-w1",
+    "t1bench-9995wx-w3"
+   ],
+   "n": 2,
+   "spread_pct": 1.5,
+   "tt_mb_during_measurement": 448,
+   "threads_measured": 184,
+   "ram_gb_measured": 241,
+   "production_over_fill_rate": 0.484
+  },
+  {
+   "name": "AMD EPYC 9754 (Zen 4c dense)",
+   "match": "EPYC 9754",
+   "confidence": "measured",
+   "per_thread_nodes_per_s": 4656010,
+   "runs": [
+    "t1bench-9754-w1"
+   ],
+   "n": 1,
+   "spread_pct": null,
+   "tt_mb_during_measurement": 512,
+   "threads_measured": 245,
+   "ram_gb_measured": 483,
+   "production_over_fill_rate": 0.539
+  },
+  {
+   "name": "AMD EPYC 9654P (Zen 4)",
+   "match": "EPYC 9654P",
+   "confidence": "measured",
+   "per_thread_nodes_per_s": 5550555,
+   "runs": [
+    "t1bench-9654p-w2"
+   ],
+   "n": 1,
+   "spread_pct": null,
+   "tt_mb_during_measurement": 448,
+   "threads_measured": 184,
+   "ram_gb_measured": 241,
+   "production_over_fill_rate": 0.528
+  },
+  {
+   "name": "AMD EPYC 9654 (dual-socket variant of the 9654P)",
+   "match": "EPYC 9654(?!P)",
+   "confidence": "family",
+   "per_thread_nodes_per_s": 5550555,
+   "runs": [
+    "t1bench-9654p-w2"
+   ],
+   "n": 1,
+   "spread_pct": null,
+   "tt_mb_during_measurement": 448,
+   "threads_measured": 184,
+   "ram_gb_measured": 241,
+   "production_over_fill_rate": 0.528
+  },
+  {
+   "name": "AMD EPYC 9734 (Zen 4c dense)",
+   "match": "EPYC 9734",
+   "confidence": "measured",
+   "per_thread_nodes_per_s": 5534063,
+   "runs": [
+    "t1bench-9734-w2"
+   ],
+   "n": 1,
+   "spread_pct": null,
+   "tt_mb_during_measurement": 224,
+   "threads_measured": 215,
+   "ram_gb_measured": 120,
+   "production_over_fill_rate": 0.441
+  },
+  {
+   "name": "AMD EPYC 9554 (Zen 4)",
+   "match": "EPYC 9554",
+   "confidence": "measured",
+   "per_thread_nodes_per_s": 6933094,
+   "runs": [
+    "t1bench-9554-w3"
+   ],
+   "n": 1,
+   "spread_pct": null,
+   "tt_mb_during_measurement": 512,
+   "threads_measured": 245,
+   "ram_gb_measured": 483,
+   "production_over_fill_rate": 0.396
+  },
+  {
+   "name": "AMD pre-release Zen 5 Turin sample 100-000001535",
+   "match": "100-000001535",
+   "confidence": "measured",
+   "per_thread_nodes_per_s": 5378769,
+   "runs": [
+    "t1bench-turines-w3"
+   ],
+   "n": 1,
+   "spread_pct": null,
+   "tt_mb_during_measurement": 512,
+   "threads_measured": 491,
+   "ram_gb_measured": 1088,
+   "production_over_fill_rate": 0.358
+  },
+  {
+   "name": "Intel Xeon E5-2695 v4 (Broadwell, 2016)",
+   "match": "E5-2695",
+   "confidence": "measured",
+   "per_thread_nodes_per_s": 3093490,
+   "runs": [
+    "t1bench-e5-w2",
+    "t1bench-e5-w3"
+   ],
+   "n": 2,
+   "spread_pct": 1.4,
+   "tt_mb_during_measurement": 512,
+   "threads_measured": 69,
+   "ram_gb_measured": 484,
+   "production_over_fill_rate": null
+  },
+  {
+   "name": "Intel Xeon Gold 5220R (Cascade Lake, 2020)",
+   "match": "Gold 5220R",
+   "confidence": "measured",
+   "per_thread_nodes_per_s": 3695529,
+   "runs": [
+    "t1bench-5220r-w3"
+   ],
+   "n": 1,
+   "spread_pct": null,
+   "tt_mb_during_measurement": 212,
+   "threads_measured": 92,
+   "ram_gb_measured": 45,
+   "production_over_fill_rate": 0.34
+  }
+ ]
+}
