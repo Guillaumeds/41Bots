@@ -47,7 +47,7 @@ self_destroy() {
     why=${why//"$key"/***}
     echo "boot: self-destroy with $name refused: ${why:-no confirmation from vastai}" >&2
   done
-  echo "boot: instance $CONTAINER_ID could not destroy itself; the launcher destroys it on DONE/FAILED or a stale heartbeat, vast-cleanup.yml after 2 hours" >&2
+  echo "boot: instance $CONTAINER_ID could not destroy itself; the launcher destroys it on DONE/FAILED or a stale heartbeat, vast-cleanup.yml 10 minutes after the marker" >&2
 }
 
 # rclone's configuration in memory only (rclone's documented /dev/null switch): the r2 remote

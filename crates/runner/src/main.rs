@@ -70,6 +70,11 @@ const USAGE: &str = "usage:
 /// The default heartbeat interval (format 1's `heartbeat_every_s`).
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(30);
 
+/// Rounds of format 1's final uploads before the machine destroys itself anyway, and the pause
+/// between rounds (each round tries every upload 3 times).
+const FINAL_UPLOAD_ROUNDS: u32 = 5;
+const FINAL_UPLOAD_PAUSE: Duration = Duration::from_secs(60);
+
 /// Format 1's default interval between partial uploads of `out/` (`upload_every_s`).
 const UPLOAD_EVERY: Duration = Duration::from_secs(300);
 
@@ -1039,8 +1044,25 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
     let _ = ctx.write_json(marker, &marker_body);
     let mut uploaded = true;
     if let Some(r) = ctx.remote() {
-        let (root, prefix) = (ctx.root.clone(), ctx.prefix.clone());
-        uploaded = ctx.blocking(move || final_uploads(&*r, &root, &prefix, marker));
+        // The machine destroys itself next, taking whatever did not reach the remote with it, so
+        // failed uploads are tried again for a few minutes first (review E, 2026-10-16: before,
+        // a network failure of a minute at the end of a long run lost its final outputs and the
+        // work since the last partial upload). A machine costs about $1 an hour.
+        for round in 1..=FINAL_UPLOAD_ROUNDS {
+            if round > 1 {
+                eprintln!(
+                    "runner: some final uploads failed; trying again in {} s (round {round} of \
+                     {FINAL_UPLOAD_ROUNDS})",
+                    FINAL_UPLOAD_PAUSE.as_secs()
+                );
+                ctx.blocking(|| std::thread::sleep(FINAL_UPLOAD_PAUSE));
+            }
+            let (root, prefix, r) = (ctx.root.clone(), ctx.prefix.clone(), Arc::clone(&r));
+            uploaded = ctx.blocking(move || final_uploads(&*r, &root, &prefix, marker));
+            if uploaded {
+                break;
+            }
+        }
         ctx.heartbeat(true);
         if let Some(n) = &ctx.net {
             n.drain(Duration::from_secs(10));
@@ -1151,8 +1173,9 @@ fn self_destroy() {
     }
     eprintln!(
         "runner: instance {id} could not destroy itself; the launcher destroys it when it sees \
-         DONE or FAILED (python/launcher/launch.py), and vast-cleanup.yml destroys any 41bots- \
-         instance left after 2 hours. With neither running, destroy it in the vast.ai console."
+         DONE or FAILED (python/launcher/launch.py), and vast-cleanup.yml destroys a 41bots- \
+         instance 10 minutes after its run's marker. With neither running, destroy it in the \
+         vast.ai console."
     );
 }
 
