@@ -57,6 +57,6 @@ pub mod labels {
 #[cfg(test)]
 mod belief_tests;
 #[cfg(test)]
-mod review_c_tests;
-#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod yardstick_probes;
