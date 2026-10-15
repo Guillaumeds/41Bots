@@ -393,8 +393,10 @@ pub struct WorldRows {
 /// 2026-10-15). Records and checkpoint lines without it were made by older binaries.
 /// - 1 (absent): before 2026-10-15 22:29 UTC; another seat's rob burn later in trick 1 was the
 ///   `rules-v1` burn.
-/// - 2: that burn is searched inside the exact solve (13d3858, 65b6a96), and the turned card of a
-///   pending rob stays live until the burn (7253b48).
+/// - 2: that burn is searched inside the exact solve (13d3858, 65b6a96), the turned card of a
+///   pending rob stays live until the burn (7253b48), and equivalent cards are not merged across
+///   another card of the hand in the tie order (64738d4). No run recorded version 2 before
+///   64738d4.
 pub const VALUES_VERSION: u32 = 2;
 
 /// A record's fingerprint: the inputs, besides the method, label and world range, that decide
