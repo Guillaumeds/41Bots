@@ -152,6 +152,12 @@ pub struct Stats {
     pub equiv_skipped: u64,
     /// Optimised solver only: bytes allocated by the transposition table at the end.
     pub tt_bytes: u64,
+    /// Optimised solver only: nodes by trick (index = tricks done this hand, 0..5), so the
+    /// weight of each trick in a solve is visible.
+    pub nodes_by_trick: [u64; 5],
+    /// Optimised solver only: cards played by the forced-play shortcut (a seat with one legal
+    /// card, and the whole last trick), each in place of a node (see `fast::Search::forced`).
+    pub forced: u64,
 }
 
 /// The result of a root solve.

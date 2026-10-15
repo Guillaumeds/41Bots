@@ -312,6 +312,10 @@ impl WorldSolve {
         a.cutoffs += b.cutoffs;
         a.equiv_skipped += b.equiv_skipped;
         a.tt_bytes = a.tt_bytes.max(b.tt_bytes);
+        a.forced += b.forced;
+        for (x, y) in a.nodes_by_trick.iter_mut().zip(&b.nodes_by_trick) {
+            *x += y;
+        }
         self.solves += 1;
     }
 }

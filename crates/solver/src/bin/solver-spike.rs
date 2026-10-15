@@ -226,6 +226,8 @@ struct Rec {
     value_changed: Option<bool>,
     cutoffs: u64,
     equiv_skipped: u64,
+    forced: u64,
+    nodes_by_trick: [u64; 5],
     replaced: u64,
     tt_bytes: u64,
 }
@@ -274,6 +276,8 @@ fn run_world(a: &Args, table: &EquityTable, w: u64) -> Rec {
         equiv_skipped: sol.stats.equiv_skipped,
         replaced: sol.stats.tt_replaced,
         tt_bytes: sol.stats.tt_bytes,
+        forced: sol.stats.forced,
+        nodes_by_trick: sol.stats.nodes_by_trick,
     }
 }
 
@@ -390,6 +394,19 @@ fn main() {
         sum(|r| r.replaced),
         max_bytes as f64 / 1048576.0,
         sum(|r| r.nodes)
+    );
+    let by_trick: Vec<String> = (0..5)
+        .map(|t| {
+            done.iter()
+                .map(|r| r.nodes_by_trick[t])
+                .sum::<u64>()
+                .to_string()
+        })
+        .collect();
+    println!(
+        "summary\tforced_plays={} nodes_by_trick={}",
+        sum(|r| r.forced),
+        by_trick.join(",")
     );
     println!(
         "summary\tsolved={} timeouts={} ms_median={:.3} ms_p90={:.3} ms_max={:.3} nodes_median={:.0} nodes_p90={:.0} nodes_max={:.0}",

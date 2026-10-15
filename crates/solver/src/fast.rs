@@ -339,9 +339,14 @@ impl<L: Leaf> Search<'_, L> {
 
     /// The cards to search at `p`, in the order to try them (at most 16).
     fn candidates(&mut self, p: &Position, out: &mut [Card; 16]) -> usize {
+        self.candidates_of(p, p.legal(), out)
+    }
+
+    /// [`Search::candidates`] with the legal set already computed.
+    fn candidates_of(&mut self, p: &Position, legal: Bits, out: &mut [Card; 16]) -> usize {
         let seat = p.to_act();
         let hand = p.hands[usize::from(seat)];
-        let legal = p.legal();
+        debug_assert_eq!(legal, p.legal());
         debug_assert!(legal != 0, "the legal set is never empty");
         let set: Bits = if self.opts.equiv && legal.count_ones() >= 2 {
             let r = self
@@ -374,8 +379,63 @@ impl<L: Leaf> Search<'_, L> {
         n
     }
 
+    /// Forced play inside a trick: from `p`, play every card that is the only legal one straight
+    /// away, without a node. Returns the first position with a choice, or the next trick
+    /// boundary (where the table is consulted), or the leaf value when the forced plays end
+    /// the hand.
+    ///
+    /// Why this changes no answer. A node with one legal card has exactly the value of its one
+    /// child (the backup rule picks the only card), so a chain of such nodes has the value of
+    /// the position at its end, and the search reports that value either way. The parent's
+    /// pruning bound is checked at the end of the chain instead of at its start: shallow
+    /// pruning needs only that the node checking the bound has the value the parent compares,
+    /// which the chain's end has; and a node reporting `Cut` or `Exact` leads the parent to the
+    /// same choice (a value that meets the cut condition is never chosen). Node counts change;
+    /// values do not.
+    fn forced(&mut self, p: &Position, legal: Bits) -> Result<(Position, Bits), MoneyChance> {
+        debug_assert!(p.n_played > 0 && legal.count_ones() == 1);
+        let mut q = *p;
+        let mut legal = legal;
+        loop {
+            self.stats.forced += 1;
+            match q.play(legal.trailing_zeros() as Card) {
+                Step::Next(r) => q = r,
+                Step::GameWon(t) => return Err(self.game_won(t)),
+                Step::HandOver(s) => return Err(self.hand_over(s)),
+            }
+            legal = q.legal();
+            if q.n_played == 0 || legal.count_ones() != 1 {
+                return Ok((q, legal));
+            }
+        }
+    }
+
+    /// The value of a last-trick boundary `p` (every hand holds one card, so the whole trick is
+    /// forced): the trick's winner, the bonuses and the leaf, computed directly, with no node,
+    /// table probe or table store per card. Called after the boundary's own table probe missed;
+    /// the caller stores the value as it would the searched value, which this equals: the node's
+    /// only line is this one, so the search would have reached exactly this leaf (and the table
+    /// holds only exact values, so a hit could only have returned it too). Node counts change;
+    /// values do not.
+    fn last_trick(&mut self, p: &Position) -> MoneyChance {
+        debug_assert_eq!(p.n_played, 0);
+        debug_assert_eq!(p.hand.tricks_done, engine::game::TRICKS_PER_HAND - 1);
+        let mut q = *p;
+        loop {
+            let only = q.hands[usize::from(q.to_act())];
+            debug_assert_eq!(only.count_ones(), 1, "one card per hand in the last trick");
+            self.stats.forced += 1;
+            match q.play(only.trailing_zeros() as Card) {
+                Step::Next(r) => q = r,
+                Step::GameWon(t) => return self.game_won(t),
+                Step::HandOver(s) => return self.hand_over(s),
+            }
+        }
+    }
+
     fn node(&mut self, p: &Position, cut: Option<Cut>) -> Res {
         self.stats.nodes += 1;
+        self.stats.nodes_by_trick[usize::from(p.hand.tricks_done.min(4))] += 1;
         if self.stats.nodes & 0xFFF == 0 {
             if let Some(cap) = self.opts.time_cap_ms
                 && self.start.elapsed().as_millis() as u64 >= cap
@@ -401,6 +461,20 @@ impl<L: Leaf> Search<'_, L> {
         if self.aborted {
             return Res::Abort;
         }
+        let mut legal = p.legal();
+        let chained;
+        let p = if p.n_played > 0 && legal.count_ones() == 1 {
+            match self.forced(p, legal) {
+                Ok((q, l)) => {
+                    chained = q;
+                    legal = l;
+                    &chained
+                }
+                Err(v) => return Res::Exact(v),
+            }
+        } else {
+            p
+        };
         let key = (self.tt.on() && p.n_played == 0).then(|| TtKey::of(p));
         if let Some(k) = &key {
             self.stats.tt_probes += 1;
@@ -409,11 +483,18 @@ impl<L: Leaf> Search<'_, L> {
                 return Res::Exact(v);
             }
         }
+        if p.n_played == 0 && p.hand.tricks_done == engine::game::TRICKS_PER_HAND - 1 {
+            let v = self.last_trick(p);
+            if let Some(k) = key {
+                self.tt.put(k, v);
+            }
+            return Res::Exact(v);
+        }
         let team = team_of(p.to_act());
         // The parent's bound applies only when the parent's team differs from ours.
         let cut = cut.filter(|c| c.team != team);
         let mut cards = [0 as Card; 16];
-        let n = self.candidates(p, &mut cards);
+        let n = self.candidates_of(p, legal, &mut cards);
         let mut best: Option<(MoneyChance, u8)> = None;
         for &c in &cards[..n] {
             let cc = canon(c, self.opts.order);
@@ -851,6 +932,10 @@ fn par_solve<L: Leaf + Sync>(
         stats.tt_hits += w.tt_hits;
         stats.cutoffs += w.cutoffs;
         stats.equiv_skipped += w.equiv_skipped;
+        stats.forced += w.forced;
+        for (a, b) in stats.nodes_by_trick.iter_mut().zip(&w.nodes_by_trick) {
+            *a += b;
+        }
     }
     if opts.tt {
         stats.tt_entries = shared.entries();
