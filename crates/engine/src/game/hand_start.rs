@@ -47,7 +47,9 @@ impl HandStartState {
             if s >= super::WINNING_SCORE {
                 return Err(StateError("a team at 41 or more has already won the game"));
             }
-            if s % 5 > 1 {
+            // A score is 5k, or 5k+6 with k >= 1 (a first bonus comes with its trick): never 1
+            // or 6 (RULES, "Reachable scores").
+            if s % 5 > 1 || s == 1 || s == 6 {
                 return Err(StateError(
                     "scores are tricks of 5 plus bonuses of 6 then 5",
                 ));
