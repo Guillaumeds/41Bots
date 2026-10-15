@@ -154,6 +154,7 @@ fn run_worlds(
     solve_threads: u64,
     tt: &mem::Plan,
     progress_file: &Path,
+    extra: &Value,
 ) -> Result<Value, String> {
     let _ = fs::remove_file(progress_file);
     c.arg("--progress").arg(progress_file);
@@ -165,36 +166,47 @@ fn run_worlds(
     );
     let (mut seq, mut polls, mut tail_polls) = (ctx.seq, 0u64, 0u64);
     let step = step.to_string();
-    ctx.run_child_with(c, "measure/worlds.log", &mut |ctx| {
-        let p: Option<Value> = fs::read_to_string(progress_file)
+    let read = || -> Value {
+        fs::read_to_string(progress_file)
             .ok()
-            .and_then(|t| serde_json::from_str(&t).ok());
-        let p = p.unwrap_or(Value::Null);
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or(Value::Null)
+    };
+    // The heartbeat's progress from the child's progress record `p` and this interval's tail
+    // share.
+    let progress = |ctx: &Ctx, p: &Value, share: f64| -> Value {
         let g = |k: &str| p.get(k).and_then(Value::as_u64).unwrap_or(0);
+        json!({
+            "kind": "search_measure", "step": step, "n": n_worlds,
+            "threads": threads, "solve_threads": solve_threads,
+            "decisions_done": g("decisions_done"), "decisions_total": g("decisions_total"),
+            "worlds_done": g("worlds_done"), "worlds_total": g("worlds_total"),
+            "worlds_resumed": g("worlds_resumed"), "eta": eta_block(ctx, p),
+            // This machine's own work, for its cost per node (`machine.rs`).
+            "worlds_valued": g("worlds_valued"), "nodes_valued": g("nodes_valued"),
+            "schedule": extra["schedule"], "trick": extra["trick"],
+            "tt_budget_mb": extra["tt_budget_mb"],
+            "par_tasks_done": g("par_tasks_done"), "par_tasks_total": g("par_tasks_total"),
+            "tail_share": (share * 100.0).round() / 100.0,
+            "partial_cpu_ok": share >= TAIL_SHARE_OK,
+            "tt_mb": tt.tt_mb, "warnings": warnings,
+        })
+    };
+    ctx.run_child_with(c, "measure/worlds.log", &mut |ctx| {
+        let p = read();
         if ctx.seq != seq {
             // A heartbeat went out: start a new interval.
             (seq, polls, tail_polls) = (ctx.seq, 0, 0);
         }
         polls += 1;
         tail_polls += u64::from(in_tail(&p, solve_threads));
-        let share = tail_polls as f64 / polls as f64;
-        let eta = eta_block(ctx, &p);
-        ctx.progress = json!({
-            "kind": "search_measure", "step": step, "n": n_worlds,
-            "threads": threads, "solve_threads": solve_threads,
-            "decisions_done": g("decisions_done"), "decisions_total": g("decisions_total"),
-            "worlds_done": g("worlds_done"), "worlds_total": g("worlds_total"),
-            "worlds_resumed": g("worlds_resumed"), "eta": eta,
-            "par_tasks_done": g("par_tasks_done"), "par_tasks_total": g("par_tasks_total"),
-            "tail_share": (share * 100.0).round() / 100.0,
-            "partial_cpu_ok": share >= TAIL_SHARE_OK,
-            "tt_mb": tt.tt_mb, "warnings": warnings,
-        });
+        ctx.progress = progress(ctx, &p, tail_polls as f64 / polls as f64);
     })?;
-    let last: Value = fs::read_to_string(progress_file)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or(Value::Null);
+    // The step's final counts go out in a heartbeat of their own, so a step shorter than a
+    // heartbeat interval still reaches the machine's node tally (`machine.rs`).
+    let last = read();
+    ctx.progress = progress(ctx, &last, 1.0);
+    ctx.heartbeat(true);
     Ok(last)
 }
 
@@ -368,6 +380,12 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         c
     };
     let progress_file = ctx.root.join("worlds-progress.json");
+    // How the worlds are spread, for the machine record: the position-aware plan, one thread
+    // per world ("fill"), or each world split over several threads.
+    let extra = json!({
+        "schedule": if budget_mb.is_some() { "plan" } else if solve_threads > 1 { "split" } else { "fill" },
+        "trick": trick, "tt_budget_mb": budget_mb,
+    });
     let yard = if from == 0 {
         out.join(format!("exact-t{trick}-n{to}.jsonl"))
     } else {
@@ -382,6 +400,7 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         solve_threads,
         &tt,
         &progress_file,
+        &extra,
     )?;
     let base = json!({ "resumed": resumed(&last), "trick": trick, "count": count, "seed": seed, "from": from, "to": to,
                        "ids": ids, "grid": grid, "solve_threads": solve_threads,
@@ -445,6 +464,7 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
             solve_threads,
             &tt,
             &progress_file,
+            &extra,
         )?;
         methods.push(format!("{}:{mto}", f.display()));
     }

@@ -129,6 +129,8 @@ pub struct Net {
     hb: Lane,
     stop: Lane,
     partial: Lane,
+    /// Small records written now and then (the machine-cost record, `machine.rs`).
+    misc: Lane,
     /// Asks a partial upload in progress to stop between files.
     cancel: Arc<AtomicBool>,
     sent: Sent,
@@ -147,6 +149,7 @@ impl Net {
             hb: Lane::new("heartbeat"),
             stop: Lane::new("stop"),
             partial: Lane::new("partial"),
+            misc: Lane::new("misc"),
             cancel: Arc::new(AtomicBool::new(false)),
             sent: Arc::default(),
         }
@@ -165,6 +168,26 @@ impl Net {
                 .and_then(|()| r.put(&tmp, &key, false));
             if let Err(e) = res {
                 eprintln!("runner: heartbeat upload {key}: {e}");
+            }
+        });
+    }
+
+    /// Uploads `text` to each of `keys` (key, immutable) in the background, written to `tmp`
+    /// first; a job still waiting is replaced by this newer one. Failures are logged only.
+    pub fn upload_text(&self, text: String, keys: Vec<(String, bool)>, tmp: PathBuf) {
+        let r = Arc::clone(&self.remote);
+        self.misc.submit(move || {
+            if let Some(d) = tmp.parent() {
+                let _ = fs::create_dir_all(d);
+            }
+            if let Err(e) = fs::write(&tmp, text) {
+                eprintln!("runner: {}: {e}", tmp.display());
+                return;
+            }
+            for (key, immutable) in keys {
+                if let Err(e) = r.put(&tmp, &key, immutable) {
+                    eprintln!("runner: upload {key}: {e}");
+                }
             }
         });
     }
@@ -219,9 +242,11 @@ impl Net {
         Arc::clone(&self.sent)
     }
 
-    /// Waits up to `limit` for the last heartbeat upload (before the process ends).
+    /// Waits up to `limit` for the last heartbeat upload (before the process ends), then as
+    /// long again for a record upload still going.
     pub fn drain(&self, limit: Duration) {
         self.hb.wait_idle(limit);
+        self.misc.wait_idle(limit);
     }
 
     /// The network fields of a heartbeat.

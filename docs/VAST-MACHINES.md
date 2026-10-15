@@ -232,6 +232,62 @@ Machines with at least 480 GB of memory and at least 1 GB per thread, ranked by 
 
 Next: EPYC 9554 ($18.2), EPYC 9754 ($20.0, 14 deals at once). By the owner's rule the 9654 box would be picked if offered (most work per hour within 20%), otherwise the 9V74. **For trick-1 the deciding numbers are probably the memory and the threads per deal, not the processor**: a 1.5 TB machine can keep three times as many deals running as a 512 GB one, each on fewer threads. How much that is worth is the first thing to measure.
 
+## Measured on our runs
+
+Since 2026-10-16 every rented machine writes its own cost record (`machines/<run_id>.json` in R2, every 10 minutes and at the end of the run; `crates/runner/src/machine.rs`): the CPU model, threads, RAM and price, the minutes and dollars so far, the worlds finished of the total, the solver nodes [positions the exact solver examined; all our work is counted in them] and the two figures that decide a rental: **dollars per 10^12 nodes** and **nodes per second per thread**. `python3 python/tools/machines.py --live` shows the machines running now (one line each, with the cost per node so far), the plain command lists every record, `--by-cpu` averages them per CPU model and schedule, `--rank` ranks today's offers by the measured speed of their CPU model (estimates marked `~`), and `--record-speeds` copies the measured speeds into `docs/vast/speed-factors.json`. The runs listed below were backfilled from their files with `machines.py --backfill` (M3-SPEC §7.3).
+
+**Read the early figures with care.** The work queue runs the hardest deals first, so a run's first worlds cost the most per node: a running record reads high until about 10% of its worlds are done (`settling` in the live view), and a run killed early (the three trick-1 runs below) keeps that high figure for good. Runs made before 2026-10-16 recorded no node counts: their nodes are *estimated* from the worlds' thread-seconds and the measured thread speed of the CPU model (`~` in the tables), so their cost per node is only as good as that speed; the t1bench rows are measured. A whole-bench row's cost covers the whole rental (boot, setup and the sweeps included), which is why it is above the fill-window figure of the same run; the per-CPU table separates the fill and production windows.
+
+**Every backfilled run** (`python3 python/tools/machines.py --from docs/vast/measured-machines.json --markdown`; `~` = nodes estimated; a whole-bench row's cost covers the whole rental):
+
+| run | state | outcome | CPU | threads | RAM GB | $/h | min | $ | worlds | nodes | $ per 1e12 | M nodes/s/thread | schedule | trick | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| m3-agree-t3 | final | KILLED | ? | None | - | 0.000 | 0 | 0.00 | 0/64000 | - | - | - | plan | 3 |  |
+| m3-agree-t4c | final | DONE | EPYC 7J13 | 122 | 252 | 1.282 | 3 | 0.07 | 128000/128000 | ~4.15e+07 | ~1651.498 | - | fill | 4 | nodes estimated |
+| m3-agree-t2d | final | DONE | EPYC 9654 | 368 | 503 | 4.268 | 40 | 2.80 | 128000/128000 | ~2.31e+12 | ~1.216 | - | fill | 2 | nodes estimated |
+| m3-agree-t1-b | final | KILLED | EPYC 9734 | 430 | 1511 | 6.407 | 173 | 18.44 | 0/1280 | - | - | - | split | 1 |  |
+| t1bench-9995wx-w1 | final | DONE | THREADRIPPER PRO 9995WX | 184 | 251 | 1.269 | 9 | 0.20 | 436/- | 3.44e+11 | 0.572 | 6.67 | bench | 1 |  |
+| t1bench-9754-w1 | final | DONE | EPYC 9754 EMB | 245 | 503 | 3.737 | 10 | 0.59 | 447/- | 3.51e+11 | 1.670 | 4.66 | bench | 1 |  |
+| t1bench-e5-w2 | final | FAILED | XEON E5-2695 V4 | 69 | 504 | 0.402 | 9 | 0.06 | 92/- | 6.07e+10 | 0.979 | 3.07 | bench | 1 |  |
+| t1bench-9734-w2 | final | DONE | EPYC 9734 | 215 | 125 | 3.335 | 9 | 0.52 | 341/- | 3.35e+11 | 1.540 | 5.53 | bench | 1 |  |
+| t1bench-9654p-w2 | final | DONE | EPYC 9654P | 184 | 251 | 2.936 | 10 | 0.46 | 394/- | 3.03e+11 | 1.524 | 5.55 | bench | 1 |  |
+| t1bench-turines-w3 | final | DONE | ENG SAMPLE: 100-000001535-05 | 491 | 1133 | 13.656 | 10 | 2.14 | 1092/- | 7.44e+11 | 2.875 | 5.38 | bench | 1 |  |
+| t1bench-9554-w3 | final | DONE | EPYC 9554 | 245 | 504 | 6.935 | 10 | 1.12 | 594/- | 4.81e+11 | 2.339 | 6.93 | bench | 1 |  |
+| t1bench-5220r-w3 | final | DONE | XEON GOLD 5220R | 92 | 47 | 0.699 | 10 | 0.11 | 159/- | 9.28e+10 | 1.206 | 3.70 | bench | 1 |  |
+| t1bench-9995wx-w3 | final | DONE | THREADRIPPER PRO 9995WX | 184 | 251 | 1.269 | 15 | 0.31 | 955/- | 8.48e+11 | 0.370 | 6.77 | bench | 1 |  |
+| t1bench-e5-w3 | final | DONE | XEON E5-2695 V4 | 69 | 504 | 0.402 | 17 | 0.11 | 280/- | 1.60e+11 | 0.719 | 3.12 | bench | 1 |  |
+| t1bench-56041192-test | final | FAILED | ENG SAMPLE: 100-000000894-04 | 208 | 251 | 1.756 | 0 | 0.00 | 338/- | 2.24e+11 | 0.008 | 3.78 | bench | 1 |  |
+| m3-agree-t1-b2 | final | KILLED | THREADRIPPER PRO 9995WX | 184 | 251 | 1.269 | 134 | 2.84 | 83/1280 | ~8.06e+12 | ~0.352 | - | plan | 1 | under 10% of its worlds: figures read high; nodes estimated |
+| m3-agree-t1-a7 | final | KILLED | THREADRIPPER PRO 7995WX | 184 | 251 | 1.140 | 169 | 3.21 | 58/1280 | ~4.64e+12 | ~0.691 | - | plan | 1 | under 10% of its worlds: figures read high; nodes estimated |
+| m3-agree-t1-b3 | final | KILLED | THREADRIPPER PRO 9995WX | 184 | 251 | 1.274 | 153 | 3.25 | 195/1197 | ~7.64e+12 | ~0.425 | - | plan | 1 | nodes estimated |
+
+**Per CPU model and schedule** (`--by-cpu`; `fill` = one thread per world on every thread, the bench's full-machine window; `prod` = the bench's 2-minute production window under the real schedule, rough: only a few of its worlds finish; `plan` = the position-aware schedule of the real trick-1 runs). The measured means use settled, measured records only; estimated-only figures are listed apart:
+
+| CPU | schedule | runs | measured | mean $ per 1e12 | best $ per 1e12 | mean M nodes/s/thread | estimated-only $ per 1e12 | runs |
+|---|---|---|---|---|---|---|---|---|
+| THREADRIPPER PRO 9995WX | fill | 2 | 2 | 0.306 | 0.304 | 6.26 | - | t1bench-9995wx-w1 t1bench-9995wx-w3 |
+| XEON E5-2695 V4 | fill | 2 | 2 | 0.538 | 0.533 | 3.01 | - | t1bench-e5-w2 t1bench-e5-w3 |
+| XEON GOLD 5220R | fill | 1 | 1 | 0.594 | 0.594 | 3.56 | - | t1bench-5220r-w3 |
+| THREADRIPPER PRO 9995WX | prod | 2 | 2 | 0.631 | 0.629 | 3.03 | - | t1bench-9995wx-w1 t1bench-9995wx-w3 |
+| ENG SAMPLE: 100-000000894-04 | fill | 1 | 1 | 0.658 | 0.658 | 3.57 | - | t1bench-56041192-test |
+| EPYC 9734 | fill | 1 | 1 | 0.826 | 0.826 | 5.22 | - | t1bench-9734-w2 |
+| EPYC 9654P | fill | 1 | 1 | 0.843 | 0.843 | 5.26 | - | t1bench-9654p-w2 |
+| XEON E5-2695 V4 | prod | 2 | 2 | 0.918 | 0.896 | 1.76 | - | t1bench-e5-w2 t1bench-e5-w3 |
+| EPYC 9754 EMB | fill | 1 | 1 | 0.944 | 0.944 | 4.49 | - | t1bench-9754-w1 |
+| EPYC 9554 | fill | 1 | 1 | 1.202 | 1.202 | 6.54 | - | t1bench-9554-w3 |
+| ENG SAMPLE: 100-000000894-04 | prod | 1 | 1 | 1.375 | 1.375 | 1.71 | - | t1bench-56041192-test |
+| ENG SAMPLE: 100-000001535-05 | fill | 1 | 1 | 1.501 | 1.501 | 5.15 | - | t1bench-turines-w3 |
+| EPYC 9654P | prod | 1 | 1 | 1.595 | 1.595 | 2.78 | - | t1bench-9654p-w2 |
+| XEON GOLD 5220R | prod | 1 | 1 | 1.748 | 1.748 | 1.21 | - | t1bench-5220r-w3 |
+| EPYC 9754 EMB | prod | 1 | 1 | 1.750 | 1.750 | 2.42 | - | t1bench-9754-w1 |
+| EPYC 9734 | prod | 1 | 1 | 1.871 | 1.871 | 2.30 | - | t1bench-9734-w2 |
+| EPYC 9554 | prod | 1 | 1 | 3.036 | 3.036 | 2.59 | - | t1bench-9554-w3 |
+| ENG SAMPLE: 100-000001535-05 | prod | 1 | 1 | 4.198 | 4.198 | 1.84 | - | t1bench-turines-w3 |
+| EPYC 7J13 | fill | 1 | 0 | - | - | - | ~1651.498 | m3-agree-t4c |
+| EPYC 9654 | fill | 1 | 0 | - | - | - | ~1.216 | m3-agree-t2d |
+| THREADRIPPER PRO 7995WX | plan | 1 | 0 | - | - | - | ~0.691 | m3-agree-t1-a7 |
+| THREADRIPPER PRO 9995WX | plan | 2 | 0 | - | - | - | ~0.352, ~0.425 | m3-agree-t1-b2 m3-agree-t1-b3 |
+
 ## Caveats
 
 - **Dense chips (EPYC 9734, 9754, 9965, 9845; "c" cores).** They put twice as many cores in the same space, with half the L3 cache per core (2 MB instead of 4 MB) and lower clock speeds. SPEC says their threads are still as fast as the 7502's or faster (1.13–1.24), and they are cheap per thread. But with 768 threads sharing 24 memory channels [the parallel links between the processor and its memory sticks], the 9965 is the weakest chip per thread for memory-heavy work (TT speed 1.09). Fine for tricks 2–5; measure before trusting it for trick 1.
@@ -279,6 +335,7 @@ python3 python/tools/vast_market.py record --cpu "AMD EPYC 9965 192-Core Process
 - `docs/vast/market-2026-10-14.json`: the snapshot (127 offers at 13:02 UTC under five searches, plus the 138 offers of the 12:43 first look), trimmed to the fields that matter.
 - `docs/vast/speed-factors.json`: speed per thread for 180 processor models, with sources, uncertainty, our measured values once we have them (`measured`), the host quirks (`machines`) and our runs so far (`observations`).
 - `python/tools/vast_market.py` and its tests `python/tools/test_vast_market.py`.
+- `python/tools/machines.py` and its tests `python/tools/test_machines.py`: the machine-cost database (records in R2 under `machines/`), the live view, the per-CPU summary, the measured ranking of today's offers, the backfill. `docs/vast/measured-machines.json` holds the backfilled records committed on 2026-10-16.
 
 ## Sources
 

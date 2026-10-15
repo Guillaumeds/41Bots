@@ -23,7 +23,9 @@
 //! background threads, every rclone call has hard time limits (`remote.rs`), and the other
 //! uploads run beside the heartbeat ([`Ctx::blocking`]). Heartbeats carry `upload_failures`,
 //! `other_net_failures`, `last_upload_ok_s`, and, during a `search_measure` worlds step,
-//! `progress.eta` (`measure.rs`).
+//! `progress.eta` (`measure.rs`). The machine's cost per solver node is followed in every
+//! heartbeat and written to `machines/<run_id>.json` every 10 minutes and at the end
+//! (`machine.rs`).
 //! A stop request (SIGTERM/SIGINT/SIGHUP, the launcher's `<out>/STOP`, a local `STOP` file, or
 //! the deadline) ends the chunk, uploads its checkpoints, then `out/` with whatever it finished,
 //! and writes `FAILED` with `stopped` and the file list (`stop.rs`).
@@ -49,6 +51,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 
 mod bundle;
+mod machine;
 mod measure;
 mod mem;
 mod net;
@@ -468,6 +471,8 @@ struct Ctx {
     upload_every: Duration,
     last_partial: Instant,
     partial_off: bool,
+    /// This machine's solver work and cost per node (`machine.rs`).
+    tally: machine::Tally,
 }
 
 impl Ctx {
@@ -499,6 +504,7 @@ impl Ctx {
             upload_every: UPLOAD_EVERY,
             last_partial: Instant::now(),
             partial_off: true,
+            tally: machine::Tally::default(),
         }
     }
 
@@ -600,12 +606,20 @@ impl Ctx {
         let cpu = self.cpu.sample(self.child);
         let round = |x: Option<f64>| x.map(|x| (x * 10.0).round() / 10.0);
         let elapsed = self.elapsed();
+        // The machine's solver work so far, and its cost per node, added to the progress.
+        self.tally.observe(&self.phase, &self.progress);
+        let mut progress = self.progress.clone();
+        if self.tally.active()
+            && let Some(o) = progress.as_object_mut()
+        {
+            o.extend(self.tally.fields(elapsed, self.dph, self.threads));
+        }
         let hb = json!({
             "run_id": self.run_id,
             "seq": self.seq,
             "utc": utc_string(unix_now()),
             "phase": self.phase,
-            "progress": self.progress,
+            "progress": progress,
             "elapsed_s": elapsed.round(),
             "threads": self.threads,
             "usable_cores": (self.cpu.cores * 100.0).round() / 100.0,
@@ -626,7 +640,7 @@ impl Ctx {
                 hb_line(
                     self.seq,
                     &self.phase,
-                    &self.progress,
+                    &hb["progress"],
                     cpu.tree.or(cpu.cgroup)
                 )
             );
@@ -645,6 +659,56 @@ impl Ctx {
             Err(e) => eprintln!("runner: heartbeat: {e}"),
         }
         self.seq += 1;
+        if self.tally.write_due() {
+            self.write_machine("running", None, false);
+        }
+    }
+
+    /// Writes the machine record (`machine.rs`) under the run root and to the remote store's
+    /// `machines/` keys: in the background (`net.rs`) for the running record, or waiting for
+    /// the upload (with retries, heartbeating meanwhile) for the final one.
+    fn write_machine(&mut self, state: &str, outcome: Option<&str>, wait: bool) {
+        let utc = utc_string(unix_now());
+        let facts = machine::RunFacts {
+            run_id: &self.run_id,
+            utc: utc.clone(),
+            elapsed_s: self.elapsed(),
+            threads: self.threads,
+            dph: self.dph,
+        };
+        let rec = machine::record(&self.tally, &facts, state, outcome);
+        self.tally.written();
+        let rel = format!("machines/{}.json", self.run_id);
+        let local = match self.write_json(&rel, &rec) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("runner: machine record: {e}");
+                return;
+            }
+        };
+        let keys = machine::keys(&self.run_id, &utc);
+        if !wait {
+            if let Some(n) = &self.net {
+                n.upload_text(
+                    rec.to_string() + "\n",
+                    keys.to_vec(),
+                    self.root.join("tmp").join("machine-upload.json"),
+                );
+            }
+            return;
+        }
+        let Some(r) = self.remote() else {
+            return;
+        };
+        let failed = self.blocking(move || {
+            keys.iter()
+                .filter(|(k, immutable)| remote::retry(3, || r.put(&local, k, *immutable)).is_err())
+                .map(|(k, _)| k.clone())
+                .collect::<Vec<_>>()
+        });
+        for k in failed {
+            eprintln!("runner: upload {k} failed");
+        }
     }
 
     fn set_phase(&mut self, phase: &str, progress: Value) {
@@ -770,6 +834,12 @@ fn hb_line(seq: u32, phase: &str, progress: &Value, cpu: Option<f64>) -> String 
     }
     if let Some(r) = progress["rate"].as_f64() {
         s.push_str(&format!(" rate {r:.1e}/s"));
+    }
+    if let Some(c) = progress["usd_per_1e12_nodes"].as_f64() {
+        s.push_str(&format!(" $/1e12 {c:.3}"));
+        if progress["settling"].as_bool() == Some(true) {
+            s.push_str(" (settling)");
+        }
     }
     s
 }
@@ -901,6 +971,7 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
         upload_every,
         last_partial: Instant::now(),
         partial_off: false,
+        tally: machine::Tally::default(),
     };
     // Continue a heartbeat sequence if this run id was started before on this disk.
     if let Ok(t) = fs::read_to_string(ctx.root.join("heartbeat.json"))
@@ -927,6 +998,18 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
     // A stopped run (signal, the launcher's STOP, the deadline) keeps everything it finished:
     // its checkpoints and the whole out/ are uploaded below, and the marker lists them.
     let stopped = stop::requested();
+    // The machine's final cost record (`machine.rs`), once it counted any solver work.
+    ctx.set_phase("machine-record", Value::Null);
+    if ctx.tally.active() {
+        let outcome_word = if ok {
+            "DONE"
+        } else if stopped.is_some() {
+            "STOPPED"
+        } else {
+            "FAILED"
+        };
+        ctx.write_machine("final", Some(outcome_word), true);
+    }
     let outputs: Vec<Value> = bundle::list_files(&ctx.root.join("out"))
         .unwrap_or_default()
         .into_iter()
@@ -1101,7 +1184,9 @@ fn destroy_outcome(text: &str, id: &str, key: &str) -> Result<(), String> {
 fn steps(ctx: &mut Ctx, manifest: &Value) -> Result<(), String> {
     fs::create_dir_all(ctx.root.join("out")).map_err(|e| e.to_string())?;
     // (1) hardware
-    let hw = ctx.write_json("hardware.json", &hardware())?;
+    let hw_rec = hardware();
+    ctx.tally.hardware(&hw_rec);
+    let hw = ctx.write_json("hardware.json", &hw_rec)?;
     ctx.upload_file(&hw, "hardware.json", false);
     ctx.set_phase("benchmark", Value::Null);
     // (2) benchmark: difftest matches per second per core
@@ -1376,6 +1461,12 @@ mod tests {
             "hb 3 chunk search_measure exact worlds cpu 99.2%"
         );
         assert_eq!(hb_line(0, "start", &Value::Null, None), "hb 0 start cpu -");
+        let p = json!({ "kind": "search_measure", "step": "exact worlds",
+                        "usd_per_1e12_nodes": 0.3124, "settling": true });
+        assert_eq!(
+            hb_line(4, "chunk", &p, Some(99.0)),
+            "hb 4 chunk search_measure exact worlds cpu 99.0% $/1e12 0.312 (settling)"
+        );
     }
 
     /// The network never blocks the runner (docs/M3-SPEC.md §7.3). With an rclone that hangs on

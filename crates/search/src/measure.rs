@@ -40,7 +40,8 @@ use solver::{ParProgress, SolveMem};
 use crate::eta::{Eta, EtaClass, EtaTracker, MIN_PRIOR_S};
 use crate::labels;
 use crate::pimc::{
-    Candidate, Ctx, Method, SearchConfig, aggregate, candidates, solves_per_world, world_row,
+    Candidate, Ctx, Method, SearchConfig, aggregate, candidates, solves_per_world,
+    world_row_counted,
 };
 use crate::plan::{AutoParams, ExecProgress, PlanTask, Planned, WorldPlan, plan_auto, run_planned};
 use crate::worlds::Worlds;
@@ -408,6 +409,10 @@ pub struct DecisionTiming {
     /// Solver threads per world, in a position-aware run ([`Schedule::Auto`]); absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threads: Option<u64>,
+    /// Solver nodes summed over its worlds (0 for rollouts; absent in files made before
+    /// 2026-10-16). The runner's machine-cost records count work in nodes.
+    #[serde(default)]
+    pub nodes: u64,
 }
 
 /// How a worlds run is spread over the machine. Values never depend on it.
@@ -472,6 +477,9 @@ pub struct BatchProgress {
     pub worlds_resumed: AtomicU64,
     /// Worlds valued by this process (so `worlds_total - worlds_resumed` once it is done).
     pub worlds_valued: AtomicU64,
+    /// Solver nodes of the worlds valued by this process (the machine's own work, for its cost
+    /// per node; restored worlds are not counted).
+    pub nodes_valued: AtomicU64,
     /// Worker threads in use (a position-aware run: all its threads).
     pub threads: AtomicU64,
     /// The parallel exact solve now running, when one worker runs `solve_fast_par`
@@ -554,6 +562,8 @@ pub struct DoneWorld {
     pub v: Vec<[u64; 4]>,
     /// Microseconds it took (timings only).
     pub us: u64,
+    /// Solver nodes it took (timings only; 0 when unknown).
+    pub nodes: u64,
 }
 
 /// What a resumed run already has. Both only shorten the work: no value, row or order depends
@@ -569,8 +579,10 @@ pub struct Resume {
 /// Receives each world as it finishes, on the one thread that collects results, before the
 /// decision it belongs to is handed on. [`worlds_file`]'s checkpoint is one.
 pub trait WorldSink {
-    /// World `w` of decision `id` finished with these values, in `us` microseconds.
-    fn world(&mut self, id: u64, w: u64, v: &[[u64; 4]], us: u64) -> Result<(), String>;
+    /// World `w` of decision `id` finished with these values, in `us` microseconds and `nodes`
+    /// solver nodes.
+    fn world(&mut self, id: u64, w: u64, v: &[[u64; 4]], us: u64, nodes: u64)
+    -> Result<(), String>;
     /// Decision `id` has been handed on complete: its worlds are no longer needed.
     fn decision(&mut self, _id: u64) -> Result<(), String> {
         Ok(())
@@ -583,7 +595,7 @@ pub trait WorldSink {
 
 /// No checkpoint.
 impl WorldSink for () {
-    fn world(&mut self, _: u64, _: u64, _: &[[u64; 4]], _: u64) -> Result<(), String> {
+    fn world(&mut self, _: u64, _: u64, _: &[[u64; 4]], _: u64, _: u64) -> Result<(), String> {
         Ok(())
     }
 }
@@ -791,6 +803,8 @@ struct Collect {
     left: Vec<usize>,
     /// Total and slowest world (µs) of each decision.
     us: Vec<(u64, u64)>,
+    /// Solver nodes of each decision's worlds.
+    nodes: Vec<u64>,
     /// Solver threads per world of each decision, in a position-aware run.
     threads: Vec<Option<u64>>,
     /// The next decision to hand on.
@@ -811,6 +825,7 @@ impl Collect {
             rows: vec![vec![None; nw]; n],
             left: vec![nw; n],
             us: vec![(0, 0); n],
+            nodes: vec![0; n],
             threads: vec![None; n],
             next: 0,
             restored: 0,
@@ -827,6 +842,7 @@ impl Collect {
                     c.rows[j][i] = Some(d.v.clone());
                     c.left[j] -= 1;
                     c.us[j] = (c.us[j].0 + d.us, c.us[j].1.max(d.us));
+                    c.nodes[j] += d.nodes;
                     c.restored += 1;
                     c.restored_per[j] += 1;
                 }
@@ -842,20 +858,23 @@ impl Collect {
             .collect()
     }
 
-    /// Task `k` finished with values `v` in `us` µs: report it to `ws`, then keep it.
+    /// Task `k` finished with values `v` in `us` µs and `nodes` solver nodes: report it to
+    /// `ws`, then keep it.
     fn put(
         &mut self,
         k: usize,
         v: Vec<[u64; 4]>,
         us: u64,
+        nodes: u64,
         ws: &mut dyn WorldSink,
     ) -> Result<(), String> {
         let (j, i) = (k / self.nw, k % self.nw);
-        ws.world(self.ids[j], self.from + i as u64, &v, us)?;
+        ws.world(self.ids[j], self.from + i as u64, &v, us, nodes)?;
         debug_assert!(self.rows[j][i].is_none(), "each task is valued once");
         self.rows[j][i] = Some(v);
         self.left[j] -= 1;
         self.us[j] = (self.us[j].0 + us, self.us[j].1.max(us));
+        self.nodes[j] += nodes;
         Ok(())
     }
 
@@ -874,6 +893,7 @@ impl Collect {
                 &*b.worlds[j],
                 rows,
                 self.us[j],
+                self.nodes[j],
                 self.threads[j],
             );
             sink(r, t)?;
@@ -921,7 +941,7 @@ fn batch_path(
     let eta = &*eta;
     let next = AtomicUsize::new(0);
     let stop = AtomicBool::new(false);
-    type Msg = (usize, Vec<[u64; 4]>, u64);
+    type Msg = (usize, Vec<[u64; 4]>, u64, u64);
     let work = |worker: usize, tx: mpsc::Sender<Msg>| {
         // One solver memory per worker for the whole run: its transposition table is allocated
         // once and emptied in O(1) between worlds, not allocated, first-touched and freed per
@@ -937,7 +957,7 @@ fn batch_path(
             let (class, prior) = b.cost.per_prep[j];
             let slot = eta.begin(worker, class, prior, world_threads);
             let t0 = Instant::now();
-            let v = world_row(
+            let (v, nodes) = world_row_counted(
                 &p.view,
                 &*b.worlds[j],
                 &p.cands,
@@ -954,9 +974,10 @@ fn batch_path(
             if let Some(pr) = b.progress {
                 pr.worlds_done.fetch_add(1, Ordering::Relaxed);
                 pr.worlds_valued.fetch_add(1, Ordering::Relaxed);
+                pr.nodes_valued.fetch_add(nodes, Ordering::Relaxed);
             }
             let v: Vec<[u64; 4]> = v.into_iter().map(|x| x.0).collect();
-            if tx.send((k, v, wall.as_micros() as u64)).is_err() {
+            if tx.send((k, v, wall.as_micros() as u64, nodes)).is_err() {
                 // The collector has stopped (a sink error).
                 break;
             }
@@ -976,12 +997,12 @@ fn batch_path(
                 return Ok(());
             }
             // Every worker has stopped (one panicked); the scope re-raises the panic.
-            let Ok((k, v, us)) = rx.recv() else {
+            let Ok((k, v, us, nodes)) = rx.recv() else {
                 return Ok(());
             };
-            col.put(k, v, us, ws)?;
-            while let Ok((k, v, us)) = rx.try_recv() {
-                col.put(k, v, us, ws)?;
+            col.put(k, v, us, nodes, ws)?;
+            while let Ok((k, v, us, nodes)) = rx.try_recv() {
+                col.put(k, v, us, nodes, ws)?;
             }
             ws.flush()?;
         })();
@@ -1030,7 +1051,7 @@ fn planned_path(
             tt_mb: plan.tt_mb,
             ..*cfg
         };
-        let v = world_row(
+        let (v, nodes) = world_row_counted(
             &p.view,
             &*b.worlds[j],
             &p.cands,
@@ -1043,7 +1064,7 @@ fn planned_path(
             mem,
         );
         eta.end(slot, class, prior, plan.threads, t0.elapsed().as_secs_f64());
-        v.into_iter().map(|x| x.0).collect::<Vec<[u64; 4]>>()
+        (v.into_iter().map(|x| x.0).collect::<Vec<[u64; 4]>>(), nodes)
     };
     run_planned(
         &planned.order,
@@ -1053,12 +1074,13 @@ fn planned_path(
         &stop,
         b.progress.map(|p| &p.exec),
         work,
-        |n, v, ran| {
+        |n, (v, nodes), ran| {
             if let Some(p) = b.progress {
                 p.worlds_done.fetch_add(1, Ordering::Relaxed);
                 p.worlds_valued.fetch_add(1, Ordering::Relaxed);
+                p.nodes_valued.fetch_add(nodes, Ordering::Relaxed);
             }
-            col.put(todo[n], v, (ran.wall_s * 1e6) as u64, ws)?;
+            col.put(todo[n], v, (ran.wall_s * 1e6) as u64, nodes, ws)?;
             ws.flush()?;
             col.emit(b, ws, sink)
         },
@@ -1094,6 +1116,7 @@ fn records(
     worlds: &dyn Worlds,
     rows: Vec<Vec<[u64; 4]>>,
     us: (u64, u64),
+    nodes: u64,
     threads: Option<u64>,
 ) -> (WorldRows, DecisionTiming) {
     let nw = rows.len() as u64;
@@ -1127,6 +1150,7 @@ fn records(
         world_us: us.0,
         max_world_us: us.1,
         threads,
+        nodes,
     };
     (r, t)
 }
@@ -1300,6 +1324,9 @@ pub struct CkptRow {
     pub v: Vec<[u64; 4]>,
     /// Microseconds the world took (timings only).
     pub us: u64,
+    /// Solver nodes the world took (timings only; 0 in lines made before 2026-10-16).
+    #[serde(default)]
+    pub nodes: u64,
 }
 
 /// A decision's fingerprint: 64-bit FNV-1a of the JSON of what defines it (start state, deck,
@@ -1420,6 +1447,7 @@ fn read_ckpt(
                 DoneWorld {
                     v: row.v,
                     us: row.us,
+                    nodes: row.nodes,
                 },
             );
         } else {
@@ -1532,7 +1560,14 @@ impl Ckpt {
 }
 
 impl WorldSink for Ckpt {
-    fn world(&mut self, id: u64, w: u64, v: &[[u64; 4]], us: u64) -> Result<(), String> {
+    fn world(
+        &mut self,
+        id: u64,
+        w: u64,
+        v: &[[u64; 4]],
+        us: u64,
+        nodes: u64,
+    ) -> Result<(), String> {
         let row = CkptRow {
             id,
             fp: self.fps.get(&id).copied().unwrap_or(0),
@@ -1544,6 +1579,7 @@ impl WorldSink for Ckpt {
             w,
             v: v.to_vec(),
             us,
+            nodes,
         };
         let line = serde_json::to_string(&row).map_err(|e| e.to_string())?;
         writeln!(self.f, "{line}").map_err(|e| format!("{}: {e}", self.path.display()))?;

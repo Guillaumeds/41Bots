@@ -402,7 +402,8 @@ def choose(a) -> dict | None:
 
 # ------------------------------------------------------------------ run
 
-def instance_env(run_id: str, ncpu: int, dph: float, bin_sha: str, image: str = "", destroy_key: str = "") -> str:
+def instance_env(run_id: str, ncpu: int, dph: float, bin_sha: str, image: str = "", destroy_key: str = "",
+                 offer: dict | None = None) -> str:
     kv = {
         "RUN_ID": run_id, "NCPU": str(ncpu), "DPH": f"{dph:.5f}", "BIN_SHA": bin_sha,
         "R2_BUCKET": os.environ["R2_BUCKET"], "R2_S3_ENDPOINT": os.environ["R2_S3_ENDPOINT"],
@@ -417,6 +418,10 @@ def instance_env(run_id: str, ncpu: int, dph: float, bin_sha: str, image: str = 
         kv["IMAGE"] = image
     if destroy_key:
         kv["VAST_DESTROY_KEY"] = destroy_key
+    # The offer, host and machine numbers, for the runner's machine-cost record (machines/<run>.json).
+    for key, field in (("OFFER_ID", "id"), ("HOST_ID", "host_id"), ("MACHINE_ID", "machine_id")):
+        if offer and offer.get(field) is not None:
+            kv[key] = str(offer[field])
     for k, v in kv.items():
         if not re.fullmatch(r"[A-Za-z0-9_.:/+=-]*", v):
             sys.exit(f"launch: environment value for {k} has characters vast's --env cannot carry")
@@ -1105,7 +1110,7 @@ def create_instance(a, best: dict, run_id: str, ncpu: int, dph: float) -> int | 
     # ssh/jupyter modes replace the image's ENTRYPOINT/CMD with their own init, so the boot script
     # never ran (run 38509301077). --entrypoint names the boot script; an empty --args (must be the
     # very last token) selects runtype "args". On-demand: never pass --bid_price.
-    env = instance_env(run_id, ncpu, dph, a.bin_sha, a.image, getattr(a, "destroy_key", ""))
+    env = instance_env(run_id, ncpu, dph, a.bin_sha, a.image, getattr(a, "destroy_key", ""), offer=best)
     res = vast("create", "instance", str(best["id"]), "--image", a.image, "--disk", str(a.disk_gb),
                "--env", env, "--label", f"41bots-{run_id}",
                "--entrypoint", BOOT_PATH, "--cancel-unavail", tail=("--args",))

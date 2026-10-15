@@ -225,6 +225,7 @@ fn write_progress(
         "decisions_resumed": ld(&p.decisions_resumed),
         "worlds_resumed": ld(&p.worlds_resumed),
         "worlds_valued": ld(&p.worlds_valued),
+        "nodes_valued": ld(&p.nodes_valued),
         "eta": p.eta().map(|e| serde_json::json!({
             "done_frac": e.done_frac, "remaining_s": e.remaining_s, "measured": e.measured,
             "basis": e.basis, "work_thread_s": e.work_s, "done_thread_s": e.done_s,
