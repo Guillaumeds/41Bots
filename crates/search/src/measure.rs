@@ -296,6 +296,7 @@ pub fn build_decisions(
                 if v.public.trick_no == trick
                     && v.public.trick_cards.len() == pos
                     && candidates(&v, &legal).1.len() >= 2
+                    && !play_after_own_rob(&v)
                 {
                     nodes.push((m.actions().to_vec(), seat, view_hand_type(&v)));
                 }
@@ -325,6 +326,19 @@ pub fn build_decisions(
         }
     }
     out
+}
+
+/// Is the view's decision the play straight after its own rob burn in trick 1? The PIMC bot
+/// chooses that card together with the burn (one joint decision, M3-SPEC §5.5) and plays it
+/// without searching again, so it is not a decision of the bot and never enters a decision set
+/// (review C, 2026-10-15: before, a robber's position offered both nodes, and about 40% of the
+/// trick-1 robber decisions drawn were these plays).
+pub fn play_after_own_rob(v: &SeatView) -> bool {
+    v.public.phase == Phase::AwaitPlay(v.seat)
+        && matches!(
+            crate::worlds::hand_events(v).last(),
+            Some(&engine::game::Event::BurnDone { seat }) if seat == v.seat
+        )
 }
 
 /// The decision seed of decision `id` under world label `label` (1 = the reference / yardstick
@@ -372,6 +386,17 @@ pub struct WorldRows {
     pub fp: Option<RowFp>,
 }
 
+/// The version of what a recorded world value means. Bump it whenever a change to the code (the
+/// solver, the leaf rule, the world generator, rebuilding a world, the candidates) can change any
+/// value a worlds run records for the same decision, seed, label and world, so that worlds valued
+/// by another version are never resumed, extended or joined with this version's (review C,
+/// 2026-10-15). Records and checkpoint lines without it were made by older binaries.
+/// - 1 (absent): before 2026-10-15 22:29 UTC; another seat's rob burn later in trick 1 was the
+///   `rules-v1` burn.
+/// - 2: that burn is searched inside the exact solve (13d3858, 65b6a96), and the turned card of a
+///   pending rob stays live until the burn (7253b48).
+pub const VALUES_VERSION: u32 = 2;
+
 /// A record's fingerprint: the inputs, besides the method, label and world range, that decide
 /// its values.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -384,6 +409,10 @@ pub struct RowFp {
     pub source: String,
     /// The equity table's SHA-256 (hex).
     pub table: String,
+    /// [`VALUES_VERSION`] of the code that valued the worlds; absent in records made before it
+    /// existed (never resumed, extended or joined with records that have it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub values: Option<u32>,
 }
 
 /// How long one decision's worlds took (reports only; never part of a result).
@@ -1138,6 +1167,7 @@ fn records(
             decision: decision_fingerprint(p.d),
             source: source.to_string(),
             table: job.table.clone(),
+            values: Some(VALUES_VERSION),
         }),
     };
     let t = DecisionTiming {
@@ -1327,6 +1357,10 @@ pub struct CkptRow {
     /// Solver nodes the world took (timings only; 0 in lines made before 2026-10-16).
     #[serde(default)]
     pub nodes: u64,
+    /// [`VALUES_VERSION`] of the code that valued the world; absent in lines made before it
+    /// existed (refused).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub values: Option<u32>,
 }
 
 /// A decision's fingerprint: 64-bit FNV-1a of the JSON of what defines it (start state, deck,
@@ -1409,6 +1443,18 @@ fn read_ckpt(
                 job.label,
                 job.seed,
                 short_sha(&job.table),
+            ));
+        }
+        if row.values != Some(VALUES_VERSION) {
+            return Err(format!(
+                "{}: world {} of decision {} was valued by another version of the code (values \
+                 version {}, this binary: {VALUES_VERSION}), so its values may differ; use \
+                 another output file, or delete the checkpoint",
+                path.display(),
+                row.w,
+                row.id,
+                row.values
+                    .map_or("1 (none recorded)".to_string(), |v| v.to_string()),
             ));
         }
         if fps.get(&row.id).is_some_and(|&fp| fp != row.fp) {
@@ -1580,6 +1626,7 @@ impl WorldSink for Ckpt {
             v: v.to_vec(),
             us,
             nodes,
+            values: Some(VALUES_VERSION),
         };
         let line = serde_json::to_string(&row).map_err(|e| e.to_string())?;
         writeln!(self.f, "{line}").map_err(|e| format!("{}: {e}", self.path.display()))?;
@@ -1774,6 +1821,13 @@ fn check_fingerprints(
             Some(format!("world source {} (this run: {source})", fp.source))
         } else if fp.decision != want {
             Some("a different decision of the same id (another decision set?)".to_string())
+        } else if fp.values != Some(VALUES_VERSION) {
+            Some(format!(
+                "values version {} (this binary: {VALUES_VERSION}; the code that values a world \
+                 has changed since)",
+                fp.values
+                    .map_or("1 (none recorded)".to_string(), |v| v.to_string())
+            ))
         } else {
             None
         };
@@ -1837,9 +1891,11 @@ pub fn merge_rows(recs: Vec<WorldRows>) -> Result<(Vec<WorldRows>, Vec<String>),
             if let (Some(a), Some(b)) = (&cur.fp, &s.fp)
                 && a != b
             {
+                let ver = |f: &RowFp| f.values.map_or("1".to_string(), |v| v.to_string());
                 return Err(format!(
                     "decision {} ({} label {}): records were made under other settings (seed {} vs \
-                     {}, equity table {} vs {}, world source {} vs {}); they cannot be joined",
+                     {}, equity table {} vs {}, world source {} vs {}, values version {} vs {}); \
+                     they cannot be joined",
                     s.id,
                     s.method,
                     s.label,
@@ -1848,7 +1904,18 @@ pub fn merge_rows(recs: Vec<WorldRows>) -> Result<(Vec<WorldRows>, Vec<String>),
                     short_sha(&a.table),
                     short_sha(&b.table),
                     a.source,
-                    b.source
+                    b.source,
+                    ver(a),
+                    ver(b)
+                ));
+            }
+            if cur.fp.is_some() != s.fp.is_some() {
+                // A record without a fingerprint was made by a binary older than 2026-10-15
+                // (older values version): never joined to worlds valued by newer code.
+                return Err(format!(
+                    "decision {} ({} label {}): one record has no fingerprint (made by an older \
+                     binary, whose values may differ); it cannot be joined to one that has",
+                    s.id, s.method, s.label
                 ));
             }
             let skip = (end - s.from) as usize;
