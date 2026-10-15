@@ -47,6 +47,8 @@ class World:
         self.outputs: dict[str, bytes] = {}  # files a finishing run uploads before its DONE
         self.destroyed_at: dict[int, float] = {}  # instance id -> clock at its destroy
         self.id_lookup_fails = False  # the search by offer id fails
+        self.search_fails = False  # a full search fails (vast's daily search quota: 429)
+        self.hidden_listings = 0  # `show instances` leaves out the newest instance this many more times
 
     # ---- clock
     def time(self) -> float:
@@ -58,7 +60,8 @@ class World:
         # finished and writes FAILED with `stopped` (then destroys itself).
         if f"runs/{RUN}/STOP" in self.store:
             for inst in self.instances.values():
-                if inst["alive"] and inst["script"].split(":")[0] in ("work", "idle", "silentbusy"):
+                if inst["alive"] and inst["script"].split(":")[0] in ("work", "idle", "silentbusy", "silentlow",
+                                                                       "obeys"):
                     self.store[f"runs/{RUN}/out/measure/exact.jsonl"] = b'{"id": 0}\n'
                     self.store[f"runs/{RUN}/FAILED"] = json.dumps({"stopped": "the launcher asked"}).encode()
                     inst["alive"] = False
@@ -84,7 +87,7 @@ class World:
             # Works on and on (at full CPU, or at 10%), never finishing by itself.
             self.heartbeat("chunk", 99.0 if kind == "work" else 10.0)
             return
-        if kind in ("silentbusy", "silentidle"):
+        if kind in ("silentbusy", "silentidle", "silentlow", "stuck"):
             # Heartbeats for n polls, then none: its uploads hang (busy) or it stopped working (idle).
             if inst["polls"] <= n:
                 self.heartbeat("chunk", 99.0)
@@ -98,6 +101,11 @@ class World:
             if inst["polls"] >= m + 3:
                 self.store[f"runs/{RUN}/DONE"] = b"{}"
                 inst["alive"] = False
+            return
+        if kind == "obeys" and inst["polls"] >= n:
+            # A replacement that sees no STOP finishes its work.
+            self.store[f"runs/{RUN}/DONE"] = b"{}"
+            inst["alive"] = False
             return
         if kind == "stall" and inst["polls"] > n:
             return
@@ -116,7 +124,7 @@ class World:
             inst["alive"] = False  # the runner destroys its own instance
 
     # ---- vast CLI
-    def vast(self, *args, raw=True, check=True, tail=()):
+    def vast(self, *args, raw=True, check=True, tail=(), timeout=None):
         cmd = args[:2]
         if cmd == ("search", "offers"):
             if args[2].startswith("id="):
@@ -127,6 +135,8 @@ class World:
             self.searches += 1
             if self.forbid_search:
                 raise AssertionError("a search was made")
+            if self.search_fails:
+                raise RuntimeError("vastai search offers failed: 429 Too Many Requests")
             return [dict(o) for o in self.offers]
         if cmd == ("create", "instance"):
             oid = int(args[2])
@@ -143,14 +153,22 @@ class World:
             self.envs.append(args[args.index("--env") + 1])
             if how == "unreadable":
                 return None  # vast rented it, but printed something that is not JSON
+            if how == "late":
+                # vast rented it, its answer was an error, and the first listing misses it.
+                self.hidden_listings = 1
+                raise RuntimeError("vastai create instance failed: 504 Gateway Timeout")
             return {"success": True, "new_contract": iid, "instance_api_key": "ik-secret"}
         if cmd == ("show", "instances"):
             if self.listing_fails:
                 raise RuntimeError("vastai show instances failed: 502 Bad Gateway")
             # Destroyed instances leave the list; one that died (or ended) but was not destroyed stays, exited.
+            hide = None
+            if self.hidden_listings > 0:
+                self.hidden_listings -= 1
+                hide = max(self.instances)
             return [{"id": iid, "label": inst["label"], "actual_status": "running" if inst["alive"] else "exited",
                      "intended_status": "running" if inst["alive"] else "stopped"}
-                    for iid, inst in self.instances.items() if not inst.get("destroyed")]
+                    for iid, inst in self.instances.items() if not inst.get("destroyed") and iid != hide]
         if cmd == ("create", "api-key"):
             with open(args[args.index("--permission_file") + 1]) as fh:
                 perm = json.load(fh)
@@ -168,7 +186,8 @@ class World:
             inst = self.instances.get(int(args[2]))
             if not inst or not inst["alive"]:
                 return {"actual_status": "exited", "intended_status": "stopped"}
-            cpu = {"silentbusy": 95.0, "hiccup": 97.0, "silentidle": 2.0}.get(inst["script"].split(":")[0])
+            cpu = {"silentbusy": 95.0, "hiccup": 97.0, "silentidle": 2.0, "silentlow": 17.0,
+                   "stuck": 95.0}.get(inst["script"].split(":")[0])
             if cpu is not None:
                 return {"actual_status": "running", "intended_status": "running", "cpu_util": cpu,
                         "cpu_cores_effective": 32, "status_msg": "success, running img:1"}
@@ -211,6 +230,9 @@ class World:
     def r2_exists(self, key: str) -> bool:
         return key in self.store
 
+    def r2_delete(self, key: str) -> None:
+        self.store.pop(key, None)
+
 
 def offer(i: int, machine: int, dph: float, **kw) -> dict:
     o = {"id": i, "machine_id": machine, "dph_total": dph, "cpu_cores_effective": 32, "cpu_name": "EPYC 7B12",
@@ -233,11 +255,12 @@ class LauncherTest(unittest.TestCase):
     def patched(self, world: World):
         """The launcher's vast, R2 and clock replaced by `world`."""
         saved = {n: getattr(launch, n) for n in ("vast", "r2_get", "r2_put", "r2_list", "r2_list_sized", "r2_exists",
-                                                 "time")}
+                                                 "r2_delete", "time")}
         launch.vast = world.vast
         launch.r2_get, launch.r2_put = world.r2_get, world.r2_put
         launch.r2_list, launch.r2_exists = world.r2_list, world.r2_exists
         launch.r2_list_sized = world.r2_list_sized
+        launch.r2_delete = world.r2_delete
         launch.time = world
         try:
             with contextlib.redirect_stdout(io.StringIO()):
@@ -246,19 +269,21 @@ class LauncherTest(unittest.TestCase):
             for n, v in saved.items():
                 setattr(launch, n, v)
 
-    def run_launch(self, world: World, manifest: dict, *extra: str) -> tuple[int, dict]:
+    def run_launch(self, world: World, manifest: dict, *extra: str, time_limit: bool = True) -> tuple[int, dict]:
         saved = {n: getattr(launch, n) for n in ("vast", "r2_get", "r2_put", "r2_list", "r2_list_sized", "r2_exists",
-                                                 "time")}
+                                                 "r2_delete", "time")}
         launch.vast = world.vast
         launch.r2_get, launch.r2_put = world.r2_get, world.r2_put
         launch.r2_list, launch.r2_exists = world.r2_list, world.r2_exists
         launch.r2_list_sized = world.r2_list_sized
+        launch.r2_delete = world.r2_delete
         launch.time = world
         out = io.StringIO()
+        limit = ["--max-minutes", "600"] if time_limit else []
         try:
             with contextlib.redirect_stdout(out):
                 code = launch.main(["run", "--manifest", json.dumps(manifest), "--image", "img:1", "--bin-sha", "abc",
-                                    "--max-minutes", "600", "--startup-minutes", "5", *extra])
+                                    *limit, "--startup-minutes", "5", *extra])
         finally:
             for n, v in saved.items():
                 setattr(launch, n, v)
@@ -637,10 +662,11 @@ class LauncherTest(unittest.TestCase):
         self.assertIn("25.0% done, ETA 14 Oct 15:20 UTC (14 Oct 19:20 Mauritius), projected $0.50, basis: chunks done",
                       self.log)
         self.assertRegex(self.log, r"heartbeat 0, phase chunk, [0-9.]+ min, \$0\.0[0-9] so far, CPU 99\.0%")
-        # No budget: no warning, no stop for money.
+        # No budget (0; the default is $20): no warning, no stop for money.
         w = World([offer(1, 11, 1.0)], ["done:3"])
         w.progress = {"eta": {"projected_usd": 50.0}}
-        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}})
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}},
+                                       "--max-dollars", "0")
         self.assertEqual((code, report["outcome"]), (0, "DONE"))
         self.assertNotIn("over the budget", self.log)
 
@@ -770,11 +796,99 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual((rec["max_dollars"], rec["handed_over"]), (5.0, False))
         self.assertNotIn(f"watch/{RUN}.json", w.store)
 
+    # ---- review E (2026-10-16)
+
+    def test_no_time_limit_by_default_and_a_20_dollar_cap(self):
+        # The owner's rule: a run ends when it finishes, at its dollar cap, or when a person stops
+        # it. Without --max-minutes, a run working for 50 minutes (the old default stopped it at
+        # 30) finishes, and its manifest carries no deadline for the runner to stop at.
+        w = World([offer(1, 11, 1.0)], ["done:50"])
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}},
+                                       time_limit=False)
+        self.assertEqual((code, report["outcome"]), (0, "DONE"))
+        self.assertGreater(report["attempts"][0]["minutes"], 50)
+        self.assertNotIn(f"runs/{RUN}/STOP", w.store)
+        self.assertNotIn("deadline_utc", json.loads(w.store[f"runs/{RUN}/manifest.json"]))
+        rec = json.loads(w.store[f"runs/{RUN}/watch.json"])
+        self.assertEqual((rec["max_dollars"], rec["deadline_utc"]), (20.0, None))
+        # The cap is what ends a run that never finishes: $20 at $10/hour is 2 hours.
+        w = World([offer(1, 11, 10.0)], ["work:0"])
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}},
+                                       time_limit=False)
+        self.assertEqual((code, report["outcome"]), (1, "STOPPED"))
+        self.assertIn("budget reached", report["reason"])
+        self.assertAlmostEqual(report["attempts"][0]["minutes"], 120, delta=8)
+
+    def test_stop_of_a_stopped_machine_does_not_stop_its_replacement(self):
+        # Format 2: the first machine goes silent while busy and ignores the stop request (its
+        # network is stuck), so it is destroyed and replaced. The replacement must not find that
+        # STOP: before, it stopped at its first heartbeat and the run ended with its work undone.
+        w = World([offer(1, 11, 1.0), offer(2, 12, 1.1)], ["stuck:2", "obeys:3"])
+        code, report = self.run_launch(w, {"format": 2, "run_id": RUN, "run_seed": 1, "streams": []})
+        self.assertEqual((code, report["outcome"], report["replacements"]), (0, "DONE", 1))
+        self.assertNotIn(f"runs/{RUN}/FAILED", w.store)
+        self.assertIn("removed the stop request", self.log)
+
+    def test_silent_machine_of_a_low_cpu_run_gets_the_busy_grace(self):
+        # A run that keeps 32 of 190 threads busy (--low-cpu-pct 1) reads about 17% in vast. When
+        # its heartbeat uploads hang it is treated as busy (wait, then stop and upload), not as
+        # idle (destroyed at once with its unsaved work).
+        w = World([offer(1, 11, 1.0)], ["silentlow:2"])
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}},
+                                       "--low-cpu-pct", "1")
+        self.assertEqual((code, report["outcome"]), (1, "STOPPED"))
+        self.assertIn("stayed busy", report["reason"])
+        self.assertIn(f"runs/{RUN}/out/measure/exact.jsonl", w.store)
+        self.assertEqual(json.loads(w.store[f"runs/{RUN}/watch.json"])["busy_cpu_pct"], 1.0)
+        # With the default threshold the same machine is idle: destroyed at once, as before.
+        w = World([offer(1, 11, 1.0)], ["silentlow:2"])
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}})
+        self.assertEqual((code, report["outcome"]), (1, "KILLED"))
+
+    def test_stream_keys_the_runner_refuses_are_refused_before_renting(self):
+        w = World([offer(1, 11, 1.0)], ["done:1"])
+        m = {"format": 2, "run_id": RUN, "run_seed": 1, "streams": [
+            {"name": "tt12g", "priority": 1, "kind": "search_measure", "threads": 32, "chunks": 1,
+             "params": {"tt_mb": 12288}}]}
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, m)
+        self.assertIn("unknown key 'threads' (it belongs in params: params.threads)", str(e.exception))
+        self.assertEqual(w.created_on, [])
+        m["streams"][0]["params"]["threads"] = m["streams"][0].pop("threads")
+        self.assertEqual(launch.manifest_stream_errors(m), [])
+
+    def test_failed_search_for_a_replacement_still_reports(self):
+        # vast's daily search quota runs out (429) when a replacement is needed: nothing more is
+        # rented and the run's report is written (before, the exception skipped it).
+        w = World([offer(1, 11, 1.0), offer(2, 12, 1.5)], ["die:2", "done:1"])
+        orig = w.vast
+
+        def vast(*args, **kw):
+            if args[:2] == ("destroy", "instance"):
+                w.search_fails = True
+            return orig(*args, **kw)
+        w.vast = vast
+        code, report = self.run_launch(w, {"format": 2, "run_id": RUN, "run_seed": 1, "streams": []})
+        self.assertEqual(code, 1)
+        self.assertEqual(w.created_on, [1])
+        self.assertIn("no offer could be rented", report["reason"])
+        self.assertIn("the offer search failed", self.log)
+
+    def test_create_error_whose_machine_appears_late_is_adopted_not_rented_twice(self):
+        # The create call fails, but vast rented the machine and lists it only from its second
+        # listing: it is adopted; the next offer is not rented as well.
+        w = World([offer(1, 11, 1.0), offer(2, 12, 1.5)], ["done:2", "done:2"], create_fail={1: "late"})
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 10, "seed": 1}}})
+        self.assertEqual((code, report["outcome"]), (0, "DONE"))
+        self.assertEqual(w.created_on, [1])
+        self.assertIn("adopting instance 100", self.log)
+
     def run_launch_minutes(self, world: World, manifest: dict, minutes: int) -> tuple[int, dict]:
-        saved = {n: getattr(launch, n) for n in ("vast", "r2_get", "r2_put", "r2_list", "r2_exists", "time")}
+        saved = {n: getattr(launch, n) for n in ("vast", "r2_get", "r2_put", "r2_list", "r2_exists", "r2_delete", "time")}
         launch.vast = world.vast
         launch.r2_get, launch.r2_put = world.r2_get, world.r2_put
         launch.r2_list, launch.r2_exists = world.r2_list, world.r2_exists
+        launch.r2_delete = world.r2_delete
         launch.time = world
         try:
             with contextlib.redirect_stdout(io.StringIO()):

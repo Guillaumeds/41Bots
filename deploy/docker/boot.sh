@@ -124,6 +124,13 @@ while true; do
   kill -0 "$runner_pid" 2>/dev/null || break
 done
 trap - TERM INT HUP
+# Exit status 2: the runner refused the manifest before starting (it writes no marker then).
+# Without a FAILED marker the launcher would take the vanished machine for a start failure and
+# rent the same manifest again, up to 3 more times (review E, 2026-10-16).
+if [[ $status == 2 ]]; then
+  printf '{"stage":"manifest","error":"the runner refused the manifest (exit status 2); see the container log"}\n' >FAILED || true
+  rclone copyto "${RC[@]}" FAILED "$R/runs/$RUN_ID/FAILED" || true
+fi
 # Only reached if the runner could not destroy the instance itself (e.g. it crashed).
 echo "boot: runner exited with $status" >&2
 self_destroy || true

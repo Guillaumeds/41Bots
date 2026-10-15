@@ -9,8 +9,10 @@ name: vast-run
 # If the chosen offer is taken before it can be rented, the next-best offer is tried.
 # Set dry_run to only print the offer that would be chosen.
 # Runs longer than this job's 6-hour limit: after 330 minutes the launcher hands the machine over
-# (it keeps working until DONE, its deadline from max_minutes, or max_dollars) and vast-cleanup.yml
-# watches it every 15 minutes; runs/<run_id>/closed.json records how it ended.
+# (it keeps working until DONE or max_dollars, or a deadline only if max_minutes was set) and
+# vast-cleanup.yml watches it every 15 minutes; runs/<run_id>/closed.json records how it ended.
+# No time limit by default (owner, 2026-10-16): a run ends when it finishes, at its dollar cap
+# (max_dollars, $20 by default), or when a person stops it.
 
 on:
   workflow_dispatch:
@@ -26,8 +28,8 @@ on:
         description: "Minimum RAM in GB (e.g. 480 for the one-deal-per-thread table measurement)"
         default: "32"
       max_minutes:
-        description: "Hard time limit (minutes) for the run, which may exceed GitHub's 6 hours (the machine is handed over to vast-cleanup at 330 min)"
-        default: "30"
+        description: "Time limit in minutes, only if you want one (0 = none, the default: the run ends when it finishes or at max_dollars). Runs past 330 min are handed over to vast-cleanup"
+        default: "0"
       cpu_only:
         description: "CPU-only job: ignore the GPU type when choosing a machine"
         type: boolean
@@ -42,8 +44,8 @@ on:
         description: "Seconds between the launcher's checks of the machine (default 60)"
         default: "60"
       max_dollars:
-        description: "Budget in dollars: stop (upload what is finished) and destroy once the run's machines cost this much (0 = no limit)"
-        default: "0"
+        description: "Dollar cap: stop (upload what is finished) and destroy once the run's machines cost this much (default 20; 0 = no limit)"
+        default: "20"
       cpu_match:
         description: "Regex the offer's CPU name must match, e.g. EPYC (blank = any)"
         default: ""
@@ -151,7 +153,7 @@ jobs:
           PY
           )
           python3 python/launcher/launch.py run --manifest "$MANIFEST" --min-cores "$MIN_CORES" --min-ram-gb "${MIN_RAM_GB:-32}" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} \
-            --max-minutes "$MAX_MINUTES" --low-cpu-pct "$LOW_CPU_PCT" --low-cpu-s "${LOW_CPU_S:-300}" --poll-s "${POLL_S:-60}" --max-dollars "${MAX_DOLLARS:-0}" \
+            --max-minutes "${MAX_MINUTES:-0}" --low-cpu-pct "$LOW_CPU_PCT" --low-cpu-s "${LOW_CPU_S:-300}" --poll-s "${POLL_S:-60}" --max-dollars "${MAX_DOLLARS:-20}" \
             --image "$IMAGE" --bin-sha "$BIN_SHA" --state-file instance-id.txt ${{ inputs.cheapest && '--cheapest' || '' }} --handover-min 330 \
             $OFFER_ARGS
       - name: Cancelled - ask the run to stop and wait (at most 5 minutes) for it to upload what it finished

@@ -5,7 +5,7 @@ docs/M1-SPEC.md section 7 and docs/PLAN.md section 12. Standard library only; va
 through the `vastai` CLI (pip package `vastai`) and R2 through the `aws` CLI (S3 API).
 
     launch.py plan --min-cores 16                      # dry run: rank offers, print the choice
-    launch.py run --manifest m.json --min-cores 16 --max-minutes 30 \
+    launch.py run --manifest m.json --min-cores 16 --max-dollars 20 \
                   --image ghcr.io/guillaumeds/41bots-base:<tag> --bin-sha <git sha>
     launch.py put-input data/equity-v0.npy             # upload a manifest input by content hash
 
@@ -23,8 +23,10 @@ Rules applied:
 - Watch through the vast API and the R2 heartbeat every --poll-s (60) seconds, never SSH. Destroy
   when: no heartbeat within --startup-minutes; heartbeat older than 3 minutes; CPU use below
   --low-cpu-pct (85%) for --low-cpu-s (300) seconds while the chunk is running (unless its
-  heartbeat says progress.partial_cpu_ok); --max-minutes reached; DONE/FAILED seen. Always
-  destroy, never stop.
+  heartbeat says progress.partial_cpu_ok); the dollar cap --max-dollars ($20 by default) reached;
+  DONE/FAILED seen. Always destroy, never stop. No time limit by default (owner, 2026-10-16: a run
+  ends only when it finishes, at its dollar cap, or when a person stops it); --max-minutes N > 0
+  sets one on purpose (then also the manifest's deadline_utc).
 - Container start failures are caught at the next poll: while waiting for the first heartbeat, an
   instance whose status shows a container error ("Error response from daemon", "failed to
   inject", "OCI runtime") is destroyed at once and the next offer is rented (counted as a
@@ -120,7 +122,9 @@ SILENT_BUSY_MIN = 15  # default; --silent-busy-min overrides
 BUSY_CPU_PCT = 50.0  # default; --busy-cpu-pct overrides
 GONE_CONFIRMATIONS = 3  # readings showing an instance exited/offline/absent before it counts as gone
 GONE_SPAN_S = 90  # ...spanning at least this long
+ADOPT_READINGS = 2  # readable instance listings without the run's label before a failed create counts as "nothing rented"
 MIN_RELIABILITY = 0.98
+MAX_DOLLARS = 20.0  # the default dollar cap of a run (owner, 2026-10-16)
 # GitHub ends a job after 6 hours (vast-run.yml timeout-minutes: 360). Longer runs are handed over
 # before that: the machine keeps working and the run-aware cleanup (cleanup.py, every 15 minutes)
 # watches it from then on, through runs/<run>/watch.json and watch/<run>.json.
@@ -161,14 +165,26 @@ def fingerprint(secret: str) -> str:
 LAST_VAST_OUTPUT = ""
 
 
-def vast(*args: str, raw: bool = True, check: bool = True, tail: tuple[str, ...] = ()):
+VAST_TIMEOUT_S = 180  # a vastai call that hangs (no answer) counts as failed; see `vast`
+
+
+def vast(*args: str, raw: bool = True, check: bool = True, tail: tuple[str, ...] = (),
+         timeout: float | None = VAST_TIMEOUT_S):
     # `tail` goes last: `--args` (argparse REMAINDER) swallows every token after it.
+    # A hung call (vastai sets no time limit of its own) would stop the watch: no polls, no
+    # hand-over before GitHub's 6-hour limit. It counts as a failed call instead, which the
+    # callers already treat as "unknown". `create instance` passes timeout=None: a create cut
+    # short could still rent a machine (`adopt_instance` covers an unreadable answer).
     global LAST_VAST_OUTPUT
     cmd = ["vastai", *args, "--api-key", os.environ["VAST_API_KEY"]]
     if raw:
         cmd.append("--raw")
     cmd.extend(tail)
-    p = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        LAST_VAST_OUTPUT = ""
+        raise RuntimeError(f"vastai {args[0]} {args[1] if len(args) > 1 else ''} gave no answer in {timeout:.0f} s")
     LAST_VAST_OUTPUT = redact(f"{p.stdout.strip()} {p.stderr.strip()}".strip())[:500]
     if check and p.returncode != 0:
         # Never echo the command line: it holds keys.
@@ -237,6 +253,10 @@ def r2_put(key: str, data: bytes) -> None:
 
 def r2_exists(key: str) -> bool:
     return _aws("s3api", "head-object", "--bucket", os.environ["R2_BUCKET"], "--key", key, check=False).returncode == 0
+
+
+def r2_delete(key: str) -> None:
+    _aws("s3", "rm", f"s3://{os.environ['R2_BUCKET']}/{key}", "--only-show-errors")
 
 
 def r2_put_file(key: str, path: str) -> None:
@@ -671,6 +691,15 @@ def vast_cpu_pct(info: dict | None) -> float | None:
     return min(v, 100.0)
 
 
+def busy_threshold(a) -> float:
+    """The vast CPU reading at or above which a silent machine counts as busy (an upload problem,
+    given time) rather than idle (destroyed at once): --busy-cpu-pct, but never above the run's
+    own --low-cpu-pct. A run declared to use few cores (e.g. --low-cpu-pct 1: 32 of 190 threads
+    busy, about 17%) would otherwise read as idle and lose its unsaved work the moment its
+    heartbeat uploads hang, the failure that cost $18 on 2026-10-14 (review E, 2026-10-16)."""
+    return min(float(a.busy_cpu_pct), float(getattr(a, "low_cpu_pct", a.busy_cpu_pct)))
+
+
 def silent_state(info: dict | None, busy_pct: float) -> tuple[str, str]:
     """What a machine whose heartbeats stopped is doing, from one reading of vast's record of it
     (a reading that shows it alive, see `Liveness`): ("unknown" | "idle" | "busy", detail). Busy
@@ -750,6 +779,29 @@ def manifest_inputs(manifest: dict) -> dict[str, str]:
     return out
 
 
+# The keys of a format-2 stream (crates/runner/src/sched.rs STREAM_KEYS); the runner refuses
+# any other, so a manifest with one is refused here before anything is rented.
+STREAM_KEYS = ("name", "priority", "kind", "params", "chunks")
+PARAMS_KEYS = ("threads", "chunk_sizes", "est_seconds", "blocks_per_chunk", "sprt")
+
+
+def manifest_stream_errors(manifest: dict) -> list[str]:
+    """Stream keys the runner refuses (review E, 2026-10-16: a stream-level "threads" was
+    ignored, so every chunk ran on one thread). Before the runner refused them, a refused
+    manifest also cost up to 4 rentals: the runner exits at once, the machine destroys itself
+    before its first heartbeat, and the launcher took that for a start failure and rented again."""
+    out = []
+    for st in manifest.get("streams") or []:
+        if not isinstance(st, dict):
+            out.append("a stream is not an object")
+            continue
+        for k in st:
+            if k not in STREAM_KEYS:
+                hint = f" (it belongs in params: params.{k})" if k in PARAMS_KEYS else ""
+                out.append(f"stream {st.get('name')!r}: unknown key {k!r}{hint}")
+    return out
+
+
 def cmd_run(a) -> int:
     need_env("VAST_API_KEY", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET", "R2_S3_ENDPOINT")
     text = a.manifest if a.manifest.lstrip().startswith("{") else open(a.manifest, encoding="utf-8").read()
@@ -760,6 +812,9 @@ def cmd_run(a) -> int:
         sys.exit("launch: run_id may only use letters, digits, - _ .")
     resumable = manifest.get("format") == 2
     if resumable:
+        bad = manifest_stream_errors(manifest)
+        if bad:
+            sys.exit("launch: the runner would refuse this manifest (nothing rented): " + "; ".join(bad))
         # The runner refuses binaries other than the manifest's.
         if manifest.get("bin_sha") and manifest["bin_sha"] != a.bin_sha:
             sys.exit(f"launch: manifest bin_sha {manifest['bin_sha']} differs from --bin-sha {a.bin_sha}")
@@ -776,8 +831,11 @@ def cmd_run(a) -> int:
 
     # No "threads" here: the runner derives the usable cores from the container's cgroup CPU quota
     # (vast's cpu_cores_effective is a fraction of the host; NCPU below is recorded for comparison).
-    manifest.setdefault("deadline_utc", datetime.fromtimestamp(time.time() + a.max_minutes * 60 - 120, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
-    a.deadline_utc = manifest["deadline_utc"]
+    # No time limit unless one is asked for (--max-minutes > 0): the owner's rule (2026-10-16) is
+    # that a run ends when it finishes, at its dollar cap, or when a person stops it.
+    if a.max_minutes > 0:
+        manifest.setdefault("deadline_utc", datetime.fromtimestamp(time.time() + a.max_minutes * 60 - 120, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    a.deadline_utc = manifest.get("deadline_utc")
     a.exclude_machines = set()
     a.exclude_offers = set()
     best = choose(a)
@@ -900,6 +958,10 @@ def rent_and_watch(a, run_id: str, best: dict | None, resumable: bool, run_start
             break
         # Another machine: the same host may have the same fault.
         a.exclude_machines.add(best.get("machine_id", best.get("id")))
+        # A stop request written for the machine just destroyed (e.g. silent while busy) would
+        # stop the replacement at its first heartbeat: it would write its marker at once and the
+        # run would end with its work undone (review E, 2026-10-16).
+        clear_stop(run_id)
         best = None
         log(f"replacement {len(attempts)} of {MAX_REPLACEMENTS}: renting another machine; it resumes from the done-list")
     return final, reason
@@ -956,6 +1018,7 @@ def watch_record(a, run_id: str, instance_id: int, best: dict, dph: float, spent
             "dph": dph, "max_dollars": a.max_dollars, "spent_before": round(spent_before, 4),
             "created_utc": datetime.fromtimestamp(created, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "deadline_utc": getattr(a, "deadline_utc", None), "handed_over": handed_over,
+            "busy_cpu_pct": busy_threshold(a), "low_cpu_pct": a.low_cpu_pct,
             "destroy_key_id": getattr(a, "destroy_key_id", None),
             "github_run": os.environ.get("GITHUB_RUN_ID"),
             "utc": datetime.fromtimestamp(time.time(), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
@@ -984,7 +1047,8 @@ def hand_over(a, run_id: str, instance_id: int, best: dict, dph: float, spent_be
                 os.remove(f"{a.state_file}{suffix}")
     spent = spent_before + (time.time() - created) / 3600 * dph
     log(f"::notice::handed instance {instance_id} over after {a.handover_min} minutes (${spent:.2f} so far): it runs "
-        f"on until DONE, its deadline {getattr(a, 'deadline_utc', None)} or its cap ${a.max_dollars:.2f}; the "
+        f"on until DONE{', its deadline ' + a.deadline_utc if getattr(a, 'deadline_utc', None) else ''} or its cap "
+        f"${a.max_dollars:.2f}; the "
         f"vast-cleanup workflow (every 15 minutes) watches it and writes runs/{run_id}/closed.json when it is gone")
 
 
@@ -1054,7 +1118,13 @@ def rent(a, run_id: str, first: dict | None = None) -> tuple[dict | None, int | 
     fails (the offer was taken meanwhile, or vast refuses it), drop the offer and take the next
     best from a fresh search, up to MAX_CREATE_TRIES offers."""
     for attempt in range(1, MAX_CREATE_TRIES + 1):
-        best = first if attempt == 1 and first else choose(a)
+        try:
+            best = first if attempt == 1 and first else choose(a)
+        except RuntimeError as e:
+            # e.g. vast's daily search quota (429): nothing more is rented; the run's report is
+            # still written (before, the exception skipped it).
+            log(f"::error::the offer search failed ({redact(str(e))[:200]}); nothing more is rented")
+            return None, None
         if not best:
             return None, None
         try:
@@ -1081,12 +1151,16 @@ def adopt_instance(a, run_id: str, best: dict) -> int | None:
     label = f"41bots-{run_id}"
     # Never an earlier machine of this run (a replacement is being rented because it died).
     known = getattr(a, "known_instances", set())
-    for attempt in range(3):
+    # A machine vast is still creating may be missing from the first listing: "nothing rented" is
+    # concluded only after ADOPT_READINGS readable listings 10 s apart (else a second offer could
+    # be rented while the first comes up: two machines on one run).
+    readable = 0
+    for attempt in range(3 + ADOPT_READINGS):
         rows = None
         try:
             rows = vast("show", "instances")
         except RuntimeError as e:
-            log(f"show instances failed ({attempt + 1}/3): {e}")
+            log(f"show instances failed ({attempt + 1}): {e}")
         if isinstance(rows, list):
             for r in rows:
                 if (isinstance(r, dict) and r.get("label") == label and r.get("id") and int(r["id"]) not in known
@@ -1098,8 +1172,12 @@ def adopt_instance(a, run_id: str, best: dict) -> int | None:
                         with open(a.state_file, "w") as fh:
                             fh.write(str(iid))
                     return iid
-            return None
+            readable += 1
+            if readable >= ADOPT_READINGS:
+                return None
         time.sleep(10)
+        if attempt >= 2 and readable == 0:
+            break
     sys.exit(f"launch: the create call's answer could not be read, and neither could the instance list, so the "
              f"launcher cannot tell whether a machine was rented; renting another could be a second rental. "
              f"Check the vast.ai console for an instance labelled {label}.")
@@ -1113,7 +1191,7 @@ def create_instance(a, best: dict, run_id: str, ncpu: int, dph: float) -> int | 
     env = instance_env(run_id, ncpu, dph, a.bin_sha, a.image, getattr(a, "destroy_key", ""), offer=best)
     res = vast("create", "instance", str(best["id"]), "--image", a.image, "--disk", str(a.disk_gb),
                "--env", env, "--label", f"41bots-{run_id}",
-               "--entrypoint", BOOT_PATH, "--cancel-unavail", tail=("--args",))
+               "--entrypoint", BOOT_PATH, "--cancel-unavail", tail=("--args",), timeout=None)
     instance_id = res.get("new_contract") if isinstance(res, dict) else None
     if not instance_id:
         return None
@@ -1137,6 +1215,16 @@ def request_stop(run_id: str, reason: str) -> None:
         log(f"asked run {run_id} to stop ({reason}); it uploads what it finished, then ends")
     except RuntimeError as e:
         log(f"could not ask run {run_id} to stop: {e}")
+
+
+def clear_stop(run_id: str) -> None:
+    """Removes runs/<run_id>/STOP (before a replacement machine is rented)."""
+    try:
+        if r2_exists(f"runs/{run_id}/STOP"):
+            r2_delete(f"runs/{run_id}/STOP")
+            log(f"removed the stop request of run {run_id}, so the replacement does not stop at once")
+    except RuntimeError as e:
+        log(f"::warning::could not remove runs/{run_id}/STOP ({e}); the replacement may stop at once")
 
 
 def stop_and_wait(run_id: str, reason: str, wait_s: int) -> str:
@@ -1185,7 +1273,7 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
         for marker in ("DONE", "FAILED"):
             if r2_get(f"runs/{run_id}/{marker}") is not None:
                 return marker, marker, False, False
-        if now - run_start > a.max_minutes * 60:
+        if a.max_minutes > 0 and now - run_start > a.max_minutes * 60:
             return "", f"max_minutes ({a.max_minutes}) reached", False, True
         spent = spent_before + (now - created) / 3600 * dph
         if a.max_dollars and spent >= a.max_dollars:
@@ -1222,7 +1310,7 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
         if silent_s > HEARTBEAT_STALE_S:
             state, info = live.check()
             if state == "alive":
-                state, detail = silent_state(info, a.busy_cpu_pct)
+                state, detail = silent_state(info, busy_threshold(a))
             else:
                 detail = live.detail
             if not silent_logged:
@@ -1362,7 +1450,9 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--manifest", required=True, help="path to a manifest JSON file, or the JSON itself")
     s.add_argument("--image", required=True)
     s.add_argument("--bin-sha", required=True)
-    s.add_argument("--max-minutes", type=int, default=30)
+    s.add_argument("--max-minutes", type=int, default=0,
+                   help="a time limit on purpose (stop, upload, destroy); 0 (the default) = none: the owner's rule is "
+                        "that a run ends when it finishes, at its dollar cap, or when a person stops it")
     s.add_argument("--low-cpu-pct", type=float, default=LOW_CPU_PCT,
                    help="destroy if CPU stays below this for --low-cpu-s (lower only for runs with known serial tails)")
     s.add_argument("--low-cpu-s", type=int, default=LOW_CPU_S,
@@ -1374,8 +1464,9 @@ def main(argv: list[str] | None = None) -> int:
                         "minutes for its heartbeats to resume before it is asked to stop and upload")
     s.add_argument("--busy-cpu-pct", type=float, default=BUSY_CPU_PCT,
                    help="vast CPU use at or above which a silent machine counts as busy")
-    s.add_argument("--max-dollars", type=float, default=0.0,
-                   help="stop the run (stop and upload, then destroy) once its machines have cost this much (0 = no limit)")
+    s.add_argument("--max-dollars", type=float, default=MAX_DOLLARS,
+                   help=f"stop the run (stop and upload, then destroy) once its machines have cost this much "
+                        f"(default ${MAX_DOLLARS:.0f}; 0 = no limit)")
     s.add_argument("--startup-minutes", type=int, default=15)
     s.add_argument("--stop-wait-s", type=int, default=STOP_WAIT_S,
                    help="before destroying a machine that is still working (time limit, low CPU, Ctrl-C), ask it to "

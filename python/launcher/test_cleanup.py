@@ -77,7 +77,22 @@ class DecideTest(unittest.TestCase):
 
     def test_exited_or_offline(self):
         self.assertEqual(self.d(inst(5, "exited"), state(1)), "destroy")
-        self.assertEqual(self.d(inst(5, "offline"), state(1)), "destroy")
+        # Offline in vast's eyes but still heartbeating to R2: working, kept (review E).
+        self.assertEqual(self.d(inst(300, "offline"), state(1)), "keep")
+        self.assertEqual(self.d(inst(300, "offline"), state(21)), "destroy")
+        self.assertEqual(self.d(inst(50, "offline"), state()), "destroy")
+        # ... and its dollar cap still applies.
+        w = {"max_dollars": 2, "dph": 1.0}
+        self.assertEqual(self.d(inst(180, "offline"), state(1, watch=w)), "stop")
+
+    def test_busy_threshold_of_a_low_cpu_run(self):
+        # Review E: a run declared to use few cores (watch.json busy_cpu_pct 1, from
+        # --low-cpu-pct 1) reads 17% in vast; silent, it is asked to stop and upload first.
+        w = {"busy_cpu_pct": 1.0}
+        self.assertEqual(self.d(inst(300, cpu=17.0), state(21, watch=w)), "stop")
+        self.assertEqual(self.d(inst(300, cpu=17.0), state(36, stop_min_ago=16, watch=w)), "destroy")
+        self.assertEqual(self.d(inst(300, cpu=0.0), state(21, watch=w)), "destroy")
+        self.assertEqual(self.d(inst(300, cpu=17.0), state(21)), "destroy", "default threshold 50%")
 
     def test_all(self):
         self.assertEqual(self.d(inst(5), state(1), everything=True), "destroy")
@@ -234,6 +249,20 @@ class SweepTest(unittest.TestCase):
         self.assertEqual((m3["state"], m3["outcome"], m3["minutes"], m3["usd"], m3["nodes_total"]), ("final", "DONE", 120.0, 2.0, 0))
         self.assertIsNone(m3["usd_per_1e12_nodes"])
         self.assertIn("upper bound", m3["finalised_basis"])
+
+    def test_handed_over_run_missing_from_the_listing_but_running_is_not_closed(self):
+        # Review E: an incomplete instance listing must not close a working handed-over run
+        # (closing deletes its destroy key and marks its machine record final).
+        r2 = FakeR2()
+        r2.put("watch/r1.json", json.dumps({"instance_id": 9, "dph": 1.0, "destroy_key_id": 77}).encode())
+        self.fresh = {"actual_status": "running"}
+        self.sweep(r2, [])
+        self.assertIsNone(r2.get("runs/r1/closed.json"))
+        self.assertIsNotNone(r2.get("watch/r1.json"))
+        self.assertEqual(self.vast_calls, [])
+        self.fresh = {"actual_status": "exited"}
+        self.sweep(r2, [])
+        self.assertIsNotNone(r2.get("runs/r1/closed.json"))
 
     def test_handed_over_run_still_working_stays_watched(self):
         r2 = FakeR2()
