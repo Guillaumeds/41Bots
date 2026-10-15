@@ -52,3 +52,4 @@ You are building the strongest possible bots for the 8-player card game **41** (
 - The owner knows the game deeply but not AI jargon. Write in plain English.
 - The first time you use a technical term, explain it in [square brackets] in plain words.
 - Be concise and state outcomes plainly, including failures.
+- Never name a machine by its chip number alone. Say what it is in words and always give its usable threads (CPU), RAM and hourly rate, e.g. "AMD Threadripper PRO 9995WX workstation chip (184 threads, 251 GB RAM, $1.27/h)". The offer number may follow in brackets.
