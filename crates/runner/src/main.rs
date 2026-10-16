@@ -467,6 +467,8 @@ struct Ctx {
     last_hb: Option<Instant>,
     cpu: CpuSampler,
     child: Option<u32>,
+    /// Child processes running beside the current step ([`Ctx::spawn_bg`]).
+    bg: Vec<Bg>,
     phase: String,
     progress: Value,
     /// Print one compact line per heartbeat to stdout ([`hb_line`]; format 1, where stdout is
@@ -505,6 +507,7 @@ impl Ctx {
             last_hb: None,
             cpu: CpuSampler::new(),
             child: None,
+            bg: Vec::new(),
             phase: "chunk".into(),
             progress: Value::Null,
             hb_stdout: false,
@@ -611,7 +614,13 @@ impl Ctx {
         if let Some(n) = &self.net {
             n.poll_stop(&self.root);
         }
-        let cpu = self.cpu.sample(self.child);
+        // With a child beside the current step, this process's whole tree (both children).
+        let tree = if !self.bg.is_empty() {
+            Some(std::process::id())
+        } else {
+            self.child
+        };
+        let cpu = self.cpu.sample(tree);
         let round = |x: Option<f64>| x.map(|x| (x * 10.0).round() / 10.0);
         let elapsed = self.elapsed();
         // The machine's solver work so far, and its cost per node, added to the progress.
@@ -781,7 +790,9 @@ impl Ctx {
             .spawn()
             .map_err(|e| format!("cannot start {cmd:?}: {e}"))?;
         self.child = Some(child.id());
-        self.cpu.prime_tree(child.id());
+        if self.bg.is_empty() {
+            self.cpu.prime_tree(child.id());
+        }
         let outcome = self.wait_child(&mut child, &cmd, log, limit, poll);
         self.child = None;
         outcome
@@ -798,6 +809,12 @@ impl Ctx {
         let started = Instant::now();
         loop {
             poll(self);
+            // A child beside this one that failed stops this one too.
+            if let Err(e) = self.poll_bg() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
             if let Some(l) = limit.filter(|&l| started.elapsed() > l) {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -811,6 +828,7 @@ impl Ctx {
                 // piece finishes); the run uploads them next.
                 let _ = child.kill();
                 let _ = child.wait();
+                self.kill_bg();
                 return Err(format!("stopped: {why}"));
             }
             if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
@@ -827,17 +845,167 @@ impl Ctx {
                 stop::request("the manifest's deadline_utc was reached");
                 let _ = child.kill();
                 let _ = child.wait();
+                self.kill_bg();
                 return Err("deadline reached; chunk killed".into());
             }
             if v2::orphaned() {
                 let _ = child.kill();
                 let _ = child.wait();
+                self.kill_bg();
                 std::process::exit(3);
             }
             self.heartbeat(false);
             std::thread::sleep(Duration::from_millis(200));
         }
     }
+
+    /// Starts `cmd` beside the steps that follow (its output appended to `<logs>/<log>`), named
+    /// `what` (unique among those running), killed (an error) once it has run longer than `limit`
+    /// counted from now or from [`Ctx::bg_limit_from_now`]. While children run beside the steps,
+    /// every child the chunk waits for is stopped (an error) as soon as one of them fails, and
+    /// they are all stopped as soon as one fails ([`Ctx::poll_bg`]); [`Ctx::wait_bg`] waits for
+    /// one, [`Ctx::kill_bg`] stops them all.
+    fn spawn_bg(
+        &mut self,
+        mut cmd: Command,
+        log: &str,
+        what: &str,
+        limit: Option<Duration>,
+    ) -> Result<(), String> {
+        if self.bg.iter().any(|b| b.what == what) {
+            return Err(format!("{what} is already running beside the steps"));
+        }
+        let log_path = self.logs.join(log);
+        if let Some(d) = log_path.parent() {
+            fs::create_dir_all(d).map_err(|e| e.to_string())?;
+        }
+        let f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(|e| format!("open {}: {e}", log_path.display()))?;
+        let f2 = f.try_clone().map_err(|e| e.to_string())?;
+        cmd.stdin(Stdio::null()).stdout(f).stderr(f2);
+        cmd.env("RAYON_NUM_THREADS", self.threads.to_string());
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("cannot start {cmd:?}: {e}"))?;
+        self.cpu.prime_tree(std::process::id());
+        let now = Instant::now();
+        self.bg.push(Bg {
+            child,
+            what: what.to_string(),
+            log: log.to_string(),
+            limit,
+            since: now,
+            started: now,
+            ended: None,
+        });
+        Ok(())
+    }
+
+    /// The limit of the child `what` beside the steps counts from now (e.g. once the data it
+    /// waits for is made).
+    fn bg_limit_from_now(&mut self, what: &str) {
+        if let Some(b) = self.bg.iter_mut().find(|b| b.what == what) {
+            b.since = Instant::now();
+        }
+    }
+
+    /// Checks the children beside the steps: when one failed or overran its limit, all of them
+    /// are stopped and that is the error; the end of those that finished well is noted.
+    fn poll_bg(&mut self) -> Result<(), String> {
+        let mut failed = None;
+        for b in self.bg.iter_mut().filter(|b| b.ended.is_none()) {
+            match b.child.try_wait().map_err(|e| e.to_string())? {
+                Some(status) if status.success() => b.ended = Some(Instant::now()),
+                Some(status) => {
+                    failed = Some(format!(
+                        "step {} (run beside others) exited with {status} (see {})",
+                        b.what,
+                        self.logs.join(&b.log).display()
+                    ));
+                    break;
+                }
+                None => {
+                    if let Some(l) = b.limit.filter(|&l| b.since.elapsed() > l) {
+                        failed = Some(format!(
+                            "step {}: still running after its time limit of {:.0} min; killed",
+                            b.what,
+                            l.as_secs_f64() / 60.0
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+        match failed {
+            Some(e) => {
+                self.kill_bg();
+                Err(e)
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// Kills every child beside the steps.
+    fn kill_bg(&mut self) {
+        for mut b in self.bg.drain(..) {
+            let _ = b.child.kill();
+            let _ = b.child.wait();
+        }
+    }
+
+    /// Waits for the child `what` beside the steps (heartbeating, `poll` every 200 ms; the
+    /// others go on, and any of them failing is an error): `Some((started, ended))` when it
+    /// finished well, `None` if there is no such child; an error if one failed, overran its
+    /// limit or the run was stopped.
+    fn wait_bg(
+        &mut self,
+        what: &str,
+        poll: &mut dyn FnMut(&mut Ctx),
+    ) -> Result<Option<(Instant, Instant)>, String> {
+        loop {
+            poll(self);
+            self.poll_bg()?;
+            match self.bg.iter().position(|b| b.what == what) {
+                None => return Ok(None),
+                Some(i) if self.bg[i].ended.is_some() => {
+                    let b = self.bg.remove(i);
+                    return Ok(Some((b.started, b.ended.expect("ended"))));
+                }
+                Some(_) => {}
+            }
+            if let Some(why) = stop::requested() {
+                self.kill_bg();
+                return Err(format!("stopped: {why}"));
+            }
+            if self.deadline.is_some_and(|d| unix_now() >= d) {
+                stop::request("the manifest's deadline_utc was reached");
+                self.kill_bg();
+                return Err("deadline reached; chunk killed".into());
+            }
+            if v2::orphaned() {
+                self.kill_bg();
+                std::process::exit(3);
+            }
+            self.heartbeat(false);
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+}
+
+/// A child process running beside the chunk's steps ([`Ctx::spawn_bg`]).
+struct Bg {
+    child: std::process::Child,
+    what: String,
+    log: String,
+    limit: Option<Duration>,
+    /// Where `limit` counts from.
+    since: Instant,
+    started: Instant,
+    /// When it finished well.
+    ended: Option<Instant>,
 }
 
 /// The compact heartbeat line, e.g. `hb 17 fill 95s cpu 98.7% busy 245/245 nodes 3.1e11
@@ -1005,6 +1173,7 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
         last_hb: None,
         cpu: CpuSampler::new(),
         child: None,
+        bg: Vec::new(),
         phase: "start".into(),
         progress: Value::Null,
         hb_stdout: true,
@@ -1606,6 +1775,82 @@ mod tests {
             );
         }
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A child beside the steps (`spawn_bg`): waited for when it ends well (with when it ran);
+    /// when it fails, the step running then is stopped with its reason; past its limit it is
+    /// killed (an error), the limit counting again from `bg_limit_from_now`; `kill_bg` ends it.
+    #[cfg(unix)]
+    #[test]
+    fn child_beside_the_steps() {
+        let root = std::env::temp_dir().join(format!("runner-bg-{}", std::process::id()));
+        let mut ctx = Ctx::local("bg", &root, 1);
+        let sh = |script: &str| {
+            let mut c = Command::new("sh");
+            c.args(["-c", script]);
+            c
+        };
+        // Ends well while a step runs; then waited for at once.
+        ctx.spawn_bg(sh("sleep 0.2"), "bg.log", "the side job", None)
+            .expect("starts");
+        assert!(
+            ctx.spawn_bg(sh("true"), "bg.log", "the side job", None)
+                .is_err(),
+            "names are unique"
+        );
+        ctx.run_child(sh("sleep 0.6"), "fg.log")
+            .expect("the step runs to its end");
+        let (a, b) = ctx
+            .wait_bg("the side job", &mut |_| {})
+            .expect("ok")
+            .expect("it ran");
+        assert!(b > a);
+        assert_eq!(
+            ctx.wait_bg("the side job", &mut |_| {}).expect("none"),
+            None
+        );
+        // Fails while a long step runs: the step is stopped with the reason.
+        let t0 = Instant::now();
+        ctx.spawn_bg(
+            sh("sleep 0.3; echo broken >&2; exit 3"),
+            "bg.log",
+            "the side job",
+            None,
+        )
+        .expect("starts");
+        let e = ctx
+            .run_child(sh("sleep 30"), "fg.log")
+            .expect_err("stopped");
+        assert!(
+            e.contains("step the side job (run beside others) exited with"),
+            "{e}"
+        );
+        assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
+        assert!(ctx.bg.is_empty());
+        // Past its limit, counted again from bg_limit_from_now.
+        ctx.spawn_bg(
+            sh("sleep 30"),
+            "bg.log",
+            "the side job",
+            Some(Duration::from_millis(1500)),
+        )
+        .expect("starts");
+        std::thread::sleep(Duration::from_millis(400));
+        ctx.bg_limit_from_now("the side job");
+        ctx.run_child(sh("sleep 0.4"), "fg.log")
+            .expect("within the renewed limit");
+        let e = ctx
+            .wait_bg("the side job", &mut |_| {})
+            .expect_err("killed");
+        assert!(e.contains("still running after its time limit"), "{e}");
+        assert!(ctx.bg.is_empty());
+        ctx.spawn_bg(sh("sleep 30"), "bg.log", "the side job", None)
+            .expect("starts");
+        ctx.kill_bg();
+        assert!(ctx.bg.is_empty());
+        let log = fs::read_to_string(root.join("logs/bg.log")).expect("log");
+        assert!(log.contains("broken"), "{log}");
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// A child past its time limit is killed and the step fails (`hybrid_rung`'s download, GPU

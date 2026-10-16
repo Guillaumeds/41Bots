@@ -182,6 +182,15 @@ without a manual `put-input`. Proposal: `docs/vast/m3-hybrid-t2-round1.manifest.
 1M random-play and 250,000 rules-v1 labels, 50,000 for validation, 1024-512-128; runnable as it
 is; priced in `rung2.md` §5 before anything is rented).
 
+## The GPU and the CPU at the same time
+
+`overlap` (true): on a GPU, a golden set to generate is made while the network trains (on the
+threads the trainer leaves; answer-neutral); a trick-3 run saves about 9 of 43 minutes.
+`label_parts` (1) and `partial_epochs` (0): the labels in parts, the training starting after the
+first; small gains at best and a measured accuracy cost when many epochs run on the early parts,
+so off by default (`docs/m3-hybrid/overlap.md`, which also describes the interfaces the audit loop
+uses: `Rung::concurrent`, the background training, `train.py --watch-dir`).
+
 ## Time and money (estimates for the AMD EPYC 9654 (384 threads) + RTX A2000 class at about $1/h)
 
 These are estimates from this VM's and GitHub's measurements, not measurements on that machine;
