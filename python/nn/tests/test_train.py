@@ -1,8 +1,8 @@
 """The trainer's device handling and data loading (``fortyone_nn.train``, ``fortyone_nn.device``).
 
 Needs PyTorch (``cd python/nn && uv run python -m unittest discover -s tests -v``); skipped where
-only numpy is installed (the CI's parity job). On a machine with a usable GPU the last test also
-trains on it and compares with the CPU.
+only numpy is installed (the CI's parity job). On a machine with a usable GPU the ``Gpu`` tests
+also run: the CUDA-graph step against the eager step, and training on the GPU against the CPU.
 
 - the GPU check's architecture rule (``arch_supported``) and its CPU answer without a GPU;
 - the compact training columns built a block at a time from memory-mapped shards, expanded,
@@ -10,17 +10,31 @@ trains on it and compares with the CPU.
   any block size, and an active index that is neither a feature nor the padding is refused;
 - the feed gives exactly the former batches (the same indices and tensors, in order, for a seed,
   over two epochs), both resident and staged;
-- training on the CPU is bit-for-bit repeatable, ``--device auto`` without a usable GPU and
-  ``--feed staged`` with a batch profile give the same network as ``--device cpu``, and the
-  progress file and the report record the device, the feed and the profile.
+- training on the CPU is bit-for-bit repeatable, ``--device auto`` without a usable GPU,
+  ``--feed staged`` with a batch profile and ``--cuda-graph off`` give the same network as
+  ``--device cpu``, and the progress file and the report record the device, the feed, the
+  training step's mode and the profile;
+- the CUDA-graph step's bookkeeping, without a GPU (``train.Replayed`` stands in for the graph:
+  each replay runs the captured step again on the graph's input buffers): the same losses, loss
+  sums and network as eager steps, bit for bit, over epochs with partial batches and a new
+  learning rate (a new capture), for both feeds; a failed capture goes on eagerly; the trial
+  passes a working graph and catches a broken one or a failed capture, without touching the
+  network; the trainer's own graph path (the trial, the two profiles, the report and progress
+  fields, ``--cuda-graph off``, a capture failing after the trial: the same network, eagerly);
+- on a GPU (skipped here): the replayed CUDA graph against eager steps for about 300 steps (two
+  new learning rates, both feeds): losses within 1e-5 (relative) with the same Adam, within 1e-3
+  with the former Adam; and a training run reports the graph, its trial and the replayed
+  batches' profile.
 """
 
 import contextlib
+import copy
 import io
 import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -123,6 +137,7 @@ class TrainTest(unittest.TestCase):
             for mode in ("auto", "resident", "staged"):
                 feed = train.Feed(train.load_compact([load_shard(p) for p in self.train]), cpu, batch, mode)
                 self.assertEqual(feed.facts["mode"], "staged" if mode == "staged" else "resident")
+                bufs = feed.inputs(batch)
                 rng = np.random.default_rng(5)
                 for _ in range(2):
                     perm = torch.from_numpy(rng.permutation(n))
@@ -135,6 +150,11 @@ class TrainTest(unittest.TestCase):
                         for x, y in zip(old, feed(b)):
                             self.assertEqual((x.dtype, x.shape), (y.dtype, y.shape))
                             self.assertTrue(torch.equal(x, y), (batch, mode, i))
+                        if len(b) == batch:  # the CUDA-graph step's way, through fixed buffers
+                            feed.put(b, bufs)
+                            for x, y in zip(old, feed.read(bufs)):
+                                self.assertEqual((x.dtype, x.shape), (y.dtype, y.shape))
+                                self.assertTrue(torch.equal(x, y), (batch, mode, i))
 
     def run_train(self, name, *extra):
         out = os.path.join(self.dir.name, name)
@@ -155,13 +175,21 @@ class TrainTest(unittest.TestCase):
         self.assertEqual(rep["device"]["device"], "cpu")
         self.assertEqual(rep["device"]["feed"]["mode"], "resident")
         self.assertEqual(len(rep["seconds"]["epochs"]), 2)
+        self.assertEqual(len(rep["seconds"]["ms_per_batch"]), 2)
         self.assertNotIn("profile", rep["seconds"], "no batch profile on the CPU by default")
+        st = rep["device"]["train_step"]
+        self.assertEqual((st["mode"], st["reason"], st["trial"]), ("eager", "the CPU", None))
+        self.assertEqual((st["captures"], st["replays"], st["eager_steps"]), (0, 0, 32))
+        self.assertEqual(prog["step_mode"], "eager (the CPU)")
+        o, _, _ = self.run_train("graph-off", "--device", "cpu", "--cuda-graph", "off")
+        self.assertEqual(o, a, "--cuda-graph off is the same eager step")
         s, rep_s, _ = self.run_train("staged", "--device", "cpu", "--feed", "staged", "--profile-batches", "3")
         self.assertEqual(s, a, "the staged feed, and profiling batches, train exactly the same network")
         self.assertEqual(rep_s["device"]["feed"]["mode"], "staged")
         p = rep_s["seconds"]["profile"]
         self.assertNotIn("error", p)
-        self.assertEqual((p["batches"], p["first_batch"]), (3, 8))
+        self.assertEqual((p["batches"], p["first_batch"], p["step"]), (3, 8, "eager"))
+        self.assertNotIn("graphed", p)
         self.assertGreater(p["host_ms_per_batch"], 0)
         self.assertTrue(any("embedding_bag" in r["op"] for r in p["top_host_ms_per_batch"]))
         self.assertEqual(rep["int"]["sha256"], a)
@@ -173,13 +201,201 @@ class TrainTest(unittest.TestCase):
             self.assertEqual(rep["device"]["want"], "auto")
             self.assertTrue(rep["device"]["reason"])
 
+    def test_the_trainers_graph_path_without_a_gpu(self):
+        a, cpu, _ = self.run_train("cpu-ref2", "--device", "cpu")
+        with mock.patch.object(train, "GRAPH_DEVICES", ("cpu",)), mock.patch.object(train, "GRAPH_CLASS", train.Replayed):
+            g, rep, prog = self.run_train("cpu-graph", "--device", "cpu", "--profile-batches", "3")
+            o, rep_o, _ = self.run_train("cpu-graph-off", "--device", "cpu", "--cuda-graph", "off")
+        FailsAfterTrial.made = 0
+        with mock.patch.object(train, "GRAPH_DEVICES", ("cpu",)), mock.patch.object(train, "GRAPH_CLASS", FailsAfterTrial):
+            f, rep_f, prog_f = self.run_train("cpu-graph-fails", "--device", "cpu", "--profile-batches", "3")
+        st = rep_f["device"]["train_step"]
+        self.assertEqual(st["trial"]["max_rel_loss_difference"], 0.0)
+        self.assertEqual(st["mode"], "eager")
+        self.assertTrue(st["reason"].startswith("capturing the step failed: RuntimeError"), st["reason"])
+        self.assertEqual(prog_f["step_mode"], f"eager ({st['reason']})")
+        self.assertEqual((st["captures"], st["replays"], st["eager_steps"]), (0, 0, 32))
+        self.assertEqual(f, g, "after a failed capture the same training goes on eagerly")
+        self.assertEqual(o, a, "--cuda-graph off: the former step and Adam")
+        self.assertEqual(rep_o["device"]["train_step"]["reason"], "--cuda-graph off")
+        st = rep["device"]["train_step"]
+        self.assertEqual((st["mode"], st["reason"], prog["step_mode"]), ("cuda-graph", None, "cuda-graph"))
+        self.assertEqual(st["optimizer"], "Adam(fused=True, capturable=True)")
+        self.assertEqual(st["trial"]["max_rel_loss_difference"], 0.0)
+        # As on a GPU (test_gpu_training_follows_the_cpu): 15 full batches an epoch, 8 + 3 eager
+        # (the profile), a capture at the 12th, the replays' profile from the 14th.
+        self.assertEqual((st["captures"], st["replays"], st["eager_steps"]), (1, 15 - 11 + 15, 11 + 2))
+        p = rep["seconds"]["profile"]
+        self.assertEqual((p["step"], p["first_batch"], p["batches"]), ("eager", 8, 3))
+        self.assertEqual((p["graphed"]["step"], p["graphed"]["first_batch"], p["graphed"]["batches"]), ("cuda-graph", 13, 2))
+        for c, x in zip(cpu["history"], rep["history"]):
+            self.assertAlmostEqual(c["val_loss"], x["val_loss"], delta=1e-4 * max(1.0, abs(c["val_loss"])))
+
     @unittest.skipUnless(torch.cuda.is_available(), "no GPU here")
     def test_gpu_training_follows_the_cpu(self):
         _, cpu, _ = self.run_train("cpu-ref", "--device", "cpu")
-        _, gpu, prog = self.run_train("gpu", "--device", "cuda")
+        # 15 full batches an epoch: 8 + 3 eager (the profile), a capture at the 12th, 3 batches
+        # later the replays' profile (2 batches: the 16th is partial).
+        _, gpu, prog = self.run_train("gpu", "--device", "cuda", "--profile-batches", "3")
         self.assertEqual((gpu["device"]["device"], prog["device"]), ("cuda", "cuda"))
-        for c, g in zip(cpu["history"], gpu["history"]):
-            self.assertAlmostEqual(c["val_loss"], g["val_loss"], delta=1e-3 * max(1.0, abs(c["val_loss"])))
+        st = gpu["device"]["train_step"]
+        self.assertEqual((st["mode"], st["reason"], prog["step_mode"]), ("cuda-graph", None, "cuda-graph"))
+        self.assertLessEqual(st["trial"]["max_rel_loss_difference"], train.TRIAL_TOLERANCE)
+        self.assertEqual((st["captures"], st["replays"], st["eager_steps"]), (1, 15 - 11 + 15, 11 + 2))
+        p = gpu["seconds"]["profile"]
+        self.assertEqual((p["step"], p["first_batch"], p["batches"]), ("eager", 8, 3))
+        g = p["graphed"]
+        self.assertNotIn("error", g)
+        self.assertEqual((g["step"], g["first_batch"], g["batches"]), ("cuda-graph", 13, 2))
+        self.assertGreater(g["host_ms_per_batch"], 0)
+        _, eager, prog_e = self.run_train("gpu-eager", "--device", "cuda", "--cuda-graph", "off")
+        self.assertEqual((eager["device"]["train_step"]["mode"], prog_e["step_mode"]),
+                         ("eager", "eager (--cuda-graph off)"))
+        for run in (gpu, eager):
+            for c, g in zip(cpu["history"], run["history"]):
+                self.assertAlmostEqual(c["val_loss"], g["val_loss"], delta=1e-3 * max(1.0, abs(c["val_loss"])))
+
+
+class NoGraph:
+    """A capture that fails, as on a driver without CUDA graphs."""
+
+    def __init__(self, fn, stream):
+        raise RuntimeError("operation not permitted when stream is capturing")
+
+
+class FailsAfterTrial(train.Replayed):
+    """Captures that work in the trial (its one capture) and fail afterwards."""
+
+    made = 0
+
+    def __init__(self, fn, stream):
+        type(self).made += 1
+        if type(self).made > 1:
+            raise RuntimeError("capture failed on this driver")
+        super().__init__(fn, stream)
+
+
+class Idle(train.Replayed):
+    """A broken graph: its replays compute nothing."""
+
+    def replay(self):
+        self.out = torch.zeros(())
+
+
+def drive(step, n, epochs, cuts=(), seed=9):
+    """Trains with ``step`` as the trainer does (a permutation an epoch, the loss sum on the
+    device), the learning rate cut by 0.3 at the start of the epochs ``cuts``: (every step's loss,
+    every epoch's loss sum)."""
+    rng = np.random.default_rng(seed)
+    losses, totals = [], []
+    for epoch in range(epochs):
+        if epoch in cuts:
+            step.opt.param_groups[0]["lr"] *= 0.3
+        order = step.feed.order(torch.from_numpy(rng.permutation(n)))
+        step.total.zero_()
+        for i in range(0, n, step.batch):
+            step(order[i : i + step.batch])
+            losses.append(float(step.loss))
+        totals.append(float(step.total))
+    return losses, totals
+
+
+class StepCase(unittest.TestCase):
+    """Training rows and a network for the training-step tests."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.TemporaryDirectory()
+        d = cls.dir.name
+        tr = [synthetic_shard(os.path.join(d, "a.npy"), 700, 1), synthetic_shard(os.path.join(d, "b.npy"), 300, 2)]
+        cls.comp = train.load_compact([load_shard(p) for p in tr])
+        cls.n = len(cls.comp[0])
+        torch.manual_seed(4)
+        cls.net = train.Net([32, 16], VOCAB[4])
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.dir.cleanup()
+
+    def stepper(self, feed, graphed, graph_class=train.Replayed, not_before=0, fused=True, on_fail=None):
+        m = copy.deepcopy(self.net)
+        return train.Step(m, train.adam(m.parameters(), 1e-3, fused), "outcome", 1.0, feed, 64,
+                          graphed=graphed, not_before=not_before, graph_class=graph_class, on_fail=on_fail)
+
+    def same_networks(self, a, b):
+        for (k, x), y in zip(a.model.state_dict().items(), b.model.state_dict().values()):
+            self.assertTrue(torch.equal(x, y), k)
+
+
+class GraphStepTest(StepCase):
+    """The CUDA-graph step's bookkeeping without a GPU (``train.Replayed`` for the graph)."""
+
+    def test_replayed_steps_are_the_eager_steps(self):
+        cpu = torch.device("cpu")
+        for mode in ("resident", "staged"):
+            feed = train.Feed(self.comp, cpu, 64, mode)
+            eager = self.stepper(feed, False)
+            graph = self.stepper(feed, True, not_before=5)
+            e = drive(eager, self.n, 4, cuts=(2,))
+            g = drive(graph, self.n, 4, cuts=(2,))
+            self.assertEqual(e, g, mode)
+            self.same_networks(eager, graph)
+            # 1000 rows: 15 full batches and one of 40 an epoch. Epoch 0: 5 eager (not_before), a
+            # capture, 10 replays, the partial batch; epoch 1: 15 replays; epoch 2 (a new rate):
+            # 3 eager (warm-up), a capture, 12 replays; epoch 3: 15 replays.
+            self.assertEqual(graph.counts, {"captures": 2, "replays": 10 + 15 + 12 + 15, "eager_steps": 6 + 1 + 4 + 1})
+            self.assertEqual((graph.describe(), graph.graph_lr), ("cuda-graph", 1e-3 * 0.3))
+            self.assertEqual(eager.counts, {"captures": 0, "replays": 0, "eager_steps": 64})
+
+    def test_a_failed_capture_goes_on_eagerly(self):
+        feed = train.Feed(self.comp, torch.device("cpu"), 64, "resident")
+        eager = self.stepper(feed, False)
+        told = []
+        failed = self.stepper(feed, True, graph_class=NoGraph, on_fail=told.append)
+        self.assertEqual(drive(eager, self.n, 2), drive(failed, self.n, 2))
+        self.same_networks(eager, failed)
+        self.assertFalse(failed.graphed)
+        self.assertIn("operation not permitted", failed.reason)
+        self.assertTrue(failed.describe().startswith("eager (capturing the step failed: RuntimeError"))
+        self.assertEqual(told, [failed.reason])
+        self.assertEqual(failed.counts, {"captures": 0, "replays": 0, "eager_steps": 32})
+
+    def test_the_trial(self):
+        cpu = torch.device("cpu")
+        before = {k: x.clone() for k, x in self.net.state_dict().items()}
+        for mode in ("resident", "staged"):
+            feed = train.Feed(self.comp, cpu, 64, mode)
+            why, facts = train.graph_trial(self.net, "outcome", 1.0, feed, 64, 1e-3, graph_class=train.Replayed)
+            self.assertIsNone(why, facts)
+            self.assertEqual((facts["steps"], facts["captures"], facts["replays"], facts["eager_steps"]), (6, 1, 3, 3))
+            self.assertEqual(facts["max_rel_loss_difference"], 0.0)
+            why, facts = train.graph_trial(self.net, "outcome", 1.0, feed, 64, 1e-3, graph_class=Idle)
+            self.assertIn("differ from the eager steps'", why)
+            why, _ = train.graph_trial(self.net, "outcome", 1.0, feed, 64, 1e-3, graph_class=NoGraph)
+            self.assertIn("capturing the step failed", why)
+        for k, x in self.net.state_dict().items():
+            self.assertTrue(torch.equal(before[k], x), "the trial works on copies")
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "no GPU here")
+class GpuGraphStepTest(StepCase):
+    """The real CUDA graph against eager steps on the GPU, about 300 steps."""
+
+    def test_graphed_steps_follow_the_eager_steps(self):
+        cuda = torch.device("cuda")
+        device.deterministic(cuda)
+        self.net = copy.deepcopy(type(self).net).to(cuda)
+        for mode in ("resident", "staged"):
+            feed = train.Feed(self.comp, cuda, 64, mode)
+            # 19 epochs of 16 batches (304 steps), new learning rates at epochs 6 and 12.
+            graph = self.stepper(feed, True, graph_class=train.CudaGraph)
+            g, gt = drive(graph, self.n, 19, cuts=(6, 12))
+            self.assertEqual((graph.describe(), graph.counts["captures"]), ("cuda-graph", 3))
+            self.assertEqual(graph.counts["replays"], 19 * 15 - 3 * train.WARMUP)
+            for name, fused, tol in (("eager, the same Adam", True, 1e-5), ("eager, the former Adam", False, 1e-3)):
+                e, et = drive(self.stepper(feed, False, fused=fused), self.n, 19, cuts=(6, 12))
+                for k, (x, y) in enumerate(zip(e + et, g + gt)):
+                    self.assertLessEqual(abs(x - y), tol * abs(x), (mode, name, k, x, y))
 
 
 if __name__ == "__main__":
