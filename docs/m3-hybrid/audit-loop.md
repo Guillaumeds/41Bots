@@ -283,3 +283,27 @@ Python evaluate the same predicate on the same features.
 Verification per round: the audit report (groups, weights, bias, SD), the golden slices, the mini
 golden sets, the integer network's SHA-256, and the identity of every exact label with the solver
 (the harvest's own check).
+
+## 8. First run on real hardware: the trick-4 mechanism test (2026-10-16 night)
+
+Run `m3-hybrid-t4-audit-mech-1` (binary 147bfa4; AMD EPYC 9654, 384 threads, RTX A4000, $1.01/h; 36 minutes,
+about $0.60; manifest `docs/vast/m3-hybrid-t4-audit-mech.manifest.json`): 9M trick-4 labels, a 1024-512-128 network,
+three rounds, 1M-row audit shards at gamma 0.001, 1M-row targeted harvests, at most two mini golden sets a round, the
+stored 400-decision golden set. Every step ran and the run ended DONE (`round limit`):
+
+| round | found / confirmed | failing at the decision level | golden 95% upper | train | audit | slices | mini set | harvest |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 433 / 343 | 19 | 0.0069% (fail on a band) | 6.5 min | 1.6 min | 5 s | 3-5 s | 2 s |
+| 2 | 449 / 354 | 12 | 0.0055% (pass) | 8.1 min | 1.7 min | 5 s | 3-5 s | 2 s |
+| 3 | 452 / 360 | 44 | 0.0108% (fail) | 8.9 min | 1.7 min | 5 s | 3-5 s | 2 s |
+
+What it taught, and what changed before the overnight loops:
+- At trick 4 everything but training costs seconds, so the overnight trick-4 loop measures every waiting group each round
+  (mini sets up to 400 a round, 100 decisions each).
+- A golden slice of 80-130 decisions cannot show 0.01% at 95% even for a sound group when the mean loss is 0.004%
+  (round 1: "trumps are spades", 0.0176%): the bound is mostly the sample's noise. The overnight loops generate larger
+  golden sets (4,000 decisions at trick 4, about a minute to make and 3 a round to check; 2,000 at trick 3, about 75
+  minutes of CPU beside round 1's training), so a group's slice holds 5-10 times the decisions.
+- Networks retrained from scratch differ from round to round (round 3 was worse than round 2 on the golden set): the
+  loop now reports the best round's network as its result (eng-auditscale).
+- A mini set that keeps only a few decisions is "unmeasurable" (fewer than `audit_mini_min`, 30), never a pass.
