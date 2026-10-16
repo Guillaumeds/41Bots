@@ -96,6 +96,7 @@ from .formats import (
     VALUE_FAULTS,
     load_shard,
     mask_bits,
+    parse_widths,
     race_classes,
     sha256_file,
     value_fault,
@@ -754,12 +755,17 @@ def main(argv=None):
                     help="the training step on a GPU (class Step): auto (captured as a CUDA graph and replayed, "
                          "eager if a trial or a capture fails, with the reason), off (eager); eager on the CPU")
     args = ap.parse_args(argv)
+    # Before anything else (no data loaded, no GPU probed, no output made): a layer wider than the
+    # integer inference allows (formats.MAX_WIDTH, Rust's nn::MAX_WIDTH) would train for nothing.
+    try:
+        widths = parse_widths(args.widths)
+    except ValueError as e:
+        raise SystemExit(f"--widths {args.widths}: {e}") from None
 
     t0 = time.time()
     torch.manual_seed(args.seed)
     torch.set_num_threads(args.threads)
     rng = np.random.default_rng(args.seed)
-    widths = [int(x) for x in args.widths.split(",")]
     os.makedirs(args.out, exist_ok=True)
     if args.device == "cpu":
         facts = facts_base()

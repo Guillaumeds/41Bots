@@ -77,6 +77,44 @@ def synthetic_shard(path, rows, seed, trick=4):
     return path
 
 
+class WidthGuardTest(unittest.TestCase):
+    """``--widths`` over the integer inference's limit (formats.MAX_WIDTH, 1024) is refused before anything
+    else happens: no shard is read, no GPU probed, no output directory made."""
+
+    def main_args(self, d, widths, device="cpu"):
+        return ["--train", "t.npy", "--val", "v.npy", "--out", os.path.join(d, "net"), "--widths", widths,
+                "--device", device]
+
+    def test_a_layer_over_the_limit_is_refused_first(self):
+        with tempfile.TemporaryDirectory() as d:
+            for widths, layer, units in (("2048,1024,256", 0, 2048), ("512,1025", 1, 1025)):
+                with mock.patch.object(train, "load_shard", side_effect=AssertionError("read a shard")), \
+                        mock.patch.object(train, "probe", side_effect=AssertionError("probed the GPU")):
+                    with self.assertRaises(SystemExit) as e:
+                        train.main(self.main_args(d, widths, device="auto"))
+                msg = str(e.exception)
+                self.assertTrue(msg.startswith(f"--widths {widths}: layer {layer}: {units} units, wider than 1024"), msg)
+                self.assertIn("MAX_WIDTH", msg)
+                self.assertFalse(os.path.exists(os.path.join(d, "net")))
+
+    def test_malformed_widths_are_refused_first_too(self):
+        with tempfile.TemporaryDirectory() as d:
+            for text in ("1024,,128", "x", "0,4"):
+                with mock.patch.object(train, "load_shard", side_effect=AssertionError("read a shard")):
+                    with self.assertRaises(SystemExit) as e:
+                        train.main(self.main_args(d, text))
+                self.assertIn(f"--widths {text}:", str(e.exception))
+
+    def test_a_width_at_the_limit_starts_the_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            sentinel = RuntimeError("stop: the guard let the run start")
+            with mock.patch.object(train, "load_shard", side_effect=sentinel) as load:
+                with self.assertRaises(RuntimeError) as e:
+                    train.main(self.main_args(d, "1024,512,128"))
+            self.assertIs(e.exception, sentinel)
+            load.assert_called_once_with("t.npy")
+
+
 class DeviceTest(unittest.TestCase):
     def test_arch_rule(self):
         arch = ["sm_50", "sm_60", "sm_70", "sm_75", "sm_80", "sm_86", "sm_90"]

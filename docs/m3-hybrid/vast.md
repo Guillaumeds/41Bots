@@ -108,6 +108,19 @@ attempt, 10 minutes, `max_minutes` + 30 minutes), and the dollar cap bounds ever
   against exact on the golden set. Label shards are not uploaded (4.4 GB; they are remade
   byte-identical in about a minute); set `"upload_shards": true` to keep them.
 
+**Network widths: at most 1024 units per layer** (the `widths` setting of `hybrid_rung`, the trainer's
+`--widths`). The integer inference that loads, checks and uses the network refuses a layer wider
+than `MAX_WIDTH` = 1024 (`crates/nn/src/mlp.rs`, an audited limit: its scratch arrays and overflow
+bound were checked for it). A wider network would train for nothing and fail when loaded: a trick-3
+run on 2026-10-16 trained 2048-1024-256 for 27 minutes and then stopped at the check with
+`layer 0: wider than 1024`. Now every place that accepts a width refuses it at once, naming the
+layer (counted from 0) and the limit: the runner's `hybrid_rung` settings (before anything is
+installed or trained), the trainer's `--widths` (before any data is loaded), and loading a network
+file (`search labels --harvest-net`, `search hybrid-check`). The trainer's copy of the number
+(`MAX_WIDTH` in `python/nn/fortyone_nn/formats.py`) is tested against the Rust source and `nn-tool
+limits`. More capacity has to come within this limit (more layers, or more data); raising the limit
+itself means auditing the integer inference again.
+
 ## Adding harvested labels (spec §5 source (c))
 
 Four optional settings add a shard of positions harvested from the hybrid's own searches to the

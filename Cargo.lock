@@ -471,6 +471,7 @@ version = "0.2.0"
 dependencies = [
  "arena",
  "engine",
+ "nn",
  "search",
  "serde_json",
  "sha2",
