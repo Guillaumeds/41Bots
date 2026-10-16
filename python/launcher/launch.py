@@ -199,7 +199,7 @@ def vast(*args: str, raw: bool = True, check: bool = True, tail: tuple[str, ...]
 
 def offer_query(a) -> str:
     return " ".join([
-        "reliability>0.98", "num_gpus>=1", "gpu_frac=1", "rentable=true", "verified=true",
+        f"reliability>{a.min_reliability}", "num_gpus>=1", "gpu_frac=1", "rentable=true", "verified=true",
         f"cpu_cores_effective>={a.min_cores}", f"cpu_ram>={a.min_ram_gb}",
     ] + ([] if a.cpu_only else ["compute_cap>=600", "compute_cap<1000", "cuda_vers>=12.6"]) + [
         f"disk_space>={a.disk_gb}", f"inet_down_cost<={a.max_net_cost}", f"inet_up_cost<={a.max_net_cost}",
@@ -328,7 +328,7 @@ def describe(o: dict) -> str:
             f"rate {o['_rate']:.2f} ({unit}), cost/work {o['_cost_per_work']:.5f}")
 
 
-def offer_check_failures(o: dict) -> list[str]:
+def offer_check_failures(o: dict, floor: float = MIN_RELIABILITY) -> list[str]:
     """Why an offer fails the launcher's safety checks (what the search query filters on, applied
     to one offer's record): a verified host, reliability at least 0.98, the whole machine (no
     sharing), on-demand and rentable. Empty when it passes."""
@@ -339,8 +339,8 @@ def offer_check_failures(o: dict) -> list[str]:
         rel = float(o.get("reliability2") if o.get("reliability2") is not None else o.get("reliability") or 0)
     except (TypeError, ValueError):
         rel = 0.0
-    if rel < MIN_RELIABILITY:
-        failed.append(f"reliability {rel:.3f} below {MIN_RELIABILITY}")
+    if rel < floor:
+        failed.append(f"reliability {rel:.3f} below {floor}")
     try:
         frac = float(o.get("gpu_frac") if o.get("gpu_frac") is not None else 0)
     except (TypeError, ValueError):
@@ -370,7 +370,7 @@ def lookup_offer(a) -> dict:
     row = next((o for o in rows if isinstance(o, dict) and o.get("id") == oid), None)
     if row is None:
         sys.exit(f"launch: offer {oid} is not on offer (on-demand) any more; nothing was rented")
-    failed = offer_check_failures(row)
+    failed = offer_check_failures(row, float(a.min_reliability))
     # The run's own needs, as the normal search filters them (`offer_query`): vast's raw records
     # give cpu_ram in MB. Review E (2026-10-16): the named offer was never checked against
     # --min-ram-gb, so a table run needing 480 GB could be rented on a 251 GB machine.
@@ -1465,6 +1465,8 @@ def main(argv: list[str] | None = None) -> int:
     def offer_args(s):
         s.add_argument("--min-cores", type=int, default=16)
         s.add_argument("--min-ram-gb", type=int, default=32)
+        s.add_argument("--min-reliability", type=float, default=MIN_RELIABILITY,
+                       help="the host reliability floor (default 0.98); lower only for one named offer the owner accepts")
         s.add_argument("--disk-gb", type=int, default=20)
         s.add_argument("--max-net-cost", type=float, default=0.10, help="max $/GB up or down (owner 2026-10-14: 0.10; our traffic is tiny)")
         s.add_argument("--premium", type=float, default=0.20, help="speed premium margin (owner's 20%% rule)")
