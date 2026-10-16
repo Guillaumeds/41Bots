@@ -293,8 +293,12 @@ impl FastMlp {
         for &i in active {
             cur[usize::from(i) / 64] |= 1 << (i % 64);
         }
+        // Unowned while it is being changed: if anything were to stop this call half-way, the
+        // next one starts afresh.
+        let owned = s.owner == self.id;
+        s.owner = 0;
         let mut fresh = true;
-        if s.owner == self.id && sorted {
+        if owned && sorted {
             s.add.clear();
             s.sub.clear();
             for (w, (&c, &p)) in cur.iter().zip(&s.prev_bits).enumerate() {
@@ -319,12 +323,10 @@ impl FastMlp {
             s.bin.resize(n0, 0);
             sum_rows_at(lv, &l0.w, n0, active, &[], &mut s.bin);
         }
+        // An unsorted list (or one with repeats) cannot be diffed: start afresh next time.
         if sorted {
             s.prev_bits = cur;
             s.owner = self.id;
-        } else {
-            // An unsorted list (or one with repeats) cannot be diffed: start afresh next time.
-            s.owner = 0;
         }
     }
 }
