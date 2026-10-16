@@ -153,6 +153,46 @@ PLAN §11.2 also lists mixed precision on GPUs (bf16/TF32 on Ampere and newer). 
 it changes the network, and our standard is 0.01% money chance; it would need its own comparison
 first.
 
+## The training step on a GPU (CUDA graph)
+
+Branch `m3-hybrid-gstep`, 2026-10-16. Measured on vast.ai today: training the 1024-512-128
+network (batch 1024) was held back by the host CPU, not the GPU. Each batch is about 80 small
+GPU operations, which the host launches one at a time: on an i9-14900K + RTX 4090 about 2.0 ms a
+batch (the GPU busy for 1.3 ms of it); on old 2.2–2.3 GHz Xeons + RTX 3090-class GPUs 11–14 ms;
+on an EPYC 7302P + 3090 with the 512-256-64 network 5.6 ms.
+
+Now, on a GPU, the trainer records the whole training step of a full batch once as a CUDA graph
+[a recording of all the GPU operations of one step, which the GPU replays from a single launch by
+the host] and replays it for every batch: per batch the host only copies the batch's row numbers
+into the recording's input and launches it, so a slow host CPU no longer matters. What is trained
+does not change: the same batches in the same order, the same loss, the same Adam settings (batch
+size and learning rate unchanged). Adam runs in its "fused, capturable" form [the whole update as
+one GPU operation, its step counter kept on the GPU, as a recording needs], which rounds the last
+digits differently; GPU training was already not bit-identical across machines, and the integer
+network's SHA-256 is what gets validated. On the CPU nothing changes (the same networks byte for
+byte: checked on this VM for both heads, both feeds, 1–4 threads and the real network shape).
+
+- **Safety.** Before training, a trial on copies of the network runs 6 batches both ways (3
+  normal steps, a recording, 3 replays) and requires the same losses to 1e-5. If the trial or a
+  later recording fails (an unusual driver, say), the training runs the normal way, as before,
+  and says why in the log (`training step: eager (...)`), the heartbeat (`train_step_mode`) and
+  the report (`device.train_step`). It never stops the run.
+- **When it records.** In the first epoch after 3 warm-up steps (PyTorch's documented procedure)
+  and after the 16 profiled normal steps; again after each learning-rate cut (the plateau
+  scheduler), since the rate is fixed inside a recording. The last, partial batch of each epoch
+  runs normally. `--cuda-graph off` turns it off.
+- **What the report shows.** `seconds.ms_per_batch` (each epoch's milliseconds a batch: the real
+  measure), `seconds.profile` (16 normal steps, as before) and `seconds.profile.graphed` (up to
+  16 replayed steps: milliseconds a batch, GPU busy time, top operations), and
+  `device.train_step` (mode and why, the trial, recordings, replays and normal steps).
+- **Expected speed (estimates from today's profile, not measurements; the next run measures
+  them).** About 1.2–1.4 ms a batch on a 4090 and 1.7–2.2 ms on a 3090, whatever the host CPU
+  (the GPU's own busy time, plus a little; the fused Adam saves a little of it): about 5 s and
+  7–9 s an epoch for 4M rows, against 43–55 s on the old Xeons today. If a 3090 stays above
+  2 ms, the replayed profile will show whether the first layer's embedding-bag backward pass
+  (0.5 of the 1.3 ms on the 4090) dominates; replacing it by an equivalent dense product is the
+  next candidate, not done yet.
+
 ## Pieces (for maintainers)
 
 - `crates/runner/src/hybrid.rs`: the `hybrid_rung` chunk kind (settings, steps, records; any
@@ -163,7 +203,9 @@ first.
   (`--feed auto|resident|staged`; else pinned staging buffers), the same batches as before; a
   profile of 16 batches on a GPU and the seconds of loading, each epoch and the integer check in
   `report.json` (`seconds`); the integer check through exact float64 products
-  (`intnet.exact_matmul`, the same integers, ~25-50x faster than numpy's int64 product).
+  (`intnet.exact_matmul`, the same integers, ~25-50x faster than numpy's int64 product); the
+  training step (`Step`, `--cuda-graph auto|off`: a CUDA graph on a GPU after `graph_trial`,
+  eager otherwise; `Feed.inputs/put/read` give the graph its batch).
 - `python/nn/pyproject.toml`, `uv.lock`: PyTorch in two dependency groups, `cpu` (the default:
   `uv sync`, this VM, the laptop, GitHub) and `cu126` (`uv sync --locked --no-default-groups
   --group cu126`), both pinned with hashes.

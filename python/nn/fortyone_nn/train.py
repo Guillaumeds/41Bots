@@ -3,7 +3,8 @@
     uv run python -m fortyone_nn.train --train A.npy [B.npy ...] --val V.npy --out DIR
         [--head outcome|money4] [--mix-weight 1.0] [--widths 512,256,64] [--epochs 40]
         [--batch 512] [--lr 1e-3] [--patience 4] [--seed 1] [--threads 4] [--max-minutes M]
-        [--device cpu|cuda|auto] [--feed auto|resident|staged] [--profile-batches N] [--progress FILE]
+        [--device cpu|cuda|auto] [--feed auto|resident|staged] [--cuda-graph auto|off]
+        [--profile-batches N] [--progress FILE]
 
 A plain MLP: the binary features through an embedding-bag sum (exactly a linear layer on the
 one-hot inputs), plus the dense features through a linear layer, ReLU clipped at 64 (as the
@@ -39,22 +40,37 @@ copies it while the GPU works on the previous batch; ``auto`` (default) is resid
 fit in the GPU's free memory with ``RESERVE`` to spare (always on the CPU). The batch size is
 ``--batch`` everywhere, so results stay comparable between devices.
 
+Training step (``--cuda-graph``, class ``Step``): on a GPU, by default, the whole step for a full
+batch (gathering its rows, forward, loss, backward, Adam, the loss sum) is captured once as a CUDA
+graph and replayed, so the host launches one graph a batch instead of about 80 small GPU
+operations and a slow host CPU no longer holds the GPU back. The batches, their order, the loss
+and Adam's settings are unchanged; Adam runs in its fused, capturable form (``adam``: step counts
+on the GPU), which rounds differently. Before training, a trial on copies of the network
+(``graph_trial``) checks that replayed steps give the eager steps' losses; if the trial or a
+capture fails, the step is eager (as before) and the log, the progress file (``step_mode``) and
+the report (``device.train_step``) say why. ``off``, and the CPU: the eager step, exactly the
+former loop.
+
 ``--progress FILE`` is rewritten (atomically) at each step and about every 20 s within an
 epoch: ``step`` (load, train, quantise, int-eval, done), epoch, batches done, the last epoch's
-losses, minutes, device; the runner's heartbeat reads it.
+losses, minutes, device, the training step's mode (``step_mode``: ``cuda-graph``, or ``eager``
+and why); the runner's heartbeat reads it.
 
 Writes to DIR ``float.safetensors``,
 ``int.safetensors`` (the quantised network ``crates/nn`` loads, with its head) and
 ``report.json`` (settings, data hashes, per-epoch losses, and validation metrics of the float and
 the integer network: outcome accuracy, and the error of every team's money chance: bias per
 team, SD, 99.9th percentile of the absolute error, max; wall-clock seconds of loading, of each
-epoch's training loop and of the integer check, and a profile of a few batches (``BatchProfile``:
-on a GPU by default, ``--profile-batches``); and the device facts of ``device.probe``: GPU
-name, driver, PyTorch and CUDA versions, the deterministic settings, and the feed's mode and
-sizes). The integer check runs the integer network exactly (``intnet.exact_matmul``).
+epoch's training loop and of the integer check, each epoch's milliseconds a batch, and a profile
+of a few batches (``BatchProfile``: on a GPU by default, ``--profile-batches``; with the CUDA graph
+also of a few replayed batches, under ``graphed``); and the device facts of ``device.probe``: GPU
+name, driver, PyTorch and CUDA versions, the deterministic settings, the feed's mode and sizes,
+and the training step (``train_step``: its mode and why, the trial, captures, replays and eager
+steps). The integer check runs the integer network exactly (``intnet.exact_matmul``).
 """
 
 import argparse
+import copy
 import json
 import math
 import os
@@ -227,20 +243,55 @@ class Feed:
     def __call__(self, b):
         if self.resident:
             return expand(*(c.index_select(0, b) for c in self.cols))
+        k, rows = self._staged(b)
+        out = [s.to(self.device, non_blocking=True) for s in rows]
+        self._copied(k)
+        return expand(*out)
+
+    def _staged(self, b):
+        """The rows ``b`` gathered on the host into the next set of staging buffers, once that
+        set's last copy has finished: (the set, the filled slices)."""
         k = self.turn
         self.turn ^= 1
         if self.copied[k] is not None:
             self.copied[k].synchronize()
         n = len(b)
-        out = []
         for c, s in zip(self.cols, self.stage[k]):
             torch.index_select(c, 0, b, out=s[:n])
-            out.append(s[:n].to(self.device, non_blocking=True))
+        return k, [s[:n] for s in self.stage[k]]
+
+    def _copied(self, k):
+        """Marks the copies from staging set ``k`` just queued (the set is reused once they end)."""
         if self.cuda:
             ev = torch.cuda.Event()
             ev.record()
             self.copied[k] = ev
-        return expand(*out)
+
+    # The CUDA-graph step (class ``Step``) reads its batch from fixed buffers on the device.
+
+    def inputs(self, batch):
+        """Fixed device buffers for a batch of ``batch`` rows, which a captured step reads: the
+        row indices (resident) or the compact rows (staged)."""
+        if self.resident:
+            return [torch.zeros(batch, dtype=torch.int64, device=self.device)]
+        return [torch.zeros(s.shape, dtype=s.dtype, device=self.device) for s in self.stage[0]]
+
+    def put(self, b, bufs):
+        """Fills ``inputs``' buffers with the full batch ``b`` (queued on the current stream)."""
+        if self.resident:
+            bufs[0].copy_(b, non_blocking=True)
+            return
+        k, rows = self._staged(b)
+        for d, s in zip(bufs, rows):
+            d.copy_(s, non_blocking=True)
+        self._copied(k)
+
+    def read(self, bufs):
+        """``columns`` of the batch in ``inputs``' buffers: what ``self(b)`` gives after
+        ``put(b, bufs)``."""
+        if self.resident:
+            return expand(*(c.index_select(0, bufs[0]) for c in self.cols))
+        return expand(*bufs)
 
 
 class BatchProfile:
@@ -249,11 +300,18 @@ class BatchProfile:
     times (CUPTI): the device's busy milliseconds a batch, the host's milliseconds a batch over
     the window (the profiler adds a little), and the operations that keep the device (and the
     host) busiest. It only observes: the training is the same with or without it. A failure is
-    recorded in the report, never raised."""
+    recorded in the report, never raised. With the CUDA-graph step a second window (``start``)
+    profiles replayed steps, after the first, which profiles eager steps."""
 
-    def __init__(self, batches, steps, device):
-        self.n = max(0, min(batches, steps))
-        self.start = 8 if steps >= 8 + self.n else 0
+    def __init__(self, batches, steps, device, start=None):
+        if start is None:
+            self.n = max(0, min(batches, steps))
+            self.start = 8 if steps >= 8 + self.n else 0
+        else:  # a window from batch ``start`` among the first ``steps``
+            self.n = max(0, min(batches, steps - start))
+            self.start = start
+        # Batches before this one are the profile's or before it (0 when there is no profile).
+        self.end = self.start + self.n if self.n else 0
         self.device, self.prof, self.result = device, None, None
 
     def sync(self):
@@ -348,6 +406,206 @@ def loss_of(head, z, tgt, lab, mask, vecs, mix_weight):
     return ce + mix_weight * soft
 
 
+# Eager steps (on a side stream) before each capture of the training step, as PyTorch's CUDA-graph
+# documentation does: lazy initialisations (Adam's state, library workspaces) happen outside it.
+WARMUP = 3
+# The trial's largest relative difference between the losses of replayed and eager steps.
+TRIAL_TOLERANCE = 1e-5
+
+
+def adam(params, lr, graphed):
+    """Adam as before (PyTorch's default form: ``foreach`` kernels on a GPU, step counts and bias
+    corrections on the host), or for the CUDA-graph step its ``fused`` form with ``capturable``
+    (step counts and bias corrections on the GPU, as a captured step needs): the same update with
+    the same settings, rounded differently."""
+    if not graphed:
+        return torch.optim.Adam(params, lr=lr)
+    opt = torch.optim.Adam(params, lr=lr, fused=True, capturable=True)
+    # Its eager steps (warm-up, the last partial batch, after a failed capture) are intended.
+    opt._warned_capturable_if_run_uncaptured = True
+    return opt
+
+
+class CudaGraph:
+    """``fn()`` captured as a CUDA graph on ``stream``: capturing records the GPU work without
+    running any of it; ``replay()`` runs it all on the current stream with one launch; ``out`` is
+    what ``fn`` returned (in the graph's memory, rewritten by every replay)."""
+
+    def __init__(self, fn, stream):
+        self.g = torch.cuda.CUDAGraph()
+        # The outer context puts the current stream back even if ending the capture raises
+        # (torch.cuda.graph then leaves its capture stream current).
+        with torch.cuda.stream(torch.cuda.current_stream()), torch.cuda.graph(self.g, stream=stream):
+            self.out = fn()
+
+    def replay(self):
+        self.g.replay()
+
+
+class Replayed:
+    """``CudaGraph``'s stand-in without a GPU (the tests): capturing runs nothing, each replay runs
+    ``fn`` again."""
+
+    def __init__(self, fn, stream):
+        self.fn, self.out = fn, None
+
+    def replay(self):
+        self.out = self.fn()
+
+
+# The devices where the trainer uses the CUDA-graph step, and its graph (the tests put the CPU
+# and ``Replayed`` here to run the trainer's graph path without a GPU).
+GRAPH_DEVICES = ("cuda",)
+GRAPH_CLASS = CudaGraph
+
+
+class Step:
+    """One training step on the rows ``b`` (a slice of ``feed.order``'s permutation): forward,
+    loss, backward, Adam, and the loss added to ``total`` (the epoch's sum, float64 on the device;
+    each term the batch's loss times its rows, as before). ``loss`` is the last step's loss.
+
+    - Eager (the CPU; ``--cuda-graph off``; a graph that failed): exactly the former loop's
+      operations, one kernel launch each (about 80 on a GPU).
+    - CUDA graph (``graphed``): the whole step for a full batch (gathering its rows from the
+      resident columns or reading the staged ones, expanding them, forward, loss, backward, Adam,
+      the loss sum) is captured once and replayed: per batch the host only copies the batch's
+      row indices (or staged rows) into the graph's input buffers (``Feed.put``) and launches the
+      graph. So the host's speed no longer limits the GPU. Before a capture, at least ``WARMUP``
+      steps, and every step up to ``not_before`` (the eager batch profile), run eagerly on a side
+      stream. Adam's learning rate is a constant of the captured update, so a new rate (the
+      plateau scheduler) means a new warm-up and capture. A partial batch (an epoch's last) runs
+      eagerly. Replayed steps compute what eager steps compute on the same rows in the same
+      order; only the kernels' rounding may differ (``graph_trial`` checks it before training).
+      A capture that fails runs nothing, so the network and Adam are untouched: the training
+      goes on eagerly from that batch, ``reason`` says why and ``on_fail(reason)`` is called.
+    """
+
+    def __init__(self, model, opt, head, mix_weight, feed, batch, graphed=False, not_before=0,
+                 graph_class=CudaGraph, on_fail=None):
+        self.model, self.opt, self.head, self.mix_weight = model, opt, head, mix_weight
+        self.feed, self.batch, self.device = feed, batch, feed.device
+        self.total = torch.zeros((), dtype=torch.float64, device=self.device)
+        self.loss = None
+        self.graphed, self.reason = graphed, None
+        self.not_before, self.graph_class, self.on_fail = not_before, graph_class, on_fail
+        self.graph, self.graph_lr, self.warm, self.calls = None, None, 0, 0
+        self.counts = {"captures": 0, "replays": 0, "eager_steps": 0}
+        self.side = self.capture_stream = None
+        if graphed:
+            if self.device.type == "cuda":
+                self.side = torch.cuda.Stream(self.device)
+                self.capture_stream = torch.cuda.Stream(self.device)
+            self.bufs = feed.inputs(batch)
+
+    def describe(self):
+        return "cuda-graph" if self.graphed else f"eager ({self.reason})" if self.reason else "eager"
+
+    def __call__(self, b):
+        self.calls += 1
+        if not self.graphed or len(b) != self.batch:
+            return self.eager(b)
+        if self.graph is not None and self.opt.param_groups[0]["lr"] != self.graph_lr:
+            self.graph, self.warm = None, 0  # a new learning rate: warm up and capture again
+        if self.graph is None:
+            if self.warm < WARMUP or self.calls <= self.not_before:
+                self.warm += 1
+                return self.eager(b, side=True)
+            if not self.capture():
+                return self.eager(b)
+        self.feed.put(b, self.bufs)
+        self.graph.replay()
+        self.loss = self.graph.out
+        self.counts["replays"] += 1
+
+    def eager(self, b, side=False):
+        if not (side and self.side is not None):
+            return self._eager(b)
+        here = torch.cuda.current_stream(self.device)
+        self.side.wait_stream(here)
+        with torch.cuda.stream(self.side):
+            self._eager(b)
+        here.wait_stream(self.side)
+
+    def _eager(self, b):
+        idx, dense, tgt, lab, mask, vecs = self.feed(b)
+        z = self.model(idx, dense)
+        loss = loss_of(self.head, z, tgt, lab, mask, vecs, self.mix_weight)
+        self.opt.zero_grad()
+        loss.backward()
+        self.opt.step()
+        self.total += loss.detach().double() * len(b)
+        self.loss = loss.detach()
+        self.counts["eager_steps"] += 1
+
+    def _captured(self):
+        """The step on the batch in the input buffers, as captured. The gradients are made by the
+        captured backward in the graph's memory and rewritten (not added to) by every replay."""
+        self.opt.zero_grad(set_to_none=True)
+        idx, dense, tgt, lab, mask, vecs = self.feed.read(self.bufs)
+        z = self.model(idx, dense)
+        loss = loss_of(self.head, z, tgt, lab, mask, vecs, self.mix_weight)
+        loss.backward()
+        self.opt.step()
+        self.total += loss.detach().double() * self.batch
+        return loss.detach()
+
+    def capture(self):
+        """Captures the step; False (and the eager step from now on) if that fails."""
+        lr = self.opt.param_groups[0]["lr"]
+        try:
+            g = self.graph_class(self._captured, self.capture_stream)
+        except Exception as e:  # noqa: BLE001 (a failed capture must not stop the training)
+            self.opt.zero_grad(set_to_none=True)  # gradients made while capturing hold nothing
+            self.graphed, self.graph = False, None
+            self.reason = f"capturing the step failed: {type(e).__name__}: {str(e)[:300]}"
+            if self.on_fail:
+                self.on_fail(self.reason)
+            return False
+        self.graph, self.graph_lr = g, lr
+        self.counts["captures"] += 1
+        return True
+
+
+def graph_trial(model, head, mix_weight, feed, batch, lr, graph_class=CudaGraph, steps=2 * WARMUP):
+    """The CUDA-graph step tried before training, on two copies of the network (the network
+    itself is not touched): ``steps`` full batches (rows 0, 1, ... cycling) through ``Step``
+    (``WARMUP`` eager steps, a capture, replays) on one copy and all eager on the other, with the
+    same Adam. Returns (None, facts) when every loss agrees within ``TRIAL_TOLERANCE`` (relative),
+    else (the reason, facts)."""
+    t = time.time()
+    n = feed.facts["rows"]
+    rows = [feed.order(torch.arange(j * batch, (j + 1) * batch) % n) for j in range(steps)]
+    losses, gst = [], None
+    facts = {"steps": steps}
+    try:
+        for g in (False, True):
+            m = copy.deepcopy(model)
+            st = Step(m, adam(m.parameters(), lr, True), head, mix_weight, feed, batch, graphed=g,
+                      graph_class=graph_class)
+            ls = []
+            for b in rows:
+                st(b)
+                ls.append(float(st.loss))
+            losses.append(ls)
+            gst = st
+    except Exception as e:  # noqa: BLE001 (a failed trial means: train eagerly)
+        facts["seconds"] = round(time.time() - t, 3)
+        return f"the trial failed: {type(e).__name__}: {str(e)[:300]}", facts
+    facts["seconds"] = round(time.time() - t, 3)
+    facts.update(gst.counts)
+    if gst.reason:
+        return gst.reason, facts
+    eager, replayed = losses
+    diff = max(abs(a - b) / max(abs(a), 1e-6) for a, b in zip(eager, replayed))
+    facts["max_rel_loss_difference"] = diff
+    if not all(math.isfinite(x) for x in eager + replayed):
+        return f"the trial's losses are not finite: {replayed}", facts
+    if gst.counts["replays"] != steps - WARMUP or not diff <= TRIAL_TOLERANCE:
+        return (f"the replayed steps' losses differ from the eager steps' by {diff:.3g} (relative; "
+                f"tolerance {TRIAL_TOLERANCE}; {gst.counts['replays']} replays)"), facts
+    return None, facts
+
+
 def error_stats(pred, target):
     """Errors of every team's money chance (fractions; team 0 is the leader's): bias per team,
     and over all teams the SD, mean and 99.9th percentile of the absolute error, and the max."""
@@ -407,6 +665,9 @@ def main(argv=None):
                     help="where the training rows live on a GPU (class Feed): auto (resident if they fit), resident, staged")
     ap.add_argument("--profile-batches", type=int, default=None,
                     help="profile this many batches of the first epoch (class BatchProfile; default 16 on a GPU, 0 on the CPU)")
+    ap.add_argument("--cuda-graph", choices=["auto", "off"], default="auto",
+                    help="the training step on a GPU (class Step): auto (captured as a CUDA graph and replayed, "
+                         "eager if a trial or a capture fails, with the reason), off (eager); eager on the CPU")
     args = ap.parse_args(argv)
 
     t0 = time.time()
@@ -466,11 +727,23 @@ def main(argv=None):
     print(f"training rows {feed.facts['mode']} ({feed.facts['bytes'] / 2**20:.0f} MiB compact)"
           + (f", GPU free {feed.facts['gpu_free_bytes'] / 2**20:.0f} MiB" if device.type == "cuda" else ""),
           flush=True)
-    # Wall-clock seconds: loading, each epoch's training loop (not its validation), the integer check.
-    seconds = {"load": round(time.time() - t0, 3), "epochs": []}
+    # Wall-clock seconds: loading, each epoch's training loop (not its validation), the integer
+    # check; and each epoch's milliseconds per batch.
+    seconds = {"load": round(time.time() - t0, 3), "epochs": [], "ms_per_batch": []}
     # Initialised on the CPU under the seed (the same weights on every device), then moved.
     model = Net(widths, n_out).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    # The training step (class Step): a CUDA graph on a GPU unless --cuda-graph off, once a trial
+    # on copies of the network agrees with eager steps; else eager, as before.
+    graphed, why, trial = False, "the CPU", None
+    if device.type in GRAPH_DEVICES:
+        if args.cuda_graph == "off":
+            why = "--cuda-graph off"
+        elif n < args.batch:
+            why = f"fewer training rows ({n}) than a batch ({args.batch})"
+        else:
+            why, trial = graph_trial(model, args.head, args.mix_weight, feed, args.batch, args.lr, GRAPH_CLASS)
+            graphed = why is None
+    opt = adam(model.parameters(), args.lr, graphed)
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, factor=0.3, patience=1)
     best = (math.inf, None, -1)
     history = []
@@ -478,34 +751,54 @@ def main(argv=None):
     last_note = time.time()
     nprof = args.profile_batches if args.profile_batches is not None else (16 if device.type == "cuda" else 0)
     prof = BatchProfile(nprof, steps, device)
+    def fell_back(reason):
+        print(f"training step: eager from now on ({reason})", flush=True)
+        progress(step_mode=step.describe())
+
+    # The first capture waits for the warm-up and the eager profile; replays are profiled from
+    # the capture's third (the first replays also load the graph), among the full batches.
+    step = Step(model, opt, args.head, args.mix_weight, feed, args.batch, graphed=graphed, not_before=prof.end,
+                graph_class=GRAPH_CLASS, on_fail=fell_back)
+    gprof = BatchProfile(nprof, n // args.batch, device, start=max(WARMUP, prof.end) + 2) if graphed else None
+    step_facts = {"cuda_graph": args.cuda_graph, "mode": "cuda-graph" if graphed else "eager",
+                  "reason": why, "trial": trial, "warmup": WARMUP,
+                  "optimizer": "Adam(fused=True, capturable=True)" if graphed else "Adam (default form)"}
+    facts["train_step"] = step_facts
+    if not graphed:
+        step.reason = why
+    print(f"training step: {step.describe()}" + (f"; trial {json.dumps(trial)}" if trial else ""), flush=True)
+    progress(step="train", epoch=0, epochs=args.epochs, batches_done=0, batches=steps, step_mode=step.describe())
     for epoch in range(args.epochs):
         model.train()
         te = time.time()
         order = feed.order(torch.from_numpy(rng.permutation(n)))
         # The epoch's loss sum in float64 on the device (each term float(loss) * rows, exactly the
         # Python float sum), so the GPU is not stopped to read every batch's loss.
-        total = torch.zeros((), dtype=torch.float64, device=device)
+        step.total.zero_()
         for k, i in enumerate(range(0, n, args.batch)):
             if epoch == 0:
                 prof.before(k)
-            b = order[i : i + args.batch]
-            idx, dense, tgt, lab, mask, vecs = feed(b)
-            z = model(idx, dense)
-            loss = loss_of(args.head, z, tgt, lab, mask, vecs, args.mix_weight)
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-            total += loss.detach().double() * len(b)
+                if gprof:
+                    gprof.before(k)
+            step(order[i : i + args.batch])
             if epoch == 0:
                 prof.after(k)
+                if gprof:
+                    gprof.after(k)
             if k % 64 == 0 and time.time() - last_note >= 20:
                 last_note = time.time()
-                progress(step="train", epoch=epoch, epochs=args.epochs, batches_done=k, batches=steps)
-        total = float(total)
+                progress(step="train", epoch=epoch, epochs=args.epochs, batches_done=k, batches=steps,
+                         step_mode=step.describe())
+        total = float(step.total)
         seconds["epochs"].append(round(time.time() - te, 3))
+        seconds["ms_per_batch"].append(round(1000 * seconds["epochs"][-1] / steps, 3))
         if epoch == 0 and prof.result is not None:
-            seconds["profile"] = prof.result
-            print(f"batch profile: {json.dumps({k: v for k, v in prof.result.items() if not k.startswith('top')})}", flush=True)
+            seconds["profile"] = dict(prof.result, step="eager")
+            if gprof and gprof.result is not None:
+                seconds["profile"]["graphed"] = dict(gprof.result, step=step.describe())
+            for name, p in (("batch profile", prof.result), ("batch profile, replayed", gprof and gprof.result)):
+                if p:
+                    print(f"{name}: {json.dumps({k: x for k, x in p.items() if not k.startswith('top')})}", flush=True)
         vloss, vv, acc = evaluate(model, args.head, va, args.mix_weight, device=device)
         sched.step(vloss)
         sd = float(((vv - val["value"].astype(np.float64)) / ONE).std())
@@ -513,7 +806,7 @@ def main(argv=None):
                         "val_sd": sd, "lr": opt.param_groups[0]["lr"], "minutes": (time.time() - t0) / 60})
         print(json.dumps(history[-1]), flush=True)
         progress(step="train", epoch=epoch, epochs=args.epochs, batches_done=steps, batches=steps,
-                 last=history[-1], best_epoch=best[2] if vloss >= best[0] else epoch)
+                 last=history[-1], best_epoch=best[2] if vloss >= best[0] else epoch, step_mode=step.describe())
         if vloss < best[0]:
             best = (vloss, {k: x.clone() for k, x in model.state_dict().items()}, epoch)
         elif epoch - best[2] >= args.patience:
@@ -522,6 +815,9 @@ def main(argv=None):
             print("time limit reached", flush=True)
             break
     model.load_state_dict(best[1])
+    step_facts.update(step.counts)
+    if graphed and not step.graphed:  # a capture failed during the training: eager from then on
+        step_facts.update(mode="eager", reason=step.reason)
     vloss, pf, acc = evaluate(model, args.head, va, args.mix_weight, device=device)
     progress(step="quantise", best_epoch=best[2])
 
