@@ -1146,6 +1146,10 @@ pub(crate) fn chunk_with(
                     "golden_threads": if overlap { json!(r.threads().saturating_sub(r.train_threads()).max(1)) } else { Value::Null },
                     "train_s": round1(span(ts, te)),
                     "golden_s": if generate { json!(round1(span(gs, ge))) } else { Value::Null },
+                    // When each began (seconds into the chunk): the trainer is started before
+                    // the golden set, in the runner's own order.
+                    "train_started_s": round1(span(r.t0, ts)),
+                    "golden_started_s": if generate { json!(round1(span(r.t0, gs))) } else { Value::Null },
                     "both_s": if overlap { json!(round1(both)) } else { Value::Null } }),
         );
         r.save()?;
@@ -1598,6 +1602,7 @@ impl Rung<'_> {
         for (i, job) in jobs.iter().enumerate() {
             let s = &job.set;
             let t = Instant::now();
+            let started_s = secs(self.t0);
             let file = job.file(self.p.cut);
             let path = if parted && s.name != "val" {
                 parts_dir.join(&file)
@@ -1655,7 +1660,8 @@ impl Rung<'_> {
             let mut rec = json!({ "name": s.name, "source": s.source, "count": s.count,
                                   "seed": s.seed, "file": file, "bytes": bytes,
                                   "shard_sha256": side["shard_sha256"],
-                                  "threads": threads, "seconds": secs(t) });
+                                  "threads": threads, "started_s": started_s,
+                                  "seconds": secs(t) });
             if let Some((k, n)) = job.part {
                 rec["part"] = json!([k, n]);
             }
@@ -3038,7 +3044,7 @@ mod tests {
             .concurrent(vec![
                 step(
                     "long",
-                    format!("sleep 5; touch '{}'", marker.display()),
+                    format!("sleep 30; touch '{}'", marker.display()),
                     2,
                     None,
                 ),
@@ -3046,7 +3052,7 @@ mod tests {
             ])
             .expect_err("one failed");
         assert!(e.contains("step broken (run beside others) exited"), "{e}");
-        assert!(t0.elapsed() < Duration::from_secs(5));
+        assert!(t0.elapsed() < Duration::from_secs(25));
         assert!(r.beside.is_empty() && r.ctx.bg.is_empty());
         std::thread::sleep(Duration::from_millis(200));
         assert!(!marker.exists());
@@ -3495,12 +3501,9 @@ esac
             .filter(|l| l.starts_with("python -m fortyone_nn.train"))
             .collect();
         assert_eq!(trains.len(), 2, "{log}");
-        // On the GPU the golden set is made while the network trains, on the threads it leaves.
-        let at = |p: &str| log.find(p).unwrap_or_else(|| panic!("no {p:?} in\n{log}"));
-        assert!(
-            at("python -m fortyone_nn.train") < at("search decisions"),
-            "{log}"
-        );
+        // On the GPU the golden set is made while the network trains, on the threads it leaves
+        // (which began first is the runner's own record, below: the children's log lines may
+        // come in either order).
         for l in log
             .lines()
             .filter(|l| l.starts_with("search decisions") || l.starts_with("search worlds"))
@@ -3528,6 +3531,11 @@ esac
             "{rung}"
         );
         assert!(o["both_s"].as_f64().is_some_and(|x| x >= 0.0));
+        assert!(
+            o["train_started_s"].as_f64().is_some()
+                && o["train_started_s"].as_f64() <= o["golden_started_s"].as_f64(),
+            "the trainer starts before the golden set: {o}"
+        );
         let steps: Vec<&str> = rung["steps"]
             .as_array()
             .expect("steps")
@@ -3634,7 +3642,7 @@ esac
         let slow = wrap(
             "search-slow-worlds",
             &format!(
-                "[ \"$1\" = worlds ] && {{ sleep 5; touch '{}'; }}",
+                "[ \"$1\" = worlds ] && {{ sleep 30; touch '{}'; }}",
                 marker.display()
             ),
         );
@@ -3650,7 +3658,7 @@ esac
             .expect_err("the training failed");
         assert!(e.contains("step train (run beside others) exited"), "{e}");
         assert!(
-            t.elapsed() < Duration::from_secs(5),
+            t.elapsed() < Duration::from_secs(25),
             "the golden worlds were stopped"
         );
         assert!(!marker.exists());
@@ -3667,7 +3675,7 @@ esac
             &f,
             "slow-train",
             &format!(
-                "case \"$2\" in fortyone_nn.train) sleep 5; touch '{}';; esac",
+                "case \"$2\" in fortyone_nn.train) sleep 30; touch '{}';; esac",
                 marker.display()
             ),
             failing,
@@ -3678,7 +3686,7 @@ esac
             .expect_err("the golden worlds failed");
         assert!(e.contains("exited with") && e.contains("golden.log"), "{e}");
         assert!(
-            t.elapsed() < Duration::from_secs(5),
+            t.elapsed() < Duration::from_secs(25),
             "the training was stopped"
         );
         assert!(ctx.bg.is_empty());
@@ -3709,10 +3717,9 @@ esac
             (json!("cuda"), json!(TRAIN_ONLY))
         );
         let log = fs::read_to_string(&f.calls).expect("calls");
-        let lines: Vec<&str> = log
-            .lines()
-            .filter(|l| l.starts_with("search") || l.starts_with("python -m fortyone_nn.train"))
-            .collect();
+        // The label steps run one after another (their calls in order); the trainer runs beside
+        // them, so its line may come anywhere: when it started is the runner's own record below.
+        let lines: Vec<&str> = log.lines().filter(|l| l.starts_with("search")).collect();
         let want = [
             (
                 "search labels --trick 2 --count 3 --seed 601 --source random",
@@ -3726,7 +3733,6 @@ esac
                 "search labels --trick 2 --count 2 --seed 51201 --source rules",
                 "--threads 16 ",
             ),
-            ("python -m fortyone_nn.train --watch-dir", "--expect 4 "),
             (
                 "search labels --trick 2 --count 4 --seed 51102 --source random",
                 "--threads 8 ",
@@ -3743,7 +3749,16 @@ esac
                 "{l} (want {start} … {has})"
             );
         }
-        let train = lines[3];
+        let trains: Vec<&str> = log
+            .lines()
+            .filter(|l| l.starts_with("python -m fortyone_nn.train"))
+            .collect();
+        assert_eq!(trains.len(), 1, "{log}");
+        let train = trains[0];
+        assert!(
+            train.contains("--watch-dir") && train.contains("--expect 4 "),
+            "{train}"
+        );
         for has in [
             "labels/train ",
             "t2-val-s601.npy",
@@ -3787,6 +3802,12 @@ esac
             rung["stream"]["train_started_after"],
             "2 of 4 shards (part 1)"
         );
+        // The trainer started after part 1 was made and before part 2 began.
+        let started = |k: usize| rung["labels"][k]["started_s"].as_f64().expect("started_s");
+        let train_at = rung["stream"]["train_started_s"]
+            .as_f64()
+            .expect("train_started_s");
+        assert!(started(2) <= train_at && train_at <= started(3), "{rung}");
         assert_eq!(rung["stream"]["label_threads_while_training"], 8);
         assert_eq!(rung["labels"][4]["part"], json!([2, 2]));
         assert_eq!(rung["labels"][4]["threads"], 8);

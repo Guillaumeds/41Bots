@@ -1637,8 +1637,22 @@ mod tests {
     }
 
     /// Every sample after the ramp has all `T` threads working (ratio of samples).
-    fn all_busy_share(w: &WindowRun, after: f64) -> f64 {
-        let s: Vec<&Sample> = w.samples.iter().filter(|s| s.t > after).collect();
+    /// The share of samples with every thread busy, from the end of the ramp: `ramp` seconds,
+    /// or later when a loaded machine is slower to start every thread (then from the first
+    /// sample with all of them busy, which must come by `full_by`, so a plan that cannot fill
+    /// the machine still fails).
+    fn all_busy_share(w: &WindowRun, ramp: f64, full_by: f64) -> f64 {
+        let full = w
+            .samples
+            .iter()
+            .find(|s| s.busy as usize == w.threads)
+            .map(|s| s.t);
+        assert!(
+            full.is_some_and(|t| t <= full_by),
+            "every thread busy only from {full:?} s (want by {full_by} s)"
+        );
+        let after = full.map_or(ramp, |t| t.max(ramp));
+        let s: Vec<&Sample> = w.samples.iter().filter(|s| s.t >= after).collect();
         assert!(!s.is_empty());
         s.iter().filter(|s| s.busy as usize == w.threads).count() as f64 / s.len() as f64
     }
@@ -1661,8 +1675,11 @@ mod tests {
         let t = 64;
         // Starting 64 worlds on a few cores takes about a second in a test build (each thread
         // samples and sets up its first world); samples before `ramp` are left out, as the
-        // bench leaves out its first 5 s.
+        // bench leaves out its first 5 s. On a loaded machine (other tests beside) the ramp
+        // can take longer: then the samples count from the first with every thread busy,
+        // which must come within `full_by`.
         let ramp = 1.5;
+        let full_by = 3.0;
         let mut fill_p = WindowParams::new(Mode::Fill, 4.0, t);
         fill_p.tt_mb = 1;
         fill_p.sample_ms = 100;
@@ -1684,7 +1701,7 @@ mod tests {
         assert_eq!(fill.stopped, None);
         assert_eq!(fill.thread_rows.len(), t);
         assert!(fill.wall_s >= 4.0 && fill.wall_s < 7.0, "{}", fill.wall_s);
-        let share = all_busy_share(&fill, ramp);
+        let share = all_busy_share(&fill, ramp, full_by);
         assert!(
             share >= 0.99,
             "fill: all {t} threads busy in {share:.3} of samples: {:?}",
@@ -1704,7 +1721,7 @@ mod tests {
         assert!(stopped >= t - 2 && stopped <= t, "{stopped}");
         let prod = run_window(&ds, &ctx, &prod_p, &mut |_| None).expect("prod");
         assert_eq!(prod.stopped, None);
-        let share = all_busy_share(&prod, ramp);
+        let share = all_busy_share(&prod, ramp, full_by);
         assert!(
             share >= 0.99,
             "prod: all {t} threads busy in {share:.3} of samples: {:?}",

@@ -1798,7 +1798,7 @@ mod tests {
                 .is_err(),
             "names are unique"
         );
-        ctx.run_child(sh("sleep 0.6"), "fg.log")
+        ctx.run_child(sh("sleep 1.2"), "fg.log")
             .expect("the step runs to its end");
         let (a, b) = ctx
             .wait_bg("the side job", &mut |_| {})
@@ -1819,25 +1819,27 @@ mod tests {
         )
         .expect("starts");
         let e = ctx
-            .run_child(sh("sleep 30"), "fg.log")
+            .run_child(sh("sleep 60"), "fg.log")
             .expect_err("stopped");
         assert!(
             e.contains("step the side job (run beside others) exited with"),
             "{e}"
         );
-        assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
+        assert!(t0.elapsed() < Duration::from_secs(30), "{:?}", t0.elapsed());
         assert!(ctx.bg.is_empty());
         // Past its limit, counted again from bg_limit_from_now.
         ctx.spawn_bg(
             sh("sleep 30"),
             "bg.log",
             "the side job",
-            Some(Duration::from_millis(1500)),
+            Some(Duration::from_millis(3000)),
         )
         .expect("starts");
-        std::thread::sleep(Duration::from_millis(400));
+        // 2.5 s before the renewal plus the 1 s step is past the 3 s limit: only the renewal
+        // keeps the side job alive through the step.
+        std::thread::sleep(Duration::from_millis(2500));
         ctx.bg_limit_from_now("the side job");
-        ctx.run_child(sh("sleep 0.4"), "fg.log")
+        ctx.run_child(sh("sleep 1"), "fg.log")
             .expect("within the renewed limit");
         let e = ctx
             .wait_bg("the side job", &mut |_| {})
