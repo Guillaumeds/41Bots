@@ -33,7 +33,7 @@ already in it, so `uv sync --locked` on the machine installs from disk in second
 downloading about 3.7 GB (`UV_CACHE_DIR` and `UV_PYTHON_INSTALL_DIR` are fixed in the image's ENV).
 If the lock used by a run differs from the one baked in, uv downloads only what differs; the run
 still works. Rebuild the image (Actions → image) whenever `python/nn/uv.lock` changes. Image tag:
-IMAGE_TAG_PLACEHOLDER. Expected size: about 6-7 GB compressed (the old image was under 1 GB); the
+`ghcr.io/guillaumeds/41bots-base:20261016-2bb16f03f96d` (digest `sha256:c77a2f5f84ddf128bceedc0c19e35a1cc5b111ec0fa636dcd4fe81ecdcdb65ae`, built at 2bb16f0). Size: the uv cache alone is 6.3 GB on disk (wheels plus their unpacked copies), so expect about 4-6 GB compressed (the old image was under 1 GB); the
 vast.ai pull is not billed. Its `nvidia/cuda:12.6.3-base` base is enough:
 the PyTorch cu126 packages bring their own CUDA libraries (cuBLAS, cuDNN and the rest, about 3.7 GB
 downloaded per run), and only the GPU driver comes from the host, which the launcher's filter
@@ -51,7 +51,7 @@ would rent), then without:
 | input | smoke run | full run |
 |---|---|---|
 | manifest | `docs/vast/m3-hybrid-smoke.manifest.json` | `docs/vast/m3-hybrid-rung1b.manifest.json` |
-| image | IMAGE_TAG_PLACEHOLDER | same |
+| image | `ghcr.io/guillaumeds/41bots-base:20261016-2bb16f03f96d` | same |
 | bin_sha | the branch commit released above | same |
 | max_dollars | 2 | 6 |
 | offer_id | the offer the owner picked (or blank: the search) | same |
