@@ -18,6 +18,12 @@ name: vast-run
 # (max_dollars, $20 by default), or when a person stops it.
 # Verified hosts are preferred (owner, 2026-10-16): when no verified offer fits, unverified or
 # deverified hosts are searched too; verified_only keeps the strict behaviour.
+# Big image, slow downlinks (2026-10-16): the launcher gives a machine that is still pulling the image
+# more time while vast's status shows the pull advancing (at most 40 minutes from renting; a status
+# unchanged for 10 minutes ends it), counts the 15 minutes to the first heartbeat from the container
+# start, and only searches hosts reporting a download speed of at least 500 Mbps (launch.py
+# --min-inet-down, default 500). This workflow has no input for those (25-input limit); the defaults
+# apply, and a manifest's "machine" object can set "min_inet_down" (Mbps; 0 = no filter) for one run.
 
 on:
   workflow_dispatch:

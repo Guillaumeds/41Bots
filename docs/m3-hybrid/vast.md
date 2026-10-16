@@ -64,7 +64,11 @@ The manifests carry the machine's needs in a `machine` object: one GPU (`gpus` 1
 2026-10-16: no 128-thread GPU machine was on offer, and a trick-4 or trick-3 rung needs the GPU, not
 the threads; raise `min_cores` for trick-2 labels). These apply even with the workflow's default
 `cpu_only` box ticked; the `gpus`, `min_gpu_ram_gb` and `disk_gb` inputs can raise them. An offer
-picked by `offer_id` is checked against the same needs. The run ids are `m3-hybrid-smoke-1` and
+picked by `offer_id` is checked against the same needs. The image is several GB, so every search also
+asks for a download speed of at least 500 Mbps (`machine.min_inet_down` in the manifest changes it for
+one run; 0 turns it off; an offer picked by `offer_id` with a slower link is rented and the log says
+so), and a machine still pulling the image after 15 minutes is waited for while vast's status shows
+the pull advancing (40 minutes at most, 10 minutes without change ends it). The run ids are `m3-hybrid-smoke-1` and
 `m3-hybrid-rung1b-1`; a second run of the same file needs a new `run_id` in it.
 
 The launcher's log shows one line per minute with the step, e.g. `rung/0: labels random (1 of 3)
