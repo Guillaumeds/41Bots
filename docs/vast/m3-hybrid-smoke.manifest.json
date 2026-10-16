@@ -10,8 +10,8 @@
   "gpus": 1,
   "min_gpu_ram_gb": 4,
   "min_compute_cap": 600,
-  "min_cores": 128,
-  "min_ram_gb": 64,
+  "min_cores": 32,
+  "min_ram_gb": 32,
   "disk_gb": 80
  },
  "streams": [

@@ -54,7 +54,9 @@ would rent), then without:
 
 The manifests carry the machine's needs in a `machine` object: one GPU (`gpus` 1) with at least
 4 GB, compute capability 6.0 or newer (and below 10.0: the cu126 build has no Blackwell), at least
-128 CPU threads, 64 GB of RAM and 80 GB of disk. These apply even with the workflow's default
+32 CPU threads, 32 GB of RAM and 80 GB of disk (lowered from 128 threads and 64 GB on
+2026-10-16: no 128-thread GPU machine was on offer, and a trick-4 or trick-3 rung needs the GPU, not
+the threads; raise `min_cores` for trick-2 labels). These apply even with the workflow's default
 `cpu_only` box ticked; the `gpus`, `min_gpu_ram_gb` and `disk_gb` inputs can raise them. An offer
 picked by `offer_id` is checked against the same needs. The run ids are `m3-hybrid-smoke-1` and
 `m3-hybrid-rung1b-1`; a second run of the same file needs a new `run_id` in it.
