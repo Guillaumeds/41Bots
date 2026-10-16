@@ -6,7 +6,7 @@
   "benchmark_seconds": 0,
   "upload_every_s": 300,
   "heartbeat_every_s": 30,
-  "note": "Trick-4 audit loop, second mechanism test (2026-10-16 night) on the binary with the auditor at scale: gamma 0.0001 on 4M-row audit shards, a generated 4,000-decision golden set, standard 0.01 then push 0.005, every waiting group measured (mini sets of 100 decisions), the start shape 1024-1024-512-128, a fast GPU. Small base data on purpose (9M rows), two rounds: it measures the auditor's and the checks' real times before the overnight loops.",
+  "note": "Trick-4 audit loop, second mechanism test (2026-10-16 night) on the binary with the auditor at scale: gamma 0.0001 on 4M-row audit shards, a generated 4,000-decision golden set, standard 0.01 then push 0.005, every waiting group measured (mini sets of 100 decisions), the start shape 1024-1024-512-128. Small base data on purpose (9M rows), two rounds: it measures the auditor's and the checks' real times before the overnight loops.",
   "machine": {
     "gpus": 1,
     "min_gpu_ram_gb": 20,
@@ -15,19 +15,7 @@
     "min_ram_gb": 128,
     "disk_gb": 150,
     "min_inet_down": 100,
-    "max_dph": 2.0,
-    "gpu_names": [
-      "RTX 4090",
-      "L40S",
-      "L40",
-      "RTX 6000Ada",
-      "RTX 5000Ada",
-      "H100 SXM",
-      "H100 PCIE",
-      "H100 NVL",
-      "H200",
-      "H200 NVL"
-    ]
+    "max_dph": 2.0
   },
   "streams": [
     {
