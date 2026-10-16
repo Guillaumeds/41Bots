@@ -73,7 +73,8 @@ use nn::shard::{Row, SOURCE_HARVEST, SOURCE_RANDOM, SOURCE_RULES, row_bytes, row
 use serde::Serialize;
 use solver::frontier::{CanonPos, Frontier};
 use solver::{
-    FastOptions, FrontierCut, MatchCtx, Position, SolveMem, canonical, from_match, solve_fast_with,
+    FastOptions, FrontierCut, MatchCtx, Position, SolveFamily, SolveMem, canonical, from_match,
+    solve_fast_with,
 };
 
 use crate::measure::{DecisionSpec, build_decision};
@@ -157,7 +158,9 @@ pub struct RowInfo {
     pub position: u8,
     /// Lines replayed because the game ended before trick `k`.
     pub retries: u32,
-    /// Solver nodes of the exact value.
+    /// Solver nodes of the exact value. For a harvested row: the nodes of its solve on the
+    /// table its decision's solves share (`solver::SolveFamily`), fewer than a solve from an
+    /// empty table when an earlier position of the decision already solved part of its future.
     pub nodes: u64,
     /// The position's race class (`nn::outcome::race_class`, from the row: [`Row::race_class`]).
     pub class: u8,
@@ -902,8 +905,9 @@ pub struct Reached {
     /// The value the search used for it (absolute team order): its exact value
     /// ([`Driver::Exact`]) or the network's ([`Driver::Net`]).
     pub value: MoneyChance,
-    /// Solver nodes of the exact value (0 when a network drove the search: the sampled
-    /// positions' own solves are counted in their rows' facts).
+    /// Solver nodes of the exact value, on the table the decision's solves share (0 when a
+    /// network drove the search: the sampled positions' own solves are counted in their rows'
+    /// facts).
     pub nodes: u64,
 }
 
@@ -1090,7 +1094,9 @@ pub fn harvest_root(
 /// (`crate::pimc::exact_world` with a frontier at the start of `job.trick` and the [`Recorder`]
 /// there, valuing the frontier as `driver` says), the distinct reached positions, a seeded sample
 /// of at most `job.cap` of them (kept in reach order), each labelled with its exact value (from
-/// the search with [`Driver::Exact`]; solved now, and only these, with [`Driver::Net`]).
+/// the search with [`Driver::Exact`]; solved now, and only these, with [`Driver::Net`]). The
+/// decision's exact solves share one table (`solver::SolveFamily`): the same values as solves
+/// from empty tables, fewer nodes.
 pub fn harvest_decision(
     job: &HarvestJob,
     j: u64,
@@ -1107,12 +1113,20 @@ pub fn harvest_decision(
         tt_mb: tt_mb_for(k),
         ..FastOptions::default()
     };
+    // The exact solves of the decision's frontier positions (every reached one with the exact
+    // driver, the sampled ones with a network) share one table and leaf memo: they all descend
+    // from the decision in this one world (`solver::SolveFamily`: the values are those of
+    // solves from empty tables; only the node counts in the rows' facts change).
+    let mut label_mem = SolveMem::new();
+    if let Some(f) = SolveFamily::of_match(&m) {
+        label_mem.share(f);
+    }
     let rec = Recorder {
         leaf,
         opts,
         driver,
         state: Mutex::new(RecState {
-            mem: SolveMem::new(),
+            mem: label_mem,
             seen: BTreeMap::new(),
             list: Vec::new(),
             evals: 0,
@@ -2616,9 +2630,19 @@ mod tests {
                     })
                     .collect();
                 assert!(at.windows(2).all(|w| w[0] < w[1]), "reach order");
+                // The labels' solves share one table, the decision's (`SolveFamily`): their
+                // nodes are those of solves in row order on such a table.
+                let mut fam = SolveMem::new();
+                fam.share(SolveFamily::of_match(&m).expect("a family"));
+                let fam_opts = FastOptions {
+                    tt_mb: tt_mb_for(k),
+                    ..FastOptions::default()
+                };
                 for (((row, info), (p, pctx)), &i) in out.rows.iter().zip(&out.positions).zip(&at) {
                     let sol = solve_fast(p, *pctx, &SyntheticLeaf, FastOptions::default());
                     let exact = sol.value.expect("solved");
+                    let shared = solve_fast_with(p, *pctx, &SyntheticLeaf, fam_opts, &mut fam);
+                    assert_eq!(shared.value, sol.value, "the shared table's value");
                     let c = canonical(p);
                     let r = nn::encode::rotation(&c);
                     assert_eq!(
@@ -2633,7 +2657,7 @@ mod tests {
                     );
                     assert_eq!(row.outcomes[usize::from(row.label)], row.value);
                     assert_eq!((info.root_trick, info.position), (d.trick, d.position + 1));
-                    assert_eq!(info.nodes, sol.stats.nodes, "the label's own solve");
+                    assert_eq!(info.nodes, shared.stats.nodes, "the label's own solve");
                     net_differs += usize::from(out.reached[i].value != exact);
                 }
                 let again = harvest_decision(

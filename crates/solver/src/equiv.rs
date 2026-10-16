@@ -77,6 +77,8 @@ pub struct Classes {
     /// The ordinary trumps and the three plain suits (classes 2–5), each inside one suit's
     /// 13-bit field of the card word.
     fields: [Field; 4],
+    /// The trumps and the three plain suits' cards: every class lies within one of these sets.
+    split: [Bits; 4],
 }
 
 /// A class whose cards all lie in one suit's 13-bit field of the card word (bits `shift ..
@@ -203,10 +205,18 @@ impl Classes {
             let cards = &lists[i][..usize::from(lens[i])];
             Field::new(cards[0] / 13 * 13, cards)
         };
+        let mut split = [trump_mask(trump); 4];
+        for (m, s) in split[1..]
+            .iter_mut()
+            .zip(Suit::ALL.into_iter().filter(|&s| s != trump))
+        {
+            *m = plain_mask(s, trump);
+        }
         Classes {
             five: five_of(trump),
             jack: jack_of(trump),
             fields: [field(2), field(3), field(4), field(5)],
+            split,
         }
     }
 
@@ -268,6 +278,12 @@ impl Classes {
     /// One representative per group of equivalent cards among the `legal` cards of `hand`: the
     /// first card of the group in the tie order. (A group is either wholly legal or wholly not.)
     pub fn representatives(&self, hand: Bits, legal: Bits, live: Bits, order: TieOrder) -> Bits {
+        // At most one legal card in each of the trumps and the plain suits: every class lies
+        // within one of those sets, so every group holds at most one legal card, which is its
+        // own representative (the same set the groups below give, without making them).
+        if self.split.iter().all(|&m| (legal & m).count_ones() <= 1) {
+            return legal;
+        }
         let mut g = [0; 16];
         let n = self.groups(hand, live, &mut g);
         let mut reps = 0;
@@ -446,6 +462,55 @@ mod tests {
             }
         }
         assert_eq!(checked, 240_000);
+    }
+
+    /// [`Classes::representatives`] (with its shortcut for legal sets holding at most one card
+    /// of the trumps and of each plain suit) against the representatives taken from the groups
+    /// themselves, for random hands and their legal sets under every lead (the engine's
+    /// `legal_plays`), every trump suit and both tie orders; the shortcut is exercised.
+    #[test]
+    fn representatives_match_the_groups() {
+        use engine::rules::legal_plays;
+        let mut rng = Rng::new(11);
+        let mut short = 0u64;
+        for trump in Suit::ALL {
+            let c = Classes::new(trump);
+            for i in 0..40_000 {
+                let mut live = rng.next_u64() & ALL_CARDS;
+                for _ in 0..(i % 3) {
+                    live &= rng.next_u64() | rng.next_u64();
+                }
+                let mut hand = live & rng.next_u64() & rng.next_u64();
+                while hand.count_ones() > 6 {
+                    hand &= rng.next_u64() | rng.next_u64();
+                }
+                // The led card is live (on the table) and in no hand.
+                let led = (i % 5 != 0).then(|| (rng.next_u64() % 53) as Card);
+                if let Some(l) = led {
+                    live |= bit(l);
+                    hand &= !bit(l);
+                }
+                if hand == 0 {
+                    continue;
+                }
+                let legal = legal_plays(hand, led, trump);
+                for order in [TieOrder::Ascending, TieOrder::Descending] {
+                    let mut g = [0; 16];
+                    let n = c.groups(hand, live, &mut g);
+                    let want = g[..n]
+                        .iter()
+                        .filter(|&&x| x & legal != 0)
+                        .fold(0, |a, &x| a | first_in_order(x & legal, order));
+                    assert_eq!(
+                        c.representatives(hand, legal, live, order),
+                        want,
+                        "trump {trump:?} hand {hand:#x} legal {legal:#x} live {live:#x}"
+                    );
+                }
+                short += u64::from(c.split.iter().all(|&m| (legal & m).count_ones() <= 1));
+            }
+        }
+        assert!(short > 10_000, "the shortcut is exercised ({short})");
     }
 
     /// Every class's cards, from [`Classes::new`]'s lists, and the field tables agree with them.

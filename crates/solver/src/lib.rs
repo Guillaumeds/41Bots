@@ -42,11 +42,12 @@ pub mod denial;
 pub mod equiv;
 pub mod fast;
 pub mod frontier;
+mod ranks;
 mod tt;
 pub mod worlds;
 
 pub use fast::{
-    FastOptions, ParProgress, SolveMem, solve_fast, solve_fast_cut, solve_fast_par,
+    FastOptions, ParProgress, SolveFamily, SolveMem, solve_fast, solve_fast_cut, solve_fast_par,
     solve_fast_par_cut, solve_fast_par_split, solve_fast_par_with, solve_fast_watched,
     solve_fast_with,
 };
@@ -286,16 +287,19 @@ impl Position {
         q.hands[usize::from(seat)] &= !bit(c);
         q.trick[usize::from(q.n_played)] = c;
         q.n_played += 1;
-        let r = trump_rank(c, q.trump);
+        // The engine's ranks and trick winner, read from tables (`ranks`: the same values).
+        let r = ranks::trump_rank_of(c, q.trump);
         if r > 0 && q.best.is_none_or(|(b, _)| r > b) {
             q.best = Some((r, team_of(seat)));
         }
         if usize::from(q.n_played) < SEATS {
             return Step::Next(q);
         }
-        let w = trick_winner(&q.trick, q.trump);
+        let w = ranks::trick_winner8(&q.trick, q.trump);
         let winner = (q.leader + w as u8) % SEATS as u8;
-        let five_here = q.trick.contains(&five_of(q.trump));
+        // The 5 of trumps is the highest card of all, so it is in the trick exactly when it
+        // wins it.
+        let five_here = q.trick[w] == five_of(q.trump);
         match q
             .hand
             .play_trick(team_of(winner), five_here, Scoring::HOUSE)
