@@ -1506,22 +1506,36 @@ def manifest_inputs(manifest: dict) -> dict[str, str]:
 # hybrid_rung settings that name a stored input by its key (crates/runner/src/hybrid.rs): the
 # chunk fetches them itself from inputs/sha256/<hex>, so they are checked here with the
 # manifest's `inputs`, before anything is rented.
-HYBRID_INPUT_PARAMS = ("harvest_net", "golden_decisions_input", "golden_worlds_input")
+HYBRID_INPUT_PARAMS = ("harvest_net", "golden_decisions_input", "golden_worlds_input",
+                       "audit_predicates_input", "t1_decisions_input")
+# The trick-2 loop's rough test: a list of {"run": LABEL, "input": KEY} (the saved trick-1 worlds).
+HYBRID_INPUT_LISTS = ("t1_saved_inputs",)
 
 
 def param_inputs(manifest: dict) -> dict[str, str]:
-    """Stored inputs named in hybrid_rung streams' params: "<stream>.<param>" -> lowercase sha256
-    hex. A value that is not "inputs/sha256/<64 hex>" (or "sha256:<64 hex>") stops the launch."""
+    """Stored inputs named in hybrid_rung streams' params: "<stream>.<param>" (a list's entries as
+    "<stream>.<param>[<run>]") -> lowercase sha256 hex. A value that is not
+    "inputs/sha256/<64 hex>" (or "sha256:<64 hex>") stops the launch."""
     out = {}
+    key = re.compile(r"(?:inputs/sha256/|sha256:)([0-9a-fA-F]{64})")
     for st in manifest.get("streams") or []:
         if not isinstance(st, dict) or st.get("kind") != "hybrid_rung":
             continue
         params = st.get("params") or {}
-        for k in HYBRID_INPUT_PARAMS:
-            v = params.get(k)
+        named = [(k, params.get(k)) for k in HYBRID_INPUT_PARAMS]
+        for k in HYBRID_INPUT_LISTS:
+            entries = params.get(k)
+            if entries is None:
+                continue
+            if not isinstance(entries, list):
+                sys.exit(f"launch: stream {st.get('name')!r}: params.{k} must be a list of {{\"run\", \"input\"}}")
+            for e in entries:
+                run = e.get("run") if isinstance(e, dict) else None
+                named.append((f"{k}[{run}]", e.get("input") if isinstance(e, dict) else e))
+        for k, v in named:
             if v is None:
                 continue
-            m = re.fullmatch(r"(?:inputs/sha256/|sha256:)([0-9a-fA-F]{64})", v) if isinstance(v, str) else None
+            m = key.fullmatch(v) if isinstance(v, str) else None
             if not m:
                 sys.exit(f"launch: stream {st.get('name')!r}: params.{k} must be \"inputs/sha256/<64 hex digits>\"")
             out[f"{st.get('name')}.{k}"] = m.group(1).lower()

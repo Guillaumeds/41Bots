@@ -328,6 +328,59 @@ fn read_json(p: &Path) -> Option<Value> {
         .and_then(|t| serde_json::from_str(&t).ok())
 }
 
+/// The tables of a saved-worlds check on this machine ([`plan_tables`]).
+pub(crate) struct TablePlan {
+    /// The hybrid's table per thread, and its plan's record.
+    pub tt_mb: u64,
+    pub record: Value,
+    /// The verification's table per solve, and its plan's record (null without verification).
+    pub verify_tt_mb: u64,
+    pub verify_record: Value,
+    pub warnings: Vec<String>,
+}
+
+/// The tables of a saved-worlds check on `threads` threads: the hybrid's one per thread, as
+/// `mem.rs` plans them (an explicit `tt_mb` only lowered, with a warning, if they would not fit),
+/// and the verification's within what is left. Shared by the `hybrid_t1check` chunk and the
+/// audit loop's rough test at trick 2 (`hybrid/audit.rs`).
+pub(crate) fn plan_tables(threads: usize, q: &Params, table: &Path, what: &str) -> TablePlan {
+    let hyb = mem::plan_here(
+        Requested::Mb(q.tt_mb),
+        Tables::Own {
+            count: threads as u64,
+        },
+        table,
+        &format!("{what} (hybrid tables)"),
+    );
+    let mut warnings: Vec<String> = hyb.warning.iter().cloned().collect();
+    let mut verify_tt = q.verify_tt_mb;
+    let mut verify_rec = Value::Null;
+    if q.verify_pct > 0.0 {
+        let workers = (threads as u64 / q.verify_solve_threads).max(1);
+        let tables = Tables::Shared {
+            count: workers,
+            solve_threads: q.verify_solve_threads,
+        };
+        let limit = mem::Sys::host().limit();
+        let other = mem::other_bytes(table, threads as u64)
+            + hyb.record["tables_peak_mb"].as_u64().unwrap_or(0) * (1 << 20);
+        let plan = mem::plan(Requested::Mb(q.verify_tt_mb), tables, other, &limit);
+        if let Some(w) = &plan.warning {
+            eprintln!("runner: WARNING: {what} (verification tables): {w}");
+            warnings.push(w.clone());
+        }
+        verify_tt = plan.tt_mb;
+        verify_rec = plan.record;
+    }
+    TablePlan {
+        tt_mb: hyb.tt_mb,
+        record: hyb.record,
+        verify_tt_mb: verify_tt,
+        verify_record: verify_rec,
+        warnings,
+    }
+}
+
 /// Run one `hybrid_t1check` chunk (its inputs resolved to paths by `v2.rs`).
 pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
     parse(p)?;
@@ -351,34 +404,13 @@ pub(crate) fn chunk_with(
     let table = table.to_path_buf();
     let threads = ctx.threads.max(1);
     // Tables: the hybrid's one per thread; the verification's within what is left.
-    let hyb = mem::plan_here(
-        Requested::Mb(q.tt_mb),
-        Tables::Own {
-            count: threads as u64,
-        },
-        &table,
-        "hybrid_t1check (hybrid tables)",
-    );
-    let mut warnings: Vec<String> = hyb.warning.iter().cloned().collect();
-    let mut verify_tt = q.verify_tt_mb;
-    let mut verify_rec = Value::Null;
-    if q.verify_pct > 0.0 {
-        let workers = (threads as u64 / q.verify_solve_threads).max(1);
-        let tables = Tables::Shared {
-            count: workers,
-            solve_threads: q.verify_solve_threads,
-        };
-        let limit = mem::Sys::host().limit();
-        let other = mem::other_bytes(&table, threads as u64)
-            + hyb.record["tables_peak_mb"].as_u64().unwrap_or(0) * (1 << 20);
-        let plan = mem::plan(Requested::Mb(q.verify_tt_mb), tables, other, &limit);
-        if let Some(w) = &plan.warning {
-            eprintln!("runner: WARNING: hybrid_t1check (verification tables): {w}");
-            warnings.push(w.clone());
-        }
-        verify_tt = plan.tt_mb;
-        verify_rec = plan.record;
-    }
+    let TablePlan {
+        tt_mb: hyb_tt,
+        record: hyb_rec,
+        verify_tt_mb: verify_tt,
+        verify_record: verify_rec,
+        warnings,
+    } = plan_tables(threads, &q, &table, "hybrid_t1check");
     let out = ctx.root.join("out").join("hybrid");
     fs::create_dir_all(&out).map_err(|e| format!("mkdir {}: {e}", out.display()))?;
     let progress = ctx.root.join("t1check.progress.json");
@@ -390,7 +422,7 @@ pub(crate) fn chunk_with(
         &Run {
             table: &table,
             threads,
-            tt_mb: hyb.tt_mb,
+            tt_mb: hyb_tt,
             verify_tt_mb: verify_tt,
             out: &out,
             progress: &progress,
@@ -456,7 +488,7 @@ pub(crate) fn chunk_with(
         "net_sha256": hc["net"]["sha256"],
         "trick": q.trick, "cut": q.cut,
         "threads": threads,
-        "tt_mb": hyb.tt_mb, "tables": hyb.record,
+        "tt_mb": hyb_tt, "tables": hyb_rec,
         "verify_tt_mb": verify_tt, "verify_tables": verify_rec,
         "sets": sets,
         "hard": hc["hard"],

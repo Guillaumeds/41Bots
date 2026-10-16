@@ -5,7 +5,7 @@
 //! **Settings** (all refused unless `audit_rounds` is above 0, and the loop needs the golden set:
 //! not with `"check": false`):
 //! - `audit_rounds` (0: no loop, the chunk is exactly as before): R_max, at most 49;
-//! - `audit_rows` (1,000,000): rows of each round's audit shard;
+//! - `audit_rows` (1,000,000; 200,000 at trick 2): rows of each round's audit shard;
 //! - `audit_seed` (301): round `r`'s audit shard has the seed `audit_seed × 100 + r`, its targeted
 //!   harvest `audit_seed × 100 + 50 + r` (a pure function of the manifest; refused when one meets
 //!   a training or validation seed, or the golden sets' seed 1);
@@ -78,6 +78,24 @@
 //! stopped, everything so far written and uploaded), the reason naming a dollar cap when the
 //! stop does.
 //!
+//! **Trick 2** (cut 2; docs/M3-HYBRID-SPEC.md §3, owner decision of 2026-10-16: no trick-1
+//! golden set is ever built): no golden set and no mini golden sets. The stop is position-level
+//! only: *flat* when a round's audit confirms no group on its fresh trick-2 audit shard. Each
+//! round, after the targeted harvest (only the round's confirmed groups: no group is ever
+//! "failing" at trick 2), the *rough test* runs: `search hybrid-check --trick 1 --cut 2 --saved
+//! …` on the saved exact trick-1 worlds (`t1_decisions_input`, `t1_saved_inputs`; the
+//! `hybrid_t1check` chunk's command and table plan, its verification sample `t1_verify_*` in
+//! round 1 only) with a slice per group of the union; it is reported in every round's report
+//! (`rough_test`, each group's slice labelled "thin: N decisions", how few decisions and seats
+//! the saved worlds cover), never decides the stop and never makes a group failing. Defaults:
+//! `audit_rows` 200,000 (an exact trick-2 label costs seconds), `audit_target_rows` 1,000,000.
+//! Round 1 without `harvest_net` makes its audit shard after its training, driven by its own
+//! network (an exact-driven trick-2 harvest would solve every reached position); with
+//! `upload_shards` the loop's audit and targeted shards are shared too (hours of labels each).
+//! The settings: `t1_decisions_input` and `t1_saved_inputs` (`[{"run": LABEL, "input":
+//! "inputs/sha256/<hex>"}, …]`, required at cut 2, refused elsewhere), `t1_verify_pct` (3),
+//! `t1_verify_rule` (`rules-v1`), `t1_verify_solve_threads` (46), `t1_verify_tt_mb` (8192).
+//!
 //! **GPU and CPU together** (plan §4, owner 2026-10-16 21:15): on a GPU with `overlap`, round `r`'s
 //! training starts at once in the background (`Rung::start_train_with`, one child beside the
 //! steps) when round `r − 1` has groups to target (confirmed, or still failing), and the CPU steps
@@ -118,7 +136,7 @@ use super::{GOLDEN_SEED, Rung, label_progress, merge_beside, read_json, secs, wr
 use crate::remote::{input_hex, input_key, put_input};
 
 /// The audit loop's settings beside `audit_rounds`, refused when it is 0.
-const AUDIT_KEYS: [&str; 10] = [
+const AUDIT_KEYS: [&str; 16] = [
     "audit_rows",
     "audit_seed",
     "audit_keep_cap",
@@ -129,7 +147,182 @@ const AUDIT_KEYS: [&str; 10] = [
     "audit_min_gain",
     "audit_target_rows",
     "audit_predicates_input",
+    "t1_decisions_input",
+    "t1_saved_inputs",
+    "t1_verify_pct",
+    "t1_verify_rule",
+    "t1_verify_solve_threads",
+    "t1_verify_tt_mb",
 ];
+
+/// The trick-2 loop's rough test's settings (`t1_*`): at cut 2 only.
+const T1_KEYS: [&str; 6] = [
+    "t1_decisions_input",
+    "t1_saved_inputs",
+    "t1_verify_pct",
+    "t1_verify_rule",
+    "t1_verify_solve_threads",
+    "t1_verify_tt_mb",
+];
+
+/// The golden set's settings, refused at cut 2: no trick-1 golden set is built (owner,
+/// 2026-10-16), and the trick-2 loop has no mini golden sets.
+const NO_GOLDEN_AT_2: [&str; 9] = [
+    "golden_trick",
+    "golden_count",
+    "golden_seed",
+    "golden_worlds",
+    "golden_decisions_input",
+    "golden_worlds_input",
+    "verify_pct",
+    "audit_mini_decisions",
+    "audit_mini_sets",
+];
+
+/// The rough test's limit (it never gates the stop: a rough test over its limit is reported as
+/// not run, and the loop goes on).
+const ROUGH_LIMIT: Duration = Duration::from_secs(2 * 60 * 60);
+
+/// The trick-2 loop's rough test (docs/M3-HYBRID-SPEC.md §3, owner decision of 2026-10-16: no
+/// trick-1 golden set): H_2 against the exact trick-1 worlds earlier runs saved (the
+/// `hybrid_t1check` chunk's check, `search hybrid-check --saved`), with a slice per group, every
+/// round, reported only: it never decides the stop and never makes a group failing.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RoughTest {
+    /// `t1_decisions_input`: the SHA-256 of the decisions file the worlds were valued for.
+    pub decisions: String,
+    /// `t1_saved_inputs`: each saved worlds file (or checkpoint) as (run label, SHA-256).
+    pub saved: Vec<(String, String)>,
+    /// `t1_verify_pct` (3), `t1_verify_rule` (`rules-v1`), `t1_verify_solve_threads` (46),
+    /// `t1_verify_tt_mb` (8192): the verification sample of round 1 (as `hybrid_t1check`'s).
+    pub verify_pct: f64,
+    pub verify_rule: String,
+    pub verify_solve_threads: u64,
+    pub verify_tt_mb: u64,
+}
+
+impl RoughTest {
+    pub fn to_json(&self) -> Value {
+        json!({ "decisions_input": input_key(&self.decisions),
+                "saved": self.saved.iter().map(|(run, h)| json!({ "run": run, "input": input_key(h) }))
+                             .collect::<Vec<_>>(),
+                "verify_pct": self.verify_pct, "verify_rule": self.verify_rule,
+                "verify_solve_threads": self.verify_solve_threads,
+                "verify_tt_mb": self.verify_tt_mb,
+                "gates": "never: a rough test, reported only (owner, 2026-10-16)" })
+    }
+
+    /// The name under which the saved file of run `run` is fetched (`Rung::inputs`).
+    pub fn input_name(run: &str) -> String {
+        format!("t1_saved:{run}")
+    }
+}
+
+/// The rough test's settings (`t1_*`): required by the audit loop at cut 2, refused elsewhere;
+/// at cut 2 the golden set's and the mini sets' settings are refused.
+fn parse_rough(o: &Map<String, Value>, cut: u64) -> Result<Option<RoughTest>, String> {
+    if cut != 2 {
+        if let Some(k) = T1_KEYS.iter().find(|k| o.contains_key(**k)) {
+            return Err(format!(
+                "hybrid_rung: {k} is for the trick-2 loop (cut 2): the saved trick-1 worlds are its \
+                 rough test"
+            ));
+        }
+        return Ok(None);
+    }
+    if let Some(k) = NO_GOLDEN_AT_2.iter().find(|k| o.contains_key(**k)) {
+        return Err(format!(
+            "hybrid_rung: {k} is set, but at cut 2 there is no golden set and no mini golden set: \
+             no trick-1 golden set is built (owner, 2026-10-16); the trick-2 loop's rough test is \
+             the saved trick-1 worlds (t1_decisions_input, t1_saved_inputs); remove it"
+        ));
+    }
+    let key = |k: &str, v: &Value| -> Result<String, String> {
+        v.as_str().and_then(input_hex).ok_or_else(|| {
+            format!(
+                "hybrid_rung: {k} {v} must be a stored input's key, \"inputs/sha256/<64 hex \
+                 digits>\" (or \"sha256:<64 hex digits>\")"
+            )
+        })
+    };
+    let decisions = match o.get("t1_decisions_input") {
+        None | Some(Value::Null) => {
+            return Err(
+                "hybrid_rung: the trick-2 loop (cut 2) needs t1_decisions_input and \
+                 t1_saved_inputs: the saved exact trick-1 worlds are its rough test (no trick-1 \
+                 golden set is built)"
+                    .into(),
+            );
+        }
+        Some(v) => key("t1_decisions_input", v)?,
+    };
+    let list = o
+        .get("t1_saved_inputs")
+        .and_then(Value::as_array)
+        .filter(|a| !a.is_empty())
+        .ok_or(
+            "hybrid_rung: t1_saved_inputs must be a list of {\"run\": LABEL, \"input\": \
+             \"inputs/sha256/<hex>\"} (the saved trick-1 worlds files)",
+        )?;
+    let mut saved: Vec<(String, String)> = Vec::new();
+    for e in list {
+        let obj = e
+            .as_object()
+            .ok_or("hybrid_rung: each t1_saved_inputs entry is {\"run\": …, \"input\": …}")?;
+        if let Some(k) = obj.keys().find(|k| !["run", "input"].contains(&k.as_str())) {
+            return Err(format!(
+                "hybrid_rung: t1_saved_inputs: unknown key {k:?} (run, input)"
+            ));
+        }
+        let run = obj
+            .get("run")
+            .and_then(Value::as_str)
+            .filter(|r| !r.is_empty() && !r.contains('='))
+            .ok_or("hybrid_rung: t1_saved_inputs: each entry needs a run label (no `=`)")?;
+        let hex = key(
+            "t1_saved_inputs input",
+            obj.get("input").unwrap_or(&Value::Null),
+        )?;
+        if saved.iter().any(|(r, _)| r == run) {
+            return Err(format!(
+                "hybrid_rung: t1_saved_inputs: run label {run:?} is given twice"
+            ));
+        }
+        saved.push((run.to_string(), hex));
+    }
+    let verify_pct = match o.get("t1_verify_pct") {
+        None | Some(Value::Null) => 3.0,
+        Some(v) => v
+            .as_f64()
+            .filter(|x| (0.0..=100.0).contains(x))
+            .ok_or("hybrid_rung: t1_verify_pct must be a number from 0 to 100")?,
+    };
+    let verify_rule = match o.get("t1_verify_rule") {
+        None | Some(Value::Null) => "rules-v1".to_string(),
+        Some(v) => v
+            .as_str()
+            .filter(|r| ["all", "rules-v1", "searched"].contains(r))
+            .ok_or("hybrid_rung: t1_verify_rule: all, rules-v1 or searched")?
+            .to_string(),
+    };
+    let n = |k: &str, d: u64| -> Result<u64, String> {
+        match o.get(k) {
+            None | Some(Value::Null) => Ok(d),
+            Some(v) => v
+                .as_u64()
+                .filter(|&x| x >= 1)
+                .ok_or_else(|| format!("hybrid_rung: {k} must be a whole number, at least 1")),
+        }
+    };
+    Ok(Some(RoughTest {
+        decisions,
+        saved,
+        verify_pct,
+        verify_rule,
+        verify_solve_threads: n("t1_verify_solve_threads", 46)?,
+        verify_tt_mb: n("t1_verify_tt_mb", 8192)?,
+    }))
+}
 
 /// A decision is in a group's golden slice (and a mini set's candidate is kept) when at least
 /// this share of its reached frontier positions are in the group.
@@ -160,6 +353,9 @@ pub(crate) struct AuditSettings {
     /// `audit_predicates_input`: the SHA-256 of a stored predicate file standing in for the
     /// auditor.
     pub predicates_input: Option<String>,
+    /// The trick-2 loop's rough test (cut 2 only, where it replaces the golden set's slices and
+    /// the mini golden sets, and never gates).
+    pub rough: Option<RoughTest>,
 }
 
 impl AuditSettings {
@@ -181,6 +377,7 @@ impl AuditSettings {
                 "min_gain": self.min_gain,
                 "target_rows": self.target_rows,
                 "predicates_input": self.predicates_input.as_deref().map(input_key),
+                "rough_test": self.rough.as_ref().map(RoughTest::to_json),
                 "audit_seeds": (1..=self.rounds).map(|r| self.audit_seed(r)).collect::<Vec<_>>(),
                 "target_seeds": (1..=self.rounds).map(|r| self.target_seed(r)).collect::<Vec<_>>() })
     }
@@ -230,7 +427,9 @@ pub(crate) fn parse_settings(
             .into(),
         );
     }
-    let rows = u("audit_rows", 1_000_000)?;
+    // Rows of each round's audit shard: 1M from trick 3 (seconds to minutes of labels), 200,000
+    // at trick 2 (an exact trick-2 label costs seconds: docs/m3-hybrid/vast.md).
+    let rows = u("audit_rows", if cut <= 2 { 200_000 } else { 1_000_000 })?;
     if rows == 0 {
         return Err("hybrid_rung: audit_rows must be at least 1".into());
     }
@@ -298,6 +497,7 @@ pub(crate) fn parse_settings(
                 .into());
         }
     };
+    let rough = parse_rough(o, cut)?;
     let s = AuditSettings {
         rounds,
         rows,
@@ -310,6 +510,7 @@ pub(crate) fn parse_settings(
         min_gain,
         target_rows,
         predicates_input,
+        rough,
     };
     for r in 1..=rounds {
         for (what, x) in [
@@ -487,8 +688,10 @@ struct Loop {
     lines: Vec<String>,
     /// Every round's record.
     rounds: Vec<Value>,
-    /// The last golden check (its JSON and text paths).
+    /// The last golden check (its JSON and text paths); at trick 2 the last rough test's.
     last_check: Option<(Value, PathBuf, PathBuf)>,
+    /// At trick 2: the last rough test's summary ([`rough_summary`]).
+    last_rough: Option<Value>,
     /// The last round's network record.
     last_net: Option<Value>,
     /// The current step on the capacity ladder (`s.shapes`).
@@ -722,6 +925,380 @@ fn update_failing(st: &mut Loop, judged: &[Value], r: u64) {
     }
 }
 
+/// The union of every group met so far, as a predicate file in `rdir` (`union.json`; each with
+/// the rounds that confirmed it), or `None` before any.
+fn write_union(st: &Loop, rdir: &Path) -> Result<Option<PathBuf>, String> {
+    if st.groups.is_empty() {
+        return Ok(None);
+    }
+    let u = rdir.join("union.json");
+    let list: Vec<Value> = st
+        .groups
+        .iter()
+        .map(|g| {
+            let mut e = g.entry.clone();
+            e["rounds_confirmed"] = json!(g.confirmed);
+            e
+        })
+        .collect();
+    write_json(&u, &Value::Array(list))?;
+    Ok(Some(u))
+}
+
+/// Whole numbers as ranges (`1-2, 5`).
+fn ranges(v: &[u64]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < v.len() {
+        let mut j = i;
+        while j + 1 < v.len() && v[j + 1] == v[j] + 1 {
+            j += 1;
+        }
+        out.push(if j == i {
+            v[i].to_string()
+        } else {
+            format!("{}-{}", v[i], v[j])
+        });
+        i = j + 1;
+    }
+    out.join(", ")
+}
+
+/// The rough test's summary (trick 2; owner decision of 2026-10-16) from `search hybrid-check
+/// --saved --slices`' JSON, `file` being the trick-1 decisions in the decisions file: per set (one
+/// per burn rule) its overall row, bands and verification; the decisions with saved worlds and
+/// their seats; the slices merged over the sets (a group's decisions in every set, its worst
+/// bound, passing when every set's slice with decisions does); and the plain-English statement
+/// of how thin the evidence is. Reported only: nothing here gates the loop.
+fn rough_summary(hc: &Value, file: u64) -> Value {
+    use std::collections::BTreeSet;
+    let mut sets = Vec::new();
+    let mut ids: BTreeSet<u64> = BTreeSet::new();
+    let mut seats: BTreeSet<u64> = BTreeSet::new();
+    let mut merged: Vec<(String, Vec<Value>)> = Vec::new();
+    let mut per_set_text = Vec::new();
+    let mut not_compared = Vec::new();
+    for s in hc["sets"].as_array().into_iter().flatten() {
+        let compared = s["groups"].is_array();
+        let all = &s["groups"][0]["summary"];
+        let decs = s["decisions"].as_array().cloned().unwrap_or_default();
+        for d in &decs {
+            ids.extend(d["id"].as_u64());
+            seats.extend(d["position"].as_u64());
+        }
+        let (n, w) = (
+            s["plan"]["decisions"].as_u64().unwrap_or(decs.len() as u64),
+            s["plan"]["worlds"].as_u64().unwrap_or(0),
+        );
+        let rule = s["burn_rule"].as_str().unwrap_or("?");
+        per_set_text.push(format!("{rule}: {n} decisions, {w} worlds"));
+        if !compared {
+            not_compared.push(rule.to_string());
+        }
+        let bands: Vec<Value> = s["groups"]
+            .as_array()
+            .map(|g| {
+                g.iter()
+                    .skip(1)
+                    .take(3)
+                    .map(|b| {
+                        json!({ "band": b["group"], "decisions": b["summary"]["decisions"],
+                                "loss_upper95": b["summary"]["loss_upper95"] })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let pass = compared
+            && all["loss_pass"].as_bool().unwrap_or(false)
+            && all["bias_pass"].as_bool().unwrap_or(false);
+        sets.push(json!({
+            "set": s["set"], "burn_rule": rule, "values_version": s["values_version"],
+            "compared": compared, "exact_values": s["exact_values"],
+            "verification": s["verification"], "decisions": n, "worlds": w,
+            "ids": decs.iter().map(|d| d["id"].clone()).collect::<Vec<_>>(),
+            "mean_loss": all["mean_loss"], "loss_upper95": all["loss_upper95"],
+            "loss_pass": all["loss_pass"], "bias": all["bias"], "bias_pass": all["bias_pass"],
+            "sd": all["sd"], "agreement": all["agreement"], "overall_pass": pass, "bands": bands }));
+        for x in s["slices"]["groups"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|x| !x["group"].is_null())
+        {
+            let name = x["name"].as_str().unwrap_or("?").to_string();
+            let e = json!({ "set": s["set"], "burn_rule": rule,
+                            "decisions": x["ids"].as_array().map_or(0, Vec::len),
+                            "ids": x["ids"], "loss_upper95": x["summary"]["loss_upper95"],
+                            "pass": x["pass"], "reached_share": x["reached_share"] });
+            match merged.iter_mut().find(|m| m.0 == name) {
+                Some(m) => m.1.push(e),
+                None => merged.push((name, vec![e])),
+            }
+        }
+    }
+    let compared: Vec<&Value> = sets
+        .iter()
+        .filter(|s| s["compared"].as_bool() == Some(true))
+        .collect();
+    let worst = compared.iter().copied().max_by(|a, b| {
+        a["loss_upper95"]
+            .as_f64()
+            .unwrap_or(0.0)
+            .total_cmp(&b["loss_upper95"].as_f64().unwrap_or(0.0))
+    });
+    let overall_pass = !compared.is_empty()
+        && compared
+            .iter()
+            .all(|s| s["overall_pass"].as_bool() == Some(true));
+    let slices: Vec<Value> = merged
+        .into_iter()
+        .map(|(name, per)| {
+            let with: Vec<&Value> = per
+                .iter()
+                .filter(|e| e["decisions"].as_u64().unwrap_or(0) > 0)
+                .collect();
+            let n: u64 = with.iter().filter_map(|e| e["decisions"].as_u64()).sum();
+            let pass = if with.is_empty() {
+                Value::Null
+            } else {
+                json!(with.iter().all(|e| e["pass"].as_bool() == Some(true)))
+            };
+            let bound = with
+                .iter()
+                .filter_map(|e| e["loss_upper95"].as_f64())
+                .fold(None, |m: Option<f64>, x| Some(m.map_or(x, |m| m.max(x))));
+            let reached = per
+                .iter()
+                .filter_map(|e| e["reached_share"].as_f64())
+                .fold(None, |m: Option<f64>, x| Some(m.map_or(x, |m| m.max(x))));
+            json!({ "name": name, "decisions": n, "label": format!("thin: {n} decisions"),
+                    "loss_upper95": bound, "pass": pass, "reached_share": reached,
+                    "by_set": per })
+        })
+        .collect();
+    let failing: Vec<&Value> = slices
+        .iter()
+        .filter(|x| x["pass"].as_bool() == Some(false))
+        .collect();
+    let worst_slice = failing.iter().max_by(|a, b| {
+        a["loss_upper95"]
+            .as_f64()
+            .unwrap_or(0.0)
+            .total_cmp(&b["loss_upper95"].as_f64().unwrap_or(0.0))
+    });
+    let ids: Vec<u64> = ids.into_iter().collect();
+    let seats: Vec<u64> = seats.into_iter().collect();
+    let missing: Vec<u64> = (1..=8).filter(|s| !seats.contains(s)).collect();
+    let evidence = format!(
+        "Rough test at trick 1 (reported only: it never decides the stop and never makes a group \
+         failing; owner, 2026-10-16): H_2 against the saved exact trick-1 worlds. {file} decisions \
+         in the saved trick-1 decisions file, {} of them with saved exact worlds ({}){}{}. That is \
+         far weaker evidence than the 400 decisions x 320 worlds of the golden sets at tricks 3 \
+         and 4: a 95% bound over a handful of decisions is coarse. No trick-1 golden set is built \
+         and no mini golden sets are made at trick 2; trick 2's standard is the position-level \
+         audit.",
+        ids.len(),
+        per_set_text.join("; "),
+        if seats.is_empty() {
+            String::new()
+        } else {
+            format!(
+                ", at seats {} only{}",
+                ranges(&seats),
+                if missing.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (seats {} have no saved decision)", ranges(&missing))
+                }
+            )
+        },
+        if not_compared.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; not compared (stored values differ from this solver's in the verification \
+                 sample): {}",
+                not_compared.join(", ")
+            )
+        }
+    );
+    json!({
+        "what": "rough test: H_2 against the saved exact trick-1 worlds (reported only)",
+        "gates": false,
+        "file_decisions": file,
+        "decisions_with_worlds": ids.len(),
+        "ids": ids,
+        "seats": seats,
+        "sets": sets,
+        "overall_pass": overall_pass,
+        "mean_loss": worst.map_or(Value::Null, |w| w["mean_loss"].clone()),
+        "loss_upper95": worst.map_or(Value::Null, |w| w["loss_upper95"].clone()),
+        "worst_set": worst.map_or(Value::Null, |w| w["burn_rule"].clone()),
+        "slices": slices,
+        "slices_failing": failing.len(),
+        "worst_slice": worst_slice.map(|w| json!({ "name": w["name"], "loss_upper95": w["loss_upper95"] })),
+        "evidence": evidence,
+    })
+}
+
+/// The rough test in one line: each set's bound and size, and how many of the file's decisions
+/// it covers.
+fn rough_line(rough: &Value) -> String {
+    if rough["ran"].as_bool() == Some(false) {
+        return "did not run this round".into();
+    }
+    let sets: Vec<String> = rough["sets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|s| {
+            if s["compared"].as_bool() == Some(true) {
+                format!(
+                    "{} 95% upper {} ({} decisions, {})",
+                    s["burn_rule"].as_str().unwrap_or("?"),
+                    pct4(s["loss_upper95"].as_f64()),
+                    s["decisions"],
+                    if s["overall_pass"].as_bool() == Some(true) {
+                        "would pass"
+                    } else {
+                        "would fail"
+                    }
+                )
+            } else {
+                format!(
+                    "{} not compared (stored values differ)",
+                    s["burn_rule"].as_str().unwrap_or("?")
+                )
+            }
+        })
+        .collect();
+    format!(
+        "{}; {} of {} trick-1 decisions have saved worlds",
+        sets.join(", "),
+        rough["decisions_with_worlds"],
+        rough["file_decisions"]
+    )
+}
+
+/// A trick-2 round's report lines on the rough test and the position level (`remaining`: the
+/// groups this round's audit confirmed).
+fn rough_text(rough: &Value, judged: &[Value], remaining: usize) -> String {
+    let mut t = format!(
+        "{}\n",
+        rough["evidence"]
+            .as_str()
+            .unwrap_or("Rough test at trick 1: no summary.")
+    );
+    if rough["ran"].as_bool() != Some(false) {
+        t += "Rough test by set (report only):\n";
+        for s in rough["sets"].as_array().into_iter().flatten() {
+            if s["compared"].as_bool() != Some(true) {
+                t += &format!(
+                    "  - {}: not compared ({})\n",
+                    s["burn_rule"].as_str().unwrap_or("?"),
+                    s["exact_values"].as_str().unwrap_or("?")
+                );
+                continue;
+            }
+            let bias = worst_bias(&s["bias"]);
+            t += &format!(
+                "  - {} (values version {}): {} decisions, {} worlds; decision loss mean {}, 95% \
+                 upper {} ({} the 0.01% line); largest team |bias| {}; agreement {}; exact values: \
+                 {}\n",
+                s["burn_rule"].as_str().unwrap_or("?"),
+                s["values_version"],
+                s["decisions"],
+                s["worlds"],
+                pct4(s["mean_loss"].as_f64()),
+                pct4(s["loss_upper95"].as_f64()),
+                if s["overall_pass"].as_bool() == Some(true) {
+                    "within"
+                } else {
+                    "over"
+                },
+                pct4(bias.map(f64::abs)),
+                s["agreement"]
+                    .as_f64()
+                    .map_or("?".into(), |a| format!("{:.0}%", 100.0 * a)),
+                s["exact_values"].as_str().unwrap_or("?")
+            );
+        }
+    }
+    if !judged.is_empty() {
+        let mut lines: Vec<&Value> = judged.iter().collect();
+        lines.sort_by_key(|x| u8::from(x["pass"].as_bool() == Some(true)));
+        t += &format!(
+            "Position level (trick 2's standard), {} groups met so far: {remaining} confirmed on \
+             this round's audit shard (out of spec):\n",
+            judged.len()
+        );
+        for x in lines.iter().take(20) {
+            let r = &x["rough"];
+            t += &format!(
+                "  - {}: SD {} on the audit shard; {}; rough test: {}\n",
+                x["group"].as_str().unwrap_or("?"),
+                x["sd"]
+                    .as_f64()
+                    .map_or("?".into(), |v| format!("{:.2}%", 100.0 * v)),
+                if x["pass"].as_bool() == Some(false) {
+                    "confirmed this round (OUT OF SPEC)"
+                } else {
+                    "not confirmed this round (within)"
+                },
+                if r.is_object() {
+                    format!(
+                        "{}, 95% upper {} ({}; report only)",
+                        r["label"].as_str().unwrap_or("?"),
+                        pct4(r["loss_upper95"].as_f64()),
+                        if r["pass"].as_bool() == Some(true) {
+                            "within"
+                        } else {
+                            "over"
+                        }
+                    )
+                } else {
+                    "no saved decision reaches it".to_string()
+                }
+            );
+        }
+        if lines.len() > 20 {
+            t += &format!("  ({} more in the round's JSON)\n", lines.len() - 20);
+        }
+    }
+    t += "Mini golden sets: none at trick 2 (no trick-1 golden set is built: owner, 2026-10-16).\n";
+    t
+}
+
+/// Every group of the union after round `p.r` at trick 2: judged at the position level only
+/// (out of spec when this round's audit confirmed it), with its rough-test slice beside it for
+/// the report (`rough`: its decisions, worst bound and verdict over the sets; null when no saved
+/// decision reaches it).
+fn judge_rough(st: &Loop, rough: &Value, p: &Round) -> Vec<Value> {
+    st.groups
+        .iter()
+        .enumerate()
+        .map(|(i, g)| {
+            let now = p.confirmed.contains(&i);
+            let sl = rough["slices"]
+                .as_array()
+                .and_then(|a| a.iter().find(|x| x["name"] == g.name.as_str()));
+            let n = sl.and_then(|x| x["decisions"].as_u64()).unwrap_or(0);
+            let r = sl.filter(|_| n > 0).map_or(Value::Null, |x| {
+                json!({ "decisions": n, "label": x["label"], "loss_upper95": x["loss_upper95"],
+                        "pass": x["pass"] })
+            });
+            json!({ "group": g.name, "weight": g.entry["weight"], "sd": g.entry["sd"],
+                    "bias": g.entry["bias"],
+                    "basis": if now { "confirmed on this round's audit shard (position level)" }
+                             else { "not confirmed on this round's audit shard (position level)" },
+                    "pass": !now, "confirmed_this_round": now,
+                    "golden_decisions": n,
+                    "loss_upper95": r["loss_upper95"],
+                    "rough": r })
+        })
+        .collect()
+}
+
 /// The failing groups (the carried set).
 fn failing(st: &Loop) -> Vec<usize> {
     (0..st.groups.len())
@@ -740,6 +1317,13 @@ fn nothing_reason(r: u64) -> String {
 /// The stop reason of a flat network after round `r`.
 fn flat_reason(st: &Loop, r: u64) -> String {
     let n = st.groups.len();
+    if st.s.rough.is_some() {
+        return format!(
+            "flat after round {r}: no weak group confirmed at the position level on the fresh \
+             trick-2 audit shard ({n} groups confirmed in earlier rounds; the saved trick-1 worlds \
+             are a rough test, reported only)"
+        );
+    }
     if n == 0 {
         format!("flat after round {r}")
     } else {
@@ -773,6 +1357,7 @@ impl Rung<'_> {
             lines: Vec::new(),
             rounds: Vec::new(),
             last_check: None,
+            last_rough: None,
             last_net: None,
             step: 0,
             prev_worst: None,
@@ -788,8 +1373,20 @@ impl Rung<'_> {
             },
         };
         self.audit_hb.insert("audit_stop".into(), json!(stop));
+        let note = match (&st.s.rough, &st.last_rough) {
+            (Some(_), Some(rs)) => format!(
+                "trick 2: the standard is the position-level audit; the rough test is the only \
+                 trick-1 measurement and much weaker evidence than tricks 3-4 (reported only): {}\n",
+                rough_line(rs)
+            ),
+            (Some(_), None) => "trick 2: the standard is the position-level audit; the rough test \
+                                did not run\n"
+                .to_string(),
+            _ => String::new(),
+        };
         let summary = st.lines.join("\n")
             + if st.lines.is_empty() { "" } else { "\n" }
+            + &note
             + &format!(
                 "stop: {stop}\nfinal network: {}\n",
                 st.last_net.as_ref().map_or("none".into(), |n| format!(
@@ -834,6 +1431,15 @@ impl Rung<'_> {
                         "slices": hc["slices"].clone(), "audit_stop": stop, "time": hc["time"] }),
             );
         }
+        if let (Some(rs), Some(c)) = (&st.last_rough, self.rec.get_mut("check")) {
+            // Trick 2: the verdict is the position level's; the rough test is reported beside.
+            c["standard"] = json!(
+                "trick 2: flat when the last round's audit confirmed no weak group on its fresh \
+                 trick-2 audit shard (position level); the rough test on the saved trick-1 worlds \
+                 is reported only (owner, 2026-10-16)"
+            );
+            c["rough_test"] = rs.clone();
+        }
         self.rec.insert("seconds".into(), json!(secs(self.t0)));
         self.save()?;
         let mut done = self.progress("done", json!({ "verdict": verdict }));
@@ -847,7 +1453,8 @@ impl Rung<'_> {
             "net_int_sha256": self.rec.get("net").and_then(|n| n.get("int_sha256")).cloned(),
             "net_int_key": self.rec.get("net").and_then(|n| n.get("int_key")).cloned(),
             "audit": { "stop": stop, "rounds": st.rounds.len(), "flat": st.flat,
-                       "summary_key": summary_key },
+                       "summary_key": summary_key,
+                       "rough_test": st.last_rough.as_ref().map(rough_line) },
             "steps": self.steps,
             "warnings": self.warnings,
         }))
@@ -878,7 +1485,20 @@ impl Rung<'_> {
             );
             self.shape = Some(shape);
             let bg = self.bg_train.is_some() || (self.device == "cuda" && self.p.overlap);
-            let shard;
+            // The audit shard is made beside (or before) the training, driven by the previous
+            // network; at trick 2 with no earlier network (round 1 without `harvest_net`) it is
+            // made after the training, driven by this round's own network: an exact-driven
+            // trick-2 harvest would solve every reached position (thousands a decision, seconds
+            // each).
+            let latest = st
+                .last_net
+                .as_ref()
+                .and_then(|n| n["int_path"].as_str())
+                .map(PathBuf::from);
+            let early = self.p.cut >= 3 || self.harvest_driver(latest.as_deref()).is_some();
+            let own = net_dir.join("int.safetensors");
+            let rough = st.s.rough.is_some();
+            let before;
             if bg {
                 // Round r trains at once: round r - 1 has groups to target (confirmed, or still
                 // failing), so its targeted shard is coming and the trainer watches for it; if
@@ -911,7 +1531,7 @@ impl Rung<'_> {
                     }
                     self.start_train_with(c, net_dir.clone(), prog, &format!("hybrid/{key}.log"))?;
                 }
-                if r == 1 {
+                if r == 1 && !rough {
                     st.golden = Some(self.golden()?);
                 }
                 if let Some(p) = prev.take() {
@@ -934,10 +1554,14 @@ impl Rung<'_> {
                         After::Go => {}
                     }
                 }
-                shard = self.audit_shard(st, r)?;
+                before = if early {
+                    Some(self.audit_shard(st, r, None)?)
+                } else {
+                    None
+                };
                 self.finish_train_as(&key, &step)?;
             } else {
-                if r == 1 {
+                if r == 1 && !rough {
                     st.golden = Some(self.golden()?);
                 }
                 if let Some(p) = prev.take() {
@@ -947,11 +1571,20 @@ impl Rung<'_> {
                         After::Go => {}
                     }
                 }
-                shard = self.audit_shard(st, r)?;
+                before = if early {
+                    Some(self.audit_shard(st, r, None)?)
+                } else {
+                    None
+                };
                 let mut files = st.train.clone();
                 files.push(st.val.clone());
                 self.train(&files, &net_dir, &self.device.clone(), &step, &key)?;
             }
+            // Trick 2 without an earlier network: the audit shard waits for this round's own.
+            let shard = match before {
+                Some(s) => s,
+                None => self.audit_shard(st, r, Some(&own))?,
+            };
             let mut round = self.audit_round(st, r, &net_dir, &key, shard)?;
             let no_gain = capacity_check(st, &mut round);
             if no_gain && r < rmax {
@@ -974,6 +1607,13 @@ impl Rung<'_> {
             if r == rmax {
                 if self.after_round(st, &round, None, false)? == After::Flat {
                     return Ok(flat_reason(st, r));
+                }
+                if rough {
+                    return Ok(format!(
+                        "round limit ({rmax} rounds; {} groups still confirmed at the position \
+                         level on round {r}'s audit shard: the next lever is network capacity)",
+                        round.confirmed.len()
+                    ));
                 }
                 let left = failing(st).len();
                 return Ok(format!(
@@ -1072,8 +1712,12 @@ impl Rung<'_> {
                     "decisions_total",
                     "worlds_done",
                     "worlds_total",
+                    "exact_done",
+                    "exact_total",
                 ] {
-                    p[k] = x.get(k).cloned().unwrap_or(Value::Null);
+                    if let Some(v) = x.get(k) {
+                        p[k] = v.clone();
+                    }
                 }
             }
             merge_beside(&mut p, &beside);
@@ -1098,8 +1742,15 @@ impl Rung<'_> {
             .or_else(|| self.inputs.get("harvest_net").cloned())
     }
 
-    /// Step 2: round `r`'s audit shard. Returns its path and facts.
-    fn audit_shard(&mut self, st: &mut Loop, r: u64) -> Result<(PathBuf, Value), String> {
+    /// Step 2: round `r`'s audit shard, driven at trick 3 and earlier by the latest network
+    /// before this round's (else `harvest_net`, else `own`: this round's network, at trick 2,
+    /// where the shard then waits for it). Returns its path and facts.
+    fn audit_shard(
+        &mut self,
+        st: &mut Loop,
+        r: u64,
+        own: Option<&Path>,
+    ) -> Result<(PathBuf, Value), String> {
         let seed = st.s.audit_seed(r);
         let file = format!("t{}-audit-r{r}-s{seed}.npy", self.p.cut);
         let path = st.wdir.join(&file);
@@ -1108,7 +1759,9 @@ impl Rung<'_> {
             .as_ref()
             .and_then(|n| n["int_path"].as_str())
             .map(PathBuf::from);
-        let driver = self.harvest_driver(latest.as_deref());
+        let earlier = self.harvest_driver(latest.as_deref());
+        let own_driver = earlier.is_none() && own.is_some();
+        let driver = earlier.or_else(|| own.map(Path::to_path_buf));
         let threads = self.fg_threads();
         let mut c = Command::new(&self.tools.search);
         c.args(["labels", "--trick", &self.p.cut.to_string()])
@@ -1140,13 +1793,22 @@ impl Rung<'_> {
             .ok_or_else(|| format!("hybrid_rung: {} wrote no sidecar", path.display()))?;
         let rdir = st.dir.join(format!("round-{r}"));
         write_json(&rdir.join(format!("{file}.json")), &side)?;
-        Ok((
-            path,
-            json!({ "file": file, "rows": st.s.rows, "seed": seed, "threads": threads,
+        let mut facts = json!({ "file": file, "rows": st.s.rows, "seed": seed, "threads": threads,
                     "shard_sha256": side["shard_sha256"],
                     "driver": driver.as_ref().map_or("exact".to_string(), |d| d.display().to_string()),
-                    "rows_by_race_class": side["rows_by_race_class"] }),
-        ))
+                    "rows_by_race_class": side["rows_by_race_class"] });
+        if own_driver {
+            facts["driver_note"] = json!(
+                "no earlier network: the shard was made after this round's training, its search \
+                 driven by this round's own network (labels exact either way)"
+            );
+        }
+        if self.p.upload_shards && st.s.rough.is_some() {
+            // At trick 2 (only) shared like the training shards (`upload_shards`): a shard is
+            // hours of exact labels there.
+            facts["key"] = json!(self.share_file(st, &path));
+        }
+        Ok((path, facts))
     }
 
     /// The harvest's settings (`harvest_cap_per_decision`, `harvest_positions`), as the rung's
@@ -1345,6 +2007,9 @@ impl Rung<'_> {
         watch: Option<&Path>,
         target: bool,
     ) -> Result<After, String> {
+        if st.s.rough.is_some() {
+            return self.after_round_rough(st, p, watch, target);
+        }
         let r = p.r;
         let rdir = st.dir.join(format!("round-{r}"));
         fs::create_dir_all(&rdir).map_err(|e| e.to_string())?;
@@ -1353,22 +2018,7 @@ impl Rung<'_> {
             .golden
             .clone()
             .ok_or("hybrid_rung: the audit loop has no golden set")?;
-        let union = if st.groups.is_empty() {
-            None
-        } else {
-            let u = rdir.join("union.json");
-            let list: Vec<Value> = st
-                .groups
-                .iter()
-                .map(|g| {
-                    let mut e = g.entry.clone();
-                    e["rounds_confirmed"] = json!(g.confirmed);
-                    e
-                })
-                .collect();
-            write_json(&u, &Value::Array(list))?;
-            Some(u)
-        };
+        let union = write_union(st, &rdir)?;
         let (g, k) = (self.p.golden_trick, self.p.cut);
         let hc_json = rdir.join(format!("hc-t{g}-o{k}.json"));
         let hc_txt = rdir.join(format!("hc-t{g}-o{k}.txt"));
@@ -1508,6 +2158,164 @@ impl Rung<'_> {
         st.flat = flat;
         self.round_report(st, p, &golden, &minis, &judged, targeted.as_ref())?;
         Ok(verdict)
+    }
+
+    /// Steps 4–5 of round `p.r` at trick 2 (cut 2; docs/M3-HYBRID-SPEC.md §3, owner decision of
+    /// 2026-10-16: no trick-1 golden set): flat when the round's audit confirmed no group (the
+    /// position level is trick 2's standard). Otherwise (with `target`) the targeted harvest of
+    /// the round's confirmed groups runs first, into `watch` when a training waits for it. Then
+    /// the rough test on the saved exact trick-1 worlds, with a slice per group of the union: it
+    /// is reported only, never decides the stop and never makes a group failing. No mini golden
+    /// sets.
+    fn after_round_rough(
+        &mut self,
+        st: &mut Loop,
+        p: &Round,
+        watch: Option<&Path>,
+        target: bool,
+    ) -> Result<After, String> {
+        let r = p.r;
+        let rdir = st.dir.join(format!("round-{r}"));
+        fs::create_dir_all(&rdir).map_err(|e| e.to_string())?;
+        let flat = p.confirmed.is_empty();
+        let targeted = if target && !flat {
+            self.target(st, p, &rdir, watch)?
+        } else {
+            None
+        };
+        let union = write_union(st, &rdir)?;
+        let rough = self.rough_test(st, p, union.as_deref(), &rdir)?;
+        let judged = judge_rough(st, &rough, p);
+        let n_slices = rough["slices"].as_array().map_or(0, Vec::len);
+        self.audit_hb
+            .insert("groups_remaining".into(), json!(p.confirmed.len()));
+        self.audit_hb.insert("groups_failing".into(), json!(0));
+        self.audit_hb.insert(
+            "slices_failing".into(),
+            json!(match rough["worst_slice"].as_object() {
+                Some(w) => format!(
+                    "{} of {n_slices} (rough test, report only; worst: {}, 95% upper {})",
+                    rough["slices_failing"],
+                    w["name"].as_str().unwrap_or("?"),
+                    pct4(w["loss_upper95"].as_f64())
+                ),
+                None => format!("0 of {n_slices} (rough test, report only)"),
+            }),
+        );
+        self.audit_hb.insert(
+            "last_check".into(),
+            json!(format!(
+                "round {r}: {} groups confirmed at the position level ({}); rough test (report \
+                 only): {}",
+                p.confirmed.len(),
+                if flat { "flat" } else { "not flat" },
+                rough_line(&rough)
+            )),
+        );
+        st.flat = flat;
+        self.round_report_rough(st, p, &rough, &judged, targeted.as_ref())?;
+        Ok(if flat { After::Flat } else { After::Go })
+    }
+
+    /// The rough test of network `p.net` (trick 2): `search hybrid-check --trick 1 --cut 2
+    /// --saved …` as the `hybrid_t1check` chunk runs it (`t1check::command`, its tables planned
+    /// by `t1check::plan_tables` on the threads the trainer leaves), with `--slices` over the
+    /// union of groups; round 1 recomputes the verification sample (`t1_verify_*`), later rounds
+    /// reuse those worlds. Writes `round-<r>/t1check.json` and `.txt`; returns its summary
+    /// ([`rough_summary`]). A rough test that fails to run is a warning (it never gates the
+    /// loop), unless the run is being stopped.
+    fn rough_test(
+        &mut self,
+        st: &mut Loop,
+        p: &Round,
+        union: Option<&Path>,
+        rdir: &Path,
+    ) -> Result<Value, String> {
+        let r = p.r;
+        let rt =
+            st.s.rough
+                .clone()
+                .ok_or("hybrid_rung: no rough test settings")?;
+        let settings = json!({
+            "net_input": "net", "decisions_input": "t1_decisions",
+            "saved": rt.saved.iter().map(|(run, _)| json!({ "input": RoughTest::input_name(run), "run": run }))
+                        .collect::<Vec<_>>(),
+            "trick": 1, "cut": self.p.cut, "tt_mb": self.p.tt_mb,
+            "verify_pct": if r == 1 { rt.verify_pct } else { 0.0 },
+            "verify_rule": rt.verify_rule, "verify_solve_threads": rt.verify_solve_threads,
+            "verify_tt_mb": rt.verify_tt_mb });
+        let q = crate::t1check::parse(&settings)?;
+        let mut paths: std::collections::BTreeMap<String, String> = self
+            .inputs
+            .iter()
+            .map(|(k, v)| (k.clone(), v.display().to_string()))
+            .collect();
+        paths.insert("net".into(), p.net.display().to_string());
+        let resolved = crate::t1check::resolve(&settings, &paths)?;
+        let threads = self.fg_threads() as usize;
+        let plan = crate::t1check::plan_tables(threads, &q, &self.table, "rough test");
+        for w in plan.warnings {
+            self.warn(format!("round {r}: rough test: {w}"));
+        }
+        let prog = self.work.join(format!("t1check-r{r}.progress.json"));
+        let _ = fs::remove_file(&prog);
+        let mut c = crate::t1check::command(
+            &self.tools.search,
+            &resolved,
+            &q,
+            &crate::t1check::Run {
+                table: &self.table,
+                threads,
+                tt_mb: plan.tt_mb,
+                verify_tt_mb: plan.verify_tt_mb,
+                out: rdir,
+                progress: &prog,
+            },
+        )?;
+        if let Some(u) = union {
+            c.arg("--slices")
+                .arg(u)
+                .args(["--slice-share", SLICE_SHARE]);
+        }
+        let (hc_json, hc_txt) = (rdir.join("t1check.json"), rdir.join("t1check.txt"));
+        let file = self
+            .inputs
+            .get("t1_decisions")
+            .map_or(Ok(0), |d| super::decisions_at(d, 1))?;
+        let ran = self.audit_step(
+            &format!("rough test (round {r})"),
+            c,
+            &format!("hybrid/t1check-r{r}.log"),
+            Some(&hc_txt),
+            Some(ROUGH_LIMIT),
+            Some(&prog),
+        );
+        let hc = match ran.and_then(|()| {
+            read_json(&hc_json)
+                .ok_or_else(|| format!("hybrid-check wrote no {}", hc_json.display()))
+        }) {
+            Ok(hc) => hc,
+            Err(e) => {
+                if crate::stop::requested().is_some() {
+                    return Err(e);
+                }
+                self.warn(format!(
+                    "round {r}: the rough test on the saved trick-1 worlds did not finish ({e}); \
+                     it never gates the stop, so the loop goes on"
+                ));
+                return Ok(json!({ "ran": false, "error": e, "file_decisions": file,
+                                  "slices": [], "slices_failing": 0,
+                                  "evidence": "Rough test at trick 1: it did not run to the end \
+                                               this round (see the warnings); it is reported \
+                                               only and never gates the stop." }));
+            }
+        };
+        let mut summary = rough_summary(&hc, file);
+        summary["ran"] = json!(true);
+        summary["report"] = json!(format!("audit/round-{r}/t1check.txt"));
+        st.last_check = Some((hc, hc_json, hc_txt));
+        st.last_rough = Some(summary.clone());
+        Ok(summary)
     }
 
     /// The targeted harvest of round `p.r`, when it has targets: the round's confirmed groups,
@@ -1811,10 +2619,16 @@ impl Rung<'_> {
                 .join(format!("{file}.json")),
             &side,
         )?;
+        // At trick 2 (only) shared with `upload_shards`: hours of exact labels there.
+        let key = if self.p.upload_shards && st.s.rough.is_some() {
+            self.share_file(st, &path)
+        } else {
+            None
+        };
         st.train.push(path);
         st.train_rows += rows;
         Ok(
-            json!({ "file": file, "rows": rows, "seed": seed, "weight": st.s.weight,
+            json!({ "file": file, "rows": rows, "seed": seed, "weight": st.s.weight, "key": key,
                    "keep_cap": st.s.keep_cap, "shard_sha256": side["shard_sha256"],
                    "groups": side["harvest"]["keep"]["groups"].clone(),
                    "rows_in_any_group": side["harvest"]["keep"]["rows_in_any_group"].clone(),
@@ -2152,5 +2966,212 @@ impl Rung<'_> {
         );
         self.save()?;
         Ok(())
+    }
+
+    /// Writes round `p.r`'s report at trick 2 (`round-<r>.json` and `.txt`): the position level
+    /// (trick 2's standard: the groups this round's audit confirmed are out of spec) and the rough
+    /// test beside it, reported only; shares it and the round's predicate files, and adds its
+    /// summary line.
+    fn round_report_rough(
+        &mut self,
+        st: &mut Loop,
+        p: &Round,
+        rough: &Value,
+        judged: &[Value],
+        targeted: Option<&Value>,
+    ) -> Result<(), String> {
+        let r = p.r;
+        let remaining: Vec<String> = p
+            .confirmed
+            .iter()
+            .map(|&i| st.groups[i].name.clone())
+            .collect();
+        let prev = st.rounds.last().cloned();
+        let groups: Vec<Value> = p
+            .confirmed
+            .iter()
+            .map(|&i| st.groups[i].entry.clone())
+            .collect();
+        let int_err = &p.train["int"]["error"];
+        let mut keys = Map::new();
+        if let Some(pp) = &p.preds {
+            keys.insert("predicates".into(), json!(self.share_file(st, pp)));
+        }
+        let union = st.dir.join(format!("round-{r}")).join("union.json");
+        if union.is_file() {
+            keys.insert("union".into(), json!(self.share_file(st, &union)));
+        }
+        let rec = json!({
+            "round": r,
+            "net": { "sha256": p.net_sha, "key": p.net_key, "path": p.net.display().to_string() },
+            "train": { "epochs_run": p.train["epochs_run"], "best_epoch": p.train["best_epoch"],
+                       "int_error": int_err, "minutes": p.train["minutes"],
+                       "shards": p.trained_on.0, "rows": p.trained_on.1 },
+            "audit_shard": p.shard,
+            "auditor": p.auditor,
+            "thresholds": p.thresholds,
+            "shape": p.shape,
+            "shape_step": p.shape_step + 1,
+            "capacity": p.capacity,
+            "groups_found": p.found,
+            "groups_confirmed": groups,
+            "standard": "trick 2: flat when the round's audit confirms no weak group on its fresh \
+                         trick-2 audit shard (position level); the rough test on the saved trick-1 \
+                         worlds is reported only (owner, 2026-10-16)",
+            "position_level": judged,
+            "rough_test": rough,
+            "mini_sets": "none at trick 2: no trick-1 golden set is built (owner, 2026-10-16)",
+            "calibration": {
+                "what": "each group's SD on the audit shard against its rough-test bound on the \
+                         saved trick-1 worlds (thin: a handful of decisions; reported only, no \
+                         automatic change)",
+                "pairs": judged.iter().filter(|x| x["rough"].is_object()).map(|x| json!({
+                    "group": x["group"], "sd": x["sd"], "weight": x["weight"],
+                    "loss_upper95": x["rough"]["loss_upper95"], "basis": x["rough"]["label"] }))
+                    .collect::<Vec<_>>(),
+            },
+            "targeted": targeted,
+            "groups_remaining": remaining,
+            "groups_failing": [],
+            "flat": st.flat,
+            "shared": keys,
+        });
+        let json_path = st.dir.join(format!("round-{r}.json"));
+        write_json(&json_path, &rec)?;
+        // Plain English.
+        let mut t = format!("Audit loop, round {r} of {} (trick 2)\n\n", st.s.rounds);
+        t += &format!(
+            "Network: {} (int SD {} on the validation shard), trained {} epochs on {} shards ({} \
+             rows).\n",
+            p.net_sha.get(..12).unwrap_or("?"),
+            pct4(int_err["sd"].as_f64()),
+            p.train["epochs_run"],
+            p.trained_on.0,
+            p.trained_on.1
+        );
+        t += &format!(
+            "Shape: {} (step {} of the capacity ladder of {}).\n",
+            p.shape,
+            p.shape_step + 1,
+            st.s.shapes.len()
+        );
+        t += &format!(
+            "Audit shard: {} trick-2 positions as the hybrid reaches them from trick-1 decisions \
+             (seed {}), labelled exactly{}.\n",
+            p.shard["rows"],
+            p.shard["seed"],
+            if p.shard["driver_note"].is_string() {
+                "; made after this round's training, driven by this round's network (no earlier one)"
+            } else {
+                ""
+            }
+        );
+        if let Some(c) = p.capacity["compared"].as_object() {
+            t += &format!(
+                "Capacity: the worst group ({}) went from SD {} to {} ({:+.0}%; at least {:.0}% \
+                 wanted){}.\n",
+                c["group"].as_str().unwrap_or("?"),
+                c["sd_before"]
+                    .as_f64()
+                    .map_or("?".into(), |v| format!("{:.2}%", 100.0 * v)),
+                c["sd_now"]
+                    .as_f64()
+                    .map_or("?".into(), |v| format!("{:.2}%", 100.0 * v)),
+                -100.0 * c["gain"].as_f64().unwrap_or(0.0),
+                100.0 * st.s.min_gain,
+                match p.capacity["next_shape"].as_str() {
+                    Some(n) => format!(": the next round trains the larger shape {n}"),
+                    None if c["no_gain"].as_bool() == Some(true) => {
+                        ": no larger shape is left".to_string()
+                    }
+                    None => String::new(),
+                }
+            );
+        }
+        if groups.is_empty() {
+            t += &format!(
+                "Found: {} candidate groups; none confirmed on the held-out half: flat at the \
+                 position level.\n",
+                p.found
+            );
+        } else {
+            t += &format!(
+                "Found: {} candidate groups; {} confirmed on the held-out half:\n",
+                p.found,
+                groups.len()
+            );
+            for g in groups.iter().take(20) {
+                t += &format!("  - {}\n", describe_group(g));
+            }
+            if groups.len() > 20 {
+                t += &format!(
+                    "  … and {} more (round-{r}.json lists them all)\n",
+                    groups.len() - 20
+                );
+            }
+        }
+        t += &format!(
+            "Auditor's thresholds (they decide the stop at trick 2): {}.\n",
+            p.thresholds
+        );
+        t += &rough_text(rough, judged, remaining.len());
+        match targeted {
+            Some(x) => {
+                t += &format!(
+                    "Harvested for the next round: {} positions inside the targeted groups ({}; \
+                     seed {}, loss weight {}).\n",
+                    x["rows"],
+                    x["why"].as_str().unwrap_or("?"),
+                    x["seed"],
+                    x["weight"]
+                )
+            }
+            None => t += "Nothing harvested (flat, or no next round).\n",
+        }
+        if let Some(pr) = &prev {
+            t += &format!(
+                "Since round {}: groups confirmed {} -> {}; int SD {} -> {}; rough test (worst set, \
+                 report only) 95% upper {} -> {}.\n",
+                pr["round"],
+                pr["groups_remaining"].as_array().map_or(0, Vec::len),
+                remaining.len(),
+                pct4(pr["train"]["int_error"]["sd"].as_f64()),
+                pct4(int_err["sd"].as_f64()),
+                pct4(pr["rough_test"]["loss_upper95"].as_f64()),
+                pct4(rough["loss_upper95"].as_f64())
+            );
+        }
+        t += &format!(
+            "Still out of spec at the position level: {}.\n",
+            if remaining.is_empty() {
+                "nothing".to_string()
+            } else {
+                remaining.join("; ")
+            }
+        );
+        let txt_path = st.dir.join(format!("round-{r}.txt"));
+        fs::write(&txt_path, &t).map_err(|e| format!("write {}: {e}", txt_path.display()))?;
+        let jk = self.share_file(st, &json_path);
+        let tk = self.share_file(st, &txt_path);
+        let mut rec = rec;
+        rec["shared"]["report_json"] = json!(jk);
+        rec["shared"]["report_txt"] = json!(tk);
+        write_json(&json_path, &rec)?;
+        st.lines.push(format!(
+            "round {r}: {} groups confirmed ({} found) at the position level{}; rough test (report \
+             only): {}; shape {}; network {}",
+            groups.len(),
+            p.found,
+            if groups.is_empty() { " (flat)" } else { "" },
+            rough_line(rough),
+            p.shape,
+            p.net_sha.get(..12).unwrap_or("?")
+        ));
+        st.rounds.push(rec);
+        self.rec.insert(
+            "audit".into(),
+            json!({ "settings": st.s.to_json(), "rounds": st.rounds }),
+        );
+        self.save()
     }
 }

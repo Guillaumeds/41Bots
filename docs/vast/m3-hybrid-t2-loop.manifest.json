@@ -1,0 +1,61 @@
+{
+ "format": 2,
+ "run_id": "m3-hybrid-t2-loop-1",
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "The trick-2 audit loop (O_2, cut 2), docs/m3-hybrid/vast.md 'The audit loop at trick 2'. PLACEHOLDER: widths 2048,1024,256 is a placeholder; the start shape will be set from tonight's trick-4 width comparison before this is launched. No harvest_net: round 1's audit shard is made after round 1's training, driven by that network; later rounds use the previous round's O_2.",
+ "machine": {
+  "gpus": 1,
+  "min_gpu_ram_gb": 4,
+  "min_compute_cap": 600,
+  "min_cores": 190,
+  "min_ram_gb": 128,
+  "disk_gb": 80
+ },
+ "streams": [
+  {
+   "name": "rung",
+   "priority": 1,
+   "kind": "hybrid_rung",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "cut": 2,
+    "labels_random": 1000000,
+    "labels_random_seed": 511,
+    "labels_rules": 250000,
+    "labels_rules_seed": 512,
+    "val_count": 50000,
+    "val_seed": 601,
+    "widths": "2048,1024,256",
+    "head": "outcome",
+    "epochs": 60,
+    "batch": 1024,
+    "lr": 0.001,
+    "patience": 5,
+    "train_seed": 1,
+    "max_minutes": 200,
+    "device": "auto",
+    "upload_shards": true,
+    "audit_rounds": 4,
+    "audit_rows": 200000,
+    "audit_target_rows": 1000000,
+    "t1_decisions_input": "inputs/sha256/b23c8b0d48ea90773adc21290e600eeea290530bdc49d7c1573a62516cbb7e37",
+    "t1_saved_inputs": [
+     { "run": "m3-t1-tables-1", "input": "inputs/sha256/b788224c346692af3e82d021c9564b7e1909a8c0b3924f1a842413eb70e1b832" },
+     { "run": "m3-t1-leader-layouts-1", "input": "inputs/sha256/8a9bd83e8c4dcda2603aefd4d8ab79f7ce85cc1f3123ca12d4b017661292b029" },
+     { "run": "m3-t1-leader-layouts-9654", "input": "inputs/sha256/96420885a545ae17c34cbc5dc1affb146b9ee1c45e764d6d8237e39138eff768" },
+     { "run": "m3-t1-leader-layouts (worlds file)", "input": "inputs/sha256/df3e4d4a1b29a23a80a8af065182aca10c7ccb9e7b947d62e4e1b6d040339df9" },
+     { "run": "m3-agree-t1-ab1", "input": "inputs/sha256/ca74c2acf6fbe189cd46408bbd39e9cfc529ed5f87ca186019246f5264ed476c" }
+    ],
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  }
+ ]
+}

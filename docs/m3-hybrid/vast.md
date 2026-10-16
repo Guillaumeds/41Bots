@@ -216,6 +216,88 @@ without a manual `put-input`. Proposal: `docs/vast/m3-hybrid-t2-round1.manifest.
 1M random-play and 250,000 rules-v1 labels, 50,000 for validation, 1024-512-128; runnable as it
 is; priced in `rung2.md` §5 before anything is rented).
 
+## The audit loop at trick 2 (O_2)
+
+Branch `m3-hybrid-t2loop`, 2026-10-16 (Mauritius). The audit loop (`docs/m3-hybrid/audit-loop.md`,
+module notes of `crates/runner/src/hybrid/audit.rs`) runs at cut 2 too, in one rental. The owner's
+decision of 2026-10-16 (spec §3): **no trick-1 golden set is ever built**, so at trick 2:
+
+- **The stop is position-level only.** A round is *flat* when the auditor confirms no weak group on
+  that round's fresh audit shard of exactly labelled trick-2 positions. There are no golden slices
+  and no mini golden sets; a group confirmed in a round is targeted in that round's harvest only
+  (no group is ever "failing" at trick 2).
+- **The rough test** runs every round and is reported only: H_2 against the saved exact trick-1
+  worlds (`search hybrid-check --trick 1 --cut 2 --saved …`, the `hybrid_t1check` chunk's command,
+  now with `--slices`), with a slice per group the loop has met. It never decides the stop and
+  never makes a group failing. Its evidence is thin and every report says so: the saved decisions
+  file holds 32 trick-1 decisions, but saved exact worlds exist for only 8 of them (decisions 0-7,
+  seats 1-2 only): 8 decisions with 31 worlds under the searched burn and 5 decisions with 355
+  worlds under the rules-v1 burn. Seats 3-8 have no saved trick-1 decision at all. Each group's
+  slice is labelled "thin: N decisions".
+- **Settings**: `t1_decisions_input` and `t1_saved_inputs` (a list of `{"run": LABEL, "input":
+  "inputs/sha256/<hex>"}`; required at cut 2, refused at other cuts), fetched and SHA-256 checked
+  before anything is installed (the launcher checks they exist before renting); `t1_verify_pct`
+  (3), `t1_verify_rule` (`rules-v1`), `t1_verify_solve_threads` (46), `t1_verify_tt_mb` (8192): the
+  verification sample of round 1 (8 rules-v1 worlds recomputed exactly first; about half an hour,
+  `rung2.md` §4); later rounds reuse the same worlds. At cut 2 the golden set's settings
+  (`golden_*`, `verify_pct`) and the mini sets' (`audit_mini_decisions`, `audit_mini_sets`) are
+  refused, and a cut-2 rung with a check but no loop (a generated trick-1 golden set) is refused.
+- **Round 1** has no earlier network to drive the search (the manifest gives no `harvest_net`, and an
+  exact-driven trick-2 harvest would solve every reached position, thousands a decision at seconds
+  each), so its audit shard is made after round 1's training, driven by round 1's own O_2; later
+  rounds' shards are driven by the previous round's O_2, beside the training, and the targeted
+  harvest by the round's own (`--harvest-tricks 1` is the default at cut 2: trick-1 decisions).
+- With `upload_shards`, the loop's audit and targeted shards are shared content-addressed as well
+  (at trick 2 only: each is hours of exact labels).
+
+**Defaults per cut** (`audit_rows`, `audit_target_rows`; both can be set in the manifest):
+
+| cut | audit shard rows | targeted harvest rows | decision-level stage |
+|---|---|---|---|
+| 4 and 5 | 1,000,000 | 10,000,000 | golden slices, mini golden sets (gate) |
+| 3 | 1,000,000 | 4,000,000 | golden slices, mini golden sets (gate) |
+| 2 | 200,000 | 1,000,000 | rough test on the saved trick-1 worlds (report only) |
+
+**Proposal** `docs/vast/m3-hybrid-t2-loop.manifest.json` (not run; trick 2 waits until tricks 4 and
+3 are done): cut 2, round-0 labels as `m3-hybrid-t2-round1` (1,000,000 random play s511, 250,000
+rules-v1 s512, 50,000 validation s601), widths 2048,1024,256 (a placeholder: the start shape is to
+be set from the trick-4 width comparison), 4 rounds, the trick-2 defaults, the saved trick-1 files
+by the SHA-256 of the t1check manifest, at least 190 threads, 128 GB of RAM (trick-2 labels hold a
+256 MB table a thread: about 200 MB a thread measured, so 40-50 GB at 190 threads, beside the
+trainer) and one GPU.
+
+**Cost, measured on the build VM** (2026-10-16; 4 vCPU Intel Xeon at 2.1 GHz, all 4 busy; solver
+nodes per label are the same on any machine):
+
+| label | labels measured | solver nodes a label | thread-seconds a label here |
+|---|---|---|---|
+| harvested trick-2 positions (audit shard, targeted harvest), every seat band | 416 | 31.5 million | 3.5 |
+| random play (round 0, validation) | 60 | 36.4 million | 4.0 |
+| rules-v1 self-play (round 0) | 40 | 43.6 million | 4.8 |
+
+A busy thread here did about 9 million nodes a second. The search that drives the harvest is under
+2% of its time even with a 2048-1024-256 network (3.2 s for a trick-1 leader decision, about 23,000
+evaluations at 140 µs, against 16 labels of 3.5 s). A rented thread of the 184-thread Threadripper
+is taken as 1.0-1.3 times slower (trick-3 labels: 9 ms here, 11.3 ms on that machine in round 1 of
+rung 2). So on 184 threads:
+
+| step | time |
+|---|---|
+| round 0: 1.3M labels | 8.2-10.7 h |
+| audit shard, 200,000 rows | 1.1-1.4 h |
+| targeted harvest, 1,000,000 rows | 5.3-6.9 h |
+| training (GPU; beside the CPU steps after round 1) | not measured for 2048-1024-256: an estimate of 5-25 min a round |
+| auditor, rough test | minutes (the rough test's verification sample: about 30 min, round 1 only) |
+| **one round with a targeted harvest** | **6.6-8.5 h** |
+
+The whole rental: flat after round 1, 10-13 h ($11-21 at $1.1-1.6 an hour); after round 2, 17-22 h
+($19-35); all 4 rounds, 31-39 h ($34-43 at $1.1, $49-62 at $1.6). **The $35 cap does not hold four
+rounds with 1,000,000 targeted rows**; it holds them only with fewer targeted rows (500,000: 23-29 h,
+$25-46; 250,000: 19-23 h, $20-37), or the dollar cap stops the loop in round 3 or 4 with every
+finished round uploaded. The plan's "200k positions (~10 minutes on 184 threads)" for the audit
+shard (`audit-loop.md` §7) is seven to eight times too low: 200,000 labels at 3.5-4.6 thread-seconds
+are 1.1-1.4 hours on 184 threads.
+
 ## The GPU and the CPU at the same time
 
 `overlap` (true): on a GPU, a golden set to generate is made while the network trains (on the

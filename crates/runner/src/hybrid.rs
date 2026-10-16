@@ -62,7 +62,11 @@
 //! `audit_shapes`, `audit_min_gain`, `audit_target_rows` and `audit_predicates_input` (refused
 //! without it); the network grows up the `audit_shapes` ladder when a round's targeted harvest
 //! stops helping. On a GPU with `overlap` each round's training
-//! runs beside the CPU steps that do not need it.
+//! runs beside the CPU steps that do not need it. At cut 2 (no trick-1 golden set is built: owner,
+//! 2026-10-16) the loop needs `t1_decisions_input` and `t1_saved_inputs` (the saved exact trick-1
+//! worlds, its rough test, reported only; `t1_verify_*` its round-1 verification sample), refuses
+//! the golden set's and the mini sets' settings, and is flat when a round's audit confirms no
+//! group; a cut-2 rung with a check but no loop (a trick-1 golden set) is refused.
 //! Also: `mix_weight` (1.0), `start_hands` (20000, for the label roots and the golden
 //! decisions), `tt_mb` (64, the solver table per thread of the golden worlds
 //! and the check), `verify_pct` (1, the check's recomputed sample of stored exact worlds),
@@ -158,7 +162,7 @@ use crate::{Ctx, sibling};
 mod audit;
 
 /// The settings a `hybrid_rung` chunk takes; any other key is refused.
-pub(crate) const KEYS: [&str; 60] = [
+pub(crate) const KEYS: [&str; 66] = [
     "cut",
     "check",
     "audit_rounds",
@@ -172,6 +176,12 @@ pub(crate) const KEYS: [&str; 60] = [
     "audit_min_gain",
     "audit_target_rows",
     "audit_predicates_input",
+    "t1_decisions_input",
+    "t1_saved_inputs",
+    "t1_verify_pct",
+    "t1_verify_rule",
+    "t1_verify_solve_threads",
+    "t1_verify_tt_mb",
     "label_parts",
     "overlap",
     "partial_epochs",
@@ -844,6 +854,17 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         &widths,
         &seen.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
     )?;
+    // No trick-1 golden set is built (owner, 2026-10-16: 10-80×10⁹ solver nodes a world): at
+    // cut 2 a rung trains only, or runs the audit loop with the saved trick-1 worlds as its
+    // rough test.
+    if cut == 2 && check && audit.is_none() {
+        return Err(
+            "hybrid_rung: cut 2 with a check would build a trick-1 golden set, which is never \
+             built (owner, 2026-10-16): train only (\"check\": false, then hybrid_t1check), or \
+             run the audit loop (audit_rounds with t1_decisions_input and t1_saved_inputs)"
+                .into(),
+        );
+    }
     Ok(Params {
         cut,
         check,
@@ -1274,8 +1295,9 @@ struct Rung<'a> {
     python: PathBuf,
     /// Where the network trains: `cuda` or `cpu` (empty before the GPU check).
     device: String,
-    /// Stored inputs fetched and checked (`harvest_net`, `golden_decisions`, `golden_worlds`).
-    inputs: BTreeMap<&'static str, PathBuf>,
+    /// Stored inputs fetched and checked (`harvest_net`, `golden_decisions`, `golden_worlds`,
+    /// `audit_predicates`, `t1_decisions`, `t1_saved:<run>`).
+    inputs: BTreeMap<String, PathBuf>,
     /// The training, while it runs in the background.
     bg_train: Option<BgTrain>,
     /// Steps running beside the current one ([`Rung::concurrent`], the background training):
@@ -1353,13 +1375,13 @@ impl Rung<'_> {
     /// (`remote::fetch_input`, the path a format-2 run's manifest inputs take) and its SHA-256
     /// checked; first, so a wrong key stops the chunk before anything is installed.
     fn fetch_inputs(&mut self) -> Result<(), String> {
-        let mut want: Vec<(&'static str, String)> = Vec::new();
+        let mut want: Vec<(String, String)> = Vec::new();
         if let Some(h) = &self.p.harvest_net {
-            want.push(("harvest_net", h.clone()));
+            want.push(("harvest_net".into(), h.clone()));
         }
         if let Some((d, w)) = &self.p.golden_inputs {
-            want.push(("golden_decisions", d.clone()));
-            want.push(("golden_worlds", w.clone()));
+            want.push(("golden_decisions".into(), d.clone()));
+            want.push(("golden_worlds".into(), w.clone()));
         }
         if let Some(h) = self
             .p
@@ -1367,7 +1389,13 @@ impl Rung<'_> {
             .as_ref()
             .and_then(|a| a.predicates_input.as_ref())
         {
-            want.push(("audit_predicates", h.clone()));
+            want.push(("audit_predicates".into(), h.clone()));
+        }
+        if let Some(rt) = self.p.audit.as_ref().and_then(|a| a.rough.as_ref()) {
+            want.push(("t1_decisions".into(), rt.decisions.clone()));
+            for (run, h) in &rt.saved {
+                want.push((audit::RoughTest::input_name(run), h.clone()));
+            }
         }
         if want.is_empty() {
             return Ok(());
@@ -1377,8 +1405,8 @@ impl Rung<'_> {
         self.ctx.set_phase("chunk", progress);
         let remote = self.tools.remote.clone().ok_or(
             "hybrid_rung: stored inputs (harvest_net, golden_decisions_input, \
-             golden_worlds_input, audit_predicates_input) come from the remote store (R2, or \
-             RUNNER_REMOTE_DIR), and there is none",
+             golden_worlds_input, audit_predicates_input, t1_decisions_input, t1_saved_inputs) \
+             come from the remote store (R2, or RUNNER_REMOTE_DIR), and there is none",
         )?;
         let dir = self.work.join("inputs");
         let mut recs = Map::new();
@@ -1396,11 +1424,26 @@ impl Rung<'_> {
                 input_key(&hex)
             );
             recs.insert(
-                name.into(),
+                name.clone(),
                 json!({ "key": input_key(&hex), "sha256": hex, "bytes": bytes,
                         "downloaded": downloaded, "seconds": secs(t1) }),
             );
             self.inputs.insert(name, local);
+        }
+        // The rough test's decisions file must hold trick-1 decisions (its worlds are checked
+        // against it by `search hybrid-check --saved`).
+        if let Some(d) = self.inputs.get("t1_decisions") {
+            let n = decisions_at(d, 1)?;
+            if n == 0 {
+                return Err(
+                    "hybrid_rung: t1_decisions_input holds no trick-1 decision: it must be the \
+                     decisions file the saved trick-1 worlds were valued for"
+                        .into(),
+                );
+            }
+            if let Some(x) = recs.get_mut("t1_decisions") {
+                x["trick1_decisions"] = json!(n);
+            }
         }
         // A stored golden set must be the one the settings describe; checked now, before the
         // labels and the training.
@@ -3023,6 +3066,70 @@ mod tests {
         assert_eq!(v["machine"]["gpus"], 1);
         assert!(v.get("bin_sha").is_none());
 
+        // The trick-2 audit loop: cut 2, the round-0 labels of the trick-2 round-1 proposal, the
+        // placeholder shape, four rounds at the trick-2 defaults, and the rough test on the saved
+        // trick-1 worlds named by the very hashes and run labels of the t1check manifest; no
+        // driver network (round 1's audit shard waits for network 1).
+        let path = dir.join("m3-hybrid-t2-loop.manifest.json");
+        let v: Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("json");
+        let m = crate::sched::parse_v2(&v).expect("runnable");
+        assert_eq!(m.streams.len(), 1);
+        let s = &m.streams[0];
+        assert_eq!((s.kind.as_str(), s.threads_all), ("hybrid_rung", true));
+        let p = parse(&s.params).expect("settings");
+        assert_eq!((p.cut, p.check, p.upload_shards), (2, true, true));
+        assert_eq!(
+            p.train
+                .iter()
+                .map(|s| (s.name, s.count, s.seed))
+                .collect::<Vec<_>>(),
+            [("random", 1_000_000, 511), ("rules", 250_000, 512)]
+        );
+        assert_eq!((p.val.count, p.val.seed), (50_000, 601));
+        assert_eq!(
+            (p.widths_arg().as_str(), p.head.as_str()),
+            ("2048,1024,256", "outcome")
+        );
+        assert!(p.harvest_net.is_none() && p.golden_inputs.is_none());
+        let a = p.audit.as_ref().expect("the audit loop");
+        assert_eq!((a.rounds, a.rows, a.target_rows), (4, 200_000, 1_000_000));
+        assert_eq!(a.shapes[0], vec![2048, 1024, 256]);
+        let rt = a.rough.as_ref().expect("the rough test");
+        let t1: Value = serde_json::from_str(
+            &fs::read_to_string(dir.join("m3-hybrid-t1check.manifest.json")).expect("read"),
+        )
+        .expect("json");
+        let hex = |name: &str| {
+            t1["inputs"][name]
+                .as_str()
+                .and_then(|h| h.strip_prefix("sha256:"))
+                .expect("a t1check input")
+                .to_string()
+        };
+        assert_eq!(rt.decisions, hex("t1-decisions"));
+        let want: Vec<(String, String)> = t1["streams"][0]["params"]["saved"]
+            .as_array()
+            .expect("saved")
+            .iter()
+            .map(|e| {
+                (
+                    e["run"].as_str().expect("run").to_string(),
+                    hex(e["input"].as_str().expect("input")),
+                )
+            })
+            .collect();
+        assert_eq!(rt.saved, want);
+        assert_eq!((rt.verify_pct, rt.verify_rule.as_str()), (3.0, "rules-v1"));
+        assert_eq!(v["machine"]["min_cores"], 190);
+        assert_eq!(v["machine"]["gpus"], 1);
+        assert!(
+            v["note"]
+                .as_str()
+                .is_some_and(|n| n.contains("PLACEHOLDER") && n.contains("width comparison"))
+        );
+        assert!(v.get("bin_sha").is_none());
+
         // A typo in a hybrid stream stops the manifest at once.
         let bad = json!({ "format": 2, "run_id": "x", "run_seed": 1, "streams": [
             { "name": "rung", "priority": 1, "kind": "hybrid_rung", "chunks": 1,
@@ -4490,6 +4597,130 @@ fi
         );
     }
 
+    /// The trick-2 loop's settings (cut 2; owner decision of 2026-10-16: no trick-1 golden set):
+    /// the saved trick-1 worlds as its rough test are required, the golden set's and the mini
+    /// sets' settings refused; `t1_*` refused elsewhere and without the loop; a cut-2 check
+    /// without the loop (a trick-1 golden set) refused; the per-cut defaults (200,000 audit rows
+    /// and 1,000,000 targeted rows at trick 2).
+    #[test]
+    fn audit_settings_at_trick_2() {
+        let (d, a1, a2) = ("d".repeat(64), "a".repeat(64), "b".repeat(64));
+        let base = || {
+            json!({ "cut": 2, "audit_rounds": 4,
+                    "t1_decisions_input": format!("inputs/sha256/{d}"),
+                    "t1_saved_inputs": [ { "run": "m3-t1-tables-1", "input": format!("sha256:{a1}") },
+                                         { "run": "m3-agree-t1-ab1", "input": format!("inputs/sha256/{a2}") } ] })
+        };
+        let p = parse(&base()).expect("trick 2");
+        let a = p.audit.as_ref().expect("on");
+        assert_eq!((a.rows, a.target_rows), (200_000, 1_000_000));
+        let rt = a.rough.as_ref().expect("the rough test");
+        assert_eq!(rt.decisions, d);
+        assert_eq!(
+            rt.saved,
+            vec![
+                ("m3-t1-tables-1".to_string(), a1.clone()),
+                ("m3-agree-t1-ab1".to_string(), a2.clone())
+            ]
+        );
+        assert_eq!(
+            (
+                rt.verify_pct,
+                rt.verify_rule.as_str(),
+                rt.verify_solve_threads,
+                rt.verify_tt_mb
+            ),
+            (3.0, "rules-v1", 46, 8192)
+        );
+        let j = p.to_json();
+        assert_eq!(
+            j["audit"]["rough_test"]["saved"][1]["input"],
+            format!("inputs/sha256/{a2}")
+        );
+        assert!(
+            j["audit"]["rough_test"]["gates"]
+                .as_str()
+                .is_some_and(|g| g.starts_with("never"))
+        );
+        let mut given = base();
+        for (k, v) in [
+            ("t1_verify_pct", json!(0)),
+            ("t1_verify_rule", json!("all")),
+            ("t1_verify_solve_threads", json!(8)),
+            ("t1_verify_tt_mb", json!(512)),
+            ("audit_rows", json!(5000)),
+        ] {
+            given[k] = v;
+        }
+        let a = parse(&given).expect("given").audit.expect("on");
+        let rt = a.rough.expect("rough");
+        assert_eq!(
+            (
+                rt.verify_pct,
+                rt.verify_rule.as_str(),
+                rt.verify_solve_threads,
+                rt.verify_tt_mb,
+                a.rows
+            ),
+            (0.0, "all", 8, 512, 5000)
+        );
+        // At trick 3 the defaults are as before, and the rough test is absent.
+        let a3 = parse(&json!({ "cut": 3, "audit_rounds": 1 }))
+            .expect("trick 3")
+            .audit
+            .expect("on");
+        assert_eq!((a3.rows, a3.rough.is_none()), (1_000_000, true));
+        let bad = |v: Value, says: &str| {
+            let e = parse(&v).expect_err(&v.to_string());
+            assert!(e.contains(says), "{v}: {e}");
+        };
+        let without = |k: &str| {
+            let mut v = base();
+            v.as_object_mut().expect("object").remove(k);
+            v
+        };
+        bad(without("t1_decisions_input"), "needs t1_decisions_input");
+        bad(without("t1_saved_inputs"), "t1_saved_inputs must be a list");
+        for (k, v) in [
+            ("golden_count", json!(32)),
+            ("golden_worlds", json!(320)),
+            ("verify_pct", json!(1)),
+            ("audit_mini_decisions", json!(50)),
+            ("audit_mini_sets", json!(2)),
+        ] {
+            let mut v2 = base();
+            v2[k] = v;
+            bad(
+                v2,
+                &format!("{k} is set, but at cut 2 there is no golden set"),
+            );
+        }
+        let mut v = base();
+        v["t1_saved_inputs"][1]["run"] = json!("m3-t1-tables-1");
+        bad(v, "is given twice");
+        let mut v = base();
+        v["t1_saved_inputs"][0]["path"] = json!("/x");
+        bad(v, "unknown key \"path\"");
+        let mut v = base();
+        v["t1_saved_inputs"][0]["input"] = json!("REPLACE_ME");
+        bad(v, "must be a stored input's key");
+        let mut v = base();
+        v["t1_verify_rule"] = json!("some");
+        bad(v, "t1_verify_rule");
+        let mut v = base();
+        v["cut"] = json!(3);
+        bad(v, "t1_decisions_input is for the trick-2 loop (cut 2)");
+        let mut v = base();
+        v["audit_rounds"] = json!(0);
+        bad(v, "t1_decisions_input is set but audit_rounds is 0");
+        bad(
+            json!({ "cut": 2 }),
+            "cut 2 with a check would build a trick-1 golden set",
+        );
+        // Train only at cut 2 stays as before.
+        assert!(parse(&json!({ "cut": 2, "check": false })).is_ok());
+    }
+
     /// Fake programs for the audit loop on top of [`fakes`]: a `search` whose targeted harvest
     /// writes its group counts, whose `decisions --keep` keeps two decisions, and whose
     /// `hybrid-check` passes with one decision in each named slice; a `python` (on a GPU when
@@ -4526,6 +4757,28 @@ case $1 in
   hybrid-check)
     echo "search $*" >> '{calls}'
     sl=$(arg --slices "$@"); s=""; i=0
+    if [ -n "$(arg --saved "$@")" ]; then
+      # The trick-2 rough test (`--saved`): two sets as the saved trick-1 worlds give them (8
+      # decisions under the searched burn, 5 under the rules-v1 burn, seats 1-2), every group's
+      # slice failing; the overall rows fail with round k's network when `rough-fail-<k>` exists.
+      net=$(arg --net "$@"); k=1
+      case "$net" in */audit/round-*) k=$(echo "$net" | sed 's|.*/audit/round-\([0-9]*\)/net/.*|\1|');; esac
+      ok=true; up=0.00008; [ -f '{base}/rough-fail-'$k ] && {{ ok=false; up=0.0004; }}
+      if [ -n "$sl" ]; then
+        for n in $(grep -o '"name": "[^"]*"' "$sl" | sed 's/"name": //'); do
+          [ -n "$s" ] && s="$s, "
+          s="$s{{\"group\": $i, \"name\": $n, \"ids\": [0, 1], \"summary\": {{\"loss_upper95\": 0.0003}}, \"pass\": false, \"reached_share\": 0.2}}"
+          i=$((i+1))
+        done
+      fi
+      d1=""; for x in 0:1 1:1 2:1 3:1 4:2 5:2 6:2 7:2; do [ -n "$d1" ] && d1="$d1, "; d1="$d1{{\"id\": ${{x%:*}}, \"position\": ${{x#*:}}, \"worlds\": 4}}"; done
+      d2=""; for x in 0:1 1:1 3:1 4:2 6:2; do [ -n "$d2" ] && d2="$d2, "; d2="$d2{{\"id\": ${{x%:*}}, \"position\": ${{x#*:}}, \"worlds\": 71}}"; done
+      set1="{{\"set\": 1, \"burn_rule\": \"searched burn\", \"values_version\": 2, \"plan\": {{\"decisions\": 8, \"worlds\": 31}}, \"exact_values\": \"stored, NOT re-verified on this binary (--verify-pct 0)\", \"verification\": {{\"done\": false}}, \"groups\": [{{\"group\": \"all\", \"summary\": {{\"decisions\": 8, \"mean_loss\": 0.00003, \"loss_upper95\": 0.00007, \"loss_pass\": true, \"bias\": [0.00001, 0.0, 0.0, -0.00001], \"bias_pass\": true, \"agreement\": 0.75}}}}], \"pass\": true, \"decisions\": [$d1], \"slices\": {{\"groups\": [$s]}}}}"
+      set2="{{\"set\": 2, \"burn_rule\": \"rules-v1 burn\", \"values_version\": 1, \"plan\": {{\"decisions\": 5, \"worlds\": 355}}, \"exact_values\": \"stored; 8 worlds recomputed by this binary and byte-identical\", \"verification\": {{\"done\": true}}, \"groups\": [{{\"group\": \"all\", \"summary\": {{\"decisions\": 5, \"mean_loss\": 0.00004, \"loss_upper95\": $up, \"loss_pass\": $ok, \"bias\": [0.00002, 0.0, 0.0, -0.00002], \"bias_pass\": true, \"agreement\": 0.8}}}}], \"pass\": $ok, \"decisions\": [$d2], \"slices\": {{\"groups\": [$s]}}}}"
+      echo "{{\"sets\": [$set1, $set2], \"hard\": [], \"both_rules\": []}}" > "$(arg --json "$@")"
+      echo "rough test: report"
+      exit 0
+    fi
     if [ -n "$sl" ]; then
       for n in $(grep -o '"name": "[^"]*"' "$sl" | sed 's/"name": //'); do
         [ -n "$s" ] && s="$s, "
@@ -5200,6 +5453,236 @@ esac
             1
         );
         let _ = fs::remove_dir_all(&f.base);
+    }
+
+    /// The trick-2 loop (cut 2; owner decision of 2026-10-16), on a fake GPU and on the CPU:
+    /// round 1 has no earlier network, so its audit shard is made after its training, driven by
+    /// it; its audit confirms g-one, which is targeted (the harvest driven by network 1), and
+    /// its rough test on the saved trick-1 worlds fails overall, with g-one's slice failing too.
+    /// Round 2 confirms nothing: flat after round 2, although g-one's slice still fails (the
+    /// rough test never gates and never makes a group failing). Every round's rough test is
+    /// `search hybrid-check --trick 1 --cut 2 --saved …` with the slices (the verification
+    /// sample in round 1 only); no golden set and no mini golden set is made; the reports say
+    /// plainly how thin the trick-1 evidence is (32 decisions in the file, 8 with saved worlds).
+    #[cfg(unix)]
+    #[test]
+    fn audit_loop_at_trick_2() {
+        for gpu in [true, false] {
+            let f = fakes(if gpu { "audit2gpu" } else { "audit2cpu" });
+            fs::write(f.base.join("audit-1.json"), GROUP_ONE).expect("write");
+            fs::write(f.base.join("rough-fail-1"), "").expect("write");
+            let tools = audit_tools(&f, gpu, None);
+            let remote = tools.remote.clone().expect("a remote store");
+            let store = |name: &str, bytes: &[u8]| {
+                let p = f.base.join(name);
+                fs::write(&p, bytes).expect("write");
+                put_input(&*remote, &p, None).expect("stored").0
+            };
+            let decisions: String = (0..32)
+                .map(|i| format!("{{\"id\":{i},\"trick\":1}}\n"))
+                .collect();
+            let dec = store("decisions-t1.jsonl", decisions.as_bytes());
+            let tables = store("tables.ckpt", b"{\"id\":0,\"w\":3}\n");
+            let ab1 = store("ab1.ckpt", b"{\"id\":0,\"w\":5}\n");
+            let params = parse(&json!({
+                "cut": 2, "labels_random": 7, "labels_rules": 0, "val_count": 3,
+                "widths": "16,8", "epochs": 1, "audit_rounds": 3, "audit_rows": 50,
+                "audit_target_rows": 1000, "upload_shards": true,
+                "t1_decisions_input": format!("inputs/sha256/{dec}"),
+                "t1_saved_inputs": [ { "run": "m3-t1-tables-1", "input": format!("sha256:{tables}") },
+                                     { "run": "m3-agree-t1-ab1", "input": format!("sha256:{ab1}") } ] }))
+            .expect("params");
+            let root = f.base.join("run");
+            let mut ctx = Ctx::local("hybrid-test", &root, 16);
+            let r =
+                chunk_steps(&mut ctx, &params, &tools, &f.table, json!({})).expect("the loop runs");
+            assert_eq!(r["verdict"], "PASS", "{r}");
+            let stop = r["audit"]["stop"].as_str().expect("stop");
+            assert!(
+                stop.starts_with(
+                    "flat after round 2: no weak group confirmed at the position level on the \
+                     fresh trick-2 audit shard (1 groups confirmed in earlier rounds"
+                ),
+                "{stop}"
+            );
+            let log = fs::read_to_string(&f.calls).expect("calls");
+            let line =
+                |p: &str| -> Vec<&str> { log.lines().filter(|l| l.starts_with(p)).collect() };
+            // No golden set and no mini golden set at trick 2.
+            assert!(
+                line("search decisions").is_empty() && line("search worlds").is_empty(),
+                "{log}"
+            );
+            // The rough tests: the t1check's command with the slices; the sample in round 1 only.
+            let checks = line("search hybrid-check");
+            assert_eq!(checks.len(), 2, "{log}");
+            let inputs = std::path::absolute(root.join("hybrid-work/inputs")).expect("abs");
+            for (k, c) in checks.iter().enumerate() {
+                assert!(
+                    c.starts_with("search hybrid-check --trick 1 --cut 2 --net "),
+                    "{c}"
+                );
+                for want in [
+                    format!("--decisions {}", inputs.join(&dec).display()),
+                    format!(
+                        "--saved m3-t1-tables-1={} --saved m3-agree-t1-ab1={}",
+                        inputs.join(&tables).display(),
+                        inputs.join(&ab1).display()
+                    ),
+                    format!("round-{}/union.json --slice-share 0.5", k + 1),
+                    format!(
+                        "--json {}",
+                        root.join("out/hybrid/audit")
+                            .join(format!("round-{}", k + 1))
+                            .join("t1check.json")
+                            .display()
+                    ),
+                ] {
+                    assert!(c.contains(&want), "{want} in {c}");
+                }
+                let verify = if k == 0 {
+                    "--verify-pct 3 --verify-rule rules-v1 --verify-solve-threads 46"
+                } else {
+                    "--verify-pct 0 --verify-rule rules-v1"
+                };
+                assert!(c.contains(verify), "{c}");
+            }
+            assert!(checks[0].contains("out/hybrid/net/int.safetensors"));
+            assert!(checks[1].contains("audit/round-2/net/int.safetensors"));
+            // Round 1's audit shard after its training, driven by network 1; round 2's driven by
+            // network 1 as well (beside or before round 2's training).
+            let net1 =
+                std::path::absolute(root.join("out/hybrid/net/int.safetensors")).expect("abs");
+            let shards = line("search labels --trick 2 --count 50");
+            assert_eq!(shards.len(), 2, "{log}");
+            for s in &shards {
+                assert!(
+                    s.contains("--harvest-cap 16 --harvest-positions 0.25,0.25,0.5")
+                        && s.ends_with(&format!("--harvest-net {}", net1.display())),
+                    "{s}"
+                );
+            }
+            // One targeted harvest (round 1's g-one), driven by network 1.
+            let target = line("search labels --trick 2 --count 1000 --seed 30151 --source harvest");
+            assert_eq!(target.len(), 1, "{log}");
+            assert!(
+                target[0].contains("--harvest-keep")
+                    && target[0]
+                        .ends_with(&format!("--keep-cap 256 --harvest-net {}", net1.display())),
+                "{}",
+                target[0]
+            );
+            let rung = read_json(&root.join("out/hybrid/rung.json")).expect("rung.json");
+            let steps = steps_of(&rung);
+            let at = |s: &str| {
+                steps
+                    .iter()
+                    .position(|x| x == s)
+                    .unwrap_or_else(|| panic!("no step {s:?} in {steps:?}"))
+            };
+            for (a, b) in [
+                ("train (round 1)", "audit shard (round 1)"),
+                ("audit shard (round 1)", "audit (round 1)"),
+                ("targeted harvest (round 1)", "rough test (round 1)"),
+                ("rough test (round 1)", "audit shard (round 2)"),
+                ("audit (round 2)", "rough test (round 2)"),
+            ] {
+                assert!(at(a) < at(b), "{a} before {b}: {steps:?}");
+            }
+            assert!(!steps.iter().any(|s| s.starts_with("golden")), "{steps:?}");
+            assert!(!steps.iter().any(|s| s == "targeted harvest (round 2)"));
+            assert_eq!(rung["inputs"]["t1_decisions"]["trick1_decisions"], 32);
+            assert!(rung["inputs"]["t1_saved:m3-agree-t1-ab1"]["sha256"] == ab1.as_str());
+            // Reports.
+            let out = root.join("out/hybrid/audit");
+            let r1 = read_json(&out.join("round-1.json")).expect("round 1");
+            assert_eq!(r1["rough_test"]["overall_pass"], false);
+            assert_eq!(r1["rough_test"]["file_decisions"], 32);
+            assert_eq!(r1["rough_test"]["decisions_with_worlds"], 8);
+            assert_eq!(r1["rough_test"]["seats"], json!([1, 2]));
+            assert_eq!(r1["rough_test"]["slices"][0]["label"], "thin: 4 decisions");
+            assert_eq!(r1["position_level"][0]["pass"], false);
+            assert_eq!(r1["groups_remaining"], json!(["g-one"]));
+            assert_eq!(r1["groups_failing"], json!([]));
+            assert_eq!(r1["targeted"]["targets"]["confirmed"], json!(["g-one"]));
+            assert!(r1.get("golden").is_none() && r1.get("decision_level").is_none());
+            assert_eq!(r1["audit_shard"]["driver"], net1.display().to_string());
+            assert!(r1["audit_shard"]["driver_note"].is_string());
+            // With upload_shards the loop's shards (hours of exact labels at trick 2) are shared.
+            for k in [&r1["audit_shard"]["key"], &r1["targeted"]["key"]] {
+                assert!(
+                    k.as_str().is_some_and(|k| k.starts_with("inputs/sha256/")),
+                    "{r1}"
+                );
+            }
+            let r2 = read_json(&out.join("round-2.json")).expect("round 2");
+            assert_eq!(r2["flat"], true);
+            assert_eq!(r2["rough_test"]["overall_pass"], true);
+            assert_eq!(r2["position_level"][0]["pass"], true);
+            assert_eq!(
+                r2["position_level"][0]["rough"]["pass"], false,
+                "still failing"
+            );
+            assert_eq!(r2["groups_failing"], json!([]));
+            assert!(r2["targeted"].is_null());
+            let t1 = fs::read_to_string(out.join("round-1.txt")).expect("txt");
+            for want in [
+                "32 decisions in the saved trick-1 decisions file, 8 of them with saved exact \
+                 worlds (searched burn: 8 decisions, 31 worlds; rules-v1 burn: 5 decisions, 355 \
+                 worlds), at seats 1-2 only (seats 3-8 have no saved decision)",
+                "far weaker evidence than the 400 decisions x 320 worlds of the golden sets",
+                "it never decides the stop and never makes a group failing",
+                "rules-v1 burn (values version 1): 5 decisions, 355 worlds; decision loss mean \
+                 0.0040%, 95% upper 0.0400% (over the 0.01% line)",
+                "g-one: SD 3.00% on the audit shard; confirmed this round (OUT OF SPEC); rough \
+                 test: thin: 4 decisions, 95% upper 0.0300% (over; report only)",
+                "Mini golden sets: none at trick 2",
+            ] {
+                assert!(t1.contains(want), "{want:?} in\n{t1}");
+            }
+            let summary = fs::read_to_string(out.join("audit-summary.txt")).expect("summary");
+            let lines: Vec<&str> = summary.lines().collect();
+            assert!(
+                lines[0].starts_with(
+                    "round 1: 1 groups confirmed (5 found) at the position level; rough test \
+                     (report only): searched burn 95% upper 0.0070% (8 decisions, would pass), \
+                     rules-v1 burn 95% upper 0.0400% (5 decisions, would fail); 8 of 32 trick-1 \
+                     decisions have saved worlds"
+                ),
+                "{summary}"
+            );
+            assert!(
+                lines[1].starts_with(
+                    "round 2: 0 groups confirmed (5 found) at the position level (flat)"
+                ),
+                "{summary}"
+            );
+            assert!(lines[2].starts_with("trick 2: the standard is the position-level audit"));
+            assert!(
+                lines[3].starts_with("stop: flat after round 2"),
+                "{summary}"
+            );
+            assert_eq!(rung["check"]["verdict"], "PASS");
+            assert_eq!(rung["check"]["rough_test"]["file_decisions"], 32);
+            assert!(root.join("out/hybrid/hc-t1-o2.json").is_file());
+            let hb = read_json(&root.join("heartbeat.json")).expect("heartbeat");
+            let p = &hb["progress"];
+            assert_eq!(p["groups_failing"], 0);
+            assert_eq!(p["groups_remaining"], 0);
+            assert!(
+                p["last_check"].as_str().is_some_and(|c| c.starts_with(
+                    "round 2: 0 groups confirmed at the position level (flat); rough test (report only)"
+                )),
+                "{p}"
+            );
+            assert!(
+                p["slices_failing"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("rough test, report only")),
+                "{p}"
+            );
+            let _ = fs::remove_dir_all(&f.base);
+        }
     }
 
     /// The capacity ladder: round 2's targeted data lowers the worst group's SD by only 3% (less

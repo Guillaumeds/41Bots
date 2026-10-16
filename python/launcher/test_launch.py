@@ -773,6 +773,34 @@ class LauncherTest(unittest.TestCase):
         other = {"format": 2, "streams": [{"name": "x", "kind": "search_measure", "params": {"harvest_net": "x"}}]}
         self.assertEqual(launch.param_inputs(other), {})
 
+    def test_trick2_loop_inputs_are_checked_before_renting(self):
+        # The trick-2 loop's rough test names the saved trick-1 files (a list) and their decisions
+        # file; the committed manifest's are found, and a missing one stops the launch.
+        path = os.path.join(os.path.dirname(__file__), "..", "..", "docs", "vast", "m3-hybrid-t2-loop.manifest.json")
+        with open(path, encoding="utf-8") as f:
+            m = json.load(f)
+        got = launch.param_inputs(m)
+        self.assertEqual(len(got), 6)
+        self.assertEqual(got["rung.t1_decisions_input"],
+                         "b23c8b0d48ea90773adc21290e600eeea290530bdc49d7c1573a62516cbb7e37")
+        self.assertEqual(got["rung.t1_saved_inputs[m3-agree-t1-ab1]"],
+                         "ca74c2acf6fbe189cd46408bbd39e9cfc529ed5f87ca186019246f5264ed476c")
+        w = World([offer(1, 11, 1.0)], ["done:1"])
+        for h in list(got.values())[1:]:
+            w.store["inputs/sha256/" + h] = b"x"
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, m)
+        self.assertIn("rung.t1_decisions_input (inputs/sha256/b23c8b0d", str(e.exception))
+        self.assertEqual(w.created_on, [])
+        bad = json.loads(json.dumps(m))
+        bad["streams"][0]["params"]["t1_saved_inputs"][0]["input"] = "REPLACE"
+        with self.assertRaises(SystemExit) as e:
+            launch.param_inputs(bad)
+        self.assertIn("params.t1_saved_inputs[m3-t1-tables-1] must be", str(e.exception))
+        pred = {"format": 2, "streams": [{"name": "r", "kind": "hybrid_rung",
+                                          "params": {"audit_predicates_input": "sha256:" + "e" * 64}}]}
+        self.assertEqual(launch.param_inputs(pred), {"r.audit_predicates_input": "e" * 64})
+
     def test_bin_sha_mismatch_refused(self):
         w = World([offer(1, 11, 1.0)], ["done:1"])
         with self.assertRaises(SystemExit):
