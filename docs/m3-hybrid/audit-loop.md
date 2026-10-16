@@ -219,9 +219,11 @@ Python evaluate the same predicate on the same features.
 - **Trick 3** (rung 2): start from round 3's network. Audit shard 1M positions (about 1.5 minutes
   on 184 threads with the network-driven search). Up to 4 rounds; training ~10 min each; the
   stored golden set reused; about $2 per rental.
-- **Trick 2** (rung 3): the same loop once the trick-1 check tool gives the decision-level
-  numbers; the audit shard at trick 2 costs 3 s per label, so 200k positions (~10 minutes on 184
-  threads) per round.
+- **Trick 2** (rung 3): the same loop; the audit shard at trick 2 costs 3 s per label, so 200k
+  positions (~10 minutes on 184 threads) per round. Its decision-level stage is only the rough test
+  on the saved exact trick-1 worlds (32 decisions): no trick-1 golden set will be built (owner,
+  2026-10-16), so at trick 2 "flat" means no confirmed weak group at the position level, with the
+  rough test reported beside it. Budget: up to $35 (owner).
 
 Verification per round: the audit report (groups, weights, bias, SD), the golden slices, the mini
 golden sets, the integer network's SHA-256, and the identity of every exact label with the solver

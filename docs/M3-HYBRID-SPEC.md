@@ -71,6 +71,14 @@ with the rules-bot burn by an older binary: compare them with H_k run with
 `SearchConfig::rules_robber_burn = true`, after confirming a sample is byte-identical on the
 current exact solver with that switch).
 
+**Owner decision, 2026-10-16 (00:25 Mauritius): no trick-1 golden set.** Trick-1 golden sets are
+too expensive and will not be built. Quality is pushed to 0.01 at tricks 4, 3 and 2 (each rung
+proven by the audit loop); trick-1 decisions are then made by PIMC over many deals, each deal
+searched with H_2 (exact through trick 1, O_2 from the start of trick 2), and trick 1 is accepted as
+good enough on that basis. The saved exact trick-1 worlds above (32 decisions, 386 worlds) remain
+the only trick-1 measurement: a rough test, reported with its thinness, never a gate. O_2's own
+standard is the audit loop at the position level on trick-2 positions plus that rough test.
+
 ## 4. Golden sets and references
 
 - Trick 4: run `m3-agree-t4c`; trick 2: `m3-agree-t2d` (each 400 decisions × 320 worlds, values
