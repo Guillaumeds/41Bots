@@ -117,27 +117,48 @@ this VM's 260 MB third-level cache; worth an A/B on one rented run, where the ca
 
 ### The gate
 
-GATE_TABLE
+Runs: the binary before and after, each at `--threads 1` and `--threads 4` (4 runs); 5: also the
+committed binary (`172920a`) re-run at 4 threads. Every run of a row gave the one SHA-256 shown,
+and each run's sidecar `shard_sha256` agrees with the file.
 
-How it was run: `search labels` of the binary before (`b96a167`) and after, release builds for
-x86-64-v3, the same seeds, start states and equity table (`64740dab…`), each shard at `--threads 1`
-and `--threads 4` with both binaries: every SHA-256 above is the one hash of all four runs (the
-sidecars' `shard_sha256` agree). The harvests with a network use the trained trick-3 network
-`o3-small` (`/home/user/t3work/o3-small/int.safetensors`) and, at trick 2, a random network of
-`nn-tool random --trick 2 --widths 512,256,64 --seed 17`; the race harvests keep classes 2 and 4
-(at trick 2 with caps 8 and 4, to fit the 5-minute limit). Cost: one thread, seconds per 1,000
-labels (a harvest's searches and labelling in thread-seconds, from its log; the others the run's
-time a row). Trick 4's times are coarse (the run's clock steps by 0.2 s, 3,000 rows taking under
-a second); the solver profile gives the trick-4 harvest's label solves at 0.020 ms before and
-0.012 ms after. The VM was shared with other jobs (load 2 at trick 3-4, 9 to 25 during the trick-2
-runs), so the trick-2 times carry a few percent of noise; the instruction counts are exact: a
-trick-3 `random` solve takes 24% fewer instructions (callgrind, the same 40 solves: 2.21 G before,
-1.88 G with levers 2 and 3, 1.69 G with lever 4 too).
+| trick | source | rows | shard SHA-256 (every run) | runs | before: s per 1,000 labels | after | change |
+|---|---|---|---|---|---|---|---|
+| 4 | random | 3,000 | `d7d927dab7338936872c6348295676681f5beb51c799fbfc9e36c57c621ea9f3` | 4 | 0.267 | 0.267 | +0% |
+| 4 | rules | 3,000 | `30d408a48ac91a4c7b7f94adb3cdb0944c8f1bf4faaccefd8775cb53a22295ed` | 4 | 0.067 | 0.067 | +0% |
+| 4 | harvest, exact driver | 3,000 | `6e39036ee5d9dff8358d188cf5f320c646355529664980a0062088caa862f1ad` | 5 | 0.334 | 0.201 | -40% |
+| 4 | race harvest | 3,000 | `cf2410109dc4e9aceef708082351655edbdea1e66f9a6827fad62cf049228c36` | 5 | 0.267 | 0.134 | -50% |
+| 3 | random | 1,000 | `7e14f715a1a609ebf30941b9fef43859617129af2084b0129d5b1266a4661c93` | 5 | 8.21 | 7.21 | -12% |
+| 3 | rules | 1,000 | `0bbdb2c1c208754a7138c251589a4548f8fc2f6563de6a800998a12840e2a7bd` | 4 | 8.4 | 7 | -17% |
+| 3 | harvest, network driver | 1,000 | `63d1114c195074596bef6ede83aae2ff6666a7984b1a8397f57f7261ec0acd3c` | 5 | 9.2 | 7 | -24% |
+| 3 | race harvest | 1,000 | `6d12f1e67bce3edbdb9b99930cc4e0d203e876f55f5d0acb2363a3dcdadbcc9c` | 5 | 10.6 | 4.5 | -58% |
+| 3 | harvest, exact driver | 320 | `25dca9480a7e42520f6460895ca63838ba6949cf515384f2235a38b2963881f4` | 4 | 288 | 61.6 | -79% |
+| 2 | random | 48 | `69f101566540f1d752aed353b4250eb8dcac48ff7d37feaafed3bf0bb4e40a3e` | 4 | 3,946 | 3,644 | -8% |
+| 2 | rules | 48 | `2a57b99c589604a80020ebcecb4938eba7c146322b00a9a2c5097e170d1011af` | 4 | 4,044 | 3,528 | -13% |
+| 2 | harvest, network driver | 48 | `5ab6fa72025574b0b395882b63eebb94dc1d3c4295121de41fb5eae36cbb815f` | 4 | 1,429 | 1,396 | -2% |
+| 2 | race harvest | 24 | `718286727b6bdfa3acbd076ae199c55567912972528d448fbd1037207d36013b` | 4 | 7,779 | 8,108 | +4% |
 
-At trick 2 the harvests gain little: a trick-1 decision reaches about two thousand trick-2
-positions and the 16 sampled ones (8 + 4 in the small race run) share few futures (nodes 4% and
-3% fewer), and the per-node levers gain less there than at trick 3 (the 128-256 MB table's memory
-accesses weigh more).
+How it was run: `search labels`, release builds for x86-64-v3 of `b96a167` (before) and of this
+branch (after), the same seeds, start states (20,000 hands) and equity table (`64740dab…`). The
+harvests with a network use the trained trick-3 network `o3-small`
+(`/home/user/t3work/o3-small/int.safetensors`) and, at trick 2, a random network
+(`nn-tool random --trick 2 --widths 512,256,64 --seed 17`); the race harvests keep classes 2 and 4
+(at trick 2 with caps of 8 and 4). Trick 2 has 48 rows, not 100: other jobs loaded the VM to 9-25
+during these runs, and 96-row runs no longer fitted the 5-minute limit.
+
+Cost: one thread, seconds per 1,000 labels: for a harvest, its searches and labelling in
+thread-seconds (from its log); for the others, the run's time a row. Trick 4's times are coarse
+(the run's clock steps by 0.2 s, and 3,000 rows take under a second); the profile tool gives the
+trick-4 harvest's label solves at 0.020 ms before and 0.012 ms after. The trick-3 and trick-4 runs
+had the VM nearly to themselves (load 2-3); the trick-2 runs did not (load 9-25), so their times
+carry several percent of noise. Instruction counts are exact: a trick-3 `random` solve takes 24%
+fewer (callgrind, the same 40 solves: 2.21 G before, 1.88 G with levers 2 and 3, 1.69 G with
+lever 4 too).
+
+At trick 2 the harvests gain little: the gate's trick-1 decisions reach about 5,700 trick-2
+positions each, and the 16 sampled ones (12 in the small race run) share few futures (nodes 4% and
+3% fewer); the trick-3 decisions reach about 600 and their samples share much more. The per-node
+levers also gain less at trick 2 than at trick 3 (the 128-256 MB table's memory accesses weigh
+more).
 
 Solver identity (`solver-identity`, release, the production equity table unless said):
 trick 4, 5,400 worlds, all 16 switch combinations, both tie orders: 0 mismatches; trick 3, 340
