@@ -105,6 +105,16 @@ For a rung k (trick-4 network, then trick 3), one round is:
    golden set passes overall, or after `R_max` rounds (then the report says which groups remain
    and the next lever is network capacity).
 
+**Capacity is part of the loop** (2026-10-16, after lead-4): 2.5× more race positions in the training
+set lowered the class-4 error only from 2.74% to 2.58%, so data alone can stall. The loop therefore
+grows the network by itself: the shape is taken from a ladder (`audit_shapes`, default
+`"<start>;2048,1024,256;2048,2048,1024,256;4096,2048,1024,256"`, the start being the shape chosen by
+the width/depth comparison, every width within the proven `nn::MAX_WIDTH`), and a round moves one
+step up when the targeted harvest did not lower the worst confirmed group's SD by at least
+`audit_min_gain` (default 15%) against the round before; the next round then retrains from scratch on
+all the data gathered so far. The top of the ladder with no gain ends the loop with the stop reason
+"capacity ladder exhausted". Every round's report names the shape it trained.
+
 **Decision of 2026-10-16, after the first real audit** (auditor `2be1c56`, lead-3c's network on a
 fresh 300k-row trick-4 shard): the auditor, told nothing, found the race positions by itself (its
 tree groups are 100% race classes 3–4 and hold 93% of all class-4 positions, through the dense
