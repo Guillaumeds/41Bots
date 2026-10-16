@@ -535,8 +535,17 @@ def instance_listed(instance_id: int) -> dict | None:
 def instance_state(instance_id: int) -> tuple[str, dict | None]:
     """One reading of an instance: ("alive" | "dead" | "unknown", vast's record). Dead means
     vast shows it exited or offline, or a successful listing of the account's instances does not
-    hold it. Unknown means no call could be read; it is never taken for dead."""
+    hold it. Unknown means no call could be read; it is never taken for dead.
+
+    A record whose actual_status is None is not decided on its own: a machine still loading shows
+    None, and so does one that was just destroyed (seen 2026-10-16, run m3-t1-leader-layouts-9654:
+    five destroy calls went through, every follow-up reading said "actual_status None", and the
+    job failed). So the account's instance list is read: not listed (in a list that was read
+    successfully) is dead; listed is judged by the listed row, where None is alive (loading); an
+    unreadable list is unknown. A record that says intended_status "stopped" is dead as before."""
     info = instance_status(instance_id)
+    if info is not None and info.get("actual_status") is None and info.get("intended_status") != "stopped":
+        info = None
     if info is None:
         row = instance_listed(instance_id)
         if row is None:
