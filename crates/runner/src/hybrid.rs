@@ -4589,10 +4589,12 @@ fi
             .expect("on");
         assert_eq!((a.mini_sets, a.mini_min), (400, 40));
         for (cut, rows) in [(4, 20_000_000), (3, 10_000_000), (2, 1_000_000)] {
-            let a = parse(&json!({ "cut": cut, "audit_rounds": 2, "audit_gamma": 0.0001 }))
-                .expect("fine gamma")
-                .audit
-                .expect("on");
+            // An audit loop at cut 3 or earlier needs `harvest_net` (round 1's audit shard).
+            let mut o = json!({ "cut": cut, "audit_rounds": 2, "audit_gamma": 0.0001 });
+            if cut <= 3 {
+                o["harvest_net"] = json!(format!("inputs/sha256/{}", "ab".repeat(32)));
+            }
+            let a = parse(&o).expect("fine gamma").audit.expect("on");
             assert_eq!((a.gamma, a.rows), (0.0001, rows), "cut {cut}");
         }
         let a = parse(
