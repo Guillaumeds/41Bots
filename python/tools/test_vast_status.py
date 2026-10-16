@@ -1,6 +1,11 @@
 """Tests for the second-machine check of vast_status.py: python3 -m unittest test_vast_status (in python/tools)."""
 import os
+import re
+import stat
+import subprocess
 import sys
+import tempfile
+import textwrap
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -13,7 +18,7 @@ import vast_status as V  # noqa: E402
 def offer(id, cpu, threads, ram, dph, **kw):
     o = {"id": id, "machine_id": id, "cpu_name": cpu, "threads": threads, "ram_gb": ram, "dph_total": dph, "reliability2": 0.995,
          "verification": "verified", "gpu_frac": 1.0, "num_gpus": 1, "gpu_name": "RTX 4090", "geolocation": "Norway, NO",
-         "inet_down_cost": 0.01, "inet_up_cost": 0.01}
+         "inet_down_cost": 0.01, "inet_up_cost": 0.01, "inet_down": 900.0}
     o.update(kw)
     return o
 
@@ -45,12 +50,28 @@ class Comparable(unittest.TestCase):
         self.assertEqual([o["id"] for o in ok], [7])
         self.assertEqual(closest, [])
 
-    def test_unverified_shared_and_slow_machines_never_count(self):
+    def test_shared_unreliable_slow_link_and_small_machines_never_count(self):
         cpu = "AMD Ryzen Threadripper PRO 9995WX 96-Cores"
-        market = [offer(1, cpu, 192, 251, 1.0, verification="deverified"), offer(2, cpu, 192, 251, 1.0, gpu_frac=0.5),
-                  offer(3, cpu, 192, 251, 1.0, reliability2=0.85), offer(4, cpu, 64, 80, 0.4)]   # 64 threads: too slow
+        market = [offer(1, cpu, 192, 251, 1.0, inet_down=300.0),   # verified, but its download link is too slow
+                  offer(2, cpu, 192, 251, 1.0, gpu_frac=0.5),
+                  offer(3, cpu, 192, 251, 1.0, reliability2=0.89),
+                  offer(4, cpu, 64, 80, 0.4)]   # 64 threads: too slow
         ok, _ = V.comparable(self.m, market, self.ref, 1.3, 0.7)
         self.assertEqual(ok, [])
+
+    def test_unverified_hosts_count_but_come_after_verified_ones_and_are_flagged(self):
+        # Owner, 2026-10-16: verified preferred, unverified or deverified allowed.
+        cpu = "AMD Ryzen Threadripper PRO 9995WX 96-Cores"
+        market = [offer(1, cpu, 192, 251, 0.90, verification="unverified"), offer(2, cpu, 192, 251, 1.20),
+                  offer(3, cpu, 192, 251, 1.0, verification="deverified", inet_down=100.0)]   # slow link: out
+        ok, _ = V.comparable(self.m, market, self.ref, 1.3, 0.7)
+        self.assertEqual([o["id"] for o in ok], [2, 1])
+        self.assertEqual([o["launcher_flag"] for o in ok], ["", "unverified"])
+        self.assertIn("UNVERIFIED host", V.words(ok[1]))
+        self.assertNotIn("UNVERIFIED", V.words(ok[0]))
+        # --min-inet-down: this run's setting reaches the label through the model.
+        slow_ok, _ = V.comparable(M.Model(rules={"min_inet_down": 50}), market, self.ref, 1.3, 0.7)
+        self.assertEqual({o["id"] for o in slow_ok}, {1, 2, 3})
 
     def test_measured_only_filter(self):
         market = [offer(5, "AMD EPYC 7J13 64-Core Processor", 128, 252, 0.3)]   # an absurdly cheap unbenchmarked machine
@@ -78,6 +99,86 @@ class Endpoint(unittest.TestCase):
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
+
+
+WORKFLOW = os.path.join(os.path.dirname(os.path.dirname(HERE)), ".github", "workflows", "vast-status.yml")
+
+
+def workflow_step_script(step_name: str) -> str:
+    """The `run: |` script of one step of vast-status.yml, dedented, read from the workflow file itself
+    so the test runs exactly what GitHub runs (no YAML library needed: the step is plain text)."""
+    with open(WORKFLOW, encoding="utf-8") as f:
+        lines = f.read().split("\n")
+    start = next(i for i, ln in enumerate(lines) if ln.strip() == f"- name: {step_name}")
+    run = next(i for i in range(start, len(lines)) if re.match(r"\s+run: \|\s*$", lines[i]))
+    indent = len(lines[run]) - len(lines[run].lstrip())
+    body = []
+    for ln in lines[run + 1:]:
+        if ln.strip() and len(ln) - len(ln.lstrip()) <= indent:
+            break
+        body.append(ln)
+    return textwrap.dedent("\n".join(body))
+
+
+FAKE_AWS = r"""#!/bin/bash
+# A stand-in for the aws CLI. FAKE_MODE: beats (two heartbeats), empty (what `aws s3 ls` really does for a folder
+# with nothing in it: prints nothing, exits 1), error (a real failure: exit 255 and a message on stderr).
+args="$*"
+case "$args" in
+  *"s3 ls s3://bkt/runs/r1/heartbeat/")
+    case "$FAKE_MODE" in
+      beats) echo "2026-10-16 10:00:00        100 000001.json"; echo "2026-10-16 10:01:00        100 000002.json";;
+      empty) exit 1;;
+      error) echo "An error occurred (AccessDenied) when calling the ListObjectsV2 operation" >&2; exit 255;;
+    esac;;
+  *"s3 ls s3://bkt/runs/r1/")
+    case "$FAKE_MODE" in
+      beats) echo "                           PRE heartbeat/"; echo "2026-10-16 09:59:00        300 manifest.json";;
+      empty) exit 1;;
+      error) exit 255;;
+    esac;;
+  *"s3 cp s3://bkt/runs/r1/heartbeat/"*) k="${args##*/heartbeat/}"; k="${k%% *}"; echo "{\"file\": \"$k\"}";;
+  *) echo "unexpected aws call: $args" >&2; exit 99;;
+esac
+"""
+
+
+class HeartbeatStep(unittest.TestCase):
+    """The workflow's "Run heartbeats" step: a run that was only just rented (still pulling its image) has no
+    heartbeat folder yet, and that must not fail the job."""
+
+    def run_step(self, mode: str, run_id: str = "r1"):
+        with tempfile.TemporaryDirectory() as d:
+            aws = os.path.join(d, "aws")
+            with open(aws, "w") as f:
+                f.write(FAKE_AWS)
+            os.chmod(aws, os.stat(aws).st_mode | stat.S_IXUSR)
+            env = dict(os.environ, PATH=d + os.pathsep + os.environ["PATH"], FAKE_MODE=mode, RUN_ID=run_id,
+                       ENDPOINT="https://example.invalid", BUCKET="bkt")
+            return subprocess.run(["bash", "-c", workflow_step_script("Run heartbeats")], env=env, capture_output=True, text=True)
+
+    def test_an_empty_heartbeat_folder_is_not_a_failure(self):
+        p = self.run_step("empty")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("no heartbeats yet for r1", p.stdout)
+
+    def test_heartbeats_are_printed_when_there_are_some(self):
+        p = self.run_step("beats")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('{"file": "000001.json"}', p.stdout)
+        self.assertIn('{"file": "000002.json"}', p.stdout)
+        self.assertNotIn("no heartbeats yet", p.stdout)
+
+    def test_a_real_listing_error_still_fails_the_job(self):
+        p = self.run_step("error")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("could not list the heartbeats of r1", p.stdout + p.stderr)
+        self.assertNotIn("no heartbeats yet", p.stdout)
+
+    def test_a_bad_run_id_is_refused(self):
+        p = self.run_step("beats", run_id="r1; rm -rf /")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("bad run_id", p.stdout)
 
 
 if __name__ == "__main__":

@@ -55,6 +55,52 @@ class VastMarketTest(unittest.TestCase):
         self.assertEqual(q["reliability_0.80-0.90"]["reliability"], {"gt": 0.80, "lte": 0.90})
         self.assertNotIn("reliability_0.90-0.98", q)
 
+    def test_search_follows_the_launchers_current_rules(self):
+        # Owner, 2026-10-16: verified hosts are preferred, not required; the launcher also asks for a fast downlink.
+        q = vm.queries(16, 32)
+        e = q["eligible"]
+        self.assertNotIn("verified", e)                      # every host is asked for; unverified ones are flagged
+        self.assertEqual(e["inet_down"], {"gte": 500.0})     # the launcher's inet_down>=500 (offer_rules.MIN_INET_DOWN)
+        self.assertEqual(e["reliability"], {"gt": 0.9})
+        self.assertEqual(e["inet_down_cost"], {"lte": 0.10})
+        self.assertEqual(e["num_gpus"], {"gte": 1})
+        self.assertEqual(e["gpu_frac"], {"eq": 1})
+        self.assertNotIn("unverified", q)                    # no longer a reason to leave an offer out
+        self.assertEqual(q["slow_link"]["inet_down"], {"lt": 500.0})
+        self.assertEqual({k: v for k, v in q["slow_link"].items() if k != "inet_down"},
+                         {k: v for k, v in e.items() if k != "inet_down"})
+        # The value passed on the command line replaces the default; 0 removes the filter (and the "slow" search).
+        self.assertEqual(vm.queries(16, 32, 300)["eligible"]["inet_down"], {"gte": 300.0})
+        self.assertNotIn("inet_down", vm.queries(16, 32, 0)["eligible"])
+        self.assertNotIn("slow_link", vm.queries(16, 32, 0))
+
+    def test_thresholds_are_the_launchers_own(self):
+        import offer_rules
+        self.assertIs(vm.R, offer_rules)
+        self.assertEqual((vm.MIN_RELIABILITY, vm.NET_CAP, vm.MIN_INET_DOWN),
+                         (offer_rules.MIN_RELIABILITY, offer_rules.MAX_NET_COST, offer_rules.MIN_INET_DOWN))
+
+    def test_unverified_eligible_offers_are_flagged_in_the_report(self):
+        eligible = {"reliability": {"gt": 0.9}, "inet_down": {"gte": 500.0}, "cpu_cores_effective": {"gte": 16}}
+        offers = [dict(offer(1, "Fast", 128, 1.0), verification="verified", inet_down=900.0),
+                  dict(offer(2, "Fast", 128, 1.2), verification="unverified", inet_down=900.0)]
+        snap = {"utc": "t", "queries": {"eligible": eligible}, "offers": offers}
+        out = io.StringIO()
+        a = type("A", (), dict(markdown=False, min_cores=16, premium=0.2, top=5, t1_min_ram_gb=480, t1_min_gb_per_thread=1.0,
+                               t1_table_gb=64, include_other=False))()
+        text = vm.report(snap, self.sp, a)
+        self.assertIn("any host (verified preferred, unverified ones flagged)", text)
+        self.assertIn("download >= 500 Mbps", text)
+        flagged = [ln for ln in text.splitlines() if "unverified host" in ln and ln.lstrip().startswith("2 ")]
+        self.assertTrue(flagged, text)
+        self.assertFalse([ln for ln in text.splitlines() if ln.lstrip().startswith("1 ") and "unverified host" in ln])
+        # An old snapshot (asked for verified hosts only, no download filter) is described as it was made.
+        old = {"utc": "t", "queries": {"eligible": {"verified": {"eq": True}, "reliability": {"gt": 0.9}}},
+               "offers": [offer(1, "Fast", 128, 1.0)]}
+        old_text = vm.report(old, self.sp, a)
+        self.assertIn("verified host, reliability > 0.9, network", old_text)
+        self.assertNotIn("download >=", old_text)
+
     def test_factor_precedence(self):
         self.assertEqual(vm.factor(self.sp, "AMD Fast 64-Core", "compute")[:2], (2.0, "estimate"))
         self.assertEqual(vm.factor(self.sp, "Slow chip", "compute")[:2], (1.1, "measured"))

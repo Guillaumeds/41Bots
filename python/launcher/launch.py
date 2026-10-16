@@ -59,6 +59,9 @@ Rules applied:
   unit of work multiplied by 1 + (200 - Mbps) / 200 (x1.5 at 100 Mbps, x2 at 0), so the ranking
   avoids it; an offer that reports no link speed gets no penalty. --offer-id reports a link slower
   than --min-inet-down in the log and rents it anyway (the owner named it).
+- The thresholds and checks (reliability floor, download floor, network cost cap, GPU limits, what counts
+  as a verified host) live in offer_rules.py, next to this file; the market tools import the same
+  module for their "can the launcher rent it" labels, so the two cannot drift apart.
 - No single answer from vast can say a machine is gone (2026-10-15): a failed call or an
   unreadable reply means "unknown" and changes nothing; a machine is declared gone (dead before
   DONE, stopped before its first heartbeat, destroyed itself) only after 3 consecutive readings
@@ -122,7 +125,7 @@ Rules applied:
 - Destroying: the launcher destroys the instance itself (on DONE/FAILED, a stale heartbeat, a
   dead instance or --max-minutes) unless it handed it over, and vast-cleanup.yml (cleanup.py,
   every 15 minutes) destroys a 41bots- instance whose run ended 10 minutes ago, went silent for
-  20 minutes, never heartbeated in 45 minutes, passed its deadline or its dollar cap (after a
+  20 minutes, never heartbeated in 60 minutes, passed its deadline or its dollar cap (after a
   stop request): that is the mechanism that does not depend on the machine. The
   machine also tries to destroy itself last. vast.ai documents a per-instance key in
   CONTAINER_API_KEY that "can only start, stop, or destroy that specific instance"
@@ -152,6 +155,12 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 
+# The thresholds and checks for which offers may be rented live in offer_rules.py (next to this file),
+# shared with the market tools so that their "the launcher can rent it" labels cannot drift.
+from offer_rules import (  # noqa: E402,F401  (some names are re-exported for the tests)
+    MAX_COMPUTE_CAP, MAX_NET_COST, MIN_COMPUTE_CAP, MIN_CUDA, MIN_INET_DOWN, MIN_RELIABILITY, SLOW_LINK_MBPS,
+    check_failures, gpu_failures, host_status, inet_down_of, is_verified, link_factor)
+
 POLL_S = 60  # default; --poll-s overrides
 HEARTBEAT_STALE_S = 180
 MAX_REPLACEMENTS = 3
@@ -166,11 +175,8 @@ GONE_CONFIRMATIONS = 3  # readings showing an instance exited/offline/absent bef
 GONE_SPAN_S = 90  # ...spanning at least this long
 DESTROY_RECHECK_S = 10  # destroy(): a "dead" reading counts only when a second one this much later agrees
 ADOPT_READINGS = 2  # readable instance listings without the run's label before a failed create counts as "nothing rented"
-MIN_RELIABILITY = 0.90  # owner, 2026-10-16: hosts with reliability of at least 90% are accepted, for every rental
 PULL_CEILING_MIN = 40  # default; --pull-ceiling-min overrides: the latest an image pull is allowed to end, from renting
 PULL_STALL_MIN = 10  # default; --pull-stall-min overrides: vast's status unchanged this long while pulling = dead
-MIN_INET_DOWN = 500.0  # default; --min-inet-down overrides: Mbps of download speed an offer must report (0 = no filter)
-SLOW_LINK_MBPS = 200.0  # below this download speed the ranking adds a penalty (see link_factor)
 MAX_DOLLARS = 20.0  # the default dollar cap of a run (owner, 2026-10-16)
 # GitHub ends a job after 6 hours (vast-run.yml timeout-minutes: 360). Longer runs are handed over
 # before that: the machine keeps working and the run-aware cleanup (cleanup.py, every 15 minutes)
@@ -244,13 +250,6 @@ def vast(*args: str, raw: bool = True, check: bool = True, tail: tuple[str, ...]
         return None
 
 
-# The PyTorch build's limits (PLAN §11.2: torch 2.14.1+cu126 runs compute capability 5.0-9.0 with a
-# driver that supports CUDA 12.6); vast's compute_cap is the capability times 100.
-MIN_COMPUTE_CAP = 600
-MAX_COMPUTE_CAP = 1000  # exclusive: no Blackwell (10.0, 12.0) in the cu126 build
-MIN_CUDA = 12.6
-
-
 def gpu_job(a) -> bool:
     return bool(getattr(a, "gpus", 0))
 
@@ -292,29 +291,11 @@ def inet_floor(a) -> float:
 
 def gpu_check_failures(o: dict, a) -> list[str]:
     """Why an offer fails a GPU job's needs (--gpus, --min-gpu-ram-gb, --min-compute-cap, and the
-    PyTorch build's limits), from vast's raw record (gpu_ram in MB, compute_cap x 100). Empty for a
-    CPU job or an offer that passes."""
+    PyTorch build's limits; offer_rules.gpu_failures), from vast's raw record (gpu_ram in MB,
+    compute_cap x 100). Empty for a CPU job or an offer that passes."""
     if not gpu_job(a):
         return []
-    failed = []
-
-    def num(k):
-        try:
-            return float(o.get(k)) if o.get(k) is not None else None
-        except (TypeError, ValueError):
-            return None
-    n, ram, cc, cuda = num("num_gpus"), num("gpu_ram"), num("compute_cap"), num("cuda_max_good")
-    if n is None or int(n) != int(a.gpus):
-        failed.append(f"{o.get('num_gpus')} GPUs, not the {a.gpus} asked for")
-    if getattr(a, "min_gpu_ram_gb", 0) and (ram is None or ram < a.min_gpu_ram_gb * 1000):
-        failed.append(f"GPU memory {o.get('gpu_ram')} MB, below --min-gpu-ram-gb {a.min_gpu_ram_gb}")
-    lo = max(MIN_COMPUTE_CAP, int(getattr(a, "min_compute_cap", MIN_COMPUTE_CAP) or MIN_COMPUTE_CAP))
-    if cc is None or not lo <= cc < MAX_COMPUTE_CAP:
-        failed.append(f"compute capability {o.get('compute_cap')} outside {lo}..{MAX_COMPUTE_CAP - 1} "
-                      f"(the PyTorch 2.14.1+cu126 build)")
-    if cuda is None or cuda < MIN_CUDA:
-        failed.append(f"driver supports CUDA {o.get('cuda_max_good')}, below {MIN_CUDA}")
-    return failed
+    return gpu_failures(o, int(a.gpus), getattr(a, "min_gpu_ram_gb", 0), getattr(a, "min_compute_cap", MIN_COMPUTE_CAP))
 
 
 # The keys of a manifest's "machine" object (what the launcher rents for it).
@@ -457,25 +438,6 @@ def load_bench(use_r2: bool) -> dict[str, float]:
     return _BENCH
 
 
-def inet_down_of(o: dict) -> float | None:
-    """The offer's download speed in Mb/s as vast reports it (`inet_down`), or None when absent."""
-    try:
-        return float(o["inet_down"]) if o.get("inet_down") is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-def link_factor(o: dict) -> float:
-    """The ranking penalty for a slow download link: 1.0 at SLOW_LINK_MBPS (200) Mbps or more, and
-    1 + (200 - Mbps) / 200 below it (x1.5 at 100 Mbps, x2.0 at 0). An offer that reports no speed
-    gets no penalty (nothing is known). The base image is several GB, so a slow link means a long
-    pull, which is paid for before any work starts. Not applied with --cheapest."""
-    mbps = inet_down_of(o)
-    if mbps is None or mbps >= SLOW_LINK_MBPS:
-        return 1.0
-    return 1.0 + (SLOW_LINK_MBPS - max(mbps, 0.0)) / SLOW_LINK_MBPS
-
-
 def link_note(o: dict) -> str:
     """The offer's download link for a log line: ", link 850 Mbps", ", link 120 Mbps (slow: cost/work x1.40)"
     or ", link speed not reported"."""
@@ -505,22 +467,6 @@ def rank(offers: list[dict], bench: dict[str, float], premium: float,
     return best, offers
 
 
-def is_verified(o: dict) -> bool:
-    """Whether vast.ai lists the offer's host as verified (the offer's `verified` flag, or its
-    `verification` word)."""
-    return o.get("verified") is True or (o.get("verification") or "") == "verified"
-
-
-def host_status(o: dict) -> str:
-    """The host's verification word for the logs: verified, unverified, deverified, or unknown."""
-    if is_verified(o):
-        return "verified"
-    word = o.get("verification")
-    if isinstance(word, str) and word:
-        return word
-    return "unverified" if o.get("verified") is False else "unknown"
-
-
 def describe(o: dict) -> str:
     unit = "matches/s/core measured" if o["_measured"] else "assumed rate"
     host = "host verified" if is_verified(o) else f"host NOT verified ({host_status(o)})"
@@ -533,30 +479,10 @@ def describe(o: dict) -> str:
 
 
 def offer_check_failures(o: dict, floor: float = MIN_RELIABILITY, verified_only: bool = False) -> list[str]:
-    """Why an offer fails the launcher's safety checks (what the search query filters on, applied
-    to one offer's record): reliability at least 0.90, the whole machine (no sharing), on-demand
-    and rentable; with `verified_only` also a verified host (owner, 2026-10-16: unverified and
-    deverified hosts are otherwise accepted). Empty when it passes."""
-    failed = []
-    if verified_only and not is_verified(o):
-        failed.append(f"host not verified ({o.get('verification') or o.get('verified')}), and --verified-only is set")
-    try:
-        rel = float(o.get("reliability2") if o.get("reliability2") is not None else o.get("reliability") or 0)
-    except (TypeError, ValueError):
-        rel = 0.0
-    if rel < floor:
-        failed.append(f"reliability {rel:.3f} below {floor}")
-    try:
-        frac = float(o.get("gpu_frac") if o.get("gpu_frac") is not None else 0)
-    except (TypeError, ValueError):
-        frac = 0.0
-    if frac < 1.0:
-        failed.append(f"shared machine (gpu_frac {o.get('gpu_frac')})")
-    if o.get("is_bid"):
-        failed.append("an interruptible (bid) offer, not on-demand")
-    if o.get("rentable") is False:
-        failed.append("not rentable")
-    return failed
+    """Why an offer fails the launcher's safety checks (offer_rules.check_failures): reliability at least
+    0.90, the whole machine, on-demand and rentable; with `verified_only` also a verified host. Empty when
+    it passes."""
+    return check_failures(o, floor, verified_only)
 
 
 def lookup_offer(a) -> dict:
@@ -1883,7 +1809,7 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("--min-reliability", type=float, default=MIN_RELIABILITY,
                        help="the host reliability floor (default 0.90, the owner's rule of 2026-10-16); raise it for a run that wants a steadier host")
         s.add_argument("--disk-gb", type=int, default=20)
-        s.add_argument("--max-net-cost", type=float, default=0.10, help="max $/GB up or down (owner 2026-10-14: 0.10; our traffic is tiny)")
+        s.add_argument("--max-net-cost", type=float, default=MAX_NET_COST, help="max $/GB up or down (owner 2026-10-14: 0.10; our traffic is tiny)")
         s.add_argument("--min-inet-down", type=float, default=None,
                        help="minimum download speed in Mbps an offer must report (vast's inet_down; default 500: the base "
                             "image is several GB; 0 = no filter; a manifest's machine.min_inet_down replaces the default, "

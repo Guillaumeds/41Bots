@@ -170,7 +170,7 @@
     price per hour ÷ (usable threads × measured speed per thread × 3600) × 10¹². Speed per thread is from our own bench runs for the CPU models we have measured
     (green <b>measured</b>), from a sibling model (grey <b>family</b>), or from the speed model (orange <b>estimate</b>). It is then adjusted for how small the
     solver's memory tables would be on that machine's RAM. Usable threads are 95.8% of the advertised ones. The three categories rank only machines our launcher can rent
-    (whole, verified, reliability above 0.90, network at most $0.10/GB) with enough threads. "Fast" means at least <span id="fastGn">1</span> billion nodes per second.
+    (the whole machine; a verified host is preferred but an unverified one is allowed and marked; reliability at least 0.90; download speed at least 500 Mbps; network at most $0.10/GB) with enough threads. Hover a "no" to see why. "Fast" means at least <span id="fastGn">1</span> billion nodes per second.
     "Best balanced" is the lowest cost × time. Search every few seconds is the program's; keep it running to keep the records.
   </section>
 </main>
@@ -410,7 +410,9 @@ function renderTable() {
     const c = td("", "n"); c.appendChild(document.createTextNode(o.cost === null ? "–" : "$" + fmt(o.cost, 3) + " ")); c.appendChild(srcTag(o.source));
     td(fmt((o.nps || 0) / 1e9), "n"); const j = jobOf(o); td(fmt(j.h, 1), "n"); td(j.usd === null ? "–" : "$" + fmt(j.usd, 0), "n"); td(fmt(o.score, 2), "n");
     td((o.num_gpus || 0) + "× " + (o.gpu_name || "?")); td(o.geolocation || "?"); td(fmt(o.reliability2, 3), "n");
-    td(o.launcher_ok ? "yes" : "no", o.launcher_ok ? "ok" : "no"); td(ago(o.listed_s), "n"); td(String(o.id), "n");
+    const rent = td(o.launcher_ok ? (o.launcher_flag ? "yes, " + o.launcher_flag + " host" : "yes") : "no", o.launcher_ok ? "ok" : "no");
+    if (o.launcher_why) rent.title = o.launcher_why;
+    td(ago(o.listed_s), "n"); td(String(o.id), "n");
     const a = el("td"); a.appendChild(copyBtn(o)); tr.appendChild(a);
     body.appendChild(tr);
   });

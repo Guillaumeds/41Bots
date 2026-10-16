@@ -45,48 +45,61 @@ from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
+# The launcher's own thresholds (python/launcher/offer_rules.py), imported so this view cannot drift from it.
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "launcher"))
+import offer_rules as R  # noqa: E402
 SPEED_FILE = os.path.join(REPO, "docs", "vast", "speed-factors.json")
 API = "https://console.vast.ai/api/v0/bundles/"
 
 # The offer fields kept in a saved snapshot.
 KEEP = ["id", "machine_id", "host_id", "cpu_name", "cpu_cores", "cpu_cores_effective", "cpu_ghz", "cpu_ram",
         "dph_total", "reliability2", "verification", "geolocation", "num_gpus", "gpu_name", "gpu_frac",
-        "disk_space", "inet_down_cost", "inet_up_cost", "mobo_name", "hosting_type", "vms_enabled", "static_ip",
-        "end_date"]
+        "disk_space", "inet_down", "inet_down_cost", "inet_up_cost", "mobo_name", "hosting_type", "vms_enabled",
+        "static_ip", "end_date", "gpu_ram", "compute_cap", "cuda_max_good"]
 
 
 # ------------------------------------------------------------------ queries
 
-# Max $/GB up or down, matching launch.py --max-net-cost (owner 2026-10-14: 0.10; our traffic is tiny).
-NET_CAP = 0.10
-# Host reliability floor, matching launch.py MIN_RELIABILITY (owner, 2026-10-16: 90%).
-MIN_RELIABILITY = 0.90
+# The launcher's thresholds, imported from python/launcher/offer_rules.py (never copied).
+NET_CAP = R.MAX_NET_COST          # max $/GB up or down (owner 2026-10-14)
+MIN_RELIABILITY = R.MIN_RELIABILITY   # owner, 2026-10-16: 90%
+MIN_INET_DOWN = R.MIN_INET_DOWN   # Mbps; the launcher asks for inet_down>=500 in every search
 
-def base_query(min_cores: int, min_ram_gb: int) -> dict:
-    """The launcher's CPU-only filter (launch.py offer_query with --cpu-only), as API JSON."""
-    return {
-        "verified": {"eq": True}, "external": {"eq": False}, "rentable": {"eq": True},
+
+def base_query(min_cores: int, min_ram_gb: int, min_inet_down: float | None = None) -> dict:
+    """The launcher's CPU-only search (launch.py offer_query with --cpu-only), as API JSON. Verified hosts are
+    preferred by the launcher, not required (owner, 2026-10-16), so there is no `verified` key: every host is
+    asked for, and an offer's own `verification` word flags the unverified ones in the report."""
+    q = {
+        "external": {"eq": False}, "rentable": {"eq": True},
         "reliability": {"gt": MIN_RELIABILITY}, "num_gpus": {"gte": 1}, "gpu_frac": {"eq": 1},
         "cpu_cores_effective": {"gte": min_cores}, "cpu_ram": {"gte": min_ram_gb * 1000},
         "disk_space": {"gte": 20}, "inet_down_cost": {"lte": NET_CAP}, "inet_up_cost": {"lte": NET_CAP},
         "order": [["dph_total", "asc"]], "type": "on-demand", "limit": 2000, "allocated_storage": 20,
     }
+    floor = MIN_INET_DOWN if min_inet_down is None else float(min_inet_down)
+    if floor > 0:
+        q["inet_down"] = {"gte": floor}
+    return q
 
 
-def queries(min_cores: int, min_ram_gb: int) -> dict[str, dict]:
+def queries(min_cores: int, min_ram_gb: int, min_inet_down: float | None = None) -> dict[str, dict]:
     """Named searches, run in this order; an offer is tagged with the first one that finds it.
     Only 'eligible' offers can be rented by launch.py; the others show the rest of the market."""
-    eligible = base_query(min_cores, min_ram_gb)
+    eligible = base_query(min_cores, min_ram_gb, min_inet_down)
     net = {k: v for k, v in eligible.items() if k not in ("inet_down_cost", "inet_up_cost")}
     partial = dict(eligible, gpu_frac={"lt": 1})
     low_rel = dict(eligible, reliability={"gt": 0.80, "lte": MIN_RELIABILITY})
-    unverified = dict(eligible, verified={"eq": False})
-    return {"eligible": eligible, "network_cost_over_cap": net, "partial_machine": partial,
-            "reliability_0.80-0.90": low_rel, "unverified": unverified}
+    out = {"eligible": eligible, "network_cost_over_cap": net, "partial_machine": partial,
+           "reliability_0.80-0.90": low_rel}
+    if "inet_down" in eligible:
+        out["slow_link"] = dict(eligible, inet_down={"lt": eligible["inet_down"]["gte"]})
+    return out
 
 
 WHY = {"network_cost_over_cap": f"network > ${NET_CAP}/GB", "partial_machine": "shared machine",
-       "reliability_0.80-0.90": f"reliability < {MIN_RELIABILITY}", "unverified": "unverified"}
+       "reliability_0.80-0.90": f"reliability < {MIN_RELIABILITY}", "unverified": "unverified",
+       "slow_link": "download link too slow"}
 
 
 def search(q: dict) -> list[dict]:
@@ -107,8 +120,8 @@ def trim(o: dict, query: str) -> dict:
     return {k: (round(v, 4) if isinstance(v, float) else v) for k, v in t.items()}
 
 
-def snapshot(min_cores: int, min_ram_gb: int) -> dict:
-    qs = queries(min_cores, min_ram_gb)
+def snapshot(min_cores: int, min_ram_gb: int, min_inet_down: float | None = None) -> dict:
+    qs = queries(min_cores, min_ram_gb, min_inet_down)
     offers, seen = [], set()
     for name, q in qs.items():
         for o in search(q):
@@ -172,6 +185,8 @@ def annotate(o: dict, sp: dict) -> dict:
         o[f"_{w}_work_h"] = threads * f
         o[f"_{w}_cost"] = o["dph_total"] / (threads * f) * 1000 if threads * f > 0 else math.inf
     o["_ram_per_thread"] = o["cpu_ram_gb"] / threads if threads else 0
+    # A host that is not verified is allowed (owner, 2026-10-16) and flagged; old snapshots only held verified ones.
+    o["_host_flag"] = f"{R.host_flag(o)} host" if o.get("verification") and R.host_flag(o) else ""
     # Fewer DIMMs than memory channels? Full population needs sockets x channels DIMMs of >= 16 GB.
     o["_mem_flag"] = ""
     cps, ch = (m or {}).get("cores_per_socket"), channels_per_socket(m)
@@ -242,7 +257,7 @@ def offer_rows(offers: list[dict], workload: str, table_gb: float = 0.0) -> list
             n = int(o["cpu_ram_gb"] * 0.9 // table_gb)
             extra = [n, f"{o['_threads'] / n:.0f}" if n else "-"]
         f, src = o[f"_{workload}"], o[f"_{workload}_src"]
-        flags = "; ".join(x for x in (o["_quirk"], o["_mem_flag"]) if x)
+        flags = "; ".join(x for x in (o["_host_flag"], o["_quirk"], o["_mem_flag"]) if x)
         rows.append([o["id"], o["_model"], f"{int(o.get('cpu_cores_effective') or 0)}", f"{o['_threads']:.0f}",
                      f"{o['dph_total']:.2f}", f"{f:.2f}{'' if src == 'measured' else '~'}",
                      f"{o[f'_{workload}_work_h']:.0f}", f"{o[f'_{workload}_cost']:.2f}", f"{o['cpu_ram_gb']:.0f}",
@@ -262,9 +277,13 @@ def report(snap: dict, sp: dict, a) -> str:
     offers = [annotate(dict(o), sp) for o in snap["offers"]]
     elig = [o for o in offers if o["query"] == "eligible"]
     min_cores = snap["queries"].get("eligible", {}).get("cpu_cores_effective", {}).get("gte", a.min_cores)
-    floor = snap["queries"].get("eligible", {}).get("reliability", {}).get("gt", MIN_RELIABILITY)  # a saved snapshot keeps its own floor
+    eq = snap["queries"].get("eligible", {})
+    floor = eq.get("reliability", {}).get("gt", MIN_RELIABILITY)  # a saved snapshot keeps its own floor
+    # A saved snapshot keeps its own rules too: an old one asked for verified hosts only and had no download-speed filter.
+    host = "verified host" if "verified" in eq else "any host (verified preferred, unverified ones flagged)"
+    link = f", download >= {eq['inet_down']['gte']:g} Mbps" if "inet_down" in eq else ""
     out.append(f"vast.ai on-demand market at {snap['utc']}: {len(elig)} offers launch.py can rent "
-               f"(whole machine, verified, reliability > {floor}, network <= ${NET_CAP}/GB, >= {min_cores} effective cores)"
+               f"(whole machine, {host}, reliability > {floor}{link}, network <= ${NET_CAP}/GB, >= {min_cores} effective cores)"
                + "".join(f"; {sum(o['query'] == q for o in offers)} {q}" for q in snap["queries"] if q != "eligible"))
     out.append("Speed: per hardware thread with all threads busy, EPYC 7502 = 1.00; '~' = estimate, not yet measured. "
                "1 unit of work = 1 hour of one EPYC 7502 thread.\n")
@@ -299,12 +318,12 @@ def report(snap: dict, sp: dict, a) -> str:
     out.append(table(T1_HEAD, offer_rows(near_t[:a.top], "tt", a.t1_table_gb), md))
 
     if a.include_other:
-        other = [o for o in offers if o["query"] in ("network_cost_over_cap", "partial_machine")]
+        other = [o for o in offers if o["query"] in ("network_cost_over_cap", "partial_machine", "slow_link")]
         for o in other:
             o["_quirk"] = WHY[o["query"]] + ("; " + o["_quirk"] if o["_quirk"] else "")
         ranked_o, _ = rank(other, "compute", a.premium)
-        out.append(f"\n## Not rentable by launch.py's current rules (network cost over the cap, or part of a "
-                   f"machine shared with other renters), cheapest compute work first, top {a.top}\n")
+        out.append(f"\n## Not rentable by launch.py's current rules (network cost over the cap, a download link under the "
+                   f"floor, or part of a machine shared with other renters), cheapest compute work first, top {a.top}\n")
         out.append(table(OFFER_HEAD, offer_rows(ranked_o[:a.top], "compute"), md))
     unknown = sorted({o["_model"] for o in offers if o["_compute_src"] == "default"})
     if unknown:
@@ -359,6 +378,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--save", help="write the trimmed snapshot to this JSON file")
     p.add_argument("--min-cores", type=int, default=64)
     p.add_argument("--min-ram-gb", type=int, default=32)
+    p.add_argument("--min-inet-down", type=float, default=None,
+                   help="the launcher's minimum download speed in Mbps (default 500, offer_rules.MIN_INET_DOWN; 0 = no filter)")
     p.add_argument("--premium", type=float, default=0.20, help="owner's speed premium (default 20%%)")
     p.add_argument("--top", type=int, default=5)
     p.add_argument("--t1-min-ram-gb", type=float, default=480.0,
@@ -388,7 +409,7 @@ def main(argv: list[str] | None = None) -> int:
         with open(a.src, encoding="utf-8") as f:
             snap = json.load(f)
     else:
-        snap = snapshot(a.min_cores, a.min_ram_gb)
+        snap = snapshot(a.min_cores, a.min_ram_gb, a.min_inet_down)
     if a.save:
         with open(a.save, "w", encoding="utf-8") as f:
             json.dump(snap, f, indent=1, ensure_ascii=False)

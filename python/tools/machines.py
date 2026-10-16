@@ -325,7 +325,8 @@ RANK_HEAD = ["offer", "CPU", "threads", "RAM GB", "$/h", "$ per 1e12", "G nodes/
 
 def rank_rows(ranked: list[dict]) -> list[list]:
     return [[a["id"], short_cpu(a.get("cpu_name")), round(a.get("usable") or a.get("threads") or 0), fmt(a.get("ram_gb"), 0),
-             fmt(a.get("dph_total"), 3), ("" if a["measured"] else "~") + fmt(a["cost"]), fmt(a["nps"] / 1e9, 2), a["source"],
+             fmt(a.get("dph_total"), 3), ("" if a["measured"] else "~") + fmt(a["cost"]), fmt(a["nps"] / 1e9, 2),
+             a["source"] + ("; " + a["launcher_flag"] + " host" if a.get("launcher_flag") else ""),
              (a.get("geolocation") or "?").split(",")[-1].strip()] for a in ranked]
 
 

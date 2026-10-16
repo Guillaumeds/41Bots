@@ -17,9 +17,11 @@ Reads the run's files from R2 (environment: R2_S3_ENDPOINT, or R2_ENDPOINT, R2_B
 R2_SECRET_ACCESS_KEY, the same as the launcher) and searches vast.ai offers (no key needed).
 Read-only: it never rents or destroys anything. Standard library only.
 
-"Comparable" = a verified, whole machine our launcher can rent whose estimated cost per 10^12 solver
-nodes is at most --max-cost-ratio (default 1.3) times this run's machine and whose estimated speed is at
-least --min-speed-ratio (default 0.7) times. Estimates come from our own benchmark runs
+"Comparable" = a whole machine our launcher can rent (its own rules, python/launcher/offer_rules.py:
+reliability at least 0.90, a download link of at least --min-inet-down Mbps, default 500; a verified host
+is preferred and listed first, an unverified or deverified one is allowed and flagged) whose estimated cost
+per 10^12 solver nodes is at most --max-cost-ratio (default 1.3) times this run's machine and whose
+estimated speed is at least --min-speed-ratio (default 0.7) times. Estimates come from our own benchmark runs
 (docs/vast/measured-speeds.json); a machine of an unbenchmarked chip is labelled "estimate".
 """
 
@@ -152,7 +154,7 @@ def comparable(model: M.Model, offers: list[dict], ref: dict, max_cost_ratio: fl
     pool = [o for o in ann if o["launcher_ok"] and o["cost"] is not None and (o["threads"] or 0) >= min_threads
             and (not measured_only or o["source"] != "estimated")]
     ok = [o for o in pool if o["cost"] <= ref["cost"] * max_cost_ratio and o["nps"] >= ref["nps"] * min_speed_ratio]
-    ok.sort(key=lambda o: (o["cost"], -o["nps"]))
+    ok.sort(key=lambda o: (bool(o.get("launcher_flag")), o["cost"], -o["nps"]))  # verified hosts first (owner's preference)
     gap = lambda o: max(o["cost"] / ref["cost"] / max_cost_ratio, ref["nps"] * min_speed_ratio / o["nps"])
     closest = sorted(pool, key=gap)[:3] if not ok else []
     return ok, closest
@@ -185,7 +187,8 @@ def bar(frac, width=30):
 
 def words(o):
     cpu = (o.get("cpu_name") or "?").replace("AMD Ryzen ", "AMD ").replace("®", "").replace("™", "").strip()
-    return f"{cpu} · {round(o.get('usable') or o.get('threads') or 0)} threads · {round(o.get('ram_gb') or 0)} GB RAM · ${o.get('dph_total', 0):.2f}/h"
+    flag = f" · {o['launcher_flag'].upper()} host" if o.get("launcher_flag") else ""
+    return f"{cpu} · {round(o.get('usable') or o.get('threads') or 0)} threads · {round(o.get('ram_gb') or 0)} GB RAM · ${o.get('dph_total', 0):.2f}/h{flag}"
 
 
 def run_panel(r2: R2, run: str, cap: float | None, c: C) -> tuple[list[str], dict | None]:
@@ -258,12 +261,12 @@ def market_panel(model: M.Model, ref: dict | None, a, c: C, plain: list[str] | N
         return lines + [c("31", f"  could not search vast.ai: {e}")]
     ok, closest = comparable(model, offers, ref, a.max_cost_ratio, a.min_speed_ratio, a.measured_only)
     lines.append(f"  This run's machine: est. ${ref['cost']:.3f} per 10¹² nodes, {ref['nps'] / 1e9:.2f} billion nodes/s ({ref['source']}).")
-    lines.append(f"  Comparable = cost at most ${ref['cost'] * a.max_cost_ratio:.3f} and speed at least {ref['nps'] * a.min_speed_ratio / 1e9:.2f} billion nodes/s, verified whole machine.")
+    lines.append(f"  Comparable = cost at most ${ref['cost'] * a.max_cost_ratio:.3f} and speed at least {ref['nps'] * a.min_speed_ratio / 1e9:.2f} billion nodes/s, whole machine our launcher can rent.")
     now = dt.datetime.now(dt.timezone.utc)
     stamp = f"checked {clock(now)} Mauritius, {len(offers)} machines on the market"
     if plain is not None:
         plain.append(f"checked {clock(now)} Mauritius ({now:%H:%M} UTC), {len(offers)} machines on the market. Comparable = at most "
-                     f"${ref['cost'] * a.max_cost_ratio:.3f} per 10¹² nodes and at least {ref['nps'] * a.min_speed_ratio / 1e9:.2f} billion nodes/s, verified whole machine.")
+                     f"${ref['cost'] * a.max_cost_ratio:.3f} per 10¹² nodes and at least {ref['nps'] * a.min_speed_ratio / 1e9:.2f} billion nodes/s, whole machine our launcher can rent.")
     if ok:
         lines.append(c("1;32", f"  AVAILABLE: YES  ({len(ok)} found; {stamp})"))
         for i, o in enumerate(ok[:3], 1):
@@ -315,10 +318,12 @@ def main(argv=None) -> int:
     ap.add_argument("--market-only", action="store_true", help="only the second-machine check, against --ref-cost/--ref-gn (no R2 keys needed)")
     ap.add_argument("--ref-cost", type=float, default=0.285, help="with --market-only: the running machine's $ per 10^12 nodes (default 0.285, the 9995WX)")
     ap.add_argument("--ref-gn", type=float, default=1.24, help="with --market-only: its speed in billion nodes/s (default 1.24)")
+    ap.add_argument("--min-inet-down", type=float, default=None,
+                    help="the launcher's minimum download speed in Mbps (default 500, offer_rules.MIN_INET_DOWN; 0 = no filter)")
     ap.add_argument("--color", choices=["auto", "on", "off"], default="auto")
     a = ap.parse_args(argv)
     c = C(a.color == "on" or (a.color == "auto" and sys.stdout.isatty()))
-    model = M.Model()
+    model = M.Model(rules=None if a.min_inet_down is None else {"min_inet_down": a.min_inet_down})
     if a.market_only:
         ref = {"cost": a.ref_cost, "nps": a.ref_gn * 1e9, "source": "given reference"}
         last_yes = None

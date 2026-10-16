@@ -58,7 +58,7 @@ class DecideTest(unittest.TestCase):
             self.assertEqual(self.d(inst(300, cpu=cpu), state(21, stop_min_ago=10)), "keep", cpu)
             self.assertEqual(self.d(inst(300, cpu=cpu), state(36, stop_min_ago=16)), "destroy", cpu)
             # The same for a machine that never heartbeated.
-            self.assertEqual(self.d(inst(46, cpu=cpu), state()), "stop", cpu)
+            self.assertEqual(self.d(inst(61, cpu=cpu), state()), "stop", cpu)
             self.assertEqual(self.d(inst(62, cpu=cpu), state(stop_min_ago=16)), "destroy", cpu)
         # Idle, or not running: destroyed as before.
         self.assertEqual(self.d(inst(300, cpu=49.9), state(21)), "destroy")
@@ -69,11 +69,23 @@ class DecideTest(unittest.TestCase):
     def test_heartbeats_of_an_earlier_machine_do_not_count(self):
         # Replacement machine started 30 min ago; the only heartbeat is from before it.
         self.assertEqual(self.d(inst(30), state(40)), "keep")
-        self.assertEqual(self.d(inst(50), state(60)), "destroy")
+        self.assertEqual(self.d(inst(50), state(60)), "keep")  # still within its 60 minutes to a first heartbeat
+        self.assertEqual(self.d(inst(62), state(70)), "destroy")
 
     def test_never_heartbeated(self):
+        # 60 minutes (2026-10-16): a slow image pull may take 40 minutes, then 15 to the first heartbeat.
         self.assertEqual(self.d(inst(40), state()), "keep")
-        self.assertEqual(self.d(inst(46), state()), "destroy")
+        self.assertEqual(self.d(inst(46), state()), "keep")
+        self.assertEqual(self.d(inst(59), state()), "keep")
+        self.assertEqual(self.d(inst(61), state()), "destroy")
+        self.assertIn("no heartbeat at all in its 61 min of life", cleanup.decide(inst(61), state(), NOW)[1])
+
+    def test_never_heartbeated_limit_covers_the_launchers_slowest_start(self):
+        # The launcher waits for an advancing image pull up to PULL_CEILING_MIN minutes from renting and
+        # then --startup-minutes (15) from the container start; the safety net must not cut that short.
+        import launch
+        self.assertEqual(cleanup.NO_HEARTBEAT_S, 60 * 60)
+        self.assertGreaterEqual(cleanup.NO_HEARTBEAT_S, (launch.PULL_CEILING_MIN + 15) * 60)
 
     def test_exited_or_offline(self):
         self.assertEqual(self.d(inst(5, "exited"), state(1)), "destroy")
