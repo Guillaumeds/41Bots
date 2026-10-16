@@ -37,6 +37,7 @@
 //!                  [--worlds FILE …] [--verify-pct 1] [--recompute] [--threads T] [--tt-mb 64]
 //!                  [--boot 1000] [--boot-seed 1] [--json OUT] [--source belief|rejection]
 //!                  [--verify-solve-threads 1] [--verify-tt-mb (--tt-mb)]
+//!                  [--explain 143,335 [--explain-worlds 3] [--explain-json FILE]]
 //! search hybrid-check --trick T --cut K --net WEIGHTS --equity TABLE --decisions FILE
 //!                  --saved RUN=FILE [--saved RUN=FILE …] [--only D:W,…] [--hard D:W,…]
 //!                  [--verify-pct 0] [--verify-rule all|rules-v1|searched]
@@ -86,6 +87,14 @@
 //! is not compared. The report: per world, per decision, the §3 tables per set, the `--hard`
 //! worlds with their saved exact times, the peak memory; `--plan-only` prints the sets and the
 //! verification sample and solves nothing.
+//! `--explain IDS` (not with `--saved`) runs, instead of the check, the explanation of those
+//! decisions (`search::hybrid_explain`): exact means in both tie orders and hybrid means per
+//! candidate, how the hybrid's misranking spreads over the worlds and over race classes, the
+//! network's error at every frontier position the hybrid reached (per race class, tie-decided
+//! or not), and for the `--explain-worlds` most misleading worlds the frontier positions each
+//! search copied up to each candidate, with the network's outcome probabilities there;
+//! `--explain-json FILE` writes every world (the principal positions of the
+//! `--explain-worlds` most misleading ones only).
 //! `decisions` stratifies equally over the 4 strata and 8 positions, so `--count` must be a
 //! multiple of 32 (`--allow-uneven` overrides); it prints the position × stratum table it made.
 //! `worlds` and `teacher` take `--source belief|rejection`: the world generator, by default
@@ -1697,6 +1706,9 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             r.id
         ));
     }
+    if let Some(ids) = a.get("--explain") {
+        return hybrid_explain(a, ids, &ds, &stored, &job, &ctx, &oracle);
+    }
     let exact_from = if stored.is_empty() || job.recompute {
         "recomputed by this binary".to_string()
     } else {
@@ -2477,6 +2489,105 @@ fn split_threads(threads: usize, n: &[usize]) -> Vec<usize> {
         }
     }
     t
+}
+
+/// `hybrid-check --explain IDS`: why the hybrid and exact search choose differently on the
+/// decisions `IDS` (`search::hybrid_explain`), instead of the check. Exact values are recomputed
+/// (and must equal the stored ones when `--worlds` is given); `--explain-worlds N` (default 3)
+/// details the N most misleading worlds of each decision; `--explain-json FILE` writes every
+/// world (the principal positions of those N only).
+fn hybrid_explain(
+    a: &Args,
+    ids: &str,
+    ds: &[DecisionSpec],
+    stored: &BTreeMap<u64, WorldRows>,
+    job: &search::hybrid::CheckJob,
+    ctx: &Ctx,
+    oracle: &nn::Oracle,
+) -> Result<(), String> {
+    use search::hybrid_explain::{
+        ExplainJob, explain, pooled_frontier_error, render, render_frontier_error,
+    };
+    let ids = parse_ids(ids)?;
+    let chosen: Vec<DecisionSpec> = ds.iter().filter(|d| ids.contains(&d.id)).cloned().collect();
+    if chosen.len() != ids.len() {
+        return Err(format!(
+            "--explain: {} of the {} ids are among the decisions given",
+            chosen.len(),
+            ids.len()
+        ));
+    }
+    let xjob = ExplainJob {
+        cut: job.cut,
+        seed: job.seed,
+        label: job.label,
+        to: job.to,
+        threads: job.threads,
+        tt_mb: job.tt_mb,
+    };
+    let t = Instant::now();
+    let mut xs = explain(&chosen, &xjob, ctx, oracle, Some(oracle))?;
+    for x in &xs {
+        if let Some(r) = stored.get(&x.id) {
+            for w in &x.worlds {
+                if r.rows.get(w.world as usize) != Some(&w.exact) {
+                    return Err(format!(
+                        "decision {} world {}: the stored exact values differ from this binary's",
+                        x.id, w.world
+                    ));
+                }
+            }
+        }
+    }
+    let top = a.num("--explain-worlds", 3)? as usize;
+    println!(
+        "H_{} vs exact, explained: {} decisions x {} worlds (seed {}, label {}, {} source); net {} {:?}; {:.1} s on {} threads{}",
+        job.cut,
+        xs.len(),
+        job.to,
+        job.seed,
+        job.label,
+        ctx.source.name(),
+        &oracle.sha256[..12],
+        oracle.net().widths(),
+        t.elapsed().as_secs_f64(),
+        job.threads,
+        if stored.is_empty() {
+            ""
+        } else {
+            "; exact values equal to the stored ones"
+        }
+    );
+    println!(
+        "network error at the hybrid's frontier positions, all explained decisions: {}",
+        render_frontier_error(&pooled_frontier_error(&xs))
+    );
+    for x in &xs {
+        println!();
+        for l in render(x, top) {
+            println!("{l}");
+        }
+    }
+    if let Some(out) = a.get("--explain-json") {
+        for x in &mut xs {
+            x.keep_lines(top);
+        }
+        let v = serde_json::json!({
+            "cut": job.cut,
+            "seed": job.seed,
+            "label": job.label,
+            "worlds": job.to,
+            "net_sha256": oracle.sha256,
+            "binary_sha256": binary_sha256(),
+            "decisions": xs,
+        });
+        std::fs::write(
+            out,
+            serde_json::to_string(&v).map_err(|e| e.to_string())? + "\n",
+        )
+        .map_err(|e| format!("{out}: {e}"))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

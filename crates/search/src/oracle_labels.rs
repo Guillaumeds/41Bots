@@ -303,7 +303,7 @@ pub fn tt_mb_for(k: u8) -> usize {
 
 /// The exact value of a position at the start of a trick (`solver::solve_fast_with`, the
 /// documented tie rule) and the solver nodes it took.
-fn exact_value(
+pub(crate) fn exact_value(
     pos: &Position,
     ctx: MatchCtx,
     leaf: &SharedLeaf,
@@ -755,11 +755,34 @@ struct RecState {
 /// with that network). A canonical form met again (another line, or the same position after a
 /// table replacement) gets its recorded value. Either value depends only on the canonical form
 /// and the context (`solver::frontier`), as the solvers require.
-struct Recorder<'a> {
+pub(crate) struct Recorder<'a> {
     leaf: &'a SharedLeaf,
     opts: FastOptions,
     driver: Driver<'a>,
     state: Mutex<RecState>,
+}
+
+impl<'a> Recorder<'a> {
+    /// A recorder valuing the frontier as `driver` says (exact solves with `opts`).
+    pub(crate) fn new(leaf: &'a SharedLeaf, opts: FastOptions, driver: Driver<'a>) -> Self {
+        Recorder {
+            leaf,
+            opts,
+            driver,
+            state: Mutex::new(RecState {
+                mem: SolveMem::new(),
+                seen: BTreeMap::new(),
+                list: Vec::new(),
+                evals: 0,
+            }),
+        }
+    }
+
+    /// The distinct positions reached, in first-visit order, and the frontier evaluations.
+    pub(crate) fn into_reached(self) -> (Vec<Reached>, u64) {
+        let st = self.state.into_inner().unwrap_or_else(|e| e.into_inner());
+        (st.list, st.evals)
+    }
 }
 
 impl Frontier for Recorder<'_> {
