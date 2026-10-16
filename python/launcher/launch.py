@@ -64,7 +64,17 @@ Rules applied:
   the list cannot be read either, the run stops. Otherwise the next-best offer is tried, up to 5.
 - --offer-id (an offer the owner picked on vast's website): one search by that id checks the
   same things as the normal search (a verified host, reliability at least 0.98, the whole
-  machine, on-demand); an offer that fails any of them, or that cannot be checked, is not rented.
+  machine, on-demand, and the GPU needs below); an offer that fails any of them, or that cannot
+  be checked, is not rented.
+- GPU jobs (network training, docs/m3-hybrid/vast.md): --gpus N (exactly N GPUs on the machine),
+  --min-gpu-ram-gb, --min-compute-cap (vast's units: 600 = compute capability 6.0, the lowest the
+  PyTorch 2.14.1+cu126 build supports), always with compute_cap<1000 and cuda_vers>=12.6 (the
+  driver must support CUDA 12.6; no Blackwell). A manifest may carry the same needs, and the
+  machine's, in a top-level "machine" object: {"gpus": 1, "min_gpu_ram_gb": 4,
+  "min_compute_cap": 600, "min_cores": 128, "min_ram_gb": 64, "disk_gb": 80}; each minimum is
+  the larger of the manifest's and the command line's, a GPU count given both ways must agree,
+  a GPU need overrides --cpu-only, and any other key is refused before anything is rented. Every
+  other rule (verified host, reliability, whole machine, on-demand only, dollar cap) is unchanged.
 - Destroying is verified: "destroyed (verified)" only once a later status call shows the instance
   exited, offline or absent; when that call fails 3 times the destroy is reported as unverified
   (in the log, the report and the step summary), never counted as done.
@@ -197,13 +207,95 @@ def vast(*args: str, raw: bool = True, check: bool = True, tail: tuple[str, ...]
         return None
 
 
+# The PyTorch build's limits (PLAN §11.2: torch 2.14.1+cu126 runs compute capability 5.0-9.0 with a
+# driver that supports CUDA 12.6); vast's compute_cap is the capability times 100.
+MIN_COMPUTE_CAP = 600
+MAX_COMPUTE_CAP = 1000  # exclusive: no Blackwell (10.0, 12.0) in the cu126 build
+MIN_CUDA = 12.6
+
+
+def gpu_job(a) -> bool:
+    return bool(getattr(a, "gpus", 0))
+
+
 def offer_query(a) -> str:
+    gpus = int(getattr(a, "gpus", 0) or 0)
+    if gpus:
+        cc = max(MIN_COMPUTE_CAP, int(getattr(a, "min_compute_cap", MIN_COMPUTE_CAP) or MIN_COMPUTE_CAP))
+        gpu = [f"num_gpus={gpus}", f"compute_cap>={cc}", f"compute_cap<{MAX_COMPUTE_CAP}", f"cuda_vers>={MIN_CUDA}"]
+        if getattr(a, "min_gpu_ram_gb", 0):
+            gpu.append(f"gpu_ram>={a.min_gpu_ram_gb}")
+    else:
+        gpu = ["num_gpus>=1"] + ([] if a.cpu_only else [f"compute_cap>={MIN_COMPUTE_CAP}",
+                                                        f"compute_cap<{MAX_COMPUTE_CAP}", f"cuda_vers>={MIN_CUDA}"])
     return " ".join([
-        f"reliability>{a.min_reliability}", "num_gpus>=1", "gpu_frac=1", "rentable=true", "verified=true",
+        f"reliability>{a.min_reliability}", gpu[0], "gpu_frac=1", "rentable=true", "verified=true",
         f"cpu_cores_effective>={a.min_cores}", f"cpu_ram>={a.min_ram_gb}",
-    ] + ([] if a.cpu_only else ["compute_cap>=600", "compute_cap<1000", "cuda_vers>=12.6"]) + [
+    ] + gpu[1:] + [
         f"disk_space>={a.disk_gb}", f"inet_down_cost<={a.max_net_cost}", f"inet_up_cost<={a.max_net_cost}",
     ] + ([f"dph_total<={a.max_dph}"] if a.max_dph else []))
+
+
+def gpu_check_failures(o: dict, a) -> list[str]:
+    """Why an offer fails a GPU job's needs (--gpus, --min-gpu-ram-gb, --min-compute-cap, and the
+    PyTorch build's limits), from vast's raw record (gpu_ram in MB, compute_cap x 100). Empty for a
+    CPU job or an offer that passes."""
+    if not gpu_job(a):
+        return []
+    failed = []
+
+    def num(k):
+        try:
+            return float(o.get(k)) if o.get(k) is not None else None
+        except (TypeError, ValueError):
+            return None
+    n, ram, cc, cuda = num("num_gpus"), num("gpu_ram"), num("compute_cap"), num("cuda_max_good")
+    if n is None or int(n) != int(a.gpus):
+        failed.append(f"{o.get('num_gpus')} GPUs, not the {a.gpus} asked for")
+    if getattr(a, "min_gpu_ram_gb", 0) and (ram is None or ram < a.min_gpu_ram_gb * 1000):
+        failed.append(f"GPU memory {o.get('gpu_ram')} MB, below --min-gpu-ram-gb {a.min_gpu_ram_gb}")
+    lo = max(MIN_COMPUTE_CAP, int(getattr(a, "min_compute_cap", MIN_COMPUTE_CAP) or MIN_COMPUTE_CAP))
+    if cc is None or not lo <= cc < MAX_COMPUTE_CAP:
+        failed.append(f"compute capability {o.get('compute_cap')} outside {lo}..{MAX_COMPUTE_CAP - 1} "
+                      f"(the PyTorch 2.14.1+cu126 build)")
+    if cuda is None or cuda < MIN_CUDA:
+        failed.append(f"driver supports CUDA {o.get('cuda_max_good')}, below {MIN_CUDA}")
+    return failed
+
+
+# The keys of a manifest's "machine" object (what the launcher rents for it).
+MACHINE_KEYS = ("gpus", "min_gpu_ram_gb", "min_compute_cap", "min_cores", "min_ram_gb", "disk_gb")
+
+
+def apply_machine(a, manifest: dict) -> None:
+    """Merges a manifest's "machine" needs into the offer settings `a` (see the module notes):
+    minimums take the larger value, a GPU count given both ways must agree, and a GPU need turns
+    the GPU filters on even with --cpu-only. Exits (nothing rented) on an unknown key or a bad
+    value."""
+    m = manifest.get("machine")
+    if m is None:
+        return
+    if not isinstance(m, dict):
+        sys.exit('launch: the manifest\'s "machine" must be an object')
+    bad = [k for k in m if k not in MACHINE_KEYS]
+    if bad:
+        sys.exit(f"launch: the manifest's \"machine\" has unknown keys {bad}; it takes only {', '.join(MACHINE_KEYS)}")
+    for k, v in m.items():
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+            sys.exit(f"launch: machine.{k} must be a number, 0 or more (got {v!r})")
+    if not float(m.get("gpus", 0)).is_integer():
+        sys.exit(f"launch: machine.gpus must be a whole number (got {m['gpus']!r})")
+    gpus = int(m.get("gpus", 0))
+    if gpus and getattr(a, "gpus", 0) and int(a.gpus) != gpus:
+        sys.exit(f"launch: the manifest asks for {gpus} GPUs but --gpus says {a.gpus}")
+    if gpus:
+        a.gpus = gpus
+    for k in ("min_gpu_ram_gb", "min_compute_cap", "min_cores", "min_ram_gb", "disk_gb"):
+        if k in m:
+            setattr(a, k, max(m[k], getattr(a, k, 0) or 0))
+    if gpu_job(a) and a.cpu_only:
+        log(f"the run needs {a.gpus} GPU(s): the GPU filters apply (--cpu-only is ignored)")
+        a.cpu_only = False
 
 
 def search_offers(a) -> list[dict]:
@@ -213,7 +305,8 @@ def search_offers(a) -> list[dict]:
             and (not a.max_dph or float(o["dph_total"]) <= a.max_dph)
             and (not a.cpu_match or re.search(a.cpu_match, o.get("cpu_name") or "", re.I))
             and o.get("id") not in getattr(a, "exclude_offers", set())
-            and o.get("machine_id", o.get("id")) not in getattr(a, "exclude_machines", set())]
+            and o.get("machine_id", o.get("id")) not in getattr(a, "exclude_machines", set())
+            and not gpu_check_failures(o, a)]
 
 
 # ------------------------------------------------------------------ R2 (aws CLI, S3 API)
@@ -324,7 +417,10 @@ def rank(offers: list[dict], bench: dict[str, float], premium: float) -> tuple[d
 def describe(o: dict) -> str:
     unit = "matches/s/core measured" if o["_measured"] else "assumed rate"
     return (f"offer {o['id']}: ${o['dph_total']:.3f}/h, {o['cpu_cores_effective']:.0f} eff. cores, "
-            f"{o.get('cpu_name')}, {o.get('num_gpus')}x {o.get('gpu_name')}, rel {o.get('reliability2', 0):.3f}, "
+            f"{o.get('cpu_name')}, {o.get('num_gpus')}x {o.get('gpu_name')}"
+            + (f" ({o.get('gpu_ram')} MB, cc {o.get('compute_cap')}, CUDA {o.get('cuda_max_good')})"
+               if o.get("gpu_ram") is not None else "")
+            + f", rel {o.get('reliability2', 0):.3f}, "
             f"rate {o['_rate']:.2f} ({unit}), cost/work {o['_cost_per_work']:.5f}")
 
 
@@ -386,6 +482,7 @@ def lookup_offer(a) -> dict:
         cores = None
     if cores is not None and cores < a.min_cores:
         failed.append(f"{cores:.0f} effective cores, below --min-cores {a.min_cores}")
+    failed += gpu_check_failures(row, a)
     if failed:
         sys.exit(f"launch: offer {oid} fails the launcher's checks: {'; '.join(failed)}; nothing was rented")
     best = dict(row)
@@ -775,12 +872,33 @@ def poll_line(hb: dict, minutes: float, spent: float, cpu) -> str:
     parts = [f"heartbeat {hb.get('seq')}", f"phase {hb.get('phase')}"
              + (f" ({p['window']} {p.get('t_s')} s)" if isinstance(p.get("window"), str) else ""),
              f"{minutes:.1f} min", f"${spent:.2f} so far", f"CPU {cpu}%" if cpu is not None else "CPU ?"]
+    steps = p.get("chunk_steps")
+    if isinstance(steps, dict):
+        for name, st in sorted(steps.items()):
+            if isinstance(st, dict) and isinstance(st.get("step"), str):
+                parts.append(f"{name}: {st['step']}" + step_detail(st))
     eta = p.get("eta")
     if isinstance(eta, dict):
         text = eta_text(eta)
         if text:
             parts.append(text)
     return ", ".join(parts)
+
+
+def step_detail(st: dict) -> str:
+    """The counts of a chunk's step for a log line (`progress.chunk_steps`, e.g. a hybrid_rung's
+    label rows, golden worlds or training epoch), or ""."""
+    bits = []
+    for done, total, word in (("rows_done", "rows_total", "rows"), ("worlds_done", "worlds_total", "worlds"),
+                              ("train_batches_done", "train_batches", "batches")):
+        if isinstance(st.get(done), int) and isinstance(st.get(total), int):
+            bits.append(f"{st[done]:,}/{st[total]:,} {word}")
+    if isinstance(st.get("train_epoch"), int):
+        bits.insert(0, f"epoch {st['train_epoch'] + 1}" + (f"/{st['train_epochs']}"
+                                                          if isinstance(st.get("train_epochs"), int) else ""))
+    if isinstance(st.get("device"), str):
+        bits.append(f"on {st['device']}")
+    return f" ({', '.join(bits)})" if bits else ""
 
 
 def latest_heartbeat(run_id: str) -> tuple[str | None, dict | None]:
@@ -838,6 +956,7 @@ def cmd_run(a) -> int:
     manifest["run_id"] = run_id
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", run_id):
         sys.exit("launch: run_id may only use letters, digits, - _ .")
+    apply_machine(a, manifest)
     resumable = manifest.get("format") == 2
     if resumable:
         bad = manifest_stream_errors(manifest)
@@ -1425,6 +1544,9 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
 
 def cmd_plan(a) -> int:
     need_env("VAST_API_KEY")
+    if a.manifest:
+        text = a.manifest if a.manifest.lstrip().startswith("{") else open(a.manifest, encoding="utf-8").read()
+        apply_machine(a, json.loads(text))
     log("query: " + offer_query(a) + " (type on-demand)")
     return 0 if choose(a) else 1
 
@@ -1488,6 +1610,11 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("--cheapest", action="store_true", help="test runs: take the cheapest $/hour offer, not the best cost per work")
         s.add_argument("--cpu-only", action="store_true",
                        help="CPU-only job: drop the GPU compute-capability/CUDA filters (they only matter for PyTorch training)")
+        s.add_argument("--gpus", type=int, default=0,
+                       help="GPU job: exactly this many GPUs on the machine (0 = no GPU need; the manifest's machine.gpus also sets it)")
+        s.add_argument("--min-gpu-ram-gb", type=int, default=0, help="GPU job: memory per GPU, in GB")
+        s.add_argument("--min-compute-cap", type=int, default=MIN_COMPUTE_CAP,
+                       help="GPU job: lowest compute capability x 100 (default 600 = 6.0, Pascal; below 1000 always)")
         s.add_argument("--offer-id", type=int, default=None,
                        help="rent exactly this vast.ai offer: one search by its id checks it (verified host, reliability >= 0.98, "
                             "whole machine, on-demand) and nothing else is searched; an offer failing a check is not rented")
@@ -1500,6 +1627,7 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("plan", help="dry run: rank offers and print the choice")
     offer_args(s)
+    s.add_argument("--manifest", default="", help="optional: a manifest (path or JSON) whose \"machine\" needs apply")
     s.set_defaults(fn=cmd_plan)
     s = sub.add_parser("run", help="rent, run, watch, destroy, report")
     offer_args(s)

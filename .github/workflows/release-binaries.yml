@@ -4,6 +4,11 @@ name: release-binaries
 # them to R2 as bin/<git sha>/<build>.tar.zst plus bin/<git sha>/manifest.json, which records the
 # SHA-256 of every tarball and every file. The rented machine checks all of them before running.
 # Objects are immutable: an existing bin/<sha>/manifest.json is never overwritten.
+# Each tarball also carries what network training needs on a rented machine (the runner's
+# `hybrid_rung` chunks, docs/m3-hybrid/vast.md): the training code python/nn (fortyone_nn/*.py,
+# pyproject.toml, uv.lock: PyTorch 2.14.1 cpu or cu126, pinned with hashes) and uv itself, at the
+# version PLAN §11.2 pins, checked against its published SHA-256 here and by the boot script's
+# manifest check on the machine.
 
 on:
   workflow_dispatch:
@@ -25,6 +30,9 @@ jobs:
       R2_ENDPOINT: ${{ vars.R2_S3_ENDPOINT }}
       R2_BUCKET: ${{ vars.R2_BUCKET }}
       SHA: ${{ github.sha }}
+      # uv for the training environment (PLAN §11.2), from astral-sh/uv's release, checked.
+      UV_VERSION: "0.13.0"
+      UV_SHA256: "1468ebd5a5541121837c5a2817b9972ba6090fa6caa3d142620850a47fb75154"
     steps:
       - uses: actions/checkout@v4
       - name: Install the pinned toolchain (rust-toolchain.toml)
@@ -46,14 +54,23 @@ jobs:
           # arena joins once its crate defines the binary.
           if grep -qs '^name = "arena"' crates/arena/Cargo.toml && [ -f crates/arena/src/main.rs ]; then BINS+=(arena); PKGS+=(-p arena); fi
           mkdir -p dist
+          # uv (one static binary for every build), checked against the pinned SHA-256.
+          curl -fsSLo uv.tar.gz "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${UV_SHA256}  uv.tar.gz" | sha256sum -c -
+          tar -xzf uv.tar.gz
+          # The training code: relative paths, the same inside the tarball.
+          PYFILES=(python/nn/pyproject.toml python/nn/uv.lock python/nn/fortyone_nn/*.py)
+          FILES=("${BINS[@]}" uv "${PYFILES[@]}")
           for level in v2 v3; do
             build="x86-64-$level"
             RUSTFLAGS="-C target-cpu=$build" cargo build --release --locked "${PKGS[@]}" --target-dir "target/$build"
             mkdir -p "stage/$build"
             for b in "${BINS[@]}"; do cp "target/$build/release/$b" "stage/$build/"; done
-            tar --zstd -cf "dist/$build.tar.zst" -C "stage/$build" "${BINS[@]}"
+            install -m 0755 uv-x86_64-unknown-linux-gnu/uv "stage/$build/uv"
+            for f in "${PYFILES[@]}"; do install -D -m 0644 "$f" "stage/$build/$f"; done
+            tar --zstd -cf "dist/$build.tar.zst" -C "stage/$build" "${FILES[@]}"
           done
-          python3 - "${BINS[@]}" <<'PY'
+          python3 - "${FILES[@]}" <<'PY'
           import hashlib, json, os, sys
           h = lambda p: hashlib.sha256(open(p, "rb").read()).hexdigest()
           builds = {}
@@ -66,7 +83,11 @@ jobs:
           PY
       - name: Smoke-test the v2 build
         if: steps.exists.outputs.skip != '1'
-        run: ./stage/x86-64-v2/difftest 200 1 && ./stage/x86-64-v2/runner hardware > /dev/null
+        run: |
+          ./stage/x86-64-v2/difftest 200 1 && ./stage/x86-64-v2/runner hardware > /dev/null
+          ./stage/x86-64-v2/uv --version
+          # The lock matches the project (the machine runs `uv sync --locked`).
+          ./stage/x86-64-v2/uv lock --check --project stage/x86-64-v2/python/nn
       - name: Upload to R2 (manifest last)
         if: steps.exists.outputs.skip != '1'
         shell: bash

@@ -8,6 +8,7 @@ in-memory world in which each rented instance follows a script (heartbeat, stall
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import io
 import json
@@ -51,6 +52,8 @@ class World:
         self.hidden_listings = 0  # `show instances` leaves out the newest instance this many more times
         self.destroy_fails = 0  # the next this many `destroy instance` calls fail (vast no longer knows the instance)
         self.destroy_calls = 0  # how many `destroy instance` calls were made
+        self.queries: list[str] = []  # the query of every full search
+        self.disks: list[str] = []  # the --disk of each created instance
 
     # ---- clock
     def time(self) -> float:
@@ -135,6 +138,7 @@ class World:
                     raise RuntimeError("vastai search offers failed: 429 Too Many Requests")
                 return [dict(o) for o in self.offers if o["id"] == int(args[2][3:])]
             self.searches += 1
+            self.queries.append(args[2])
             if self.forbid_search:
                 raise AssertionError("a search was made")
             if self.search_fails:
@@ -153,6 +157,7 @@ class World:
                                    "created": self.t, "label": args[args.index("--label") + 1]}
             self.created_on.append(oid)
             self.envs.append(args[args.index("--env") + 1])
+            self.disks.append(args[args.index("--disk") + 1])
             if how == "unreadable":
                 return None  # vast rented it, but printed something that is not JSON
             if how == "late":
@@ -862,6 +867,118 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(w.created_on, [])
         m["streams"][0]["params"]["threads"] = m["streams"][0].pop("threads")
         self.assertEqual(launch.manifest_stream_errors(m), [])
+
+    def test_gpu_job_query_keeps_every_safety_filter(self):
+        a = argparse.Namespace(
+            min_reliability=0.98, min_cores=128, min_ram_gb=64, disk_gb=80, max_net_cost=0.1, max_dph=None,
+            cpu_only=True, gpus=1, min_gpu_ram_gb=4, min_compute_cap=600)
+        q = launch.offer_query(a).split()
+        for want in ("num_gpus=1", "gpu_ram>=4", "compute_cap>=600", "compute_cap<1000", "cuda_vers>=12.6",
+                     "gpu_frac=1", "verified=true", "rentable=true", "reliability>0.98", "cpu_cores_effective>=128",
+                     "cpu_ram>=64", "disk_space>=80"):
+            self.assertIn(want, q)
+        self.assertNotIn("num_gpus>=1", q)
+        # A higher capability floor is kept; one below the build's 6.0 is raised to it.
+        a.min_compute_cap = 860
+        self.assertIn("compute_cap>=860", launch.offer_query(a).split())
+        a.min_compute_cap = 500
+        self.assertIn("compute_cap>=600", launch.offer_query(a).split())
+        # CPU jobs are unchanged: any GPU, and the PyTorch filters only without --cpu-only.
+        a.gpus, a.min_gpu_ram_gb = 0, 0
+        q = launch.offer_query(a).split()
+        self.assertIn("num_gpus>=1", q)
+        self.assertFalse(any(x.startswith(("compute_cap", "cuda_vers", "gpu_ram")) for x in q), q)
+        a.cpu_only = False
+        self.assertIn("cuda_vers>=12.6", launch.offer_query(a).split())
+
+    def test_manifest_machine_needs_rent_one_gpu_machine(self):
+        # The hybrid rung's manifest asks for 1 GPU with 4 GB, 128 cores and 80 GB of disk. Under the
+        # workflow's default --cpu-only the GPU filters still apply; offers without a usable GPU
+        # (too little memory, a Blackwell card the cu126 build cannot run, an old driver, two GPUs)
+        # are skipped even though the search returned them, and the cheapest one that fits is rented.
+        a2000 = dict(num_gpus=1, gpu_name="RTX A2000", gpu_ram=6138, compute_cap=860, cuda_max_good=12.8,
+                     cpu_cores_effective=384, cpu_name="AMD EPYC 9654 96-Core Processor")
+        offers = [offer(1, 11, 0.4, **{**a2000, "gpu_ram": 2048}),
+                  offer(2, 12, 0.5, **{**a2000, "compute_cap": 1200, "gpu_name": "RTX 5090"}),
+                  offer(3, 13, 0.6, **{**a2000, "cuda_max_good": 12.4}),
+                  offer(4, 14, 0.7, **{**a2000, "num_gpus": 2}),
+                  offer(5, 15, 1.02, **a2000),
+                  offer(6, 16, 1.5, **a2000)]
+        w = World(offers, ["done:2"])
+        m = {"format": 2, "run_id": RUN, "run_seed": 1,
+             "machine": {"gpus": 1, "min_gpu_ram_gb": 4, "min_cores": 128, "disk_gb": 80},
+             "streams": [{"name": "rung", "priority": 1, "kind": "hybrid_rung", "chunks": 1,
+                          "params": {"threads": "all"}}]}
+        code, report = self.run_launch(w, m, "--cpu-only", "--cheapest")
+        self.assertEqual((code, report["outcome"]), (0, "DONE"))
+        self.assertEqual(w.created_on, [5])
+        self.assertEqual(w.disks, ["80"])
+        q = w.queries[0].split()
+        for want in ("num_gpus=1", "gpu_ram>=4", "compute_cap>=600", "compute_cap<1000", "cuda_vers>=12.6",
+                     "cpu_cores_effective>=128", "disk_space>=80", "gpu_frac=1", "verified=true"):
+            self.assertIn(want, q)
+        self.assertIn("--cpu-only is ignored", self.log)
+        self.assertIn("RTX A2000 (6138 MB, cc 860, CUDA 12.8)", self.log)
+
+    def test_offer_chosen_by_id_must_meet_the_gpu_needs(self):
+        a2000 = dict(num_gpus=1, gpu_name="RTX A2000", gpu_ram=6138, compute_cap=860, cuda_max_good=12.8)
+        m = {"run_id": RUN, "machine": {"gpus": 1, "min_gpu_ram_gb": 4},
+             "chunk": {"difftest": {"matches": 1, "seed": 1}}}
+        cases = [({"compute_cap": 1200}, "compute capability 1200 outside 600..999"),
+                 ({"compute_cap": 520}, "compute capability 520"),
+                 ({"gpu_ram": 3000}, "GPU memory 3000 MB, below --min-gpu-ram-gb 4"),
+                 ({"num_gpus": 4}, "4 GPUs, not the 1 asked for"),
+                 ({"cuda_max_good": 12.2}, "driver supports CUDA 12.2, below 12.6")]
+        for kw, word in cases:
+            w = World([offer(500, 50, 1.0, **{**a2000, **kw})], ["done:1"])
+            w.forbid_search = True
+            with self.assertRaises(SystemExit) as e:
+                self.run_launch(w, m, "--offer-id", "500")
+            self.assertIn(word, str(e.exception), kw)
+            self.assertEqual(w.created_on, [], kw)
+        w = World([offer(500, 50, 1.0, **a2000)], ["done:1"])
+        w.forbid_search = True
+        code, _ = self.run_launch(w, m, "--offer-id", "500")
+        self.assertEqual((code, w.created_on), (0, [500]))
+        # The same needs from the command line.
+        w = World([offer(500, 50, 1.0, **{**a2000, "gpu_ram": 3000})], ["done:1"])
+        w.forbid_search = True
+        with self.assertRaises(SystemExit):
+            self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}},
+                            "--offer-id", "500", "--gpus", "1", "--min-gpu-ram-gb", "4")
+        self.assertEqual(w.created_on, [])
+
+    def test_manifest_machine_object_is_checked_before_renting(self):
+        base = {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}}
+        for machine, word in (({"gpu": 1}, "unknown keys ['gpu']"), ({"gpus": "one"}, "machine.gpus must be a number"),
+                              ({"disk_gb": -1}, "machine.disk_gb must be a number"),
+                              ({"gpus": 1.5}, "machine.gpus must be a whole number"), ([1], "must be an object")):
+            w = World([offer(1, 11, 1.0)], ["done:1"])
+            with self.assertRaises(SystemExit) as e:
+                self.run_launch(w, {**base, "machine": machine})
+            self.assertIn(word, str(e.exception), machine)
+            self.assertEqual((w.created_on, w.searches), ([], 0), machine)
+        w = World([offer(1, 11, 1.0)], ["done:1"])
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, {**base, "machine": {"gpus": 1}}, "--gpus", "2")
+        self.assertIn("the manifest asks for 1 GPUs but --gpus says 2", str(e.exception))
+        # Minimums take the larger of the two.
+        a = argparse.Namespace(gpus=0, min_gpu_ram_gb=8, min_compute_cap=600, min_cores=256,
+                                                          min_ram_gb=32, disk_gb=20, cpu_only=False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            launch.apply_machine(a, {"machine": {"gpus": 1, "min_gpu_ram_gb": 4, "min_cores": 128, "min_ram_gb": 64,
+                                                 "disk_gb": 80}})
+        self.assertEqual((a.gpus, a.min_gpu_ram_gb, a.min_cores, a.min_ram_gb, a.disk_gb), (1, 8, 256, 64, 80))
+
+    def test_poll_line_shows_each_chunks_step(self):
+        hb = {"seq": 7, "phase": "chunks", "progress": {"chunk_steps": {
+            "rung/0": {"step": "train", "train_epoch": 3, "train_epochs": 60, "train_batches_done": 1200,
+                       "train_batches": 3907, "device": "cuda"}}}}
+        line = launch.poll_line(hb, 12.0, 0.2, 2.0)
+        self.assertIn("rung/0: train (epoch 4/60, 1,200/3,907 batches, on cuda)", line)
+        hb["progress"]["chunk_steps"]["rung/0"] = {"step": "labels random (1 of 3)", "rows_done": 250000,
+                                                   "rows_total": 3200000}
+        self.assertIn("rung/0: labels random (1 of 3) (250,000/3,200,000 rows)", launch.poll_line(hb, 1.0, 0.0, 99.0))
 
     def test_offer_chosen_by_id_must_have_the_ram_and_cores_asked_for(self):
         # Review E: --min-ram-gb and --min-cores apply to a named offer too (vast's cpu_ram in MB).

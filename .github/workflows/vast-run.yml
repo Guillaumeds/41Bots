@@ -8,6 +8,9 @@ name: vast-run
 # the done-list (at most 3). Format-2 inputs must be in R2 first (launch.py put-input FILE).
 # If the chosen offer is taken before it can be rented, the next-best offer is tried.
 # Set dry_run to only print the offer that would be chosen.
+# GPU jobs (network training, docs/m3-hybrid/vast.md): a manifest's top-level "machine" object
+# ({"gpus": 1, "min_gpu_ram_gb": 4, "min_cores": 128, "disk_gb": 80}) or the gpus /
+# min_gpu_ram_gb / disk_gb inputs; a GPU need overrides cpu_only.
 # Runs longer than this job's 6-hour limit: after 330 minutes the launcher hands the machine over
 # (it keeps working until DONE or max_dollars, or a deadline only if max_minutes was set) and
 # vast-cleanup.yml watches it every 15 minutes; runs/<run_id>/closed.json records how it ended.
@@ -37,6 +40,15 @@ on:
         description: "CPU-only job: ignore the GPU type when choosing a machine"
         type: boolean
         default: true
+      gpus:
+        description: "GPU job (network training): exactly this many GPUs, with the PyTorch cu126 filters (0 = as the manifest's machine.gpus says, none otherwise)"
+        default: "0"
+      min_gpu_ram_gb:
+        description: "GPU job: memory per GPU in GB (0 = as the manifest says)"
+        default: "0"
+      disk_gb:
+        description: "Container disk in GB (default 20; a hybrid rung needs about 80: the GPU PyTorch build and the label shards)"
+        default: "20"
       low_cpu_pct:
         description: "Low-CPU watchdog threshold in % (default 85; lower only for runs with known serial tails)"
         default: "85"
@@ -110,6 +122,9 @@ jobs:
           MIN_CORES: ${{ inputs.min_cores }}
           MIN_RAM_GB: ${{ inputs.min_ram_gb }}
           MIN_RELIABILITY: ${{ inputs.min_reliability }}
+          GPUS: ${{ inputs.gpus }}
+          MIN_GPU_RAM_GB: ${{ inputs.min_gpu_ram_gb }}
+          DISK_GB: ${{ inputs.disk_gb }}
           MAX_MINUTES: ${{ inputs.max_minutes }}
           LOW_CPU_PCT: ${{ inputs.low_cpu_pct }}
           LOW_CPU_S: ${{ inputs.low_cpu_s }}
@@ -137,7 +152,9 @@ jobs:
           fi
           if [ "$DRY_RUN" = "true" ]; then
             # Prints the offer that would be rented (the named one with offer_id, else the search's choice); rents nothing.
-            python3 python/launcher/launch.py plan --min-cores "$MIN_CORES" --min-ram-gb "${MIN_RAM_GB:-32}" --min-reliability "${MIN_RELIABILITY:-0.98}" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} ${{ inputs.cheapest && '--cheapest' || '' }} $OFFER_ARGS
+            # The manifest's "machine" needs (GPUs, cores, disk) apply to the plan too.
+            python3 python/launcher/launch.py plan --manifest "$MANIFEST" --min-cores "$MIN_CORES" --min-ram-gb "${MIN_RAM_GB:-32}" --min-reliability "${MIN_RELIABILITY:-0.98}" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} ${{ inputs.cheapest && '--cheapest' || '' }} \
+              --gpus "${GPUS:-0}" --min-gpu-ram-gb "${MIN_GPU_RAM_GB:-0}" --disk-gb "${DISK_GB:-20}" $OFFER_ARGS
             exit 0
           fi
           # A blank run_id gets a timestamp from the launcher; resume_from goes into the manifest unless it has one.
@@ -159,6 +176,7 @@ jobs:
           python3 python/launcher/launch.py run --manifest "$MANIFEST" --min-cores "$MIN_CORES" --min-ram-gb "${MIN_RAM_GB:-32}" --min-reliability "${MIN_RELIABILITY:-0.98}" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} \
             --max-minutes "${MAX_MINUTES:-0}" --low-cpu-pct "$LOW_CPU_PCT" --low-cpu-s "${LOW_CPU_S:-300}" --poll-s "${POLL_S:-60}" --max-dollars "${MAX_DOLLARS:-20}" \
             --image "$IMAGE" --bin-sha "$BIN_SHA" --state-file instance-id.txt ${{ inputs.cheapest && '--cheapest' || '' }} --handover-min 330 \
+            --gpus "${GPUS:-0}" --min-gpu-ram-gb "${MIN_GPU_RAM_GB:-0}" --disk-gb "${DISK_GB:-20}" \
             $OFFER_ARGS
       - name: Cancelled - ask the run to stop and wait (at most 5 minutes) for it to upload what it finished
         if: cancelled() && hashFiles('instance-id.txt.run-id') != ''
