@@ -1387,6 +1387,7 @@ fn chunk_step(dir: &Path) -> Option<Value> {
                 "groups_found",
                 "groups_confirmed",
                 "groups_remaining",
+                "groups_failing",
                 "worst_group",
                 "shape",
                 "shape_step",

@@ -62,34 +62,41 @@
 //!    only).
 //! 5. **Targeted harvest** (`search labels --source harvest --harvest-keep PRED --harvest-cap 0
 //!    --keep-cap audit_keep_cap`, network `r` driving at trick 3 and earlier, exact at trick 4):
-//!    the round's confirmed groups (`audit_keep_cap` in-group positions per decision over their
-//!    union), `audit_target_rows` rows, weight `audit_weight`; the shard joins the next round's
-//!    training. Not made when the round is flat.
+//!    the round's confirmed groups and the *failing groups* (every group whose decision-level
+//!    bound failed in this or an earlier round and has not passed since: it stays a target until
+//!    it passes; `round-<r>/targets.json`), `audit_keep_cap` in-group positions per decision over
+//!    their union, `audit_target_rows` rows, weight `audit_weight`; the shard joins the next
+//!    round's training. A round that confirms nothing new but has failing groups targets those
+//!    ("re-targeting N groups still failing"). Not made when the round is flat.
 //!
 //! **Stop**: *flat* when the golden set's overall row passes (decision loss bound, every team's
-//! bias; the bands are reported only) and no group is remaining or not yet measured, confirmed
-//! groups or not (`flat after round r`); when a round's audit confirms nothing (nothing to
-//! target) the loop ends there, every waiting mini set made first so the decision is complete;
-//! *round limit* after `audit_rounds` rounds; *stopped* on the stop file or the launcher's STOP
-//! (after the current step, everything so far written and uploaded), the reason naming a dollar
-//! cap when the stop does.
+//! bias; the bands are reported only), no group is failing and none is waiting to be measured,
+//! confirmed groups or not (`flat after round r`); *nothing to target* when a round confirms
+//! nothing, no group is still failing, and the overall row fails (every waiting mini set is made
+//! first, so the decision is complete); *capacity ladder exhausted*; *round limit* after
+//! `audit_rounds` rounds; *stopped* on the stop file or the launcher's STOP (the running step is
+//! stopped, everything so far written and uploaded), the reason naming a dollar cap when the
+//! stop does.
 //!
 //! **GPU and CPU together** (plan §4, owner 2026-10-16 21:15): on a GPU with `overlap`, round `r`'s
 //! training starts at once in the background (`Rung::start_train_with`, one child beside the
-//! steps), and the CPU steps that do not need network `r` run beside it on the threads it leaves:
-//! in round 1 the golden set (when generated); for round `r − 1` its golden slices, mini golden
-//! sets and targeted harvest (written into the directory the trainer watches, `--watch-dir …
-//! --expect`, so it joins between epochs; the trainer's time limit counts again from when it
-//! lands; when the golden slices already rule flatness out the harvest runs before the mini sets);
-//! then round `r`'s audit shard. If round `r − 1` turns out flat, the training of round `r` is
-//! stopped unused and the loop ends. On the CPU (or `overlap` false) the same steps run one after
+//! steps) when round `r − 1` has groups to target (confirmed, or still failing), and the CPU steps
+//! that do not need network `r` run beside it on the threads it leaves: in round 1 the golden set
+//! (when generated); for round `r − 1` its golden slices, mini golden sets and targeted harvest
+//! (written into the directory the trainer watches, `--watch-dir … --expect`, so it joins between
+//! epochs; the trainer's time limit counts again from when it lands; when the checks of earlier
+//! mini sets already rule flatness out the harvest runs before the new mini sets are made); then
+//! round `r`'s audit shard. If round `r − 1` turns out flat (or has nothing to target), the
+//! training of round `r` is stopped unused and the loop ends. A round with nothing confirmed and
+//! nothing failing is decided before any further training starts. On the CPU (or `overlap` false) the same steps run one after
 //! another, the targeted harvest before the training it feeds. Either way every answer is the
 //! same: each child gets a fixed thread count and the labels, checks and sets are byte-identical
 //! for any.
 //!
 //! **Reporting**: every heartbeat carries `round` (`r of R`), `step`, `groups_found` (the latest
 //! audit's candidates on half A), `groups_confirmed` (its confirmed groups), `groups_remaining`
-//! (groups over 0.01% at the decision level after the latest checks), `worst_group` (`name:
+//! (groups measured over 0.01% at the decision level by the latest checks), `groups_failing` (the
+//! failing groups carried across rounds, the targets still owed), `worst_group` (`name:
 //! weight …, bias …, SD …`, the auditor's most severe), `shape` and `shape_step` (`k of n`: the
 //! network's hidden widths and their step on the ladder), `thresholds` (the latest audit's gamma,
 //! alpha_bias, alpha_sd, fdr), `slices_failing` (`k of n`, with the worst) and `last_check` (the
@@ -413,6 +420,9 @@ struct Group {
     confirmed: Vec<u64>,
     /// Its mini golden set, once made.
     mini: Option<Mini>,
+    /// The round its decision-level bound failed, while it has not passed since: it stays a
+    /// target of every targeted harvest until it passes (the failing groups).
+    failing_since: Option<u64>,
 }
 
 /// A group's mini golden set.
@@ -648,6 +658,85 @@ fn capacity_check(st: &mut Loop, p: &mut Round) -> bool {
     no_gain
 }
 
+/// What a round's checks decided (`Rung::after_round`).
+#[derive(Debug, PartialEq, Eq)]
+enum After {
+    /// No group failing or waiting to be measured, and the golden set's overall row passes.
+    Flat,
+    /// Not flat, and no group confirmed now or still failing: nothing to target.
+    Nothing,
+    /// Not flat; with `target`, the targeted harvest is made.
+    Go,
+}
+
+/// Every group of the union at the decision level after round `r`'s checks, in the union's
+/// order: its golden slice when that holds `big` decisions, else its mini golden set (`minis`:
+/// this round's measurements), else not yet measured.
+fn judge(st: &Loop, golden: &Value, minis: &[Value], r: u64) -> Vec<Value> {
+    let big = st.s.mini_decisions;
+    st.groups
+        .iter()
+        .map(|g| {
+            let sl = golden["slices"]
+                .as_array()
+                .and_then(|a| a.iter().find(|x| x["name"] == g.name.as_str()).cloned());
+            let n = sl
+                .as_ref()
+                .and_then(|x| x["decisions"].as_u64())
+                .unwrap_or(0);
+            let mini = minis.iter().find(|x| x["group"] == g.name.as_str());
+            let (basis, bound, pass) = if n >= big {
+                let x = sl.unwrap_or(Value::Null);
+                ("golden slice", x["loss_upper95"].clone(), x["pass"].clone())
+            } else {
+                match mini {
+                    Some(m) if m["pass"].is_null() => ("unmeasurable", Value::Null, Value::Null),
+                    Some(m) => (
+                        "mini golden set",
+                        m["loss_upper95"].clone(),
+                        m["pass"].clone(),
+                    ),
+                    None => ("not yet measured", Value::Null, Value::Null),
+                }
+            };
+            json!({ "group": g.name, "weight": g.entry["weight"], "sd": g.entry["sd"],
+                    "bias": g.entry["bias"], "golden_decisions": n, "basis": basis,
+                    "loss_upper95": bound, "pass": pass,
+                    "confirmed_this_round": g.confirmed.last() == Some(&r) })
+        })
+        .collect()
+}
+
+/// The failing groups after round `r`'s measurements (`judged`, in the union's order): a group
+/// whose bound fails joins them (or stays), one whose bound passes leaves them, one not measured
+/// keeps its state.
+fn update_failing(st: &mut Loop, judged: &[Value], r: u64) {
+    for (g, x) in st.groups.iter_mut().zip(judged) {
+        match x["pass"].as_bool() {
+            Some(false) => {
+                g.failing_since.get_or_insert(r);
+            }
+            Some(true) => g.failing_since = None,
+            None => {}
+        }
+    }
+}
+
+/// The failing groups (the carried set).
+fn failing(st: &Loop) -> Vec<usize> {
+    (0..st.groups.len())
+        .filter(|&i| st.groups[i].failing_since.is_some())
+        .collect()
+}
+
+/// The stop reason when nothing is left to target after round `r`.
+fn nothing_reason(r: u64) -> String {
+    format!(
+        "nothing to target after round {r}: no group confirmed and none still failing, but the \
+         golden set's overall row fails (the next lever is network capacity)"
+    )
+}
+
 /// The stop reason of a flat network after round `r`.
 fn flat_reason(st: &Loop, r: u64) -> String {
     let n = st.groups.len();
@@ -767,6 +856,7 @@ impl Rung<'_> {
     /// The rounds; returns the stop reason.
     fn audit_rounds(&mut self, st: &mut Loop) -> Result<String, String> {
         let rmax = st.s.rounds;
+        // The round whose checks and targeted harvest run beside the next training.
         let mut prev: Option<Round> = None;
         for r in 1..=rmax {
             self.audit_hb
@@ -790,9 +880,10 @@ impl Rung<'_> {
             let bg = self.bg_train.is_some() || (self.device == "cuda" && self.p.overlap);
             let shard;
             if bg {
-                // Round r trains at once (round r - 1 confirmed groups, so its targeted shard is
-                // coming: the trainer watches for it); if round r - 1 turns out flat at the
-                // decision level the training is stopped unused.
+                // Round r trains at once: round r - 1 has groups to target (confirmed, or still
+                // failing), so its targeted shard is coming and the trainer watches for it; if
+                // round r - 1 turns out flat (or has nothing to target after all) the training is
+                // stopped unused.
                 let watch = st.wdir.join(format!("train-r{r}"));
                 if self.bg_train.is_none() {
                     fs::create_dir_all(&watch).map_err(|e| e.to_string())?;
@@ -823,11 +914,25 @@ impl Rung<'_> {
                 if r == 1 {
                     st.golden = Some(self.golden()?);
                 }
-                if let Some(p) = prev.take()
-                    && self.after_round(st, &p, Some(&watch), true, false)?
-                {
-                    self.stop_train(&format!("{step}: not needed, round {} is flat", p.r));
-                    return Ok(flat_reason(st, p.r));
+                if let Some(p) = prev.take() {
+                    match self.after_round(st, &p, Some(&watch), true)? {
+                        After::Flat => {
+                            self.stop_train(&format!("{step}: not needed, round {} is flat", p.r));
+                            self.audit_hb
+                                .insert("round".into(), json!(format!("{} of {rmax}", p.r)));
+                            return Ok(flat_reason(st, p.r));
+                        }
+                        After::Nothing => {
+                            self.stop_train(&format!(
+                                "{step}: not needed, nothing to target after round {}",
+                                p.r
+                            ));
+                            self.audit_hb
+                                .insert("round".into(), json!(format!("{} of {rmax}", p.r)));
+                            return Ok(nothing_reason(p.r));
+                        }
+                        After::Go => {}
+                    }
                 }
                 shard = self.audit_shard(st, r)?;
                 self.finish_train_as(&key, &step)?;
@@ -835,10 +940,12 @@ impl Rung<'_> {
                 if r == 1 {
                     st.golden = Some(self.golden()?);
                 }
-                if let Some(p) = prev.take()
-                    && self.after_round(st, &p, None, true, false)?
-                {
-                    return Ok(flat_reason(st, p.r));
+                if let Some(p) = prev.take() {
+                    match self.after_round(st, &p, None, true)? {
+                        After::Flat => return Ok(flat_reason(st, p.r)),
+                        After::Nothing => return Ok(nothing_reason(p.r)),
+                        After::Go => {}
+                    }
                 }
                 shard = self.audit_shard(st, r)?;
                 let mut files = st.train.clone();
@@ -847,29 +954,13 @@ impl Rung<'_> {
             }
             let mut round = self.audit_round(st, r, &net_dir, &key, shard)?;
             let no_gain = capacity_check(st, &mut round);
-            if round.confirmed.is_empty() {
-                // Nothing to target: the loop ends here, so every group still waiting for its
-                // mini golden set gets one now and the decision is complete.
-                return Ok(if self.after_round(st, &round, None, false, true)? {
-                    flat_reason(st, r)
-                } else {
-                    format!(
-                        "nothing confirmed to target in round {r}, and the decision-level checks \
-                         fail ({} groups remaining): the next lever is network capacity",
-                        self.audit_hb
-                            .get("groups_remaining")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0)
-                    )
-                });
-            }
             if no_gain && r < rmax {
                 if st.step + 1 < st.s.shapes.len() {
                     // The next round retrains from scratch, one step up, on all the data so far.
                     st.step += 1;
                     round.capacity["next_shape"] = json!(shape_text(&st.s.shapes[st.step]));
                 } else {
-                    if self.after_round(st, &round, None, false, false)? {
+                    if self.after_round(st, &round, None, false)? == After::Flat {
                         return Ok(flat_reason(st, r));
                     }
                     return Ok(format!(
@@ -881,28 +972,44 @@ impl Rung<'_> {
                 }
             }
             if r == rmax {
-                if self.after_round(st, &round, None, false, false)? {
+                if self.after_round(st, &round, None, false)? == After::Flat {
                     return Ok(flat_reason(st, r));
                 }
-                let left = self
-                    .audit_hb
-                    .get("groups_remaining")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
+                let left = failing(st).len();
                 return Ok(format!(
-                    "round limit ({rmax} rounds; {left} groups remain at the decision level: the \
-                     next lever is network capacity)"
+                    "round limit ({rmax} rounds; {left} groups still failing at the decision \
+                     level: the next lever is network capacity)"
                 ));
             }
-            prev = Some(round);
+            if round.confirmed.is_empty() && failing(st).is_empty() {
+                // Nothing confirmed and nothing failing: no targeted shard is expected, so the
+                // round is decided before another training starts (a group measured for the
+                // first time may still fail, and is then targeted into the next training).
+                match self.after_round(st, &round, None, true)? {
+                    After::Flat => return Ok(flat_reason(st, r)),
+                    After::Nothing => return Ok(nothing_reason(r)),
+                    After::Go => {}
+                }
+            } else {
+                prev = Some(round);
+            }
         }
         Err("hybrid_rung: the audit loop ran no round".into())
     }
 
     /// Stops the background training unused (`why` in the log and `rung.json`'s steps).
+    /// Its output (a partial network) is removed, so the bundle holds only networks that were
+    /// used.
     fn stop_train(&mut self, why: &str) {
         self.ctx.kill_bg();
-        self.bg_train = None;
+        if let Some(bg) = self.bg_train.take() {
+            let _ = fs::remove_dir_all(&bg.dir);
+            let _ = fs::remove_file(&bg.progress);
+            // The round's directory, when the network was all it held.
+            if let Some(parent) = bg.dir.parent() {
+                let _ = fs::remove_dir(parent);
+            }
+        }
         self.beside.retain(|b| b.1 != "train");
         println!("runner: hybrid_rung: {why}");
         self.steps.push(json!({ "step": why, "seconds": 0.0 }));
@@ -1144,6 +1251,7 @@ impl Rung<'_> {
                         entry: Value::Null,
                         confirmed: Vec::new(),
                         mini: None,
+                        failing_since: None,
                     });
                     st.groups.len() - 1
                 }
@@ -1220,21 +1328,23 @@ impl Rung<'_> {
     /// (with `target`) the targeted harvest, into `watch` when a training waits for it. Decides
     /// at the decision level (plan §4, decision of 2026-10-16): a group is judged by its golden
     /// slice when that holds at least `audit_mini_decisions` decisions, else by its mini golden
-    /// set; it is *remaining* when that bound is over 0.01%, *not yet measured* while it waits for
-    /// its mini set (at most `audit_mini_sets` new ones a round, in order of weight × SD²; all of
-    /// them with `uncapped`). Returns whether the network is flat: the golden set's overall row
-    /// passes (decision loss bound and every team's bias) and no group is remaining or not yet
-    /// measured. When the golden check already rules flatness out, the targeted harvest runs
-    /// before the mini sets (a training may be waiting for it); when flatness depends on the
-    /// mini sets, they run first and a flat network harvests nothing.
+    /// set; a group whose bound fails joins the *failing groups* and stays a target of every
+    /// targeted harvest until its bound passes; one waiting for its mini set is *not yet
+    /// measured* (at most `audit_mini_sets` new sets a round, in order of weight × SD²; every
+    /// waiting one when the round confirmed nothing new, so its decision is complete).
+    ///
+    /// Order: the golden slices, then the mini sets made in earlier rounds (a check each); when
+    /// that already rules flatness out (the overall row fails, or a group fails) the targeted
+    /// harvest runs next (a training may be waiting for it), before the new mini sets are made;
+    /// otherwise the new mini sets come first and a flat network harvests nothing. The targets
+    /// are the round's confirmed groups and the failing groups, as known when the harvest runs.
     fn after_round(
         &mut self,
         st: &mut Loop,
         p: &Round,
         watch: Option<&Path>,
         target: bool,
-        uncapped: bool,
-    ) -> Result<bool, String> {
+    ) -> Result<After, String> {
         let r = p.r;
         let rdir = st.dir.join(format!("round-{r}"));
         fs::create_dir_all(&rdir).map_err(|e| e.to_string())?;
@@ -1283,30 +1393,29 @@ impl Rung<'_> {
             .ok_or_else(|| format!("hybrid_rung: hybrid-check wrote no {}", hc_json.display()))?;
         let golden = check_summary(&hc);
         let overall_pass = golden["overall_pass"].as_bool().unwrap_or(false);
-        let slice = |name: &str| -> Option<Value> {
+        let big = st.s.mini_decisions;
+        // The mini golden sets of earlier rounds, re-measured with this network.
+        let mut minis = Vec::new();
+        for i in 0..st.groups.len() {
+            if st.groups[i].mini.is_some() {
+                minis.push(self.check_mini(st, i, &p.net, &rdir, r)?);
+            }
+        }
+        let judged = judge(st, &golden, &minis, r);
+        update_failing(st, &judged, r);
+        let mut targeted = None;
+        if target && (!overall_pass || !failing(st).is_empty()) {
+            targeted = self.target(st, p, &rdir, watch)?;
+        }
+        // New mini golden sets: made once for a group whose slice is too small (the largest
+        // expected share of the loss first: weight × SD²), checked with every later network.
+        let slice_n = |name: &str| {
             golden["slices"]
                 .as_array()
-                .and_then(|a| a.iter().find(|x| x["name"] == name).cloned())
-        };
-        let slice_n = |name: &str| {
-            slice(name)
+                .and_then(|a| a.iter().find(|x| x["name"] == name))
                 .and_then(|x| x["decisions"].as_u64())
                 .unwrap_or(0)
         };
-        let big = st.s.mini_decisions;
-        // A group judged on its own golden slice that fails rules flatness out at once.
-        let slice_fails = st.groups.iter().any(|g| {
-            slice(&g.name).is_some_and(|x| {
-                x["decisions"].as_u64().unwrap_or(0) >= big && x["pass"].as_bool() == Some(false)
-            })
-        });
-        let mut targeted = None;
-        if target && (!overall_pass || slice_fails) {
-            let preds = p.preds.clone().expect("a round with groups to target");
-            targeted = Some(self.targeted_harvest(st, p, &preds, watch)?);
-        }
-        // Mini golden sets: made once for a group whose slice is too small (the largest expected
-        // share of the loss first: weight × SD²), checked with every round's network.
         let mut want: Vec<usize> = (0..st.groups.len())
             .filter(|&i| st.groups[i].mini.is_none() && slice_n(&st.groups[i].name) < big)
             .collect();
@@ -1322,7 +1431,7 @@ impl Rung<'_> {
                 .total_cmp(&severity(&st.groups[a].entry))
                 .then(a.cmp(&b))
         });
-        let cap = if uncapped {
+        let cap = if p.confirmed.is_empty() {
             usize::MAX
         } else {
             st.s.mini_sets as usize
@@ -1335,105 +1444,34 @@ impl Rung<'_> {
         for &i in want.iter().take(cap) {
             let m = self.make_mini(st, i, &p.net, r)?;
             st.groups[i].mini = Some(m);
+            minis.push(self.check_mini(st, i, &p.net, &rdir, r)?);
         }
-        let mut minis = Vec::new();
-        for i in 0..st.groups.len() {
-            let Some(m) = &st.groups[i].mini else {
-                continue;
-            };
-            let (id, mpred, mdec, mworlds, kept, drawn) = (
-                m.id.clone(),
-                m.pred.clone(),
-                m.decisions.clone(),
-                m.worlds.clone(),
-                m.kept,
-                m.drawn,
-            );
-            let (made, mdir) = (m.made_round, m.dir.clone());
-            let rel = mdir
-                .strip_prefix(&self.out)
-                .map_or_else(|_| mdir.display().to_string(), |x| x.display().to_string());
-            let name = st.groups[i].name.clone();
-            let Some(mworlds) = mworlds else {
-                minis.push(json!({ "group": name, "mini": id, "decisions": 0, "drawn": drawn,
-                                   "made_round": made, "dir": rel, "pass": Value::Null,
-                                   "note": "no decision of the generator reaches this group at the share: \
-                                            unmeasurable at the decision level (the overall check covers it)" }));
-                continue;
-            };
-            let mj = rdir.join(format!("mini-{id}.json"));
-            let mt = rdir.join(format!("mini-{id}.txt"));
-            let c = self.check_cmd(&p.net, &mdec, &mworlds, Some(&mpred), &mj, 0.0);
-            self.audit_step(
-                &format!("mini golden set {id} (round {r})"),
-                c,
-                &format!("hybrid/mini-{id}-r{r}.log"),
-                Some(&mt),
-                None,
-                None,
-            )?;
-            let x = read_json(&mj)
-                .ok_or_else(|| format!("hybrid_rung: hybrid-check wrote no {}", mj.display()))?;
-            let all = &x["groups"][0]["summary"];
-            minis.push(
-                json!({ "group": name, "mini": id, "decisions": kept, "drawn": drawn,
-                               "made_round": made, "dir": rel, "mean_loss": all["mean_loss"],
-                               "loss_upper95": all["loss_upper95"],
-                               "pass": all["loss_pass"].as_bool().unwrap_or(false),
-                               "report": format!("audit/round-{r}/mini-{id}.txt") }),
-            );
-        }
-        // Every group at the decision level: its slice when large enough, else its mini set.
-        let judged: Vec<Value> = st
-            .groups
-            .iter()
-            .map(|g| {
-                let sl = slice(&g.name);
-                let n = sl
-                    .as_ref()
-                    .and_then(|x| x["decisions"].as_u64())
-                    .unwrap_or(0);
-                let mini = minis.iter().find(|x| x["group"] == g.name.as_str());
-                let (basis, bound, pass) = if n >= big {
-                    let x = sl.unwrap_or(Value::Null);
-                    ("golden slice", x["loss_upper95"].clone(), x["pass"].clone())
-                } else {
-                    match mini {
-                        Some(m) if m["pass"].is_null() => {
-                            ("unmeasurable", Value::Null, Value::Null)
-                        }
-                        Some(m) => (
-                            "mini golden set",
-                            m["loss_upper95"].clone(),
-                            m["pass"].clone(),
-                        ),
-                        None => ("not yet measured", Value::Null, Value::Null),
-                    }
-                };
-                json!({ "group": g.name, "weight": g.entry["weight"], "sd": g.entry["sd"],
-                        "bias": g.entry["bias"], "golden_decisions": n, "basis": basis,
-                        "loss_upper95": bound, "pass": pass,
-                        "confirmed_this_round": g.confirmed.last() == Some(&r) })
-            })
-            .collect();
-        let remaining: Vec<String> = judged
+        // Every group at the decision level.
+        let judged = judge(st, &golden, &minis, r);
+        update_failing(st, &judged, r);
+        let remaining = judged
             .iter()
             .filter(|x| x["pass"].as_bool() == Some(false))
-            .map(|x| x["group"].as_str().unwrap_or("?").to_string())
-            .collect();
+            .count();
         let pending = judged
             .iter()
             .filter(|x| x["basis"] == "not yet measured")
             .count();
-        let flat = overall_pass && remaining.is_empty() && pending == 0;
+        let n_failing = failing(st).len();
+        let flat = overall_pass && n_failing == 0 && pending == 0;
+        let mut verdict = if flat { After::Flat } else { After::Go };
         if target && !flat && targeted.is_none() {
-            let preds = p.preds.clone().expect("a round with groups to target");
-            targeted = Some(self.targeted_harvest(st, p, &preds, watch)?);
+            targeted = self.target(st, p, &rdir, watch)?;
+            if targeted.is_none() {
+                verdict = After::Nothing;
+            }
         }
         // The heartbeat.
         let n_slices = golden["slices"].as_array().map_or(0, Vec::len);
         self.audit_hb
-            .insert("groups_remaining".into(), json!(remaining.len()));
+            .insert("groups_remaining".into(), json!(remaining));
+        self.audit_hb
+            .insert("groups_failing".into(), json!(n_failing));
         self.audit_hb.insert(
             "slices_failing".into(),
             json!(match golden["worst_slice"].as_object() {
@@ -1469,7 +1507,108 @@ impl Rung<'_> {
         }
         st.flat = flat;
         self.round_report(st, p, &golden, &minis, &judged, targeted.as_ref())?;
-        Ok(flat)
+        Ok(verdict)
+    }
+
+    /// The targeted harvest of round `p.r`, when it has targets: the round's confirmed groups,
+    /// then the failing groups not among them (`round-<r>/targets.json`). Its record, with the
+    /// targets and why; `None` (nothing harvested) without targets.
+    fn target(
+        &mut self,
+        st: &mut Loop,
+        p: &Round,
+        rdir: &Path,
+        watch: Option<&Path>,
+    ) -> Result<Option<Value>, String> {
+        let carried: Vec<usize> = failing(st)
+            .into_iter()
+            .filter(|i| !p.confirmed.contains(i))
+            .collect();
+        if p.confirmed.is_empty() && carried.is_empty() {
+            return Ok(None);
+        }
+        let list: Vec<Value> = p
+            .confirmed
+            .iter()
+            .chain(&carried)
+            .map(|&i| st.groups[i].entry.clone())
+            .collect();
+        let path = rdir.join("targets.json");
+        write_json(&path, &Value::Array(list))?;
+        let why = match (p.confirmed.len(), carried.len()) {
+            (0, n) => format!("re-targeting {n} groups still failing"),
+            (c, 0) => format!("{c} groups confirmed this round"),
+            (c, n) => format!("{c} groups confirmed this round and {n} groups still failing"),
+        };
+        println!(
+            "runner: hybrid_rung: round {}: targeted harvest: {why}",
+            p.r
+        );
+        let mut t = self.targeted_harvest(st, p, &path, watch)?;
+        t["why"] = json!(why);
+        t["targets"] = json!({
+            "file": format!("audit/round-{}/targets.json", p.r),
+            "confirmed": p.confirmed.iter().map(|&i| st.groups[i].name.clone()).collect::<Vec<_>>(),
+            "failing": carried.iter().map(|&i| json!({ "group": st.groups[i].name,
+                                                        "failing_since": st.groups[i].failing_since }))
+                              .collect::<Vec<_>>(),
+        });
+        Ok(Some(t))
+    }
+
+    /// Checks group `i`'s mini golden set with `net` (step `mini golden set m<k> (round r)`); its
+    /// record (`pass` null when the set found no decision: unmeasurable).
+    fn check_mini(
+        &mut self,
+        st: &mut Loop,
+        i: usize,
+        net: &Path,
+        rdir: &Path,
+        r: u64,
+    ) -> Result<Value, String> {
+        let m = st.groups[i].mini.as_ref().expect("a mini golden set");
+        let (id, mpred, mdec, mworlds, kept, drawn) = (
+            m.id.clone(),
+            m.pred.clone(),
+            m.decisions.clone(),
+            m.worlds.clone(),
+            m.kept,
+            m.drawn,
+        );
+        let (made, mdir) = (m.made_round, m.dir.clone());
+        let rel = mdir
+            .strip_prefix(&self.out)
+            .map_or_else(|_| mdir.display().to_string(), |x| x.display().to_string());
+        let name = st.groups[i].name.clone();
+        let Some(mworlds) = mworlds else {
+            return Ok(
+                json!({ "group": name, "mini": id, "decisions": 0, "drawn": drawn,
+                              "made_round": made, "dir": rel, "pass": Value::Null,
+                              "note": "no decision of the generator reaches this group at the share: \
+                                       unmeasurable at the decision level (the overall check covers it)" }),
+            );
+        };
+        let mj = rdir.join(format!("mini-{id}.json"));
+        let mt = rdir.join(format!("mini-{id}.txt"));
+        let c = self.check_cmd(net, &mdec, &mworlds, Some(&mpred), &mj, 0.0);
+        self.audit_step(
+            &format!("mini golden set {id} (round {r})"),
+            c,
+            &format!("hybrid/mini-{id}-r{r}.log"),
+            Some(&mt),
+            None,
+            None,
+        )?;
+        let x = read_json(&mj)
+            .ok_or_else(|| format!("hybrid_rung: hybrid-check wrote no {}", mj.display()))?;
+        let all = &x["groups"][0]["summary"];
+        Ok(
+            json!({ "group": name, "mini": id, "decisions": kept, "drawn": drawn,
+                   "made_round": made, "dir": rel, "mean_loss": all["mean_loss"],
+                   "loss_upper95": all["loss_upper95"],
+                   "pass": all["loss_pass"].as_bool().unwrap_or(false),
+                   "report": format!("audit/round-{r}/mini-{id}.txt") }),
+        )
     }
 
     /// `search hybrid-check` of `net` on a decision set and its exact worlds, with slices.
@@ -1701,6 +1840,10 @@ impl Rung<'_> {
             .filter(|x| x["pass"].as_bool() == Some(false))
             .map(|x| x["group"].as_str().unwrap_or("?").to_string())
             .collect();
+        let failing_now: Vec<Value> = failing(st)
+            .into_iter()
+            .map(|i| json!({ "group": st.groups[i].name, "failing_since": st.groups[i].failing_since }))
+            .collect();
         let prev = st.rounds.last().cloned();
         let groups: Vec<Value> = p
             .confirmed
@@ -1743,6 +1886,7 @@ impl Rung<'_> {
             },
             "targeted": targeted,
             "groups_remaining": remaining,
+            "groups_failing": failing_now,
             "flat": st.flat,
             "shared": keys,
         });
@@ -1924,12 +2068,15 @@ impl Rung<'_> {
         match targeted {
             Some(x) => {
                 t += &format!(
-                    "Harvested for the next round: {} positions inside the confirmed groups (seed {}, \
-                     loss weight {}).\n",
-                    x["rows"], x["seed"], x["weight"]
+                    "Harvested for the next round: {} positions inside the targeted groups ({}; \
+                     seed {}, loss weight {}).\n",
+                    x["rows"],
+                    x["why"].as_str().unwrap_or("?"),
+                    x["seed"],
+                    x["weight"]
                 )
             }
-            None => t += "Nothing harvested (no next round).\n",
+            None => t += "Nothing harvested (flat, nothing to target, or no next round).\n",
         }
         if let Some(pr) = &prev {
             let before = pr["golden"]["loss_upper95"].as_f64();
@@ -1953,6 +2100,20 @@ impl Rung<'_> {
                 remaining.join("; ")
             }
         );
+        if !failing_now.is_empty() {
+            t += &format!(
+                "Failing groups (targets until their bound passes): {}.\n",
+                failing_now
+                    .iter()
+                    .map(|x| format!(
+                        "{} (since round {})",
+                        x["group"].as_str().unwrap_or("?"),
+                        x["failing_since"]
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+        }
         let txt_path = st.dir.join(format!("round-{r}.txt"));
         fs::write(&txt_path, &t).map_err(|e| format!("write {}: {e}", txt_path.display()))?;
         let jk = self.share_file(st, &json_path);
@@ -1962,11 +2123,12 @@ impl Rung<'_> {
         rec["shared"]["report_txt"] = json!(tk);
         write_json(&json_path, &rec)?;
         st.lines.push(format!(
-            "round {r}: {} groups confirmed ({} found) -> {} remaining; golden 95% upper {} \
-             ({}); worst slice {}; shape {}; network {}",
+            "round {r}: {} groups confirmed ({} found) -> {} remaining, {} failing; golden 95% \
+             upper {} ({}); worst slice {}; shape {}; network {}",
             groups.len(),
             p.found,
             remaining.len(),
+            failing_now.len(),
             pct4(golden["loss_upper95"].as_f64()),
             if golden["overall_pass"].as_bool() == Some(true) {
                 "PASS"
