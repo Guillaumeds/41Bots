@@ -54,6 +54,10 @@ class World:
         self.hidden_listings = 0  # `show instances` leaves out the newest instance this many more times
         self.destroy_fails = 0  # the next this many `destroy instance` calls fail (vast no longer knows the instance)
         self.destroy_calls = 0  # how many `destroy instance` calls were made
+        self.listing_script: list[str] = []  # answers of the next `show instances` calls, one each: "empty" (a
+        #                                      successfully read list without the instance), "fail", or "normal"
+        self.listing_times: list[float] = []  # the clock at each `show instances` call
+        self.status_times: list[float] = []  # ...and at each `show instance` call
 
     # ---- clock
     def time(self) -> float:
@@ -165,7 +169,11 @@ class World:
                 raise RuntimeError("vastai create instance failed: 504 Gateway Timeout")
             return {"success": True, "new_contract": iid, "instance_api_key": "ik-secret"}
         if cmd == ("show", "instances"):
-            if self.listing_fails:
+            self.listing_times.append(self.t)
+            step = self.listing_script.pop(0) if self.listing_script else "normal"
+            if step == "empty":
+                return []
+            if self.listing_fails or step == "fail":
                 raise RuntimeError("vastai show instances failed: 502 Bad Gateway")
             # Destroyed instances leave the list; one that died (or ended) but was not destroyed stays, exited.
             hide = None
@@ -188,6 +196,7 @@ class World:
             self.deleted_keys.append(int(args[2]))
             return "{'success': True}"
         if cmd == ("show", "instance"):
+            self.status_times.append(self.t)
             if self.status_fails:
                 raise RuntimeError("vastai show instance failed: 502 Bad Gateway")
             if self.status_none:
@@ -986,6 +995,10 @@ class LauncherTest(unittest.TestCase):
                 self.assertEqual(w.destroy_calls, 1)  # no pointless retries
                 self.assertIn("destroy attempt 1 failed", out)
                 self.assertIn("was already gone when the destroy call failed", out)
+                # Two dead readings, at least DESTROY_RECHECK_S apart (the listing alone when `show instance` errors).
+                times = w.listing_times if status_fails else w.status_times
+                self.assertEqual(len(times), 2)
+                self.assertGreaterEqual(times[1] - times[0], launch.DESTROY_RECHECK_S)
                 self.assertNotIn("::error::", out)
                 self.assertNotIn("::warning::", out)
 
@@ -998,6 +1011,7 @@ class LauncherTest(unittest.TestCase):
         result, out = self.run_destroy(w)
         self.assertEqual(result, "failed")
         self.assertEqual(w.destroy_calls, 5)
+        self.assertEqual(len(w.listing_times), 5)  # one unreadable reading per attempt: never a pair
         self.assertIn("destroy attempt 5 failed", out)
         self.assertIn("::error::could not destroy instance 100; destroy it by hand", out)
         self.assertNotIn("already gone", out)
@@ -1019,6 +1033,8 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual((result, w.destroy_calls), ("verified", 3))
         self.assertIn("destroyed instance 100 (verified: actual_status exited)", out)
         self.assertNotIn("::error::", out)
+        # Attempts 1 and 2: one reading each (still running, so no second one); attempt 3: a pair.
+        self.assertEqual(len(w.status_times), 4)
 
     def test_destroy_normal_path_is_unchanged(self):
         # The call goes through and a later reading shows the instance gone: verified, one call.
@@ -1029,6 +1045,8 @@ class LauncherTest(unittest.TestCase):
         self.assertNotIn("::error::", out)
         self.assertNotIn("already gone", out)
         self.assertTrue(w.instances[100]["destroyed"])
+        self.assertEqual(len(w.status_times), 2)  # the extra reading: two, at least DESTROY_RECHECK_S apart
+        self.assertGreaterEqual(w.status_times[1] - w.status_times[0], launch.DESTROY_RECHECK_S)
         # The call goes through but vast's status cannot be read: unverified, never "verified".
         w = self.destroy_world(alive=True)
         w.status_fails = w.listing_fails = True
@@ -1103,6 +1121,8 @@ class LauncherTest(unittest.TestCase):
         result, out = self.run_destroy(w)
         self.assertEqual((result, w.destroy_calls), ("verified", 1))
         self.assertIn("destroyed instance 100 (verified: not listed)", out)
+        self.assertEqual(len(w.listing_times), 2)
+        self.assertGreaterEqual(w.listing_times[1] - w.listing_times[0], launch.DESTROY_RECHECK_S)
         self.assertNotIn("still actual_status None", out)
         self.assertNotIn("::error::", out)
         self.assertTrue(w.instances[100]["destroyed"])
@@ -1112,6 +1132,93 @@ class LauncherTest(unittest.TestCase):
         result, out = self.run_destroy(w)
         self.assertEqual((result, w.destroy_calls), ("unverified", 1))
         self.assertIn("NOT verified", out)
+
+    def test_one_empty_listing_is_not_enough_after_a_failed_destroy_call(self):
+        # 2026-10-16, 09:56 UTC: vast's `show instances` once held no 41bots instance while the machine
+        # ran on. The destroy call failed (vast hiccup), the first reading says "not listed" (dead), the
+        # second, 10 s later, lists the instance running: not verified, and the retry goes on. The next
+        # destroy call goes through and two clean dead readings then verify it.
+        w = self.destroy_world(alive=True)
+        w.destroy_fails = 1
+        w.status_fails = True  # `show instance` unreadable: the listing decides
+        w.listing_script = ["empty"]  # the first listing misses the instance, every later one is right
+        result, out = self.run_destroy(w)
+        self.assertEqual((result, w.destroy_calls), ("verified", 2))
+        self.assertIn("destroy attempt 1 failed", out)
+        self.assertNotIn("already gone", out)
+        self.assertIn("reads alive on the second reading", out)
+        self.assertIn("destroyed instance 100 (verified: not listed)", out)
+        self.assertNotIn("::error::", out)
+        self.assertGreaterEqual(w.listing_times[1] - w.listing_times[0], launch.DESTROY_RECHECK_S)
+        self.assertEqual(len(w.listing_times), 4)  # attempt 1: empty + alive; attempt 2: dead + dead
+        # The instance stayed alive through the first attempt: nothing marked it destroyed before call 2.
+        self.assertTrue(w.instances[100]["destroyed"])
+        # And a machine that is really alive is never counted as destroyed by a lone empty listing.
+        w = self.destroy_world(alive=True)
+        w.destroy_fails = 10 ** 6
+        w.status_fails = True
+        w.listing_script = ["empty"]
+        result, out = self.run_destroy(w)
+        self.assertEqual((result, w.destroy_calls), ("failed", 5))
+        self.assertNotIn("already gone", out)
+        self.assertIn("::error::could not destroy instance 100", out)
+
+    def test_one_empty_listing_is_not_enough_after_a_successful_destroy_call(self):
+        # The same on the follow-up check of a destroy call that went through: the first reading is an
+        # empty list, the second shows the instance running (the call had not taken effect): not
+        # verified, "still ..." is logged and the destroy is called again, then verified by a clean pair.
+        w = self.destroy_world(alive=True)
+        w.status_fails = True
+        w.listing_script = ["empty"]
+        # Make the first destroy call a no-op on vast's side (it answers success, nothing happens).
+        real = w.vast
+        calls = []
+
+        def vast(*a, **kw):
+            if a[:2] == ("destroy", "instance") and not calls:
+                calls.append(a)
+                w.destroy_calls += 1
+                return ""
+            return real(*a, **kw)
+
+        w.vast = vast
+        result, out = self.run_destroy(w)
+        self.assertEqual((result, w.destroy_calls), ("verified", 2))
+        self.assertIn("reads alive on the second reading", out)
+        self.assertIn("destroy attempt 1: instance 100 still actual_status running", out)
+        self.assertIn("destroyed instance 100 (verified: not listed)", out)
+        self.assertGreaterEqual(w.listing_times[1] - w.listing_times[0], launch.DESTROY_RECHECK_S)
+
+    def test_two_dead_readings_ten_seconds_apart_verify_a_destroy(self):
+        # After a failed call and after a successful one: dead, 10 s later dead again: verified.
+        for fails in (10 ** 6, 0):
+            with self.subTest(destroy_fails=fails):
+                w = self.destroy_world(alive=False, destroyed=True)
+                w.destroy_fails = fails
+                w.status_fails = True
+                result, out = self.run_destroy(w)
+                self.assertEqual((result, w.destroy_calls), ("verified", 1))
+                self.assertEqual(len(w.listing_times), 2)
+                self.assertGreaterEqual(w.listing_times[1] - w.listing_times[0], launch.DESTROY_RECHECK_S)
+                self.assertNotIn("::error::", out)
+
+    def test_dead_then_unreadable_is_not_verified(self):
+        # Unknown is never dead: a dead reading followed by an unreadable one decides nothing. After a
+        # failed call the destroy is tried again; after a successful one the pair is read afresh.
+        w = self.destroy_world(alive=False, destroyed=True)
+        w.destroy_fails = 10 ** 6
+        w.status_fails = True
+        w.listing_script = ["empty", "fail"]  # dead, unknown; then (attempt 2) dead, dead
+        result, out = self.run_destroy(w)
+        self.assertEqual((result, w.destroy_calls), ("verified", 2))
+        self.assertEqual(len(w.listing_times), 4)
+        w = self.destroy_world(alive=False, destroyed=True)
+        w.status_fails = True
+        w.listing_script = ["empty", "fail", "empty", "fail", "empty", "fail"]  # never a clean pair
+        result, out = self.run_destroy(w)
+        self.assertEqual((result, w.destroy_calls), ("unverified", 1))
+        self.assertIn("NOT verified", out)
+        self.assertNotIn("(verified", out)
 
     def run_launch_minutes(self, world: World, manifest: dict, minutes: int) -> tuple[int, dict]:
         saved = {n: getattr(launch, n) for n in ("vast", "r2_get", "r2_put", "r2_list", "r2_exists", "r2_delete", "time")}
