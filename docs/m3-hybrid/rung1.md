@@ -574,14 +574,12 @@ Same data for all three (the lead-4 mix: 40M trick-4 labels, random 16M, rules 4
 95% upper bound of the decision loss (% money); class-4 SD is the integer network's value error SD on race-class-4 rows
 (a team can win the match and another the game) of the validation shard.
 
-| run | shape | GPU | val loss | class-4 SD (int / float) | all | pos 1-2 | pos 3-4 | pos 5-8 | largest bias | agree |
+| run | shape | GPU | val loss | class-4 SD (int / float) | all | pos 1-2 | pos 3-4 | pos 5-8 | largest bias (all) | agree |
 |---|---|---|---|---|---|---|---|---|---|---|
 | lead-5c | 1024-1024-512-128 | A100 40GB | 1.19817 | 2.33% / 2.99% | 0.0072 | 0.0210 | 0.0109 | 0.0001 | 0.0083 | 95.2% |
-| lead-6a | 2048-1024-256 | L4 | 1.20811 | 3.60% / 3.34% | 0.0074 | 0.0222 | 0.0104 | 0.0002 | 0.0134 | 93.8% |
+| lead-6a | 2048-1024-256 | L4 | 1.20811 | 3.60% / 3.34% | 0.0074 | 0.0222 | 0.0104 | 0.0002 | 0.0097 | 93.8% |
 | lead-6b | 2048-2048-1024-256 | RTX 3090 | 1.19772 | 3.29% / 3.02% | 0.0076 | 0.0239 | 0.0102 | 0.0003 | 0.0060 | 94.2% |
 
-Note: the earlier summary gave lead-5c's seat bands in a different order (0.0072 / 0.0210 / 0.0109 / 0.0001 is all /
-1-2 / 3-4 / 5-8 as in this table).
 
 Choice (rule: class-4 SD, then the worst band bound, then validation loss; a tie goes to the cheaper network):
 **1024-1024-512-128**. Width alone does not lower the race-class error on this data (the float class-4 SD is 3.0% for
