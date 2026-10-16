@@ -491,6 +491,7 @@ dependencies = [
  "bots",
  "engine",
  "equity",
+ "nn",
  "serde",
  "serde_json",
  "solver",

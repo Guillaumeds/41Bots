@@ -18,6 +18,10 @@
 //!   every thread busy, and a check that the production schedule fills the machine (§13.1
 //!   item 11).
 //! - [`teacher`]: teacher hands and their output files (§5.10).
+//! - [`hybrid`]: the hybrid yardstick check (docs/M3-HYBRID-SPEC.md §3): exact against H_k on the
+//!   same worlds; decision loss with a bootstrap bound, value error, agreement.
+//! - [`oracle_labels`]: training labels for the oracle networks of the hybrid yardstick
+//!   (docs/M3-HYBRID-SPEC.md §5): positions at the start of a trick, encoded, valued exactly.
 //!
 //! Everything that scores is fixed point ([`equity::MoneyChance`]); floats appear in reports
 //! only.
@@ -25,7 +29,9 @@
 pub mod bot;
 pub mod curves;
 pub mod eta;
+pub mod hybrid;
 pub mod measure;
+pub mod oracle_labels;
 pub mod pimc;
 pub mod plan;
 pub mod t1bench;

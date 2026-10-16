@@ -26,8 +26,8 @@ use engine::view::SeatView;
 use equity::{MatchState, MoneyChance};
 use serde::{Deserialize, Serialize};
 use solver::{
-    FastOptions, Leaf, ParProgress, SolveMem, Stats, from_match, solve_fast_par_with,
-    solve_fast_watched,
+    FastOptions, FrontierCut, Leaf, ParProgress, SolveMem, Stats, from_match, solve_fast_cut,
+    solve_fast_par_cut,
 };
 
 use crate::worlds::{WorldSource, Worlds, rebuild, world_rng};
@@ -36,7 +36,7 @@ use crate::worlds::{WorldSource, Worlds, rebuild, world_rng};
 pub type SharedLeaf = dyn Leaf + Send + Sync;
 
 /// `&dyn Leaf` as a sized leaf for the solver's generic functions.
-struct DynLeaf<'a>(&'a SharedLeaf);
+pub struct DynLeaf<'a>(pub &'a SharedLeaf);
 
 impl Leaf for DynLeaf<'_> {
     fn value(&self, state: &MatchState) -> MoneyChance {
@@ -347,8 +347,10 @@ impl WorldSolve {
     }
 }
 
-/// One exact solve; `None` if it was stopped through `par`'s `abort` flag before it finished
-/// (its counters, the nodes searched so far included, still go into `run`).
+/// One exact solve (a hybrid one with `cut`); `None` if it was stopped through `par`'s `abort`
+/// flag before it finished (its counters, the nodes searched so far included, still go into
+/// `run`).
+#[allow(clippy::too_many_arguments)]
 fn solve(
     pos: &solver::Position,
     mctx: solver::MatchCtx,
@@ -357,6 +359,7 @@ fn solve(
     par: Option<&ParProgress>,
     mem: &mut SolveMem,
     run: &mut WorldSolve,
+    cut: Option<FrontierCut>,
 ) -> Option<Vec<(Card, MoneyChance)>> {
     let opts = FastOptions {
         tt_mb: cfg.tt_mb,
@@ -369,11 +372,11 @@ fn solve(
             p.tasks_total.store(0, Ordering::Relaxed);
             p.tasks_done.store(0, Ordering::Relaxed);
         }
-        solve_fast_par_with(pos, mctx, &leaf, opts, cfg.solve_threads, par, mem)
+        solve_fast_par_cut(pos, mctx, &leaf, opts, cfg.solve_threads, par, mem, cut)
     } else {
         // `par` here only carries a stop flag and live counters (planned runs); the answer is
         // `solve_fast_with`'s.
-        solve_fast_watched(pos, mctx, &leaf, opts, mem, par)
+        solve_fast_cut(pos, mctx, &leaf, opts, cut, mem, par)
     };
     run.add(&sol.stats);
     (!sol.timed_out).then_some(sol.children)
@@ -387,8 +390,10 @@ fn pick(children: &[(Card, MoneyChance)], c: Card) -> MoneyChance {
         .expect("every legal root card is valued")
 }
 
-/// The exact value of every candidate in one rebuilt world (`None` if stopped through `par`).
-fn exact_world(
+/// The exact value of every candidate in one rebuilt world (`None` if stopped through `par`);
+/// with `cut`, the hybrid value (exact search down to the frontier, the evaluator there).
+#[allow(clippy::too_many_arguments)]
+pub fn exact_world(
     m: &Match,
     cands: &[Candidate],
     ctx: &Ctx,
@@ -396,6 +401,7 @@ fn exact_world(
     par: Option<&ParProgress>,
     mem: &mut SolveMem,
     run: &mut WorldSolve,
+    cut: Option<FrontierCut>,
 ) -> Option<Vec<MoneyChance>> {
     let mut out = vec![MoneyChance::even(); cands.len()];
     let mut i = 0;
@@ -405,7 +411,7 @@ fn exact_world(
                 // One solve values every root card.
                 let (pos, mctx, robber) = solver_position(m, ctx.rules, cfg.rules_robber_burn);
                 run.robber = robber;
-                let ch = solve(&pos, mctx, ctx, cfg, par, mem, run)?;
+                let ch = solve(&pos, mctx, ctx, cfg, par, mem, run, cut)?;
                 for (j, &(a, _)) in cands.iter().enumerate() {
                     out[j] = pick(&ch, a.card());
                 }
@@ -418,7 +424,7 @@ fn exact_world(
                 let (pos, mctx, robber) = solver_position(&mm, ctx.rules, cfg.rules_robber_burn);
                 debug_assert!(robber.is_none(), "one rob per trick 1 after a Joker's");
                 run.robber = robber;
-                let ch = solve(&pos, mctx, ctx, cfg, par, mem, run)?;
+                let ch = solve(&pos, mctx, ctx, cfg, par, mem, run, cut)?;
                 while i < cands.len() && cands[i].0 == Action::Burn(b) {
                     out[i] = pick(&ch, cands[i].1.expect("joint"));
                     i += 1;
@@ -466,6 +472,19 @@ pub fn world_robber(
     }
 }
 
+/// World `w` of the decision with seed `dseed` (`worlds` prepared from `view`), rebuilt as a
+/// match: exactly the world every worlds run values for that decision and world.
+pub fn world_match(
+    view: &SeatView,
+    worlds: &dyn Worlds,
+    w: u64,
+    dseed: u64,
+    rules: engine::game::Rules,
+) -> Match {
+    let world = worlds.sample(&mut world_rng(dseed, w));
+    rebuild(view, &world, rules, dseed ^ w).expect("sampled worlds rebuild")
+}
+
 /// [`world_row`] for exact PIMC, with a stop flag (`par`'s `abort`) and the solves' counters
 /// (`run`): the values of every candidate in world `w`, exactly [`world_row`]'s, or `None` if it
 /// was stopped first.
@@ -484,7 +503,7 @@ pub fn exact_world_row(
 ) -> Option<Vec<MoneyChance>> {
     let world = worlds.sample(&mut world_rng(dseed, w));
     let m = rebuild(view, &world, ctx.rules, dseed ^ w).expect("sampled worlds rebuild");
-    exact_world(&m, cands, ctx, cfg, par, mem, run)
+    exact_world(&m, cands, ctx, cfg, par, mem, run, None)
 }
 
 /// The values of every candidate in world `w` of the decision with seed `dseed` (`worlds`
@@ -508,8 +527,17 @@ pub fn world_row(
     let m = rebuild(view, &world, ctx.rules, dseed ^ w).expect("sampled worlds rebuild");
     match method {
         Method::RolloutPimc => rollout_world(&m, cands, ctx),
-        Method::ExactPimc => exact_world(&m, cands, ctx, cfg, par, mem, &mut WorldSolve::default())
-            .expect("nothing stops a solve here"),
+        Method::ExactPimc => exact_world(
+            &m,
+            cands,
+            ctx,
+            cfg,
+            par,
+            mem,
+            &mut WorldSolve::default(),
+            None,
+        )
+        .expect("nothing stops a solve here"),
         Method::Forced => vec![MoneyChance::even(); cands.len()],
     }
 }

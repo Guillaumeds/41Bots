@@ -26,7 +26,30 @@
 //! search score     --yardstick FILE --n N --method FILE:N [--method FILE:N …] [--json FILE]
 //!                  [--boot 1000] [--seed 1]
 //! search teacher   --hands N --out DIR --equity TABLE [--seed S] [--config NAME] [--start-hands H]
+//! search labels    --trick K --count N --seed S --source random|rules --out FILE.npy
+//!                  --equity TABLE [--threads T] [--start-hands 20000]
+//! search hybrid-check --trick T --cut K --net WEIGHTS --equity TABLE
+//!                  [--decisions FILE | --count N] [--seed 1] [--start-hands 20000]
+//!                  [--first I] [--last J] [--ids …] [--to 320] [--label 1]
+//!                  [--worlds FILE …] [--verify-pct 1] [--recompute] [--threads T] [--tt-mb 64]
+//!                  [--boot 1000] [--boot-seed 1] [--json OUT] [--source belief|rejection]
 //! ```
+//! `labels` writes training labels for the oracle network O_K (docs/M3-HYBRID-SPEC.md §5,
+//! `search::oracle_labels`): a label shard (`nn::shard`, `.npy` records: encoded features, the exact
+//! value as four u64, the source tag, the trick) and a JSON sidecar `FILE.npy.json` with the
+//! encoder, values version, tie rule, this binary's SHA-256, the equity table's SHA-256, the seed,
+//! counts and the shard's SHA-256. Byte-identical for any `--threads`; seed 1 (the golden sets')
+//! is refused.
+//! `hybrid-check` measures the hybrid H_K (exact to the start of trick K, the oracle network
+//! there) against exact search on the same worlds (docs/M3-HYBRID-SPEC.md §3, `search::hybrid`):
+//! decision loss with its bootstrap 95% upper bound, value error and agreement, overall, per
+//! position band and per position. Decisions come from `--decisions` (those at trick T) or are
+//! built like `search decisions` (`--count`, `--seed`); worlds are regenerated as the yardstick
+//! draws them (`--seed`, `--label`, worlds `0..--to`). Exact values are recomputed, or read from
+//! `--worlds` files (a `--verify-pct` sample recomputed first and required byte-identical;
+//! `--recompute` ignores them). Worlds files made before the belief sampler became the default
+//! (no world counts, e.g. the trick-4 golden set `m3-agree-t4c`) were drawn by the rejection
+//! sampler: check them with `--source rejection`.
 //! `decisions` stratifies equally over the 4 strata and 8 positions, so `--count` must be a
 //! multiple of 32 (`--allow-uneven` overrides); it prints the position × stratum table it made.
 //! `worlds` and `teacher` take `--source belief|rejection`: the world generator, by default
@@ -140,8 +163,10 @@ fn main() -> ExitCode {
         Some("teacher") => teacher(&a),
         Some("bench-t1") => bench_t1(&a),
         Some("robber-burn") => robber_burn(&a),
+        Some("labels") => labels_cmd(&a),
+        Some("hybrid-check") => hybrid_check(&a),
         _ => Err(
-            "usage: search decisions|worlds|agree|curves|score|teacher|bench-t1|robber-burn … (see the source docs)"
+            "usage: search decisions|worlds|agree|curves|score|teacher|bench-t1|robber-burn|labels|hybrid-check … (see the source docs)"
                 .into(),
         ),
     };
@@ -1140,6 +1165,374 @@ fn robber_burn(a: &Args) -> Result<(), String> {
             "nodes: burn searched {n_search}, rules burn {n_rules}, multiplier {:.3}",
             n_search as f64 / n_rules as f64
         );
+    }
+    Ok(())
+}
+
+/// SHA-256 (hex) of the running binary, for records (empty if it cannot be read).
+fn binary_sha256() -> String {
+    std::env::current_exe()
+        .and_then(std::fs::read)
+        .map(|b| equity::sha256::sha256_hex(&b))
+        .unwrap_or_default()
+}
+
+/// `search labels`: a label shard for the oracle network O_K and its sidecar.
+fn labels_cmd(a: &Args) -> Result<(), String> {
+    use search::oracle_labels::{GOLDEN_SEED, LabelJob, Source, label_rows};
+    let trick = a.num("--trick", 4)? as u8;
+    if !(2..=5).contains(&trick) {
+        return Err("--trick is 2..=5 (the start of that trick)".into());
+    }
+    let seed: u64 = a
+        .req("--seed")?
+        .parse()
+        .map_err(|_| "--seed: not a number".to_string())?;
+    if seed == GOLDEN_SEED {
+        return Err("--seed 1 is the golden sets' seed: use another".into());
+    }
+    let job = LabelJob {
+        trick,
+        count: a.num("--count", 1000)?,
+        seed,
+        source: Source::parse(a.req("--source")?)?,
+        threads: a.num("--threads", 1)?.max(1) as usize,
+    };
+    let out = PathBuf::from(a.req("--out")?);
+    let t0 = Instant::now();
+    let (table, table_sha) = load_equity_sha(a.req("--equity")?)?;
+    let leaf: Arc<SharedLeaf> = Arc::new(table);
+    let start_hands = a.num("--start-hands", 20_000)?;
+    let starts = collect_starts(start_hands, seed);
+    eprintln!(
+        "labels: trick {trick}, {} rows from {}, seed {seed}, {} threads (table and start states in {:.1} s)",
+        job.count,
+        job.source.name(),
+        job.threads,
+        t0.elapsed().as_secs_f64()
+    );
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    let finished = AtomicBool::new(false);
+    let t1 = Instant::now();
+    let rows = std::thread::scope(|s| {
+        let (done, finished) = (&done, &finished);
+        s.spawn(move || {
+            let mut last = Instant::now();
+            while !finished.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(200));
+                if last.elapsed() >= Duration::from_secs(20) {
+                    last = Instant::now();
+                    eprintln!(
+                        "labels: {} of {} rows, {:.0} s",
+                        done.load(Ordering::Relaxed),
+                        job.count,
+                        t0.elapsed().as_secs_f64()
+                    );
+                }
+            }
+        });
+        // Stops the progress thread however `label_rows` ends (a panic included).
+        struct Finish<'a>(&'a AtomicBool);
+        impl Drop for Finish<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+        let _finish = Finish(finished);
+        label_rows(&job, &starts, &*leaf, Some(done))
+    });
+    let shard: Vec<nn::shard::Row> = rows.iter().map(|r| r.0).collect();
+    let bytes = nn::shard::to_npy(&shard);
+    std::fs::write(&out, &bytes).map_err(|e| format!("{}: {e}", out.display()))?;
+    let mut by_stratum = [0u64; 4];
+    let mut by_root = [0u64; 6];
+    let (mut retries, mut nodes) = (0u64, 0u64);
+    for (_, i) in &rows {
+        by_stratum[usize::from(i.stratum - 1)] += 1;
+        by_root[usize::from(i.root_trick)] += 1;
+        retries += u64::from(i.retries);
+        nodes += i.nodes;
+    }
+    let secs = t0.elapsed().as_secs_f64();
+    let side = serde_json::json!({
+        "format": "41bots-label-shard-v1",
+        "encoder": nn::encode::ENCODER,
+        "n_features": nn::encode::N_FEATURES,
+        "n_binary": nn::encode::N_BINARY,
+        "n_dense": nn::encode::N_DENSE,
+        "max_active": nn::encode::MAX_ACTIVE,
+        "record": nn::shard::descr(),
+        "value_order": "rotated: the leader is seat 0 (as the encoder's outputs)",
+        "trick": trick,
+        "source": job.source.name(),
+        "count": job.count,
+        "seed": seed,
+        "start_hands": start_hands,
+        "values_version": search::measure::VALUES_VERSION,
+        "tie_rule": "first strictly best card in increasing card index (solver default)",
+        "binary_sha256": binary_sha256(),
+        "equity_sha256": table_sha,
+        "shard_sha256": equity::sha256::sha256_hex(&bytes),
+        "rows_by_stratum": by_stratum,
+        "rows_by_root_trick": &by_root[1..trick as usize],
+        "replayed_lines": retries,
+        "solver_nodes": nodes,
+        "seconds": (secs * 10.0).round() / 10.0,
+    });
+    let mut side_path = out.as_os_str().to_owned();
+    side_path.push(".json");
+    std::fs::write(
+        &side_path,
+        serde_json::to_string_pretty(&side).map_err(|e| e.to_string())? + "\n",
+    )
+    .map_err(|e| e.to_string())?;
+    eprintln!(
+        "labels: {} rows in {:.1} s ({:.3} ms a row on {} threads; {secs:.1} s in all); shard sha256 {}",
+        rows.len(),
+        t1.elapsed().as_secs_f64(),
+        t1.elapsed().as_secs_f64() * 1000.0 / rows.len().max(1) as f64,
+        job.threads,
+        side["shard_sha256"].as_str().unwrap_or("")
+    );
+    Ok(())
+}
+
+/// `search hybrid-check`: H_K against exact on the same worlds (docs/M3-HYBRID-SPEC.md §3).
+fn hybrid_check(a: &Args) -> Result<(), String> {
+    use search::hybrid::{CheckJob, report, run_check};
+    let trick = a.num("--trick", 3)? as u8;
+    let cut = a.num("--cut", u64::from(trick) + 1)? as u8;
+    if !(2..=5).contains(&cut) || trick == 0 || trick >= cut {
+        return Err(format!(
+            "--cut {cut} must be 2..=5 and after --trick {trick} (and --trick at least 1)"
+        ));
+    }
+    let seed = a.num("--seed", 1)?;
+    let t0 = Instant::now();
+    let (table, table_sha) = load_equity_sha(a.req("--equity")?)?;
+    let leaf: Arc<SharedLeaf> = Arc::new(table);
+    let net_path = a.req("--net")?;
+    let oracle = nn::Oracle::load(Path::new(net_path), leaf.clone())?;
+    if oracle.trick != cut {
+        return Err(format!(
+            "{net_path} was trained for trick {} positions, not trick {cut}",
+            oracle.trick
+        ));
+    }
+    let mut ds: Vec<DecisionSpec> = match a.get("--decisions") {
+        Some(f) => read_lines::<DecisionSpec>(f)?
+            .into_iter()
+            .filter(|d| d.trick == trick)
+            .collect(),
+        None => {
+            let starts = collect_starts(a.num("--start-hands", 20_000)?, seed);
+            build_decisions(trick, a.num("--count", 32)?, seed, &starts)
+        }
+    };
+    let (first, last) = (a.num("--first", 0)?, a.num("--last", u64::MAX)?);
+    let ids = a.get("--ids").map(parse_ids).transpose()?;
+    ds.retain(|d| d.id >= first && d.id <= last && ids.as_ref().is_none_or(|i| i.contains(&d.id)));
+    if ds.is_empty() {
+        return Err(format!("no decisions at trick {trick}"));
+    }
+    let stored: BTreeMap<u64, WorldRows> = if a.has("--worlds") {
+        let paths: Vec<&Path> = a.all("--worlds").into_iter().map(Path::new).collect();
+        let (rows, warnings) = read_worlds(&paths)?;
+        for w in warnings {
+            eprintln!("warning: {w}");
+        }
+        rows.into_iter()
+            .filter(|r| r.method == "exact" && r.trick == trick)
+            .map(|r| (r.id, r))
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
+    if a.has("--worlds")
+        && let Some(d) = ds.iter().find(|d| !stored.contains_key(&d.id))
+    {
+        return Err(format!("decision {} has no stored exact worlds", d.id));
+    }
+    let job = CheckJob {
+        cut,
+        seed,
+        label: a.num("--label", 1)?,
+        to: a.num("--to", 320)?,
+        threads: a.num("--threads", 1)?.max(1) as usize,
+        tt_mb: a.num("--tt-mb", 64)? as usize,
+        verify_pct: float(a, "--verify-pct", 1.0)?,
+        recompute: a.has("--recompute"),
+    };
+    let src = world_source(a)?;
+    if src.name() != "rejection"
+        && let Some(r) = stored.values().find(|r| r.log2_worlds.is_none())
+    {
+        return Err(format!(
+            "decision {}: the stored worlds have no world count, so they were drawn by the \
+             rejection sampler (the default before the belief sampler): pass --source rejection",
+            r.id
+        ));
+    }
+    let ctx = Ctx {
+        leaf: &*leaf,
+        source: &*src,
+        rules: engine::game::Rules::HOUSE,
+    };
+    let exact_from = if stored.is_empty() || job.recompute {
+        "recomputed by this binary".to_string()
+    } else {
+        format!(
+            "stored ({}), {}% sample recomputed",
+            a.all("--worlds").join(", "),
+            job.verify_pct
+        )
+    };
+    eprintln!(
+        "hybrid-check: {} decisions at trick {trick}, frontier at trick {cut}, net {} {:?}, {} worlds each (seed {seed}, label {}, {} source), {} threads; exact values {exact_from}",
+        ds.len(),
+        &oracle.sha256[..12],
+        oracle.net().widths(),
+        job.to,
+        job.label,
+        src.name(),
+        job.threads
+    );
+    let t1 = Instant::now();
+    let run = run_check(&ds, &stored, &job, &ctx, &oracle)?;
+    let wall = t1.elapsed().as_secs_f64();
+    if run.verified.1 > 0 {
+        return Err(format!(
+            "{} of {} recomputed worlds differ from the stored exact values: recompute them \
+             (--recompute, or off this VM for trick 2)",
+            run.verified.1, run.verified.0
+        ));
+    }
+    let boots = a.num("--boot", 1000)?;
+    let groups = report(&run, boots, a.num("--boot-seed", 1)?);
+    let pct = |x: f64| format!("{:.4}%", 100.0 * x);
+    let spct = |x: f64| format!("{:+.4}%", 100.0 * x);
+    println!(
+        "H_{cut} vs exact, trick {trick}: {} decisions x {} worlds (seed {seed}, label {}, {} source); net {} {:?}; exact values {exact_from}{}",
+        run.decisions.len(),
+        job.to,
+        job.label,
+        src.name(),
+        &oracle.sha256[..12],
+        oracle.net().widths(),
+        if run.verified.0 > 0 {
+            format!(" ({} worlds verified byte-identical)", run.verified.0)
+        } else {
+            String::new()
+        }
+    );
+    println!(
+        "{:<9} {:>5} {:>10} {:>10} {:>7} {:>7} {:>8} {:>10} {:>9} {:>10} {:>9}",
+        "group",
+        "dec",
+        "mean loss",
+        "95% upper",
+        "<=0.01%",
+        "agree",
+        "values",
+        "bias",
+        "SD",
+        "p99.9|e|",
+        "max|e|"
+    );
+    for (name, s) in groups.iter().filter(|(_, s)| s.decisions > 0) {
+        println!(
+            "{:<9} {:>5} {:>10} {:>10} {:>7} {:>6.1}% {:>8} {:>10} {:>9} {:>10} {:>9}",
+            name,
+            s.decisions,
+            pct(s.mean_loss),
+            pct(s.loss_upper95),
+            if s.loss_pass { "yes" } else { "no" },
+            100.0 * s.agreement,
+            s.values,
+            spct(s.bias),
+            pct(s.sd),
+            pct(s.p999_abs),
+            pct(s.max_abs)
+        );
+    }
+    let nw = (run.decisions.len() as u64 * job.to).max(1) as f64;
+    let ne = run
+        .decisions
+        .iter()
+        .map(|d| d.exact_worlds)
+        .sum::<u64>()
+        .max(1) as f64;
+    let exact_us: u64 = run.decisions.iter().map(|d| d.exact_us).sum();
+    let hybrid_us: u64 = run.decisions.iter().map(|d| d.hybrid_us).sum();
+    let exact_nodes: u64 = run.decisions.iter().map(|d| d.exact_nodes).sum();
+    let hybrid_nodes: u64 = run.decisions.iter().map(|d| d.hybrid_nodes).sum();
+    let evals: u64 = run.decisions.iter().map(|d| d.frontier).sum();
+    let ns_eval = run.net.0 as f64 / run.net.1.max(1) as f64;
+    println!(
+        "time: exact {:.3} ms a world ({:.0} nodes; {ne} worlds solved exactly here), hybrid {:.3} ms a world ({:.0} nodes, {:.0} network evaluations); {:.0} ns per network evaluation (encode + integer forward + softmax); {wall:.1} s wall on {} threads",
+        exact_us as f64 / 1000.0 / ne,
+        exact_nodes as f64 / ne,
+        hybrid_us as f64 / 1000.0 / nw,
+        hybrid_nodes as f64 / nw,
+        evals as f64 / nw,
+        ns_eval,
+        job.threads
+    );
+    let loss_pass = groups.iter().take(4).all(|(_, s)| s.loss_pass);
+    let bias_pass = groups[0].1.bias_pass;
+    let pass = loss_pass && bias_pass;
+    println!(
+        "standard: decision loss 95% upper bound <= 0.01% overall and in every band: {}; |bias| <= 0.01%: {} ({}); {}",
+        if loss_pass { "yes" } else { "no" },
+        if bias_pass { "yes" } else { "no" },
+        spct(groups[0].1.bias),
+        if pass { "PASS" } else { "FAIL" }
+    );
+    if let Some(out) = a.get("--json") {
+        let v = serde_json::json!({
+            "trick": trick,
+            "cut": cut,
+            "seed": seed,
+            "label": job.label,
+            "worlds": job.to,
+            "world_source": src.name(),
+            "exact_values": exact_from,
+            "verified_worlds": run.verified.0,
+            "net": {
+                "path": net_path,
+                "sha256": oracle.sha256,
+                "widths": oracle.net().widths(),
+                "trick": oracle.trick,
+                "meta": oracle.meta,
+            },
+            "values": {
+                "exact": search::measure::VALUES_VERSION,
+                "hybrid": format!("{}+O{cut}:{}", search::measure::VALUES_VERSION, oracle.sha256),
+            },
+            "equity_sha256": table_sha,
+            "binary_sha256": binary_sha256(),
+            "boot": {"replicates": boots, "seed": a.num("--boot-seed", 1)?, "bound": "97.5th percentile of bootstrap means (upper end of the 95% interval)"},
+            "groups": groups.iter().map(|(n, s)| serde_json::json!({"group": n, "summary": s})).collect::<Vec<_>>(),
+            "pass": pass,
+            "time": {
+                "exact_worlds_solved": ne,
+                "exact_ms_per_world": exact_us as f64 / 1000.0 / ne,
+                "hybrid_ms_per_world": hybrid_us as f64 / 1000.0 / nw,
+                "exact_nodes_per_world": exact_nodes as f64 / ne,
+                "hybrid_nodes_per_world": hybrid_nodes as f64 / nw,
+                "net_evals_per_world": evals as f64 / nw,
+                "ns_per_net_eval": ns_eval,
+                "wall_s": wall,
+                "threads": job.threads,
+                "setup_s": t1.duration_since(t0).as_secs_f64(),
+            },
+            "decisions": run.decisions,
+        });
+        std::fs::write(
+            out,
+            serde_json::to_string_pretty(&v).map_err(|e| e.to_string())? + "\n",
+        )
+        .map_err(|e| format!("{out}: {e}"))?;
     }
     Ok(())
 }

@@ -276,56 +276,73 @@ pub fn build_decisions(
     seed: u64,
     starts: &[Vec<HandStartState>; 4],
 ) -> Vec<DecisionSpec> {
-    let mut out = Vec::new();
-    for i in 0..count {
-        let st = (i % 4) as usize;
-        let pos = ((i / 4) % 8) as usize;
-        assert!(!starts[st].is_empty(), "stratum S{} has no states", st + 1);
-        let mut rng = Rng::derive(seed, &[labels::MEASURE, u64::from(trick), i]);
-        loop {
-            let start = starts[st][rng.bounded(starts[st].len() as u64) as usize];
-            let mut deck: [u8; DECK_SIZE] = core::array::from_fn(|k| k as u8);
-            rng.shuffle(&mut deck);
-            let mut m = Match::from_hand_start(start, deck, 0, Rules::HOUSE).expect("valid");
-            let h = m.hand_index();
-            let mut nodes: Vec<(Vec<Action>, u8, Option<HandType>)> = Vec::new();
-            while m.phase() != Phase::MatchOver && m.hand_index() == h {
-                let seat = m.to_act().expect("to act");
-                let v = m.view(seat);
-                let legal = m.legal_actions();
-                if v.public.trick_no == trick
-                    && v.public.trick_cards.len() == pos
-                    && candidates(&v, &legal).1.len() >= 2
-                    && !play_after_own_rob(&v)
-                {
-                    nodes.push((m.actions().to_vec(), seat, view_hand_type(&v)));
-                }
-                if v.public.trick_no > trick {
-                    break;
-                }
-                let a = bots::decide(&v, &Rules::HOUSE, &legal).0;
-                m.apply(a).expect("legal");
-            }
-            if nodes.is_empty() {
-                continue;
-            }
-            let (actions, seat, hand_type) =
-                nodes.swap_remove(rng.bounded(nodes.len() as u64) as usize);
-            out.push(DecisionSpec {
-                id: i,
+    (0..count)
+        .map(|i| {
+            let mut rng = Rng::derive(seed, &[labels::MEASURE, u64::from(trick), i]);
+            build_decision(
                 trick,
-                stratum: st as u8 + 1,
-                start,
-                deck: deck.to_vec(),
-                actions,
-                seat,
-                position: pos as u8,
-                hand_type,
-            });
-            break;
+                i,
+                (i % 4) as usize,
+                ((i / 4) % 8) as usize,
+                &mut rng,
+                starts,
+            )
+        })
+        .collect()
+}
+
+/// One decision of [`build_decisions`]: id `id` at trick `trick`, from stratum `st + 1` at
+/// position `pos` in the trick, drawn with `rng` (decks are drawn until a hand has such a node).
+pub fn build_decision(
+    trick: u8,
+    id: u64,
+    st: usize,
+    pos: usize,
+    rng: &mut Rng,
+    starts: &[Vec<HandStartState>; 4],
+) -> DecisionSpec {
+    assert!(!starts[st].is_empty(), "stratum S{} has no states", st + 1);
+    loop {
+        let start = starts[st][rng.bounded(starts[st].len() as u64) as usize];
+        let mut deck: [u8; DECK_SIZE] = core::array::from_fn(|k| k as u8);
+        rng.shuffle(&mut deck);
+        let mut m = Match::from_hand_start(start, deck, 0, Rules::HOUSE).expect("valid");
+        let h = m.hand_index();
+        let mut nodes: Vec<(Vec<Action>, u8, Option<HandType>)> = Vec::new();
+        while m.phase() != Phase::MatchOver && m.hand_index() == h {
+            let seat = m.to_act().expect("to act");
+            let v = m.view(seat);
+            let legal = m.legal_actions();
+            if v.public.trick_no == trick
+                && v.public.trick_cards.len() == pos
+                && candidates(&v, &legal).1.len() >= 2
+                && !play_after_own_rob(&v)
+            {
+                nodes.push((m.actions().to_vec(), seat, view_hand_type(&v)));
+            }
+            if v.public.trick_no > trick {
+                break;
+            }
+            let a = bots::decide(&v, &Rules::HOUSE, &legal).0;
+            m.apply(a).expect("legal");
         }
+        if nodes.is_empty() {
+            continue;
+        }
+        let (actions, seat, hand_type) =
+            nodes.swap_remove(rng.bounded(nodes.len() as u64) as usize);
+        return DecisionSpec {
+            id,
+            trick,
+            stratum: st as u8 + 1,
+            start,
+            deck: deck.to_vec(),
+            actions,
+            seat,
+            position: pos as u8,
+            hand_type,
+        };
     }
-    out
 }
 
 /// Is the view's decision the play straight after its own rob burn in trick 1? The PIMC bot
