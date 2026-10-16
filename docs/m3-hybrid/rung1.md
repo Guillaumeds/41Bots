@@ -324,3 +324,120 @@ reached sets are nearly the same either way (lines above).
 **Built** (branch `m3-hybrid-t3`, `docs/m3-hybrid/rung2.md`): `search labels --harvest-net`, about
 10 thread-seconds per 1,000 trick-3 labels; the network-driven search reaches 99.94% of what the
 exact-driven one reaches at trick 3 too.
+
+## Results, 2026-10-16
+
+**What was run.** Ten trainings of the trick-4 oracle network O_4 [the network that values a
+position at the start of trick 4], each checked as the hybrid H_4 [exact search down to the start
+of trick 4, the network from there on] against exact search on the same golden set [a fixed test
+set]: the 400 trick-3 decisions of seed 1, each valued on 320 worlds [guessed deals of the hidden
+cards], 1.4 million values in all. All but the first ran on one rented vast.ai machine each,
+through the runner's `hybrid_rung` chunk (`docs/m3-hybrid/vast.md`); each of those checks
+recomputed 1% of the stored exact worlds and found them byte-identical (1,284 worlds; 11 in the
+smoke run). Each run's reports (the check's text and JSON, the training curve, the step timings,
+the machine) are in its R2 bundle, `runs/<run_id>/out/rung/`.
+
+**How to read the tables.**
+
+- *Seat* is the decider's place in the order of play in the trick: seat 1 leads, seat 8 plays
+  last (the program's tables call it `pos`). Seats 1-2, 3-4 and 5-8 are the three bands.
+- *Decision loss* [the money chance given away per decision by playing the hybrid's card instead of
+  exact search's] is shown as its 95% upper bound [the top of a 95% confidence range, found by
+  resampling the 400 decisions 1,000 times], in percent of money chance. **The standard: at most
+  0.0100% overall and in every band, and every team's bias at most 0.0100%** [bias: whether the
+  network's values lean one way, the average error in each team's chance; the largest of the four
+  teams' is shown]. Bold marks a number over the line. Seats 1 and 4 are not part of the standard;
+  they are shown because they are the hardest seats (52 decisions each, so their bounds are coarse).
+- *Agreement* is how often the hybrid and exact search choose the same card.
+- *Network widths* [units in each layer]: 1024-512-128 is three layers of 1024, 512 and 128 units.
+- *Labels* [training positions with their exact values]: random play, self-play (rules-v1 bots
+  against each other), and harvested [positions the hybrid's own search reaches, labelled exactly;
+  see "Harvested positions" above]. *Cap* is the most harvested positions kept per decision; the
+  three percentages are the shares of harvested decisions whose decider sits at seats 1-2 / 3-4 /
+  5-8. Every run also had 100,000 validation labels (seed 201) except the smoke run (20,000).
+- *Epochs* [passes over all the training labels] are counted from 0 as the trainer reports them,
+  so "best 8" is the ninth pass; the trainer keeps the best one. The graphics card (GPU) does the
+  training.
+- *Cost*: training minutes times the machine's hourly price from the launcher's record, "about";
+  the *whole rental* (boot, uploads, tear-down included) is the launcher's estimate for the full
+  rental at the same price.
+
+**Table 1: what each run was** (in time order).
+
+| run | started (Mauritius time) | labels: random play + self-play + harvested | network widths | machine | training | cost |
+|---|---|---|---|---|---|---|
+| GitHub run 38868893704 | before the rented runs | 3.2M + 0.8M + none (seeds 101, 102; the workflow's defaults) | 1024-512-128 | GitHub standard runner, CPU only (4 threads, 16 GB RAM), not rented | 52 min, on the CPU (epochs not kept here) | none (not rented) |
+| smoke (`m3-hybrid-smoke-1`) | 13:48 | 0.4M + 0.1M + none; seeds 101, 102; 20,000 validation | 1024-512-128 | AMD EPYC 9654 96-core server chip (368 threads, 125 GB RAM, $1.00/h) [offer 53633715] + RTX A2000 graphics card (6 GB) | 1.6 min, 3 epochs (best 2) | about $0.03 (whole rental about $0.17) |
+| 4M (`m3-hybrid-rung1b-1`) | 14:37 | 3.2M + 0.8M + none; seeds 101, 102 | 1024-512-128 | Intel Core i9-14900K desktop chip (30 threads, 63 GB RAM, $0.72/h) [offer 54905705] + RTX 4090 graphics card (24 GB) | 2.1 min, 14 epochs (best 8) | about $0.03 (whole rental about $0.10) |
+| 16M, small network (`m3-hybrid-r1-d16m-small`) | 15:05 | 12.8M + 3.2M + none; seeds 121, 122 | 512-256-64 | AMD EPYC 7302P 16-core server chip (30 threads, 94 GB RAM, $0.51/h) [offer 47335235] + RTX 3090 graphics card (24 GB) | 41.1 min, 29 epochs (best 23) | about $0.35 (whole rental about $0.45) |
+| 4M, training seed 2 (`m3-hybrid-r1-a4m-s2b`) | 15:24 | 3.2M + 0.8M + none; seeds 101, 102 | 1024-512-128 | AMD EPYC 9374F 32-core server chip (30 threads, 39 GB RAM, $1.68/h) [offer 55830933] + RTX 4090 graphics card (24 GB) | 2.4 min, 13 epochs (best 7) | about $0.07 (whole rental about $0.21) |
+| harvest-2 (`m3-hybrid-harvest-2`) | 16:12 | 6.4M + 1.6M + 4M harvested (cap 16 per decision; decisions at seats 1-2 / 3-4 / 5-8: 40/40/20%); seeds 101, 102, 103 | 1024-512-128 | AMD Ryzen Threadripper PRO 7995WX 96-core workstation chip (184 threads, 251 GB RAM, $1.14/h) [offer 55689381] + RTX 3090 graphics card (24 GB) | 6.7 min, 16 epochs (best 10) | about $0.13 (whole rental about $0.26) |
+| 8M (`m3-hybrid-r1-b8m-2`) | 16:12 | 6.4M + 1.6M + none; seeds 111, 112 | 1024-512-128 | older Intel Xeon E5-2698 v4 server chip, 2.2 GHz (38 threads, 126 GB RAM, $0.39/h) [offer 53914105] + RTX 3090 graphics card (24 GB) | 5.2 min, 16 epochs (best 10) | about $0.03 (whole rental about $0.10) |
+| 16M (`m3-hybrid-r1-c16m-2`) | 16:44 | 12.8M + 3.2M + none; seeds 121, 122 | 1024-512-128 | AMD Ryzen 9 5950X 16-core desktop chip (30 threads, 63 GB RAM, $0.28/h) [offer 52369530] + RTX 3090 Ti graphics card (24 GB) | 10.4 min, 20 epochs (best 14) | about $0.05 (whole rental about $0.24) |
+| lead-1 (`m3-hybrid-harvest-lead-1`) | 17:03 | 12.8M + 3.2M + 8M harvested (cap 64 per decision; decisions at seats 1-2 / 3-4 / 5-8: 60/25/15%); seeds 131, 132, 133 | 1024-512-128 | AMD EPYC 9654 96-core server chip (46 threads, 118 GB RAM, $0.70/h) [offer 55224468] + RTX 6000 Ada graphics card (48 GB) | 9.8 min, 20 epochs (best 14) | about $0.11 (whole rental about $0.21) |
+| lead-2 (`m3-hybrid-harvest-lead-2`) | about 17:30 | 12.8M + 3.2M + 12M harvested (cap 64 per decision; decisions at seats 1-2 / 3-4 / 5-8: 45/40/15%); seeds 131, 132, 134 | 1024-512-128 | AMD EPYC 9654 96-core server chip (46 threads, $0.75/h; RAM not recorded, lead-1 on the same offer had 118 GB) [offer 55224468] + RTX 6000 Ada graphics card (48 GB) | 12.5 min, 22 epochs (best 16) | about $0.16 (whole rental about $0.27) |
+
+**Table 2: what the check found** (95% upper bounds of decision loss in percent of money chance;
+bold = over the standard).
+
+| run | overall | seats 1-2 | seats 3-4 | seats 5-8 | largest team \|bias\| (%) | agreement | seat 1 | seat 4 | standard met? |
+|---|---|---|---|---|---|---|---|---|---|
+| GitHub run 38868893704 | 0.0083 | **0.0113** | **0.0145** | 0.0073 | **0.0168** | 88.2% | n/a | n/a | no (1-2, 3-4, bias) |
+| smoke (`m3-hybrid-smoke-1`) | **0.2961** | **0.8868** | **0.4127** | **0.0441** | **0.0907** | 75.0% | **1.6611** | **0.0222** | no (all; a 32 x 32 pipeline test, not a verdict) |
+| 4M (`m3-hybrid-rung1b-1`) | **0.0108** | **0.0309** | **0.0174** | 0.0016 | **0.0130** | 87.5% | **0.0519** | **0.0198** | no (overall, 1-2, 3-4, bias) |
+| 16M, small network (`m3-hybrid-r1-d16m-small`) | 0.0084 | **0.0224** | **0.0161** | 0.0001 | 0.0077 | 92.0% | **0.0384** | **0.0202** | no (1-2, 3-4) |
+| 4M, training seed 2 (`m3-hybrid-r1-a4m-s2b`) | 0.0097 | **0.0247** | **0.0177** | 0.0014 | **0.0186** | 86.8% | **0.0453** | **0.0214** | no (1-2, 3-4, bias) |
+| harvest-2 (`m3-hybrid-harvest-2`) | 0.0090 | **0.0210** | 0.0059 | 0.0098 | 0.0094 | 92.0% | **0.0408** | 0.0088 | no (1-2) |
+| 8M (`m3-hybrid-r1-b8m-2`) | 0.0086 | **0.0281** | **0.0113** | 0.0008 | 0.0089 | 91.2% | **0.0481** | **0.0196** | no (1-2, 3-4) |
+| 16M (`m3-hybrid-r1-c16m-2`) | 0.0076 | **0.0211** | **0.0115** | 0.0007 | 0.0091 | 92.2% | **0.0373** | **0.0204** | no (1-2, 3-4) |
+| lead-1 (`m3-hybrid-harvest-lead-1`) | 0.0037 | 0.0069 | **0.0109** | 0.0002 | 0.0075 | 93.8% | **0.0124** | **0.0198** | no (3-4) |
+| lead-2 (`m3-hybrid-harvest-lead-2`) | 0.0033 | 0.0046 | **0.0103** | 0.0002 | 0.0079 | 93.5% | 0.0028 | **0.0196** | no (3-4) |
+
+Notes. The GitHub row is the run's summary as reported (no files kept here, so no seat figures).
+"4M, training seed 2" has the same labels as "4M" and differs only in the training seed; "16M,
+small network" has the same labels as "16M". The 16M run's whole rental includes two machines that
+never reported within 15 minutes and were replaced (33 minutes, about $0.14). The smoke run
+trained 3 epochs and was checked on 32 decisions x 32 worlds only: it tests the pipeline, not
+the network.
+
+**What the numbers say.**
+
+1. No run meets the whole standard yet, but the latest, lead-2, is close: overall bound 0.0033%,
+   every team's bias at most 0.0079%, and only the seats 3-4 band over the line (0.0103% against
+   0.0100%).
+2. More ordinary labels help, slowly: with the same recipe the overall bound was 0.0083-0.0108% at
+   4M labels (three trainings on the same labels, so differences of up to about 0.0025% between
+   single runs are noise), 0.0086% at 8M and 0.0076% at 16M, while seats 1-2 and 3-4 stayed over
+   the line (0.0211% and 0.0115% at 16M), and the smaller network on the same 16M labels did a
+   little worse (0.0084%).
+3. Harvested positions go at that directly: adding 4M of them to 8M ordinary labels (harvest-2,
+   cap 16) took seats 3-4 from 0.0113% (the 8M run) to 0.0059%, but left the overall bound where
+   it was (0.0090% against 0.0086%) and seats 1-2 at 0.0210%, and seats 5-8 slipped to 0.0098%,
+   96% of that band's loss coming from one seat-5 decision.
+4. Weighting the harvest towards the leaders was the big step: lead-1 (8M harvested on top of 16M
+   ordinary labels, cap 64, 60% of harvested decisions at seats 1-2) roughly halved the overall
+   bound against the 16M run without harvest (0.0076% to 0.0037%) and brought seats 1-2 under the
+   line (0.0211% to 0.0069%; seat 1 alone from 0.0373% to 0.0124%).
+5. It changed the cap, the amount and the shares together, so the gain cannot be split between
+   them; the cap was raised because a cap of 16 keeps only a sliver of a leader's positions (a
+   seat-1 decision reaches about 500 positions at trick 4 on average, a seat-4 decision about 40).
+6. Lead-2 (12M harvested, shares 45/40/15) took seats 1-2 to 0.0046% (seat 1 to 0.0028%) but seats
+   3-4 only from 0.0109% to 0.0103%, and seat 4 is the last to pass: its bound is 0.0196-0.0214%
+   in every network except harvest-2 (0.0088%).
+7. That seat-4 loss is concentrated: in lead-2, two of its 52 decisions (numbers 143 and 335 of
+   the golden set) are 91% of the seat's loss and 54% of the whole loss, and seven of the eight
+   networks with full files miss each of them at exactly the same cost (0.2533% and 0.0972% of
+   money chance a decision), which points to a systematic gap, not training luck.
+8. The lead-2 training curve shows overfitting [the network fits its training positions ever more
+   closely while doing worse on positions it has not seen]: the best epoch is 16, with training
+   loss 1.1775 [error on the positions it learns from] and validation loss 1.2088 [error on a
+   separate set it never learns from], and by epoch 21 the training loss had fallen to 1.1673 while
+   the validation loss rose in each of the five epochs after 16 (1.2114, 1.2150, 1.2188, 1.2227,
+   1.2246), so the trainer stopped and kept epoch 16 (the two losses are measured on different mixes,
+   harvested plus random-play positions for training and random play only for validation, so only
+   the direction matters).
+9. That argues for more and different positions, not more passes over the same 28M.
+10. Lead-3 is therefore running as the next step: 16M random-play + 4M self-play + 20M harvested
+    labels (40M in all), cap 64, with 55% of the harvested decisions at seats 3-4 (30% at seats 1-2,
+    15% at seats 5-8), to see whether the seats 3-4 band and seat 4 finally pass; its result will be
+    added here.

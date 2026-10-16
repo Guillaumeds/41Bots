@@ -148,6 +148,31 @@ about 3 s each, 0.5–1M, are 400–800 thread-hours (2–4 hours on 384 threads
 should be split into several label chunks first (one machine lost would otherwise redo it all);
 that is not built yet.
 
+### Time and money, measured (2026-10-16)
+
+Nine rentals ran the same day (the smoke run, the 4M-label run and seven more; what each trained
+and what it found: `docs/m3-hybrid/rung1.md`, "Results, 2026-10-16"). Against the estimates above:
+
+| step | estimate above | measured |
+|---|---|---|
+| boot, image, start, uploads, tear-down | 1-3 min plus under 1 min | 3-8 min of each rental fall outside the rung's own steps |
+| Python environment | 2-5 min | 19-56 s with the older image; 1-2 s with the image that carries the packages (from harvest-2 on) |
+| GPU check | under 1 min | 5-18 s |
+| labels | 1-2 min for 4.1M rows | 53 s for 4.1M rows (30 threads); 2.3 min for 28.1M rows, 30 GB (46 threads) |
+| golden set (400 decisions x 320 worlds, exact) | about 1 min | 4-25 s (184 threads to 38 threads) |
+| training on the GPU | 5-15 min for 4M labels | 2.1 min for 4M labels (8 s an epoch); 5.2 min for 8M; 10.4 min for 16M; 12.5 min for 28M (22 epochs at 29.5 s) |
+| check | about 1 min | 51 s in the first runs, 5 s in the last |
+| whole rental | 15-30 min, $0.25-0.50 (smoke: about 10 min, $0.20) | 4M labels: 8.7 min, $0.10 (7.4 min, $0.21 on a dearer host); 28M labels: 21.3 min, $0.27; smoke: 10.2 min, $0.17 |
+
+The CUDA-graph training step ran at 1.1 ms a batch on the RTX 6000 Ada card and 1.9-2.0 ms on the
+RTX 3090 and 3090 Ti cards behind three different host chips (estimate for the 3090: 1.7-2.2 ms).
+Three runs predate the change (4M labels twice on an RTX 4090, and 16M labels with the 512-256-64
+network on an RTX 3090 behind a 16-core EPYC 7302P); the last took 83 s an epoch, about 5 ms a
+batch, and 41 minutes in all. The nine rentals together cost about $2.01 (minutes times the
+offer's hourly price, the launcher's estimate rather than an invoice); the dearest single run was
+that 41-minute one ($0.45), and the 16M run's total includes two machines that never reported
+within 15 minutes and were replaced (33 minutes, about $0.14).
+
 ## What it records
 
 Everything is in the run's bundle `runs/<run_id>/out/rung/000000-<hash>.tar.zst` in R2 (the
