@@ -4,10 +4,13 @@
 //!
 //! The deals are small (tricks 3–5 of random play, with a seat still to act in the current
 //! trick given a pending rob of a card out of play), so the whole tree, burns included, is cheap.
+//! Real robs happen only in trick 1; these synthetic later-trick robs are kept only where the
+//! equivalent-burn merge is proved sound (`common::burn_merge_sound`: no trump played in an
+//! earlier trick and still the best lies between two trumps the robber could burn).
 
 mod common;
 
-use common::{L, leaf, position_mid, tie_leaf};
+use common::{L, burn_merge_sound, leaf, position_mid, tie_leaf};
 use engine::cards::{Bits, Card, JOKER, Suit, bit, has, parse};
 use engine::game::{Match, Phase, Rules};
 use engine::rng::Rng;
@@ -55,7 +58,7 @@ fn with_rob(seed: u64, k: u8, extra: u8, ace: bool) -> Option<(Position, solver:
         pos.hands[usize::from(seat)] = (h & !bit(c)) | bit(a);
     }
     pos.rob = Some(Rob { seat, card: table });
-    Some((pos, ctx))
+    burn_merge_sound(&pos).then_some((pos, ctx))
 }
 
 /// The naive solver's value of a position whose robber is to act: the robber's team's best over
@@ -204,8 +207,11 @@ fn identity_with_pending_burn_tricks_4_and_5() {
 
 #[test]
 fn identity_with_pending_burn_trick_3_sample() {
-    for seed in 0..3 {
-        let (pos, ctx) = with_rob(seed, 3, 1, true).expect("room in trick 3");
+    for seed in (0..40)
+        .filter_map(|s| with_rob(s, 3, 1, true).map(|_| s))
+        .take(3)
+    {
+        let (pos, ctx) = with_rob(seed, 3, 1, true).expect("kept");
         identity(
             &pos,
             ctx,
@@ -337,6 +343,9 @@ fn identity_when_turned_card_splits_a_group() {
             };
             let seat = pos.rob.expect("pending rob").seat;
             pos.rob = Some(Rob { seat, card: t });
+            if !burn_merge_sound(&pos) {
+                continue;
+            }
             found += 1;
             identity(
                 &pos,

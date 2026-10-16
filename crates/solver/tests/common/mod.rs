@@ -119,3 +119,35 @@ pub fn brute<Lf: Leaf>(m: &Match, hand0: u32, leaf: &Lf) -> MoneyChance {
     }
     best.expect("legal set is never empty")
 }
+
+/// Whether the merging of equivalent burns is proved sound for a position with a pending rob.
+///
+/// The solver merges two burns of the same group (no live card between them in rank, no card of
+/// the robber's hand between them in card index). Its proof assumes the rob is in trick 1, where
+/// every card played so far is still on the table (live), so no played card lies between the two.
+/// These tests also put synthetic robs in tricks 3–5, where a trump played in an earlier trick is
+/// dead: if it is the best trump so far and lies strictly between two trumps of the robber's hand
+/// (with the taken card), burning one or the other can change the team of the end-of-hand bonus,
+/// and the merge would not be exact. Only that case breaks the proof (another dead trump below
+/// the best can never become the best). The synthetic-rob tests keep only positions where it
+/// cannot happen: no rob, no best trump, the best trump still on the table in the current trick,
+/// or every trump of the robber's hand and the taken card on the same side of it.
+pub fn burn_merge_sound(p: &solver::Position) -> bool {
+    use engine::rules::trump_rank;
+    let Some(rob) = p.rob else { return true };
+    let Some((best, _)) = p.best else {
+        return true;
+    };
+    if p.trick[..usize::from(p.n_played)]
+        .iter()
+        .any(|&c| trump_rank(c, p.trump) == best)
+    {
+        return true;
+    }
+    let h = p.hands[usize::from(rob.seat)] | engine::cards::bit(rob.card);
+    let ranks: Vec<u8> = engine::cards::cards(h)
+        .map(|c| trump_rank(c, p.trump))
+        .filter(|&r| r > 0)
+        .collect();
+    ranks.iter().all(|&r| r > best) || ranks.iter().all(|&r| r < best)
+}

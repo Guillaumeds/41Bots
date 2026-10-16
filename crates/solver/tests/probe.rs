@@ -707,7 +707,8 @@ fn with_rob(pos: &Position, ctx: MatchCtx, seed: u64) -> Option<(Position, Match
         pos.hands[usize::from(seat)] = (h & !bit(x)) | bit(a);
     }
     pos.rob = Some(Rob { seat, card: table });
-    Some((pos, ctx))
+    // Synthetic later-trick robs only where the burn merge is proved sound (see the helper).
+    common::burn_merge_sound(&pos).then_some((pos, ctx))
 }
 
 /// Pending robs (any dead card, the 5 of trumps included when it was not played, and the Joker)
