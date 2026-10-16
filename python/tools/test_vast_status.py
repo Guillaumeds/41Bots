@@ -1,6 +1,11 @@
 """Tests for the second-machine check of vast_status.py: python3 -m unittest test_vast_status (in python/tools)."""
 import os
+import re
+import stat
+import subprocess
 import sys
+import tempfile
+import textwrap
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -78,6 +83,86 @@ class Endpoint(unittest.TestCase):
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
+
+
+WORKFLOW = os.path.join(os.path.dirname(os.path.dirname(HERE)), ".github", "workflows", "vast-status.yml")
+
+
+def workflow_step_script(step_name: str) -> str:
+    """The `run: |` script of one step of vast-status.yml, dedented, read from the workflow file itself
+    so the test runs exactly what GitHub runs (no YAML library needed: the step is plain text)."""
+    with open(WORKFLOW, encoding="utf-8") as f:
+        lines = f.read().split("\n")
+    start = next(i for i, ln in enumerate(lines) if ln.strip() == f"- name: {step_name}")
+    run = next(i for i in range(start, len(lines)) if re.match(r"\s+run: \|\s*$", lines[i]))
+    indent = len(lines[run]) - len(lines[run].lstrip())
+    body = []
+    for ln in lines[run + 1:]:
+        if ln.strip() and len(ln) - len(ln.lstrip()) <= indent:
+            break
+        body.append(ln)
+    return textwrap.dedent("\n".join(body))
+
+
+FAKE_AWS = r"""#!/bin/bash
+# A stand-in for the aws CLI. FAKE_MODE: beats (two heartbeats), empty (what `aws s3 ls` really does for a folder
+# with nothing in it: prints nothing, exits 1), error (a real failure: exit 255 and a message on stderr).
+args="$*"
+case "$args" in
+  *"s3 ls s3://bkt/runs/r1/heartbeat/")
+    case "$FAKE_MODE" in
+      beats) echo "2026-10-16 10:00:00        100 000001.json"; echo "2026-10-16 10:01:00        100 000002.json";;
+      empty) exit 1;;
+      error) echo "An error occurred (AccessDenied) when calling the ListObjectsV2 operation" >&2; exit 255;;
+    esac;;
+  *"s3 ls s3://bkt/runs/r1/")
+    case "$FAKE_MODE" in
+      beats) echo "                           PRE heartbeat/"; echo "2026-10-16 09:59:00        300 manifest.json";;
+      empty) exit 1;;
+      error) exit 255;;
+    esac;;
+  *"s3 cp s3://bkt/runs/r1/heartbeat/"*) k="${args##*/heartbeat/}"; k="${k%% *}"; echo "{\"file\": \"$k\"}";;
+  *) echo "unexpected aws call: $args" >&2; exit 99;;
+esac
+"""
+
+
+class HeartbeatStep(unittest.TestCase):
+    """The workflow's "Run heartbeats" step: a run that was only just rented (still pulling its image) has no
+    heartbeat folder yet, and that must not fail the job."""
+
+    def run_step(self, mode: str, run_id: str = "r1"):
+        with tempfile.TemporaryDirectory() as d:
+            aws = os.path.join(d, "aws")
+            with open(aws, "w") as f:
+                f.write(FAKE_AWS)
+            os.chmod(aws, os.stat(aws).st_mode | stat.S_IXUSR)
+            env = dict(os.environ, PATH=d + os.pathsep + os.environ["PATH"], FAKE_MODE=mode, RUN_ID=run_id,
+                       ENDPOINT="https://example.invalid", BUCKET="bkt")
+            return subprocess.run(["bash", "-c", workflow_step_script("Run heartbeats")], env=env, capture_output=True, text=True)
+
+    def test_an_empty_heartbeat_folder_is_not_a_failure(self):
+        p = self.run_step("empty")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("no heartbeats yet for r1", p.stdout)
+
+    def test_heartbeats_are_printed_when_there_are_some(self):
+        p = self.run_step("beats")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('{"file": "000001.json"}', p.stdout)
+        self.assertIn('{"file": "000002.json"}', p.stdout)
+        self.assertNotIn("no heartbeats yet", p.stdout)
+
+    def test_a_real_listing_error_still_fails_the_job(self):
+        p = self.run_step("error")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("could not list the heartbeats of r1", p.stdout + p.stderr)
+        self.assertNotIn("no heartbeats yet", p.stdout)
+
+    def test_a_bad_run_id_is_refused(self):
+        p = self.run_step("beats", run_id="r1; rm -rf /")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("bad run_id", p.stdout)
 
 
 if __name__ == "__main__":

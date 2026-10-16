@@ -61,5 +61,12 @@ jobs:
           set -euo pipefail
           case "$RUN_ID" in *[!A-Za-z0-9._-]*) echo "bad run_id"; exit 1;; esac
           aws --endpoint-url "$ENDPOINT" s3 ls "s3://$BUCKET/runs/$RUN_ID/" || true
-          last=$(aws --endpoint-url "$ENDPOINT" s3 ls "s3://$BUCKET/runs/$RUN_ID/heartbeat/" | awk '{print $4}' | sort | tail -5)
+          # A run that was only just rented (still pulling its image) has no heartbeat folder yet. For an empty
+          # folder `aws s3 ls` prints nothing and exits 1: that is not a failure. Any other non-zero exit
+          # (bad keys, no network: 255) still fails the job.
+          rc=0
+          listing=$(aws --endpoint-url "$ENDPOINT" s3 ls "s3://$BUCKET/runs/$RUN_ID/heartbeat/") || rc=$?
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then echo "::error::could not list the heartbeats of $RUN_ID (aws exit $rc)"; exit 1; fi
+          last=$(printf '%s\n' "$listing" | awk 'NF {print $4}' | sort | tail -5)
+          if [ -z "$last" ]; then echo "no heartbeats yet for $RUN_ID"; exit 0; fi
           for k in $last; do aws --endpoint-url "$ENDPOINT" s3 cp "s3://$BUCKET/runs/$RUN_ID/heartbeat/$k" - ; echo; done
