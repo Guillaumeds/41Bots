@@ -7,7 +7,7 @@
 //! a time; a job submitted while another waits replaces it, so the newest heartbeat wins and a
 //! STOP check or partial upload is skipped while the previous one is still going. Every rclone
 //! call has hard limits (`remote.rs`): rclone's own short timeouts, and a wall-clock kill (45 s
-//! for a heartbeat or STOP check, more for larger files at 1 MiB/s). Heartbeats report
+//! for a heartbeat or STOP check, more for larger files: 2 s per MiB, at most 30 min). Heartbeats report
 //! `upload_failures`, `other_net_failures` and `last_upload_ok_s`.
 //!
 //! **Partial uploads** ([`Net::partial`], [`upload_changed`]): every `upload_every_s` the files

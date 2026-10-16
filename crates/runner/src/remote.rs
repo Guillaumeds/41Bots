@@ -229,12 +229,27 @@ const RCLONE_LIMITS: [&str; 8] = [
 /// says otherwise: a heartbeat upload or a STOP check.
 pub const NET_LIMIT: Duration = Duration::from_secs(45);
 
+/// Seconds of wall-clock limit granted per MiB moved: a transfer may run as slowly as 0.5 MiB/s
+/// and still finish (a host with a slow route to R2 was seen below 1 MiB/s).
+pub const SECS_PER_MIB: u64 = 2;
+
+/// The longest wall-clock limit a size-scaled call gets (never below the base limit itself).
+pub const MAX_NET_LIMIT: Duration = Duration::from_secs(30 * 60);
+
+/// The wall-clock limit of a call moving `bytes`: `base` plus [`SECS_PER_MIB`] per MiB, at most
+/// [`MAX_NET_LIMIT`] (or `base` when that is larger). Used for uploads and downloads alike.
+pub fn limit_for_bytes(base: Duration, bytes: u64) -> Duration {
+    let extra = (bytes >> 20).saturating_mul(SECS_PER_MIB);
+    base.saturating_add(Duration::from_secs(extra))
+        .min(MAX_NET_LIMIT.max(base))
+}
+
 pub struct RcloneRemote {
     /// e.g. `r2:bucket`.
     pub base: String,
     /// The rclone executable (`RUNNER_RCLONE` overrides `rclone`; tests use a fake that hangs).
     pub bin: PathBuf,
-    /// Wall-clock limit of a call moving no data ([`NET_LIMIT`]); one second per MiB moved is
+    /// Wall-clock limit of a call moving no data ([`NET_LIMIT`]); [`SECS_PER_MIB`] per MiB moved is
     /// added ([`RcloneRemote::limit_for`]).
     pub limit: Duration,
 }
@@ -276,10 +291,9 @@ impl RcloneRemote {
         c
     }
 
-    /// The wall-clock limit of a call moving `bytes`: [`RcloneRemote::limit`] plus one second
-    /// per MiB (that is, the transfer may run at 1 MiB/s and still finish).
+    /// The wall-clock limit of a call moving `bytes`: see [`limit_for_bytes`].
     pub fn limit_for(&self, bytes: u64) -> Duration {
-        self.limit + Duration::from_secs(bytes >> 20)
+        limit_for_bytes(self.limit, bytes)
     }
 
     fn run(&self, c: Command, limit: Duration) -> Result<(), String> {
@@ -491,7 +505,9 @@ impl Remote for RcloneRemote {
             .iter()
             .map(|r| fs::metadata(dir.join(r)).map_or(0, |m| m.len()))
             .sum();
-        let limit = self.limit_for(bytes) + Duration::from_secs(files.len() as u64);
+        let limit = self
+            .limit_for(bytes)
+            .saturating_add(Duration::from_secs(files.len() as u64));
         let prefix = prefix.trim_end_matches('/');
         let mut c = self.cmd("copy");
         c.arg("--s3-no-check-bucket");
@@ -628,6 +644,27 @@ pub fn retry_patient<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limit_scales_with_size_and_is_capped() {
+        let base = Duration::from_secs(60);
+        let mib = 1u64 << 20;
+        assert_eq!(limit_for_bytes(base, 0), base);
+        assert_eq!(limit_for_bytes(base, mib - 1), base);
+        assert_eq!(limit_for_bytes(base, mib), Duration::from_secs(62));
+        // 100 MiB: 60 s + 200 s.
+        assert_eq!(limit_for_bytes(base, 100 * mib), Duration::from_secs(260));
+        // The 14 MiB file killed at ~56-59 s on the slow host now gets 88 s.
+        assert_eq!(limit_for_bytes(base, 14 * mib), Duration::from_secs(88));
+        // Capped at 30 minutes, whatever the size (no overflow either).
+        assert_eq!(limit_for_bytes(base, 10_000 * mib), MAX_NET_LIMIT);
+        assert_eq!(limit_for_bytes(base, u64::MAX), MAX_NET_LIMIT);
+        // A base above the cap is kept as it is.
+        let big = Duration::from_secs(3600);
+        assert_eq!(limit_for_bytes(big, 5 * mib), big);
+        // Monotonic in size.
+        assert!(limit_for_bytes(base, 50 * mib) < limit_for_bytes(base, 51 * mib));
+    }
 
     #[test]
     fn patient_backoff() {

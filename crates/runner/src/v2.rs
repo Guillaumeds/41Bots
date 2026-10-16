@@ -370,6 +370,9 @@ struct Run {
     noted: BTreeSet<String>,
     /// Warnings of the chunks running now (`<stream>/<index>: …`), for the heartbeat.
     warnings: Vec<String>,
+    /// Standing warnings about delivering results (a chunk bundle that could not be uploaded
+    /// after all retries); they stay in every heartbeat from then on.
+    delivery_warnings: Vec<String>,
     /// Every warning seen this session, for the final manifest.
     warned: BTreeSet<String>,
     /// Unfinished outputs of chunks stopped mid-way (deadline or stop request), uploaded under
@@ -450,6 +453,7 @@ pub fn run(manifest: &Value, work: &Path) -> ExitCode {
         partial_ok: false,
         noted: BTreeSet::new(),
         warnings: Vec::new(),
+        delivery_warnings: Vec::new(),
         warned: BTreeSet::new(),
         partial: Vec::new(),
         phase: "start".into(),
@@ -893,8 +897,15 @@ impl Run {
         // A failure here ends the run (no new chunks, then FAILED), so a network failure of a
         // few minutes is waited out (`retry_patient`; the heartbeat goes on meanwhile).
         let (l2, k2) = (local.clone(), key.clone());
-        self.net_call(move |rem| retry_patient(8, || rem.put(&l2, &k2, true)))
-            .map_err(|e| format!("upload {key}: {e}"))?;
+        if let Err(e) = self.net_call(move |rem| retry_patient(8, || rem.put(&l2, &k2, true))) {
+            let w = result_upload_warning(&name, r.index, &key, bytes, 8, &e);
+            eprintln!("runner: WARNING: {w}");
+            self.warned.insert(w.clone());
+            self.delivery_warnings.push(w);
+            // Say so in a heartbeat now, not at the next interval.
+            self.heartbeat(true, "result_upload_failed");
+            return Err(format!("upload {key}: {e}"));
+        }
         // Read back in full and hash before listing it.
         let k2 = key.clone();
         match self.net_call(move |rem| retry_patient(8, || rem.sha256(&k2)))? {
@@ -1200,7 +1211,7 @@ impl Run {
         let round = |x: Option<f64>| x.map(|x| (x * 10.0).round() / 10.0);
         let elapsed = self.start.elapsed().as_secs_f64();
         let mut progress = json!({ "queue": self.queue(), "entries": self.entries.len(),
-                                   "partial_cpu_ok": self.partial_ok, "warnings": self.warnings });
+                                   "partial_cpu_ok": self.partial_ok, "warnings": heartbeat_warnings(&self.warnings, &self.delivery_warnings) });
         if !self.chunk_etas.is_empty() {
             progress["chunk_eta"] = json!(self.chunk_etas);
         }
@@ -1380,6 +1391,27 @@ fn chunk_step(dir: &Path) -> Option<Value> {
     Some(out)
 }
 
+/// The warning for a chunk result that could not be uploaded after all retries.
+fn result_upload_warning(
+    stream: &str,
+    index: u64,
+    key: &str,
+    bytes: u64,
+    attempts: u32,
+    err: &str,
+) -> String {
+    format!(
+        "RESULT NOT DELIVERED: upload of {stream}/{index} ({:.1} MiB, {key}) failed after \
+         {attempts} attempts: {err}",
+        bytes as f64 / 1_048_576.0
+    )
+}
+
+/// The heartbeat's warnings: the running chunks' own, then the standing delivery warnings.
+fn heartbeat_warnings(chunk: &[String], delivery: &[String]) -> Vec<String> {
+    chunk.iter().chain(delivery).cloned().collect()
+}
+
 /// The warnings a running chunk's own heartbeat lists (`progress.warnings`).
 fn chunk_warnings(dir: &Path) -> Vec<String> {
     fs::read_to_string(dir.join("heartbeat.json"))
@@ -1420,6 +1452,28 @@ fn stop_child(c: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_result_upload_is_a_clear_heartbeat_warning() {
+        let w = result_upload_warning(
+            "rung",
+            7,
+            "runs/x/out/rung/000007-ab.tar.zst",
+            31_457_280,
+            8,
+            "killed after 59 s (its hard limit)",
+        );
+        assert!(w.starts_with("RESULT NOT DELIVERED"), "{w}");
+        assert!(
+            w.contains("rung/7") && w.contains("30.0 MiB") && w.contains("8 attempts"),
+            "{w}"
+        );
+        assert!(w.contains("hard limit"), "{w}");
+        let chunk = vec!["rung/8: slow".to_string()];
+        let all = heartbeat_warnings(&chunk, std::slice::from_ref(&w));
+        assert_eq!(all, vec!["rung/8: slow".to_string(), w]);
+        assert!(heartbeat_warnings(&[], &[]).is_empty());
+    }
     use crate::mem::Limit;
 
     /// Review E (2026-10-16): the table measurement's three `search_measure` streams of 32
