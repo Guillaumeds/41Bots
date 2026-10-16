@@ -139,3 +139,92 @@ check's exact worlds would add about 90 thread-hours.
   labels was not built; it would cost the same 1,280 trick-2 solves, done first.
 - **Machine size.** The proposal keeps `min_cores` 32 (labels about 20 minutes); with 64 or more
   threads on offer the labels take 10 minutes or less.
+
+## Results, 2026-10-16
+
+**What was run.** Two trainings of the trick-3 oracle network O_3 [the network that values a
+position at the start of trick 3, with 24 cards left], each checked as the hybrid H_3 [exact search
+through tricks 1 and 2, the network from the start of trick 3] against exact search on the
+trick-2 golden set [a fixed test set]: the 400 trick-2 decisions of seed 1, each valued on 320
+worlds [guessed deals of the hidden cards], 1,697,280 values in all. Each ran as the runner's
+`hybrid_rung` chunk (`docs/m3-hybrid/vast.md`) on one rented vast.ai machine with 184 threads and one
+graphics card (GPU); each check recomputed 1% of the stored exact worlds (1,284 worlds) with the
+current binary and found them byte-identical. The reports (the check's text and JSON, the training
+curve, the step timings, the machine) are in each run's R2 bundle, `runs/<run_id>/out/rung/`.
+
+**How to read the tables.** Seats, decision loss [the money chance given away per decision by
+playing the hybrid's card instead of exact search's, shown as its 95% upper bound, in percent of
+money chance], bias, agreement and the standard are as in `rung1.md`, "Results, 2026-10-16": **at
+most 0.0100% overall and in every band (seats 1-2, 3-4, 5-8), and every team's bias at most
+0.0100%**; bold marks a number over the line. Seats 1, 4 and 5 are not part of the standard; they
+are shown because they are the weakest seats here (48-52 decisions each, so their bounds are
+coarse). *Labels* are the training positions with their exact values: random play, self-play
+(rules-v1 bots against each other) and harvested [positions the hybrid's own search reaches,
+labelled exactly; section 1 above]. *Cap* is the most harvested positions kept per decision; the
+three percentages are the shares of harvested decisions whose decider sits at seats 1-2 / 3-4 /
+5-8. Both networks were validated on the same 100,000 random-play positions (seed 401). Epochs are
+counted from 0 as the trainer reports them, so "best 13" is the fourteenth pass.
+
+**Table 1: what each run was.**
+
+| run | labels: random play + self-play + harvested | network widths | machine | golden set | training | whole rental |
+|---|---|---|---|---|---|---|
+| round 1 (`m3-hybrid-t3-r1c`) | 12.8M + 3.2M + none; seeds 311, 312 | 1024-512-128 | AMD Ryzen Threadripper PRO 7995WX 96-core workstation chip (184 threads) + RTX 3090 graphics card (24 GB), $1.135/h | generated in the run: 400 x 320 exact trick-2 worlds in 1,057 s on 184 threads | 9.7 min (582 s), 19 epochs (best 13) | 48 min, about $0.90 |
+| round 2 (`m3-hybrid-t3-r2`) | 12.8M + 3.2M + 8M harvested (cap 32 per decision; decisions at seats 1-2 / 3-4 / 5-8: 40/30/30%; search driven by round 1's network `b89b26d6...`); seeds 311, 312, 313 | 1024-512-128 | AMD Ryzen Threadripper PRO 7995WX 96-core workstation chip (184 threads) + RTX 4090 graphics card (24 GB) | stored, reused from round 1 (fetched in 3 s; 1% recheck byte-identical) | 10.8 min (650 s), 25 epochs (best 18) | 42 min, about $0.79 |
+
+**Table 2: what the check found** (95% upper bounds of decision loss in percent of money chance;
+bold = over the standard).
+
+| run | overall | seats 1-2 | seats 3-4 | seats 5-8 | largest team \|bias\| (%) | agreement | seat 1 | seat 4 | seat 5 | standard met? |
+|---|---|---|---|---|---|---|---|---|---|---|
+| round 1 (`m3-hybrid-t3-r1c`) | **0.0105** | **0.0138** | 0.0091 | **0.0133** | **0.0108** | 84.5% | **0.0240** | 0.0062 | **0.0355** | no (overall, 1-2, 5-8, bias) |
+| round 2 (`m3-hybrid-t3-r2`) | **0.0111** | **0.0156** | **0.0171** | **0.0109** | 0.0092 | 83.2% | **0.0280** | **0.0229** | **0.0224** | no (overall, 1-2, 3-4, 5-8) |
+
+Notes. Mean decision loss (not the upper bound) was 0.0073% in round 1 and 0.0082% in round 2.
+Seat by seat (95% upper bound, %, seats 1 to 8): round 1: 0.0240, 0.0068, 0.0143, 0.0062, 0.0355,
+0.0183, 0.0140, 0.0027; round 2: 0.0280, 0.0066, 0.0175, 0.0229, 0.0224, 0.0186, 0.0149, 0.0025.
+Team biases (the decider's own team, the next, the opposite, the previous; %): round 1 -0.0090,
++0.0108, +0.0030, -0.0047; round 2 -0.0092, +0.0079, +0.0061, -0.0049. The networks are `b89b26d6...`
+(round 1) and `22c76276...` (round 2). Where the time went (seconds): round 1: labels random 786,
+rules 202, validation 7, golden worlds 1,057, training 582, check 64 (the chunk took 2,705 s);
+round 2: stored inputs 4, labels random 777, rules 199, harvest 600, validation 7, training 650,
+check 63 (2,307 s).
+
+**Speed of the hybrid.** At trick 2 the hybrid values a world in 12.7 ms (873 search nodes, 559
+network evaluations at 21.5 microseconds each) where exact search takes 1,289 ms (9,786,559 nodes):
+about 100 times faster per world (12.5 ms against 1,288 ms in round 2, 103 times). The exact figure
+is from the 1,284 worlds recomputed in the check.
+
+**The golden set, generated once and reused.** Round 1 generated the 400 decisions (240,642 bytes)
+and their exact worlds (18,495,472 bytes) in 1,057 s on 184 threads, about 54 thread-hours. Round 2
+fetched the same two files from storage (same SHA-256: decisions `7cfc09e0...`, worlds
+`644c5506...`) instead of generating them, and its 1% recheck (1,284 worlds, recomputed with the
+current binary) was byte-identical. These are not the `m3-agree-t2d` files named in section 3 above
+(there the decisions file is `159d59c6...`); round 1 made its own.
+
+**The harvest of round 2** (sidecar `labels/t3-harvest-s313.npy.json`). The search was driven by
+round 1's network. It covered 311,348 decisions, 219,362 of them capped at 32 positions (70%), and
+kept 8,000,000 labelled positions, in 600 s (391 million solver nodes, 250 million network
+evaluations). Distinct positions reached per decision, by the decider's seat, 1 to 8: 2110.6,
+759.0, 301.8, 117.8, 46.7, 18.2, 7.0, 2.7 (mean over all decisions 642.5, median 144, largest
+27,511). Rows kept by seat: 1,978,062; 1,967,853; 1,457,209; 1,385,134; 594,188; 389,535; 164,277;
+63,742.
+
+**What the numbers say.**
+
+1. Round 1, from random-play and rules-v1 labels alone, is a near miss: overall bound 0.0105%
+   against 0.0100%, seats 3-4 inside the line (0.0091%), seats 1-2 at 0.0138% and seats 5-8 at
+   0.0133%, and the largest team bias 0.0108%.
+2. The harvest at cap 32 did not help. The overall bound went from 0.0105% to 0.0111% and seats
+   1-2 from 0.0138% to 0.0156%, both small; seats 3-4 went from 0.0091% to 0.0171%, the one clear
+   step the wrong way; seats 5-8 improved from 0.0133% to 0.0109%, and the largest team bias from
+   0.0108% to 0.0092% (inside the line now). There is no repeat of a trick-3 training yet, so
+   the size of single-run noise is not measured here (at trick 4 it was up to about 0.0025% overall).
+3. On the validation positions the second network is a little better (validation loss 1.4971
+   against 1.5131, outcome accuracy 87.2% against 86.4%), yet its decisions in the check are not,
+   so the validation loss does not predict the check here. (Round 2 also had 24M rows against
+   16M, and ran 25 epochs against 19.)
+4. Trick 3 is a much harder function than trick 4: the network's outcome accuracy [how often it
+   gets the ending of the hand right] is 87% here against 98% at trick 4.
+5. Round 3 is running to test capacity: 32M random-play and rules-v1 labels plus 8M harvested,
+   and a network of 2048-1024-256 units. Its result will be added here.

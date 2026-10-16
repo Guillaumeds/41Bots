@@ -264,3 +264,30 @@ Owner request: a database of every machine we rent with its real cost per 10^12 
 - Launcher: `--gpus`, `--min-gpu-ram-gb`, `--min-compute-cap` and a manifest `machine` object (all the old checks kept); vast-run inputs `gpus`, `min_gpu_ram_gb`, `disk_gb`. Release bundle: `uv` and `python/nn`. Image unchanged (`20261015-0a4f3e598996`).
 - Manifests ready, not launched (price and owner approval first): `docs/vast/m3-hybrid-smoke.manifest.json` (about 10 min, about $0.20) and `docs/vast/m3-hybrid-rung1b.manifest.json` (the GitHub run's settings: 4M trick-4 labels, 400 x 320 trick-3 golden set, 1024-512-128 outcome head; about 15–30 min, about $0.25–0.50; estimates). How to launch, what it records, time per step: `docs/m3-hybrid/vast.md`.
 - Checked on this VM (no GPU): the chunk end to end from a release-like bundle with uv 0.13.0 and CPU PyTorch (30–90 s at small counts), runner and launcher tests, the Python tests.
+
+## 2026-10-16 (end of day): the hybrid yardstick, what was built, rentals and open items (branch `m3-hybrid`)
+
+**Strategy.** The yardstick is the hybrid [exact search down to the start of trick k, then a network that values the position at that point], which is about 100 times faster per world than exact search at trick 2 (12.7 ms against 1,289 ms). Each network is checked against exact search on a fixed golden set. One network per rung: O_4 (values the start of trick 4; checked on trick-3 decisions), O_3 (checked on trick-2 decisions), then O_2 (to be checked on trick-1 decisions). The standard is the same for each: decision loss at most 0.0100% overall and in every seat band (95% upper bound), every team's bias at most 0.0100%. Details: `docs/m3-hybrid/rung1.md`, `rung2.md`, `vast.md`.
+
+**Where each rung stands.**
+- **O_4 (rung 1):** `rung1.md` has the nine rented trainings; the best is lead-3c: overall 0.0057%, seats 1-2 0.0097%, seats 3-4 **0.0159%**, seats 5-8 0.0007%, largest team bias 0.0057%, agreement 94.5%. Only seats 3-4 are over the line, because of a few systematic decisions (as with lead-2, `rung1.md` note 7); analysis is under way.
+- **O_3 (rung 2):** round 1 (16M random-play and self-play labels): overall 0.0105%, seats 1-2 0.0138%, 3-4 0.0091%, 5-8 0.0133%, bias 0.0108%, agreement 84.5%, a near miss. Round 2 (+ 8M harvested positions, cap 32): overall 0.0111%, seats 1-2 0.0156%, 3-4 0.0171%, 5-8 0.0109%, bias 0.0092%, agreement 83.2%: the harvest did not help. The network's outcome accuracy is 87% at trick 3 against 98% at trick 4, so the trick-3 function is much harder. Round 2 reused round 1's golden set from storage (generation took 1,057 s on 184 threads), with the 1% recheck byte-identical. Round 3 (32M random-play and self-play + 8M harvested, network 2048-1024-256, testing capacity) is running. Tables: `rung2.md`, "Results, 2026-10-16".
+- **O_2 (the trick-2 network):** not started. It needs the train-only runner mode and the trick-1 check tool, both being built. A trick-2 label costs 1.3 s on one 7995WX thread, so round 1 with 1.25M labels is about $3; awaiting the owner.
+
+**Built and merged on `m3-hybrid` today.**
+- *Yardstick:* GPU training on vast.ai (a CUDA-graph training step), the fast exact integer check, streamed label shards (hashed and written while the rows are made), the harvest of frontier positions, the network-driven harvest at trick 3 and reuse of a stored golden set, and the baked PyTorch image `ghcr.io/guillaumeds/41bots-base:20261016-2bb16f03f96d`.
+- *Launcher and tools:* the host reliability floor 0.90, unverified or deverified hosts allowed (verified preferred), the pull-aware start timeout, the waiting search with the price ladder, the floors of 190 threads / $1.70 an hour / 100 Mbps, the bad-machine memory, the cleanup limit of 60 minutes for a machine that never heartbeated, the vast-status fix for a run with no heartbeat yet, and the offer rules shared with the market tools (entries above).
+
+**Owner's rules of the day** (the "Where compute runs" and "Parallel rentals" rules are in `CLAUDE.md`).
+- 2026-10-16, 18:10 Mauritius, on renting: "the launcher must wait until it gets a cheap 120+ thread machine, actually at least 190+; there are many, they come every few minutes." Then, by 18:20: the thread floor is 190, the price cap is $1.70 an hour (also for a named offer, unless a manifest raises it), the link floor is 100 Mbps, a GPU job needs at least the GPUs it asks for (the price is per machine), and the launcher should "look for the cheapest a few times before hiking the price" (3 searches at $1.20, 3 at $1.45, then the cap).
+- Earlier the same day: hosts at 90% reliability are fine; unverified or deverified hosts are fine, verified preferred.
+
+**Rentals and spend today (hybrid yardstick).** The nine trick-4 runs of `rung1.md`: about $2.01 (whole rentals). Then lead-3 $0.35 (cancelled), lead-3b $0.03 (start failure: machine #55016300, whose NVIDIA container runtime is broken, was rented a second time five minutes after its first failure, which is why the launcher now remembers such machines for 24 hours), lead-3c about $0.40, t3-r1b $0.58 (cancelled), t3-r1c $0.90 (O_3 round 1), t3-r2 $0.79 (O_3 round 2). Sum of these figures: about $5.06. O_3 round 3 is running and not counted.
+
+**Open items.**
+- Seats 3-4 of O_4: finish the analysis of the few systematic decisions (`rung1.md`, notes 7-9).
+- The trick-1 checks, and the train-only runner mode that O_2 needs.
+- Start trick 2 (O_2) once the owner agrees to the cost.
+- Overlap the golden-set generation with training (round 1 spent 1,057 s generating it before training started), and feed the labels to training a quarter at a time as the owner proposed.
+- Expect merge conflicts in the workflow files with `main` when `m3-hybrid` goes to `main`.
+- The vast API key cannot create destroy-only keys (the launcher logs it and goes on; machines are destroyed by the launcher and the cleanup workflow only).
