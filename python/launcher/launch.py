@@ -109,7 +109,7 @@ Rules applied:
 - Destroying: the launcher destroys the instance itself (on DONE/FAILED, a stale heartbeat, a
   dead instance or --max-minutes) unless it handed it over, and vast-cleanup.yml (cleanup.py,
   every 15 minutes) destroys a 41bots- instance whose run ended 10 minutes ago, went silent for
-  20 minutes, never heartbeated in 45 minutes, passed its deadline or its dollar cap (after a
+  20 minutes, never heartbeated in 60 minutes, passed its deadline or its dollar cap (after a
   stop request): that is the mechanism that does not depend on the machine. The
   machine also tries to destroy itself last. vast.ai documents a per-instance key in
   CONTAINER_API_KEY that "can only start, stop, or destroy that specific instance"
