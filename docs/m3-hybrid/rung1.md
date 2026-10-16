@@ -1,6 +1,8 @@
 # Hybrid yardstick, rung 1 (O_4): build report
 
-Branch `m3-hybrid`, 2026-10-16 (Mauritius). Spec: `docs/M3-HYBRID-SPEC.md`.
+Branch `m3-hybrid`, 2026-10-16 (Mauritius). Spec: `docs/M3-HYBRID-SPEC.md`. Rung 1 (below) was
+followed the same day by **rung 1b, the outcome head** (spec §6a): see its section after the
+first small run.
 
 **In one paragraph.** The whole pipeline now exists and runs end to end: the exact solver can stop
 at the start of a chosen trick and ask a network instead; the network's inputs are produced by one
@@ -115,73 +117,137 @@ the play is trivial, which showed the network was struggling to learn the match-
 the cards; giving it the successor equities cut the trick-5 error SD from 2.7% to 1.9% with the
 same network (1.1% with a deeper one). Both networks were still improving when stopped.
 
+## Rung 1b: the outcome head (spec §6a)
+
+**What changed.** The network no longer guesses four money chances. It says how the hand ends,
+and the money chances of each ending are computed exactly from the match-equity table. This works
+because in an all-cards-face-up position the exact value is always the value of one ending of the
+hand. From the start of trick k an ending is either "team t wins the game" (4 of them; the value
+depends only on t) or "the hand is over" with a given split of the remaining tricks between the
+four teams (the bonus still to come goes to a team the position already fixes: the holder of a
+live 5 of trumps, or the end-of-hand bonus team). That gives 8, 14, 24 and 39 possible endings at
+tricks 5, 4, 3 and 2 (`crates/nn/src/outcome.rs`, with the proof). Endings no line can reach are
+masked, exactly: a team that cannot reach 41, a split where someone would reach 41 or win all five
+tricks, or a split where the team holding the highest live trump wins no trick. The network gives
+a score per ending; the value is the softmax-weighted mean of the endings' exact money vectors, in
+whole numbers (u128 sums, largest-remainder rounding, exactly 2^32). The encoder inputs are
+unchanged (`oracle-v2`).
+
+**Completeness checked three ways.** Every label row needs an ending whose money vector equals the
+exact value, or `search labels` stops. A test solves 4,300 random positions at tricks 3–5 under
+both tie orders (8,600 solves) and finds one every time, asking the table only for valid states.
+The Python trainer checks every row of every shard before training. All 1.24 million labels of the
+small run below passed.
+
+**Small run, same seeds and sizes as rung 1** (O_5: 300,000 labels; O_4: 900,000; 20,000 for
+validation each; MLP 512-256-64; this VM):
+
+| net | outcome accuracy | mean \|error\| | SD | 99.9% \|e\| | bias by team (leader's, next, opposite, previous) | training |
+|---|---|---|---|---|---|---|
+| O_5 (8 endings) | 99.96% | 0.016% | 0.80% | 1.0% | −0.006%, −0.002%, −0.001%, +0.009% | 1.8 min, best epoch 5 |
+| O_4 (14 endings) | 90.1% | 0.53% | 2.31% | 29% | +0.078%, −0.025%, −0.010%, −0.044% | 4.2 min, best epoch 5 |
+
+(Rung 1, four-logit head: O_5 mean |error| 0.51%, SD 1.1%; O_4 1.35%, 3.0%.) The integer networks
+match the float ones to 0.0001%. O_4 started to overfit after epoch 5 (training loss still
+falling, validation loss rising): it needs more labels.
+
+**Check 1: H_4 against exact, first 40 trick-3 decisions × 64 worlds** (seed 1, regenerated, exact
+recomputed; net `5b26d0baa852…`). Value error now over all four teams' chances (the other seats
+choose by their own team's chance inside the search); bias per team relative to the decider.
+
+| group | dec | mean loss | 95% upper | ≤ 0.01%? | agree | bias: own / next / opposite / previous | SD | 99.9% \|e\| | max \|e\| |
+|---|---|---|---|---|---|---|---|---|---|
+| all | 40 | 0.0189% | 0.0399% | no | 82.5% | −0.024% / −0.008% / −0.009% / +0.041% | 2.08% | 25.3% | 75.1% |
+| pos 1–2 | 16 | 0.0357% | 0.0882% | no | 68.8% | −0.081% / −0.023% / +0.007% / +0.098% | 1.84% | 20.3% | 50.5% |
+| pos 3–4 | 8 | 0.0000% | 0.0000% | yes | 100% | +0.149% / +0.110% / −0.294% / +0.035% | 3.51% | 60.0% | 75.1% |
+| pos 5–8 | 16 | 0.0117% | 0.0294% | no | 87.5% | −0.043% / −0.044% / +0.102% / −0.015% | 1.33% | 17.2% | 39.3% |
+
+Decider's team alone: SD 1.99%, 99.9% |e| 25.5%. Time: exact 3.4 ms a world, hybrid 17.5 ms a
+world (229 network evaluations), 75 µs per evaluation (the outcome table adds about 5–15 µs to the
+four-logit head). Result: FAIL (loss and bias), value SD down from 3.05% to 2.08%.
+
+**Check 2: H_5 against exact, trick-4 golden decisions 0–39 × 64 worlds** (stored exact values,
+`--source rejection`, 145 worlds recomputed byte-identical; net `d740d066ea63…`):
+
+| group | dec | mean loss | 95% upper | ≤ 0.01%? | agree | bias: own / next / opposite / previous | SD | 99.9% \|e\| | max \|e\| |
+|---|---|---|---|---|---|---|---|---|---|
+| all | 40 | 0.0000% | 0.0000% | yes | 100% | −0.000% / +0.019% / +0.004% / −0.023% | 0.42% | 2.3% | 28.2% |
+| pos 1–2 | 16 | 0.0000% | 0.0000% | yes | 100% | +0.000% / −0.000% / +0.000% / +0.000% | 0.003% | 0.009% | 0.21% |
+| pos 3–4 | 8 | 0.0000% | 0.0000% | yes | 100% | +0.000% / −0.000% / +0.000% / −0.000% | 0.0004% | 0.002% | 0.017% |
+| pos 5–8 | 16 | 0.0000% | 0.0000% | yes | 100% | −0.000% / +0.048% / +0.010% / −0.057% | 0.66% | 10.2% | 28.2% |
+
+Decider's team alone: SD 0.004%. The decision loss passes everywhere; the bias of two other teams
+(+0.019%, −0.023%) fails, all of it from one decision at position 5 where an ending is misclassified.
+Result: FAIL on bias only (rung 1: loss 0.0037%, bias −0.11%, SD 2.0%).
+
+**What this says.** The outcome head fixes what it was meant to fix: once the cards decide
+the ending (trick 5), the values are nearly exact. At trick 4 the remaining error is the network
+not yet predicting who wins the last two tricks (90% accuracy), and it is data-limited. The next
+round (spec §3): many more labels (they are cheap), a larger network, harvested frontier positions,
+then the full trick-3 check.
+
 ## Full rung-1 run (off this VM; nothing rented)
 
-Binaries: `cargo build --release -p search -p nn -p equity`. Table: `equity build --model
-data/equity/model-rules-v1-1M-seed1.json --out equity-v0.npy` (SHA-256 `64740dab…`). `T` = threads.
+A ready-to-run GitHub Actions job is in `.github/workflows/hybrid-rung1.yml` (manual trigger
+only; not run). One standard CPU runner (4 vCPU, 16 GB): equity table, 1.05M labels (~2 min),
+the trick-3 golden set (~2–3 min), training capped at 200 minutes (1024-512-128, outcome head),
+the check (~10–30 min), outputs kept as an artifact (networks, reports, sidecars, the new trick-3
+golden decisions and exact worlds, the check). About 4 hours of wall time at most, inside the
+6-hour limit. The same steps by hand (`T` = threads):
 
 ```
-# 1. labels, about 1M trick-4 positions (~0.27 ms per row per core: ~0.08 core-hours; 626 MB)
+cargo build --release -p search -p nn -p equity
+equity build --model data/equity/model-rules-v1-1M-seed1.json --out equity-v0.npy   # SHA-256 64740dab…
+
+# 1. labels, ~1M trick-4 positions (~0.3 ms per row per core: ~0.1 core-hours; ~1.1 GB)
 search labels --trick 4 --count 800000 --seed 101 --source random --out t4-random-s101.npy --equity equity-v0.npy --threads T
 search labels --trick 4 --count 200000 --seed 102 --source rules  --out t4-rules-s102.npy  --equity equity-v0.npy --threads T
 search labels --trick 4 --count 50000  --seed 201 --source random --out t4-val-s201.npy    --equity equity-v0.npy --threads T
 
-# 2. training (~25 s per epoch per 1M rows for 512-256-64 on 4 CPU threads; 1024-512-128 about 4x:
-#    40-60 epochs = 1.5-6 core-hours on CPU, minutes on a GPU)
-cd python/nn && uv sync && uv run python -m fortyone_nn.train \
+# 2. training, outcome head (~25 s per epoch per 1M rows for 512-256-64 on 4 CPU threads;
+#    1024-512-128 about 4x: 2-14 core-hours on CPU, minutes on a GPU)
+cd python/nn && uv sync && uv run python -m fortyone_nn.train --head outcome \
   --train t4-random-s101.npy t4-rules-s102.npy --val t4-val-s201.npy --out o4-full \
   --widths 1024,512,128 --epochs 60 --batch 1024 --lr 1e-3 --patience 5 --seed 1 --threads T
 
-# 3. the trick-3 golden set: 400 decisions x 320 worlds, seed 1 (128,000 exact worlds at ~3.8 ms:
-#    ~0.14 core-hours), stored in the yardstick's worlds format
+# 3. the trick-3 golden set: 400 decisions x 320 worlds, seed 1 (128,000 exact worlds at ~3.5 ms:
+#    ~0.13 core-hours), stored in the yardstick's worlds format
 search decisions --trick 3 --count 400 --seed 1 --allow-uneven --out decisions-t3.jsonl
 search worlds --decisions decisions-t3.jsonl --method exact --to 320 --out exact-t3-n320.jsonl --equity equity-v0.npy --threads T
 
-# 4. the check (hybrid ~15 ms a world with a 512-256-64 net, ~40 ms with 1024-512-128:
-#    0.5-1.5 core-hours; 1% of exact worlds recomputed)
+# 4. the check (hybrid ~17 ms a world with 512-256-64, ~40-50 ms with 1024-512-128:
+#    0.6-1.8 core-hours; 1% of exact worlds recomputed)
 search hybrid-check --trick 3 --cut 4 --net o4-full/int.safetensors --equity equity-v0.npy \
   --decisions decisions-t3.jsonl --worlds exact-t3-n320.jsonl --to 320 --threads T --json hc-t3-o4-full.json
 ```
 
-Total about 2–8 core-hours depending on the network size and where training runs: under 10
-minutes of wall time on a 32-thread machine for steps 1, 3 and 4.
+Total about 3–16 core-hours, nearly all of it training.
 
-## Spec questions (what I decided, for review)
+## Spec questions and the answers (review of 2026-10-16)
 
-1. **Successor equities in the encoder.** Spec §6 lists the fields; I added, as number inputs, the
-   match-equity values after each possible winner of the next one and two tricks (PLAN §6.5 lists
-   "the best and worst reachable successor equities" as optional inputs; this gives the network all
-   of them for the next two tricks). They are pure functions of fields the encoder already holds,
-   so completeness is unchanged. Encoder version `oracle-v2`. Please confirm.
-2. **The evaluator sees a canonical form, not the raw position** (see "What was built", 1). Without
-   it the fast solver's equivalent-card merging would not stay exact once a network sits at the
-   frontier. The form is complete (equal forms ⇒ equal exact values: proved and tested).
-3. **Suit symmetries are not used.** Swapping clubs and spades (PLAN A8) changes the card numbers,
-   and the solver's tie rule breaks ties by card number, so exact values can change: it is not an
-   exact symmetry of the current solver. Only the team rotation is used (tested).
-4. **The trick-4 golden set was drawn by the rejection sampler.** `m3-agree-t4c` was made by binary
-   `bc4835a`, before the belief sampler became the default; its worlds are reproduced only with
-   `--source rejection` (then byte-identical). The trick-2 set has world counts, so it used the
-   belief sampler. The new trick-3 set will use the current default.
-5. **"95% upper bound"** is taken as the upper end of the 95% bootstrap interval, the 97.5th
-   percentile of 1,000 bootstrap means (decisions resampled with replacement, seed 1, each band on
-   its own), as `search curves` does. It is the stricter reading (a one-sided bound would use the
-   95th percentile).
-6. **Value error** is reported in the decider's team's chance (as the decision loss is).
-7. **Hybrid values version** is written as `2+O4:<net sha256>` in the check's JSON.
+1. **Successor equities in the encoder** (`oracle-v2`): approved.
+2. **The evaluator sees a canonical form**: approved.
+3. **No suit symmetries** (the card-number tie rule breaks them): confirmed.
+4. **The trick-4 golden set was drawn by the rejection sampler** (binary `bc4835a`); keep
+   `--source rejection` for it. The new trick-3 set uses the current default (belief sampler).
+5. **"95% upper bound"** = 97.5th percentile of 1,000 bootstrap means (seed 1), as `search
+   curves`: accepted.
+6. **Value error for all four teams**: done (rung 1b tables): bias per team relative to the
+   decider, SD and tails over all four teams' chances; the decider's own SD is printed too.
+7. **Synthetic robs in later tricks**: the solver tests now keep a synthetic rob only where the
+   burn merge is proved sound (`solver/tests/common::burn_merge_sound`: no trump played in an
+   earlier trick that is still the best lies between two trumps the robber could burn; noted in
+   the test files). Among 154 positions where the proof does not hold, no wrong value was found.
+8. **Hybrid values version** is written as `2+O4:<net sha256>` in the check's JSON.
 
 ## Open questions
 
-- **Speed for O_3.** About 65 µs per evaluation is far too slow for O_3 (an exact trick-3 solve is
+- **Speed for O_3.** About 75 µs per evaluation is far too slow for O_3 (an exact trick-3 solve is
   ~4–9 ms; H_3 from trick 2 will make tens of thousands of evaluations a world). The forward pass is
   plain 64-bit arithmetic; the plan's path (32-bit SIMD kernel with runtime dispatch, smaller first
-  layer, incremental first layer) should give 10x or more.
-- **Accuracy.** Next round per spec §3: more labels (they are cheap: 1M in about a minute here),
-  a larger and longer-trained network (GPU), and harvested frontier positions from H_4's own
-  searches (`SOURCE_HARVEST` is reserved in the shard format).
-- **For the solver owner (not a real-game issue):** the burn-merge proof assumes the rob happens in
-  trick 1 (no played card can lie between two burn candidates). Some solver tests put synthetic
-  robs in tricks 3–5, where a played trump could lie between two merged burns and change the
-  end-of-hand bonus.
-- The new CI step (Python parity, `astral-sh/setup-uv@v6`) has not been run (no workflows were
-  triggered from here).
+  layer, incremental first layer) should give 10x or more. The outcome table (up to 39 equity
+  lookups at trick 2) should be cached per score state.
+- **Accuracy.** O_4 overfits 900k labels; labels are cheap (1M in about a minute here), so the next
+  round should use several million, a larger network, and harvested frontier positions from H_4's
+  own searches (`SOURCE_HARVEST` is reserved in the shard format).
+- The CI parity step and the rung-1 workflow have not been run (no workflows triggered from here).

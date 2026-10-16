@@ -1,0 +1,111 @@
+# The full rung-1 run of the hybrid yardstick (docs/M3-HYBRID-SPEC.md §3, §5, §6a;
+# docs/m3-hybrid/rung1.md): ~1M trick-4 labels, O_4 trained with the outcome head on CPU, the
+# trick-3 golden set (400 decisions x 320 worlds, seed 1) valued exactly, then H_4 checked
+# against it. One CPU job on a standard GitHub runner (4 vCPU, 16 GB RAM), well inside the
+# 6-hour job limit: labels ~2 min, golden worlds ~2-3 min, training capped by `train_minutes`
+# (default 200), the check ~10-30 min depending on the network size.
+#
+# Manual only (workflow_dispatch): nothing here runs on a push. Outputs are uploaded as one
+# artifact: the networks and their reports, the label sidecars (not the 1 GB of shards), the
+# trick-3 decisions and exact worlds (the regenerated golden set), and the check's JSON and text.
+
+name: Hybrid rung 1 (O_4) full run
+
+on:
+  workflow_dispatch:
+    inputs:
+      labels_random:
+        description: "Trick-4 labels from random play at yardstick roots (seed 101)"
+        default: "800000"
+      labels_rules:
+        description: "Trick-4 labels from rules-v1 self-play (seed 102)"
+        default: "200000"
+      labels_val:
+        description: "Validation labels (random, seed 201)"
+        default: "50000"
+      widths:
+        description: "Hidden layer widths"
+        default: "1024,512,128"
+      epochs:
+        description: "Most training epochs (early stopping on the validation shard)"
+        default: "60"
+      train_minutes:
+        description: "Training time cap in minutes"
+        default: "200"
+      golden_count:
+        description: "Trick-3 golden decisions (seed 1)"
+        default: "400"
+      golden_worlds:
+        description: "Worlds per golden decision"
+        default: "320"
+
+concurrency:
+  group: hybrid-rung1
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rung1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binaries
+        run: cargo build --release -p search -p nn -p equity
+      - name: Equity table v0 (checked against its recorded SHA-256)
+        shell: bash
+        run: |
+          mkdir -p out
+          ./target/release/equity build --model data/equity/model-rules-v1-1M-seed1.json \
+            --out out/equity-v0.npy --threads "$(nproc)"
+          test "$(sha256sum out/equity-v0.npy | cut -d' ' -f1)" = "$(cat data/equity/equity-v0-rules-v1.sha256 | tr -d '[:space:]')"
+      - name: Labels (trick 4)
+        shell: bash
+        run: |
+          S=./target/release/search
+          T="$(nproc)"
+          $S labels --trick 4 --count ${{ inputs.labels_random }} --seed 101 --source random --out out/t4-random-s101.npy --equity out/equity-v0.npy --threads "$T"
+          $S labels --trick 4 --count ${{ inputs.labels_rules }}  --seed 102 --source rules  --out out/t4-rules-s102.npy  --equity out/equity-v0.npy --threads "$T"
+          $S labels --trick 4 --count ${{ inputs.labels_val }}    --seed 201 --source random --out out/t4-val-s201.npy    --equity out/equity-v0.npy --threads "$T"
+          df -h .
+      - name: Golden trick-3 set (decisions, exact worlds)
+        shell: bash
+        run: |
+          S=./target/release/search
+          $S decisions --trick 3 --count ${{ inputs.golden_count }} --seed 1 --allow-uneven --out out/decisions-t3.jsonl
+          $S worlds --decisions out/decisions-t3.jsonl --method exact --to ${{ inputs.golden_worlds }} \
+            --out out/exact-t3-n${{ inputs.golden_worlds }}.jsonl --equity out/equity-v0.npy --threads "$(nproc)"
+      - name: Install uv (Python 3.14)
+        uses: astral-sh/setup-uv@v6
+      - name: Train O_4 (outcome head, PyTorch 2.14.1 CPU)
+        shell: bash
+        run: |
+          cd python/nn
+          uv sync
+          uv run python -m fortyone_nn.train \
+            --train ../../out/t4-random-s101.npy ../../out/t4-rules-s102.npy --val ../../out/t4-val-s201.npy \
+            --out ../../out/o4-full --head outcome --widths ${{ inputs.widths }} --epochs ${{ inputs.epochs }} \
+            --batch 1024 --lr 1e-3 --patience 5 --seed 1 --threads "$(nproc)" --max-minutes ${{ inputs.train_minutes }}
+      - name: Hybrid check H_4 vs exact on the golden trick-3 set (1% of exact worlds recomputed)
+        shell: bash
+        run: |
+          ./target/release/search hybrid-check --trick 3 --cut 4 --net out/o4-full/int.safetensors \
+            --equity out/equity-v0.npy --decisions out/decisions-t3.jsonl \
+            --worlds out/exact-t3-n${{ inputs.golden_worlds }}.jsonl --to ${{ inputs.golden_worlds }} \
+            --threads "$(nproc)" --json out/hc-t3-o4-full.json | tee out/hc-t3-o4-full.txt
+      - name: Keep the outputs (no shards)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hybrid-rung1-${{ github.run_id }}
+          path: |
+            out/*.json
+            out/*.txt
+            out/*.jsonl
+            out/o4-full/
+          if-no-files-found: warn
