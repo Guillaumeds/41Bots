@@ -192,8 +192,11 @@ steps when two run at once. Neither device waits for the other when it has a big
   decisions with 5% of their positions in it) instead of a half, so rejection sampling finds
   decisions at all; at most `audit_mini_candidates` (200 × `audit_mini_decisions`) candidates are
   drawn. A set's verdict needs at least `audit_mini_min` decisions (default 30; a handful that all
-  agree would give a bound of 0): with fewer, the group is reported "unmeasurable at the decision
-  level (N decisions kept)", never passed or failed, and it blocks "flat" (never passed silently).
+  agree would give a bound of 0): with fewer (none included), the group is reported "unmeasurable
+  at the decision level (N decisions kept)" in every round report and the summary ("unmeasurable:
+  k groups"), never passed or failed, never failing and never blocking "flat": the overall row
+  covers it, and a group too rare to measure must not keep the loop from reaching flat (the push
+  starts only after flat). It is targeted only when the auditor confirms it again.
 - **Diminishing returns.** Two rounds in a row on the largest shape of the capacity ladder that
   lower neither the worst failing group's decision-level bound nor the overall bound by
   `audit_min_gain` end the loop ("diminishing returns"), with the groups still limiting it (weight,

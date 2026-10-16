@@ -20,9 +20,10 @@
 //!   for one mini golden set; its keep share is a half for a group of weight 0.1% or more and
 //!   500 × the weight, at least 5%, for a lighter one ([`keep_share`]);
 //! - `audit_mini_min` (30, or `audit_mini_decisions` when smaller): a mini golden set's verdict
-//!   needs this many decisions; with fewer (the cap reached) its group is *unmeasurable at the
-//!   decision level*, reported with the number kept, never passed or failed, and it blocks
-//!   "flat";
+//!   needs this many decisions; with fewer (the cap reached, or none found) its group is
+//!   *unmeasurable at the decision level*, reported with the number kept in every round and the
+//!   summary, never passed or failed, never failing and never blocking "flat" (the overall row
+//!   covers it); it is targeted only when the auditor confirms it again;
 //! - `audit_seed` (301): round `r`'s audit shard has the seed `audit_seed × 100 + r`, its targeted
 //!   harvest `audit_seed × 100 + 50 + r` (a pure function of the manifest; refused when one meets
 //!   a training or validation seed, or the golden sets' seed 1);
@@ -73,8 +74,9 @@
 //!    (the standard; plan §4, decision of 2026-10-16): each group's 95% upper bound of the
 //!    decision loss, on its golden slice when that holds `audit_mini_decisions` decisions, else
 //!    on its mini golden set; a group over the standard is *remaining*; one whose mini set kept
-//!    fewer than `audit_mini_min` decisions (within `audit_mini_candidates`) is *unmeasurable*,
-//!    and one waiting for its mini set *not yet measured*: both block "flat". The auditor's thresholds only choose what to target and slice; each round's
+//!    fewer than `audit_mini_min` decisions (within `audit_mini_candidates`) is *unmeasurable*
+//!    (reported, not judged, not blocking), and one waiting for its mini set *not yet measured*
+//!    (blocks "flat"). The auditor's thresholds only choose what to target and slice; each round's
 //!    report pairs every group's SD with its decision-level bound (the recalibration table, report
 //!    only).
 //! 5. **Targeted harvest** (`search labels --source harvest --harvest-keep PRED --harvest-cap 0
@@ -87,11 +89,11 @@
 //!    ("re-targeting N groups still failing"). Not made when the round is flat.
 //!
 //! **Stop**: *flat* when the golden set's overall row passes (decision loss bound, every team's
-//! bias; the bands are reported only), no group is failing and none is waiting to be measured or
-//! unmeasured, confirmed groups or not (`flat after round r`; with a push standard, flat at it);
-//! *nothing to target* when a round confirms nothing, no group is still failing, and the overall
-//! row fails or groups stay unmeasured (every waiting mini set is made first, so the decision is
-//! complete); *diminishing returns* when two rounds in a row on the largest shape of the ladder
+//! bias; the bands are reported only), no group is failing and none is waiting to be measured
+//! (unmeasurable groups are reported, not judged), confirmed groups or not (`flat after round
+//! r`; with a push standard, flat at it); *nothing to target* when a round confirms nothing, no
+//! group is still failing, and the overall row fails (every waiting mini set is made first, so
+//! the decision is complete); *diminishing returns* when two rounds in a row on the largest shape of the ladder
 //! lower neither the worst failing group's decision-level bound nor the overall bound by
 //! `audit_min_gain` (never while the shape can still step up; the summary lists the groups still
 //! limiting it, their weight and SD); *round limit* after
@@ -727,9 +729,10 @@ fn flat_at(golden: &Value, judged: &[Value], pct: f64) -> bool {
         .is_none_or(|b| b.iter().filter_map(Value::as_f64).all(|x| x.abs() <= lim));
     golden["loss_upper95"].as_f64().is_some_and(|u| u <= lim)
         && bias_ok
-        && judged
-            .iter()
-            .all(|x| !unmeasured(x) && x["loss_upper95"].as_f64().is_some_and(|u| u <= lim))
+        && judged.iter().all(|x| {
+            x["basis"] == UNFILLED
+                || (!unmeasured(x) && x["loss_upper95"].as_f64().is_some_and(|u| u <= lim))
+        })
 }
 
 /// 2 when flat at the push standard, 1 at `audit_standard`, else 0.
@@ -992,8 +995,8 @@ fn judge(st: &Loop, golden: &Value, minis: &[Value], r: u64) -> Vec<Value> {
                 ("golden slice", x["loss_upper95"].clone(), x["pass"].clone())
             } else {
                 match mini {
-                    // Never silently passed (owner, 2026-10-16 night): a mini set with fewer than
-                    // `audit_mini_min` decisions gives no verdict and its group blocks "flat".
+                    // A verdict needs evidence: a mini set with fewer than `audit_mini_min`
+                    // decisions gives none (reported, never passed or failed).
                     Some(m) if m["unfilled"].as_bool() == Some(true) => {
                         (UNFILLED, m["loss_upper95"].clone(), Value::Null)
                     }
@@ -1013,20 +1016,25 @@ fn judge(st: &Loop, golden: &Value, minis: &[Value], r: u64) -> Vec<Value> {
         .collect()
 }
 
-/// The basis of a group whose mini golden set kept fewer than `audit_mini_min` decisions: no
-/// verdict, and the group blocks "flat".
+/// The basis of a group whose mini golden set kept fewer than `audit_mini_min` decisions (none
+/// included): no verdict, reported in every round, neither failing nor blocking "flat" (the
+/// overall row covers it; coordinator's review, 2026-10-16 night).
 const UNFILLED: &str = "unmeasurable at the decision level";
 
-/// Whether a judged group is still unmeasured at the decision level (blocks "flat").
+/// Whether a judged group is waiting for its mini golden set (blocks "flat").
 fn unmeasured(x: &Value) -> bool {
-    x["basis"] == "not yet measured" || x["basis"] == UNFILLED
+    x["basis"] == "not yet measured"
 }
 
 /// The failing groups after round `r`'s measurements (`judged`, in the union's order): a group
-/// whose bound fails joins them (or stays), one whose bound passes leaves them, one not measured
-/// keeps its state.
+/// whose bound fails joins them (or stays), one whose bound passes leaves them, one unmeasurable
+/// leaves them too (it is never failing), one not yet measured keeps its state.
 fn update_failing(st: &mut Loop, judged: &[Value], r: u64) {
     for (g, x) in st.groups.iter_mut().zip(judged) {
+        if x["basis"] == UNFILLED {
+            g.failing_since = None;
+            continue;
+        }
         match x["pass"].as_bool() {
             Some(false) => {
                 g.failing_since.get_or_insert(r);
@@ -1044,30 +1052,22 @@ fn failing(st: &Loop) -> Vec<usize> {
         .collect()
 }
 
-/// The stop reason when nothing is left to target after round `r`: the overall row fails, or
-/// groups stay unmeasurable (their mini golden sets kept too few decisions).
-fn nothing_reason(st: &Loop, r: u64) -> String {
-    let unfilled: Vec<&str> = st
-        .groups
+/// The stop reason when nothing is left to target after round `r`.
+fn nothing_reason(_st: &Loop, r: u64) -> String {
+    format!(
+        "nothing to target after round {r}: no group confirmed and none still failing, but the \
+         golden set's overall row fails (the next lever is network capacity)"
+    )
+}
+
+/// The groups unmeasurable at the decision level (a mini golden set of fewer than
+/// `audit_mini_min` decisions): reported, never judged.
+fn unmeasurable_groups(st: &Loop) -> Vec<&str> {
+    st.groups
         .iter()
         .filter(|g| g.mini.as_ref().is_some_and(|m| m.kept < st.s.mini_min))
         .map(|g| g.name.as_str())
-        .collect();
-    if unfilled.is_empty() {
-        format!(
-            "nothing to target after round {r}: no group confirmed and none still failing, but \
-             the golden set's overall row fails (the next lever is network capacity)"
-        )
-    } else {
-        format!(
-            "nothing to target after round {r}: no group confirmed and none still failing, but \
-             {} groups stay unmeasurable at the decision level (their mini golden sets kept \
-             fewer than {} decisions: {}), so the network cannot be called flat",
-            unfilled.len(),
-            st.s.mini_min,
-            unfilled.join("; ")
-        )
-    }
+        .collect()
 }
 
 /// The stop reason of a flat network after round `r`.
@@ -1158,6 +1158,16 @@ impl Rung<'_> {
         }
         if let Some(n) = best.as_ref().and_then(|b| b.3.clone()) {
             self.rec.insert("net".into(), n);
+        }
+        let unm = unmeasurable_groups(&st);
+        if !unm.is_empty() {
+            st.lines.push(format!(
+                "unmeasurable: {} groups (mini golden sets of fewer than {} decisions; reported, \
+                 not judged): {}",
+                unm.len(),
+                st.s.mini_min,
+                unm.join("; ")
+            ));
         }
         let summary = st.lines.join("\n")
             + if st.lines.is_empty() { "" } else { "\n" }
@@ -1359,19 +1369,6 @@ impl Rung<'_> {
                     _ => {}
                 }
                 let left = failing(st).len();
-                let unfilled = st
-                    .groups
-                    .iter()
-                    .filter(|g| g.mini.as_ref().is_some_and(|m| m.kept < st.s.mini_min))
-                    .count();
-                if unfilled > 0 {
-                    return Ok(format!(
-                        "round limit ({rmax} rounds; {left} groups still failing and {unfilled} \
-                         groups unmeasurable at the decision level: their mini golden sets kept \
-                         fewer than {} decisions)",
-                        st.s.mini_min
-                    ));
-                }
                 return Ok(format!(
                     "round limit ({rmax} rounds; {left} groups still failing at the decision \
                      level: the next lever is network capacity)"
@@ -2094,7 +2091,7 @@ impl Rung<'_> {
                               "made_round": made, "dir": rel, "pass": Value::Null,
                               "unfilled": true, "fill": fill, "share": share,
                               "note": "no decision of the generator reached this group at the keep share \
-                                       within the cap: unmeasurable at the decision level, which blocks flat" }),
+                                       within the cap: unmeasurable at the decision level (reported, not judged)" }),
             );
         };
         let mj = rdir.join(format!("mini-{id}{tag}.json"));
@@ -2362,6 +2359,11 @@ impl Rung<'_> {
             .filter(|x| x["pass"].as_bool() == Some(false))
             .map(|x| x["group"].as_str().unwrap_or("?").to_string())
             .collect();
+        let unmeasurable: Vec<String> = judged
+            .iter()
+            .filter(|x| x["basis"] == UNFILLED)
+            .map(|x| x["group"].as_str().unwrap_or("?").to_string())
+            .collect();
         let failing_now: Vec<Value> = failing(st)
             .into_iter()
             .map(|i| json!({ "group": st.groups[i].name, "failing_since": st.groups[i].failing_since }))
@@ -2411,6 +2413,7 @@ impl Rung<'_> {
             "targeted": targeted,
             "groups_remaining": remaining,
             "groups_failing": failing_now,
+            "groups_unmeasurable": unmeasurable,
             "flat": st.flat,
             "shared": keys,
         });
@@ -2512,11 +2515,13 @@ impl Rung<'_> {
             });
             t += &format!(
                 "Decision level (the standard), {} groups: {} over {std}, {} not yet measured \
-                 ({} of them unmeasurable: a mini golden set of too few decisions):\n",
+                 and {} unmeasurable (a mini golden set of fewer than {} decisions: reported, \
+                 not judged; the overall row covers them):\n",
                 judged.len(),
                 remaining.len(),
                 judged.iter().filter(|x| unmeasured(x)).count(),
-                judged.iter().filter(|x| x["basis"] == UNFILLED).count()
+                judged.iter().filter(|x| x["basis"] == UNFILLED).count(),
+                st.s.mini_min
             );
             for x in lines.iter().take(20) {
                 t += &format!(
@@ -2594,7 +2599,7 @@ impl Rung<'_> {
                     Some(true) => " (passes)".to_string(),
                     Some(false) => " (FAILS)".to_string(),
                     None => format!(
-                        " (UNMEASURABLE at the decision level: {}; the group blocks flat)",
+                        " (unmeasurable at the decision level: {}; reported, not judged)",
                         m["fill"].as_str().unwrap_or("?")
                     ),
                 }
@@ -2628,7 +2633,15 @@ impl Rung<'_> {
             );
         }
         t += &format!(
-            "Still out of spec: {}.\n",
+            "Unmeasurable at the decision level (mini golden sets of fewer than {} decisions; \
+             reported, not judged): {} groups{}.\nStill out of spec: {}.\n",
+            st.s.mini_min,
+            unmeasurable.len(),
+            if unmeasurable.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", unmeasurable.join("; "))
+            },
             if remaining.is_empty() {
                 "nothing".to_string()
             } else {
@@ -2659,7 +2672,8 @@ impl Rung<'_> {
         write_json(&json_path, &rec)?;
         st.lines.push(format!(
             "round {r}{}: {} groups confirmed ({} found) -> {} remaining, {} failing; golden 95% \
-             upper {} ({}); worst slice {}; shape {}; network {}; standard {std}",
+             upper {} ({}); worst slice {}; shape {}; network {}; standard {std}; unmeasurable: \
+             {} groups",
             if tag.is_empty() {
                 ""
             } else {
@@ -2683,7 +2697,8 @@ impl Rung<'_> {
                     pct4(w["loss_upper95"].as_f64())
                 )),
             p.shape,
-            p.net_sha.get(..12).unwrap_or("?")
+            p.net_sha.get(..12).unwrap_or("?"),
+            unmeasurable.len()
         ));
         st.rounds.push(rec);
         self.rec.insert(

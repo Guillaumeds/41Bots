@@ -236,9 +236,10 @@ settings:
 - `audit_mini_candidates` (default 200 × `audit_mini_decisions`): the most candidates one mini
   golden set may draw. A group lighter than 0.1% keeps decisions with at least 500 × its weight of
   their reached positions in it (at least 5%) instead of a half. A set's verdict needs at least
-  `audit_mini_min` decisions (default 30): with fewer, its group is reported "unmeasurable at the
-  decision level (N decisions kept)", never passed or failed, and the loop is then never called
-  flat. `audit_mini_sets` (new sets a round, default 4) has no upper limit: at trick 4 a set costs
+  `audit_mini_min` decisions (default 30): with fewer (none included), its group is reported
+  "unmeasurable at the decision level (N decisions kept)" in every round report and the summary,
+  never passed or failed, never failing and never blocking "flat" (the overall row covers it);
+  it is targeted only when the auditor confirms it again. `audit_mini_sets` (new sets a round, default 4) has no upper limit: at trick 4 a set costs
   seconds, so a loop may measure every waiting group each round (e.g. 400).
 - Stops added: *diminishing returns* (two rounds in a row on the largest shape lowering neither
   the worst failing group's bound nor the overall bound by `audit_min_gain`; never while the shape

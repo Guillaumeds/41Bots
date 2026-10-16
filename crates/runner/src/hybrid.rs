@@ -5525,12 +5525,13 @@ esac
         let _ = fs::remove_dir_all(&f.base);
     }
 
-    /// A mini golden set that cannot be filled (1 decision kept of 2 when the candidate cap is
-    /// reached) leaves its group unmeasured: never passed silently, it blocks "flat" even though
-    /// the golden set passes, and the reports say so.
+    /// A mini golden set with fewer than `audit_mini_min` decisions (1 kept of 2 when the
+    /// candidate cap is reached) gives no verdict: its group is reported "unmeasurable at the
+    /// decision level" in every round and the summary, neither failing nor blocking "flat" (the
+    /// overall row covers it, as for a set that found no decision).
     #[cfg(unix)]
     #[test]
-    fn audit_loop_unfilled_mini_set_stays_unmeasured() {
+    fn audit_loop_unmeasurable_group_is_reported_not_judged() {
         let f = fakes("auditunfilled");
         fs::write(f.base.join("audit-1.json"), GROUP_ONE).expect("write");
         fs::write(f.base.join("mini-unfilled"), "").expect("write");
@@ -5539,26 +5540,23 @@ esac
         let root = f.base.join("run");
         let mut ctx = Ctx::local("hybrid-test", &root, 4);
         let r = chunk_steps(&mut ctx, &params, &tools, &f.table, json!({})).expect("the loop runs");
-        assert_eq!(r["verdict"], "FAIL", "{r}");
+        assert_eq!(r["verdict"], "PASS", "{r}");
         let stop = r["audit"]["stop"].as_str().expect("stop");
-        assert!(
-            stop.contains("1 groups unmeasurable at the decision level: their mini golden sets kept fewer than 2 decisions"),
-            "{stop}"
-        );
+        assert!(stop.starts_with("flat after round 1"), "{stop}");
         let log = fs::read_to_string(&f.calls).expect("calls");
         assert!(log.contains("--max-candidates 30 "), "{log}");
+        assert!(!log.contains("--harvest-keep"), "nothing targeted: {log}");
         let out = root.join("out/hybrid/audit");
-        for r in ["round-1.json", "round-2.json"] {
-            let x = read_json(&out.join(r)).expect("round");
-            assert_eq!(
-                x["decision_level"][0]["basis"], "unmeasurable at the decision level",
-                "{r}"
-            );
-            assert_eq!(x["decision_level"][0]["pass"], Value::Null);
-            assert_eq!(x["flat"], false);
-        }
-        let r1 = read_json(&out.join("round-1.json")).expect("round 1");
-        let m = &r1["mini_sets"][0];
+        let x = read_json(&out.join("round-1.json")).expect("round 1");
+        assert_eq!(
+            x["decision_level"][0]["basis"],
+            "unmeasurable at the decision level"
+        );
+        assert_eq!(x["decision_level"][0]["pass"], Value::Null);
+        assert_eq!(x["flat"], true);
+        assert_eq!(x["groups_failing"], json!([]));
+        assert_eq!(x["groups_unmeasurable"], json!(["g-one"]));
+        let m = &x["mini_sets"][0];
         assert_eq!(
             (m["unfilled"].as_bool(), m["pass"].is_null()),
             (Some(true), true)
@@ -5571,14 +5569,18 @@ esac
         );
         let t = fs::read_to_string(out.join("round-1.txt")).expect("txt");
         assert!(
-            t.contains("UNMEASURABLE at the decision level: 1 decisions kept of 2 wanted"),
+            t.contains("unmeasurable at the decision level: 1 decisions kept of 2 wanted"),
             "{t}"
         );
         assert!(
-            t.contains(
-                "1 not yet measured (1 of them unmeasurable: a mini golden set of too few decisions)"
-            ),
+            t.contains("Unmeasurable at the decision level (mini golden sets of fewer than 2 decisions; reported, not judged): 1 groups (g-one)."),
             "{t}"
+        );
+        let summary = fs::read_to_string(out.join("audit-summary.txt")).expect("summary");
+        assert!(summary.contains("; unmeasurable: 1 groups\n"), "{summary}");
+        assert!(
+            summary.contains("\nunmeasurable: 1 groups (mini golden sets of fewer than 2 decisions; reported, not judged): g-one\n"),
+            "{summary}"
         );
         let _ = fs::remove_dir_all(&f.base);
     }
