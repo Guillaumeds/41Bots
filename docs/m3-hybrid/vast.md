@@ -216,6 +216,41 @@ without a manual `put-input`. Proposal: `docs/vast/m3-hybrid-t2-round1.manifest.
 1M random-play and 250,000 rules-v1 labels, 50,000 for validation, 1024-512-128; runnable as it
 is; priced in `rung2.md` §5 before anything is rented).
 
+## The audit loop's settings (decisions of 2026-10-16 night)
+
+The audit loop (`audit_rounds` above 0; `docs/m3-hybrid/audit-loop.md`) takes, beside its earlier
+settings:
+
+- `audit_gamma` (default 0.001; **tonight 0.0001**): the smallest weak group the auditor looks
+  for, as a share of positions. At 0.0002 or less the audit shard grows by itself to 20M rows at
+  trick 4 and 10M at trick 3 (`audit_rows` overrides it), so a group of 0.01% holds 1,000-2,000
+  rows. The shard is deleted once the auditor has read it (about 22 GB at trick 4, 14 GB at
+  trick 3; its record stays in `round-<r>/`). The auditor uses every thread of the step and has
+  90 minutes plus 15 per million rows above 2 million.
+- `audit_standard` (default 0.01) and `audit_push_standard` (none by default; **tonight 0.005 at
+  trick 4, 0.0075 at trick 3**), in percent of money chance: every golden check, slice and mini
+  set is judged by the standard (`search hybrid-check --standard`); once the loop is flat at
+  `audit_standard` it judges the same round again by the push standard and carries on, on the same
+  machine and dollar cap, until flat at that too. The heartbeat's `standard` says which phase it
+  is in; the summary has a line "flat at 0.01% after round 3; pushing to 0.005%".
+- `audit_mini_candidates` (default 200 × `audit_mini_decisions`): the most candidates one mini
+  golden set may draw. A group lighter than 0.1% keeps decisions with at least 500 × its weight of
+  their reached positions in it (at least 5%) instead of a half. A set's verdict needs at least
+  `audit_mini_min` decisions (default 30): with fewer (none included), its group is reported
+  "unmeasurable at the decision level (N decisions kept)" in every round report and the summary,
+  never passed or failed, never failing and never blocking "flat" (the overall row covers it);
+  it is targeted only when the auditor confirms it again. `audit_mini_sets` (new sets a round, default 4) has no upper limit: at trick 4 a set costs
+  seconds, so a loop may measure every waiting group each round (e.g. 400).
+- Stops added: *diminishing returns* (two rounds in a row on the largest shape lowering neither
+  the worst failing group's bound nor the overall bound by `audit_min_gain`; never while the shape
+  can still grow; the summary lists the groups still failing with their weight and SD). It
+  replaces "capacity ladder exhausted".
+- The capacity ladder keeps only shapes larger than the rung's `widths` (a rung at 2048,1024,256
+  steps to 2048,2048,1024,256, then 4096,2048,1024,256).
+- The chunk's network (`rung.json` `net`, `check`) is the best round's, not the last (flat at the
+  tightest standard first, then the lowest overall bound); `audit-summary.txt` says "best: round
+  k"; a stop keeps it too.
+
 ## The GPU and the CPU at the same time
 
 `overlap` (true): on a GPU, a golden set to generate is made while the network trains (on the

@@ -5,7 +5,25 @@
 //! **Settings** (all refused unless `audit_rounds` is above 0, and the loop needs the golden set:
 //! not with `"check": false`):
 //! - `audit_rounds` (0: no loop, the chunk is exactly as before): R_max, at most 49;
-//! - `audit_rows` (1,000,000): rows of each round's audit shard;
+//! - `audit_rows` (1,000,000; with `audit_gamma` at most 0.0002, 20,000,000 at trick 4 and later
+//!   and 10,000,000 at trick 3, so a group of 0.01% holds 1,000-2,000 rows): rows of each
+//!   round's audit shard, deleted once its auditor has run (its sidecar stays in `round-<r>/`);
+//! - `audit_gamma` (0.001; 0.0001 since the decisions of 2026-10-16 night): the auditor's
+//!   smallest group (`--gamma`), a share of the shard's discovery half; the auditor runs on the
+//!   step's threads (`--workers`), its time limit 90 minutes plus 15 per million rows above 2M;
+//! - `audit_standard` (0.01) and `audit_push_standard` (none), percentages of money chance: the
+//!   standard every check judges by (`search hybrid-check --standard`); once flat at
+//!   `audit_standard` the same round is judged again by `audit_push_standard` (files `…-push`),
+//!   and the loop goes on, on the same rental and budget, until flat at it (owner: 0.005 at
+//!   trick 4, 0.0075 at trick 3); the heartbeat's `standard` names the phase;
+//! - `audit_mini_candidates` (200 × `audit_mini_decisions`): at most this many candidates drawn
+//!   for one mini golden set; its keep share is a half for a group of weight 0.1% or more and
+//!   500 × the weight, at least 5%, for a lighter one ([`keep_share`]);
+//! - `audit_mini_min` (30, or `audit_mini_decisions` when smaller): a mini golden set's verdict
+//!   needs this many decisions; with fewer (the cap reached, or none found) its group is
+//!   *unmeasurable at the decision level*, reported with the number kept in every round and the
+//!   summary, never passed or failed, never failing and never blocking "flat" (the overall row
+//!   covers it); it is targeted only when the auditor confirms it again;
 //! - `audit_seed` (301): round `r`'s audit shard has the seed `audit_seed × 100 + r`, its targeted
 //!   harvest `audit_seed × 100 + 50 + r` (a pure function of the manifest; refused when one meets
 //!   a training or validation seed, or the golden sets' seed 1);
@@ -55,9 +73,10 @@
 //!    (`audit_mini_sets` a round) and checked with every later network. **The decision level**
 //!    (the standard; plan §4, decision of 2026-10-16): each group's 95% upper bound of the
 //!    decision loss, on its golden slice when that holds `audit_mini_decisions` decisions, else
-//!    on its mini golden set; a group over 0.01% is *remaining*; one whose mini set found no
-//!    decision is unmeasurable (the overall row covers it); one waiting for its mini set is *not
-//!    yet measured*. The auditor's thresholds only choose what to target and slice; each round's
+//!    on its mini golden set; a group over the standard is *remaining*; one whose mini set kept
+//!    fewer than `audit_mini_min` decisions (within `audit_mini_candidates`) is *unmeasurable*
+//!    (reported, not judged, not blocking), and one waiting for its mini set *not yet measured*
+//!    (blocks "flat"). The auditor's thresholds only choose what to target and slice; each round's
 //!    report pairs every group's SD with its decision-level bound (the recalibration table, report
 //!    only).
 //! 5. **Targeted harvest** (`search labels --source harvest --harvest-keep PRED --harvest-cap 0
@@ -70,10 +89,14 @@
 //!    ("re-targeting N groups still failing"). Not made when the round is flat.
 //!
 //! **Stop**: *flat* when the golden set's overall row passes (decision loss bound, every team's
-//! bias; the bands are reported only), no group is failing and none is waiting to be measured,
-//! confirmed groups or not (`flat after round r`); *nothing to target* when a round confirms
-//! nothing, no group is still failing, and the overall row fails (every waiting mini set is made
-//! first, so the decision is complete); *capacity ladder exhausted*; *round limit* after
+//! bias; the bands are reported only), no group is failing and none is waiting to be measured
+//! (unmeasurable groups are reported, not judged), confirmed groups or not (`flat after round
+//! r`; with a push standard, flat at it); *nothing to target* when a round confirms nothing, no
+//! group is still failing, and the overall row fails (every waiting mini set is made first, so
+//! the decision is complete); *diminishing returns* when two rounds in a row on the largest shape of the ladder
+//! lower neither the worst failing group's decision-level bound nor the overall bound by
+//! `audit_min_gain` (never while the shape can still step up; the summary lists the groups still
+//! limiting it, their weight and SD); *round limit* after
 //! `audit_rounds` rounds; *stopped* on the stop file or the launcher's STOP (the running step is
 //! stopped, everything so far written and uploaded), the reason naming a dollar cap when the
 //! stop does.
@@ -103,9 +126,11 @@
 //! latest golden check's overall row, and how many groups are not yet measured); `audit_stop` at
 //! the end. Each round writes `out/hybrid/audit/round-<r>.txt` (plain English) and
 //! `round-<r>.json`; the loop ends with `out/hybrid/audit/audit-summary.txt` (one line per round,
-//! then the stop reason). Each round's network, predicate files and reports are shared
-//! content-addressed (`inputs/sha256/<hex>`) and are in the bundle. `rung.json`'s `audit` holds
-//! every round's record; its `net` and `check` are the last round's, as the chunk's result.
+//! the best round, then the stop reason). Each round's network, predicate files and reports are
+//! shared content-addressed (`inputs/sha256/<hex>`) and are in the bundle. `rung.json`'s `audit`
+//! holds every round's record; its `net` and `check` are the *best* round's (flat at the
+//! tightest standard first, then the lowest overall bound, the lowest worst group bound, the
+//! earlier round), also when the run is stopped; the verdict is PASS when that round is flat.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -118,8 +143,13 @@ use super::{GOLDEN_SEED, Rung, label_progress, merge_beside, read_json, secs, wr
 use crate::remote::{input_hex, input_key, put_input};
 
 /// The audit loop's settings beside `audit_rounds`, refused when it is 0.
-const AUDIT_KEYS: [&str; 10] = [
+const AUDIT_KEYS: [&str; 15] = [
     "audit_rows",
+    "audit_mini_min",
+    "audit_gamma",
+    "audit_mini_candidates",
+    "audit_standard",
+    "audit_push_standard",
     "audit_seed",
     "audit_keep_cap",
     "audit_weight",
@@ -132,14 +162,48 @@ const AUDIT_KEYS: [&str; 10] = [
 ];
 
 /// A decision is in a group's golden slice (and a mini set's candidate is kept) when at least
-/// this share of its reached frontier positions are in the group.
+/// this share of its reached frontier positions are in the group (a mini set of a group lighter
+/// than 0.1%: [`keep_share`]).
 const SLICE_SHARE: &str = "0.5";
+
+/// At or below this `audit_gamma` the audit shard's default size grows (20M rows at trick 4,
+/// 10M at trick 3).
+const FINE_GAMMA: f64 = 0.0002;
+
+/// The keep share of a group's mini golden set (`search decisions --keep-share`), in
+/// millionths: a half ([`SLICE_SHARE`]) for a group of weight 0.1% or more; for a lighter one 500
+/// times its weight, at least 5% (0.01%: 5%, 0.05%: 25%), so that rejection sampling finds
+/// decisions whose searches reach a rare group at all. The same share for the same weight on
+/// every machine (the auditor's weight, rounded to millionths).
+pub(crate) fn keep_share(weight: f64) -> u64 {
+    let w = if weight.is_finite() {
+        weight.max(0.0)
+    } else {
+        0.0
+    };
+    ((w * 500.0 * 1e6).round() as u64).clamp(50_000, 500_000)
+}
+
+/// A share in millionths as `search` reads it (`0.05`, `0.125`).
+fn share_text(micro: u64) -> String {
+    let t = format!("{}.{:06}", micro / 1_000_000, micro % 1_000_000);
+    t.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// A standard in percent as text (`0.01%`, `0.005%`).
+pub(crate) fn std_text(pct: f64) -> String {
+    format!("{pct}%")
+}
 
 /// Worlds searched per candidate of a mini golden set.
 const MINI_WORLDS: u64 = 8;
 
-/// The auditor's time limit.
-const AUDIT_LIMIT: Duration = Duration::from_secs(90 * 60);
+/// The auditor's time limit for an audit shard of `rows` rows: 90 minutes, and 15 more per
+/// million rows above 2 million (a safety ceiling only: 20M rows are measured at minutes on a
+/// 128-thread machine, docs/m3-hybrid/audit-loop.md "Decisions of 2026-10-16 night").
+fn audit_limit(rows: u64) -> Duration {
+    Duration::from_secs(90 * 60 + rows.saturating_sub(2_000_000) / 1_000_000 * 15 * 60)
+}
 
 /// The audit loop's settings (module notes).
 #[derive(Clone, Debug, PartialEq)]
@@ -160,6 +224,17 @@ pub(crate) struct AuditSettings {
     /// `audit_predicates_input`: the SHA-256 of a stored predicate file standing in for the
     /// auditor.
     pub predicates_input: Option<String>,
+    /// `audit_gamma`: the auditor's smallest group, a share of the audit shard's half A.
+    pub gamma: f64,
+    /// `audit_mini_candidates`: at most this many candidates drawn for one mini golden set.
+    pub mini_candidates: u64,
+    /// `audit_mini_min`: a mini golden set with fewer decisions gives no verdict.
+    pub mini_min: u64,
+    /// `audit_standard`: the standard, in percent of money chance (0.01).
+    pub standard: f64,
+    /// `audit_push_standard`: the tighter standard the loop continues to once flat at
+    /// `standard`, in percent (none: the loop ends when flat).
+    pub push_standard: Option<f64>,
 }
 
 impl AuditSettings {
@@ -180,6 +255,9 @@ impl AuditSettings {
                 "shapes": self.shapes.iter().map(|w| shape_text(w)).collect::<Vec<_>>(),
                 "min_gain": self.min_gain,
                 "target_rows": self.target_rows,
+                "gamma": self.gamma, "mini_candidates": self.mini_candidates,
+                "mini_min": self.mini_min,
+                "standard_pct": self.standard, "push_standard_pct": self.push_standard,
                 "predicates_input": self.predicates_input.as_deref().map(input_key),
                 "audit_seeds": (1..=self.rounds).map(|r| self.audit_seed(r)).collect::<Vec<_>>(),
                 "target_seeds": (1..=self.rounds).map(|r| self.target_seed(r)).collect::<Vec<_>>() })
@@ -230,7 +308,24 @@ pub(crate) fn parse_settings(
             .into(),
         );
     }
-    let rows = u("audit_rows", 1_000_000)?;
+    let gamma = match o.get("audit_gamma") {
+        None | Some(Value::Null) => 0.001,
+        Some(v) => v
+            .as_f64()
+            .filter(|g| g.is_finite() && *g > 0.0 && *g <= 0.1)
+            .ok_or("hybrid_rung: audit_gamma must be a number above 0 (at most 0.1)")?,
+    };
+    // A group of `gamma` must hold 1,000-2,000 rows of the shard: at gamma 0.0001 (owner,
+    // 2026-10-16 night) 20M rows at trick 4 and later, 10M at trick 3; 1M otherwise.
+    let rows = u(
+        "audit_rows",
+        match cut {
+            _ if gamma > FINE_GAMMA => 1_000_000,
+            0..=2 => 1_000_000,
+            3 => 10_000_000,
+            _ => 20_000_000,
+        },
+    )?;
     if rows == 0 {
         return Err("hybrid_rung: audit_rows must be at least 1".into());
     }
@@ -263,6 +358,41 @@ pub(crate) fn parse_settings(
         return Err("hybrid_rung: audit_mini_decisions must be 1 to 10000".into());
     }
     let mini_sets = u("audit_mini_sets", 4)?;
+    let mini_candidates = u("audit_mini_candidates", mini_decisions.saturating_mul(200))?;
+    if mini_candidates < mini_decisions {
+        return Err(
+            "hybrid_rung: audit_mini_candidates must be at least audit_mini_decisions".into(),
+        );
+    }
+    // A verdict needs evidence (owner's review, 2026-10-16 night): a mini set of a handful of
+    // decisions that all agree has a 95% upper bound of 0.
+    let mini_min = u("audit_mini_min", mini_decisions.min(30))?;
+    if !(1..=mini_decisions).contains(&mini_min) {
+        return Err("hybrid_rung: audit_mini_min must be from 1 to audit_mini_decisions".into());
+    }
+    let pct_of = |k: &str, d: Option<f64>| -> Result<Option<f64>, String> {
+        match o.get(k) {
+            None | Some(Value::Null) => Ok(d),
+            Some(v) => v
+                .as_f64()
+                .filter(|x| x.is_finite() && *x > 0.0 && *x <= 1.0)
+                .map(Some)
+                .ok_or_else(|| {
+                    format!(
+                        "hybrid_rung: {k} must be a percentage of money chance above 0 (at most \
+                         1), e.g. 0.01"
+                    )
+                }),
+        }
+    };
+    let standard = pct_of("audit_standard", Some(0.01))?.unwrap_or(0.01);
+    let push_standard = pct_of("audit_push_standard", None)?;
+    if push_standard.is_some_and(|p| p >= standard) {
+        return Err(format!(
+            "hybrid_rung: audit_push_standard must be tighter (smaller) than audit_standard \
+             ({standard})"
+        ));
+    }
     let shapes = parse_shapes(o.get("audit_shapes"), widths)?;
     let min_gain = match o.get("audit_min_gain") {
         None | Some(Value::Null) => 0.15,
@@ -310,6 +440,11 @@ pub(crate) fn parse_settings(
         min_gain,
         target_rows,
         predicates_input,
+        gamma,
+        mini_candidates,
+        mini_min,
+        standard,
+        push_standard,
     };
     for r in 1..=rounds {
         for (what, x) in [
@@ -337,6 +472,18 @@ const LADDER: [&[u64]; 3] = [
     &[4096, 2048, 1024, 256],
 ];
 
+/// The weights of the hidden layers of a shape (inputs: the encoder's 909 features; biases
+/// counted), the size the capacity ladder grows by.
+fn weights_of(w: &[u64]) -> u64 {
+    let mut n_in = 909u64;
+    let mut total = 0u64;
+    for &x in w {
+        total = total.saturating_add((n_in + 1).saturating_mul(x));
+        n_in = x;
+    }
+    total
+}
+
 /// Hidden widths as written (`1024,512,128`).
 fn shape_text(w: &[u64]) -> String {
     w.iter().map(u64::to_string).collect::<Vec<_>>().join(",")
@@ -353,13 +500,15 @@ fn parse_shapes(v: Option<&Value>, widths: &[u64]) -> Result<Vec<Vec<u64>>, Stri
     };
     let text = match v {
         None | Some(Value::Null) => {
+            // Only shapes strictly larger than the rung's (by weights), each once, in order: a
+            // rung that starts at 2048,1024,256 steps to 2048,2048,1024,256, never to itself or
+            // down.
             let mut out = vec![widths.to_vec()];
-            out.extend(
-                LADDER
-                    .iter()
-                    .map(|w| w.to_vec())
-                    .filter(|w| fits(w).is_ok()),
-            );
+            for w in LADDER.iter().map(|w| w.to_vec()) {
+                if fits(&w).is_ok() && weights_of(&w) > weights_of(widths) && !out.contains(&w) {
+                    out.push(w);
+                }
+            }
             return Ok(out);
         }
         Some(Value::String(t)) => t.clone(),
@@ -391,6 +540,13 @@ fn parse_shapes(v: Option<&Value>, widths: &[u64]) -> Result<Vec<Vec<u64>>, Stri
                 })?
         };
         fits(&w).map_err(|e| format!("hybrid_rung: audit_shapes {text:?}: {part:?}: {e}"))?;
+        if !out.is_empty() && weights_of(&w) <= weights_of(widths) {
+            return Err(format!(
+                "hybrid_rung: audit_shapes {text:?}: {part:?} is not larger than the rung's widths \
+                 ({}): the ladder only grows",
+                shape_text(widths)
+            ));
+        }
         if out.contains(&w) {
             return Err(format!(
                 "hybrid_rung: audit_shapes {text:?}: {part:?} is given twice"
@@ -438,6 +594,8 @@ struct Mini {
     kept: u64,
     drawn: u64,
     made_round: u64,
+    /// The keep share (`search decisions --keep-share`, [`keep_share`]).
+    share: String,
 }
 
 /// One round's network and audit.
@@ -499,12 +657,156 @@ struct Loop {
     flat: bool,
     /// Sharing to the remote store failed or is impossible (warned once).
     share_warned: bool,
+    /// The standard the loop judges by now, in percent: `audit_standard`, then
+    /// `audit_push_standard` once flat at it.
+    standard: f64,
+    /// The push phase: the round that was flat at `audit_standard`, that standard, and that
+    /// round's network record and golden check (the chunk's result unless the loop is flat at
+    /// the push standard too).
+    pushed: Option<Pushed>,
+    /// Each judged round's decision-level bounds: (round, overall 95% upper bound, every measured
+    /// group's 95% upper bound), for the diminishing-returns stop.
+    bounds: Vec<(u64, f64, Vec<f64>)>,
+    /// Each judged round at the top of the ladder that lowered neither bound by `audit_min_gain`:
+    /// (round, the standard it was judged by).
+    stalled: Vec<(u64, f64)>,
+    /// Why the loop stopped for diminishing returns (with what limited it).
+    diminishing: Option<String>,
+    /// Every judged round (its latest judgement), for the chunk's network (`best_round`).
+    results: Vec<RoundResult>,
+}
+
+/// The round flat at `audit_standard` when the loop went on to `audit_push_standard`.
+struct Pushed {
+    round: u64,
+    from: f64,
+}
+
+/// A judged round's network and golden check, and what ranks it (`best_round`).
+struct RoundResult {
+    r: u64,
+    net: Option<Value>,
+    check: Option<(Value, PathBuf, PathBuf)>,
+    /// 2: flat at the push standard; 1: flat at `audit_standard`; 0: not flat.
+    level: u8,
+    /// The golden set's overall 95% upper bound of the decision loss.
+    overall: f64,
+    /// The largest decision-level 95% upper bound of a measured group (0: none measured).
+    worst: f64,
+}
+
+/// The round whose network the chunk keeps: flat at the tightest standard first, then the
+/// lowest overall bound, then the lowest worst group bound, then the earlier round.
+fn best_round(st: &Loop) -> Option<&RoundResult> {
+    st.results.iter().min_by(|a, b| {
+        b.level
+            .cmp(&a.level)
+            .then(a.overall.total_cmp(&b.overall))
+            .then(a.worst.total_cmp(&b.worst))
+            .then(a.r.cmp(&b.r))
+    })
+}
+
+/// The decision-level bounds of measured groups (a golden slice or a filled mini set).
+fn measured_bounds(judged: &[Value]) -> Vec<f64> {
+    judged
+        .iter()
+        .filter(|x| x["basis"] == "golden slice" || x["basis"] == "mini golden set")
+        .filter_map(|x| x["loss_upper95"].as_f64())
+        .collect()
+}
+
+fn worst_bound(judged: &[Value]) -> f64 {
+    measured_bounds(judged).into_iter().fold(0.0, f64::max)
+}
+
+/// Whether a judged round is flat at `pct` percent, from its numbers: the overall bound and
+/// every team's bias within it, every group measured and within it.
+fn flat_at(golden: &Value, judged: &[Value], pct: f64) -> bool {
+    let lim = pct / 100.0;
+    let bias_ok = golden["bias"]
+        .as_array()
+        .is_none_or(|b| b.iter().filter_map(Value::as_f64).all(|x| x.abs() <= lim));
+    golden["loss_upper95"].as_f64().is_some_and(|u| u <= lim)
+        && bias_ok
+        && judged.iter().all(|x| {
+            x["basis"] == UNFILLED
+                || (!unmeasured(x) && x["loss_upper95"].as_f64().is_some_and(|u| u <= lim))
+        })
+}
+
+/// 2 when flat at the push standard, 1 at `audit_standard`, else 0.
+fn flat_level(st: &Loop, golden: &Value, judged: &[Value]) -> u8 {
+    if st
+        .s
+        .push_standard
+        .is_some_and(|p| flat_at(golden, judged, p))
+    {
+        2
+    } else if flat_at(golden, judged, st.s.standard) {
+        1
+    } else {
+        0
+    }
+}
+
+/// The diminishing-returns stop (owner, 2026-10-16 night): records round `p.r`'s bounds and
+/// whether it lowered neither the worst failing group's decision-level bound (the largest
+/// measured bound over the current standard; 0 when none fails) nor the overall bound by
+/// `audit_min_gain` against the round before, on the largest shape of the ladder (never while
+/// the shape can still step up). The reason when this round and the one before both did, by the
+/// same standard.
+fn stall_check(st: &mut Loop, p: &Round, golden: &Value, judged: &[Value]) -> Option<String> {
+    let lim = st.standard / 100.0;
+    let now = measured_bounds(judged);
+    let overall = golden["loss_upper95"].as_f64().unwrap_or(0.0);
+    let worst = |v: &[f64]| v.iter().copied().filter(|&u| u > lim).fold(0.0, f64::max);
+    let prev = st.bounds.iter().rev().find(|b| b.0 < p.r).cloned();
+    st.bounds.retain(|b| b.0 != p.r);
+    st.bounds.push((p.r, overall, now.clone()));
+    st.stalled.retain(|x| x.0 != p.r);
+    let top = p.shape_step + 1 >= st.s.shapes.len();
+    let (_, before_overall, before) = prev?;
+    let gain = |b: f64, n: f64| if b > 0.0 { (b - n) / b } else { 0.0 };
+    let (w0, w1) = (worst(&before), worst(&now));
+    if !top || gain(w0, w1) >= st.s.min_gain || gain(before_overall, overall) >= st.s.min_gain {
+        return None;
+    }
+    st.stalled.push((p.r, st.standard));
+    if !st
+        .stalled
+        .iter()
+        .any(|x| x.0 + 1 == p.r && x.1 == st.standard)
+    {
+        return None;
+    }
+    Some(format!(
+        "diminishing returns (rounds {} and {} on the largest shape, {}, each lowered neither the \
+         worst failing group's decision-level bound (last: {} -> {}) nor the overall bound (last: \
+         {} -> {}) by {:.0}%, judged by {}; the groups still limiting it are listed above)",
+        p.r - 1,
+        p.r,
+        p.shape,
+        pct4(Some(w0)),
+        pct4(Some(w1)),
+        pct4(Some(before_overall)),
+        pct4(Some(overall)),
+        100.0 * st.s.min_gain,
+        std_text(st.standard)
+    ))
 }
 
 /// The stop reason for a stop request: `dollar cap` when the request names one.
-fn stop_reason(why: &str) -> String {
+pub(crate) fn stop_reason(why: &str) -> String {
     let w = why.to_lowercase();
-    if w.contains("dollar") || w.contains("cost cap") || w.contains("usd") {
+    if w.contains("dollar")
+        || w.contains("cost cap")
+        || w.contains("usd")
+        || w.contains('$')
+        || w.contains("budget")
+        || w.contains("spend")
+        || w.contains("spent")
+    {
         format!("dollar cap ({why})")
     } else {
         format!("stopped ({why})")
@@ -667,6 +969,9 @@ enum After {
     Nothing,
     /// Not flat; with `target`, the targeted harvest is made.
     Go,
+    /// Two rounds in a row on the largest shape lowered neither the worst failing group's
+    /// decision-level bound nor the overall bound by `audit_min_gain` (`Loop::diminishing`).
+    Diminishing,
 }
 
 /// Every group of the union at the decision level after round `r`'s checks, in the union's
@@ -690,7 +995,11 @@ fn judge(st: &Loop, golden: &Value, minis: &[Value], r: u64) -> Vec<Value> {
                 ("golden slice", x["loss_upper95"].clone(), x["pass"].clone())
             } else {
                 match mini {
-                    Some(m) if m["pass"].is_null() => ("unmeasurable", Value::Null, Value::Null),
+                    // A verdict needs evidence: a mini set with fewer than `audit_mini_min`
+                    // decisions gives none (reported, never passed or failed).
+                    Some(m) if m["unfilled"].as_bool() == Some(true) => {
+                        (UNFILLED, m["loss_upper95"].clone(), Value::Null)
+                    }
                     Some(m) => (
                         "mini golden set",
                         m["loss_upper95"].clone(),
@@ -707,11 +1016,25 @@ fn judge(st: &Loop, golden: &Value, minis: &[Value], r: u64) -> Vec<Value> {
         .collect()
 }
 
+/// The basis of a group whose mini golden set kept fewer than `audit_mini_min` decisions (none
+/// included): no verdict, reported in every round, neither failing nor blocking "flat" (the
+/// overall row covers it; coordinator's review, 2026-10-16 night).
+const UNFILLED: &str = "unmeasurable at the decision level";
+
+/// Whether a judged group is waiting for its mini golden set (blocks "flat").
+fn unmeasured(x: &Value) -> bool {
+    x["basis"] == "not yet measured"
+}
+
 /// The failing groups after round `r`'s measurements (`judged`, in the union's order): a group
-/// whose bound fails joins them (or stays), one whose bound passes leaves them, one not measured
-/// keeps its state.
+/// whose bound fails joins them (or stays), one whose bound passes leaves them, one unmeasurable
+/// leaves them too (it is never failing), one not yet measured keeps its state.
 fn update_failing(st: &mut Loop, judged: &[Value], r: u64) {
     for (g, x) in st.groups.iter_mut().zip(judged) {
+        if x["basis"] == UNFILLED {
+            g.failing_since = None;
+            continue;
+        }
         match x["pass"].as_bool() {
             Some(false) => {
                 g.failing_since.get_or_insert(r);
@@ -730,22 +1053,41 @@ fn failing(st: &Loop) -> Vec<usize> {
 }
 
 /// The stop reason when nothing is left to target after round `r`.
-fn nothing_reason(r: u64) -> String {
+fn nothing_reason(_st: &Loop, r: u64) -> String {
     format!(
         "nothing to target after round {r}: no group confirmed and none still failing, but the \
          golden set's overall row fails (the next lever is network capacity)"
     )
 }
 
+/// The groups unmeasurable at the decision level (a mini golden set of fewer than
+/// `audit_mini_min` decisions): reported, never judged.
+fn unmeasurable_groups(st: &Loop) -> Vec<&str> {
+    st.groups
+        .iter()
+        .filter(|g| g.mini.as_ref().is_some_and(|m| m.kept < st.s.mini_min))
+        .map(|g| g.name.as_str())
+        .collect()
+}
+
 /// The stop reason of a flat network after round `r`.
 fn flat_reason(st: &Loop, r: u64) -> String {
     let n = st.groups.len();
+    let std = std_text(st.standard);
+    let base = match &st.pushed {
+        None => format!("flat after round {r}"),
+        Some(p) => format!(
+            "flat at {std} after round {r} (flat at {} after round {}, then pushed)",
+            std_text(p.from),
+            p.round
+        ),
+    };
     if n == 0 {
-        format!("flat after round {r}")
+        base
     } else {
         format!(
-            "flat after round {r} ({n} groups confirmed by the auditor so far, every one within \
-             0.01% at the decision level)"
+            "{base} ({n} groups confirmed by the auditor so far, every one within {std} at the \
+             decision level)"
         )
     }
 }
@@ -778,7 +1120,16 @@ impl Rung<'_> {
             prev_worst: None,
             flat: false,
             share_warned: false,
+            standard: 0.0,
+            pushed: None,
+            bounds: Vec::new(),
+            stalled: Vec::new(),
+            diminishing: None,
+            results: Vec::new(),
         };
+        st.standard = st.s.standard;
+        self.audit_hb
+            .insert("standard".into(), json!(std_text(st.standard)));
         let outcome = self.audit_rounds(&mut st);
         let stop = match &outcome {
             Ok(why) => why.clone(),
@@ -788,16 +1139,48 @@ impl Rung<'_> {
             },
         };
         self.audit_hb.insert("audit_stop".into(), json!(stop));
+        // The chunk keeps the best round's network and check (`best_round`), also on a stop.
+        let best =
+            best_round(&st).map(|b| (b.r, b.level, b.overall, b.net.clone(), b.check.clone()));
+        if let Some((r, level, overall, _, _)) = &best {
+            st.lines.push(format!(
+                "best: round {r} ({}; golden 95% upper {})",
+                match level {
+                    2 => format!(
+                        "flat at {}",
+                        std_text(st.s.push_standard.unwrap_or(st.standard))
+                    ),
+                    1 => format!("flat at {}", std_text(st.s.standard)),
+                    _ => "not flat".to_string(),
+                },
+                pct4(Some(*overall))
+            ));
+        }
+        if let Some(n) = best.as_ref().and_then(|b| b.3.clone()) {
+            self.rec.insert("net".into(), n);
+        }
+        let unm = unmeasurable_groups(&st);
+        if !unm.is_empty() {
+            st.lines.push(format!(
+                "unmeasurable: {} groups (mini golden sets of fewer than {} decisions; reported, \
+                 not judged): {}",
+                unm.len(),
+                st.s.mini_min,
+                unm.join("; ")
+            ));
+        }
         let summary = st.lines.join("\n")
             + if st.lines.is_empty() { "" } else { "\n" }
             + &format!(
                 "stop: {stop}\nfinal network: {}\n",
-                st.last_net.as_ref().map_or("none".into(), |n| format!(
-                    "{} (sha256 {}, key {})",
-                    n["dir"].as_str().unwrap_or("?"),
-                    n["int_sha256"].as_str().unwrap_or("?"),
-                    n["int_key"].as_str().unwrap_or("not shared")
-                ))
+                best.as_ref()
+                    .and_then(|b| b.3.as_ref())
+                    .map_or("none".into(), |n| format!(
+                        "{} (sha256 {}, key {})",
+                        n["dir"].as_str().unwrap_or("?"),
+                        n["int_sha256"].as_str().unwrap_or("?"),
+                        n["int_key"].as_str().unwrap_or("not shared")
+                    ))
             );
         let summary_path = st.dir.join("audit-summary.txt");
         fs::write(&summary_path, &summary)
@@ -808,16 +1191,19 @@ impl Rung<'_> {
             "audit".into(),
             json!({ "settings": st.s.to_json(), "rounds": st.rounds, "stop": stop,
                     "flat": st.flat, "summary": "audit/audit-summary.txt",
-                    "summary_key": summary_key }),
+                    "best_round": best.as_ref().map(|b| b.0),
+                    "summary_key": summary_key, "standard_pct": st.standard,
+                    "push": st.pushed.as_ref().map(|p| json!({
+                        "from_pct": p.from, "flat_round": p.round, "to_pct": st.standard,
+                        "flat_at_push": st.flat })) }),
         );
         self.save()?;
         outcome?;
-        // The last round's network and check are the chunk's.
-        if let Some(n) = st.last_net.clone() {
-            self.rec.insert("net".into(), n);
-        }
-        let verdict = if st.flat { "PASS" } else { "FAIL" };
-        if let Some((hc, json_path, txt_path)) = &st.last_check {
+        // The best round's network and check are the chunk's (set above, before any stop).
+        let level = best.as_ref().map_or(0, |b| b.1);
+        let check = best.as_ref().and_then(|b| b.4.clone());
+        let verdict = if level > 0 { "PASS" } else { "FAIL" };
+        if let Some((hc, json_path, txt_path)) = &check {
             let (g, k) = (self.p.golden_trick, self.p.cut);
             let (j, t) = (
                 self.out.join(format!("hc-t{g}-o{k}.json")),
@@ -831,7 +1217,8 @@ impl Rung<'_> {
                         "text": t.file_name().map(|n| n.to_string_lossy().into_owned()),
                         "values": hc["values"], "net_sha256": hc["net"]["sha256"],
                         "overall": hc["groups"].get(0).cloned().unwrap_or(Value::Null),
-                        "slices": hc["slices"].clone(), "audit_stop": stop, "time": hc["time"] }),
+                        "slices": hc["slices"].clone(), "audit_stop": stop, "time": hc["time"],
+                        "best_round": best.as_ref().map(|b| b.0) }),
             );
         }
         self.rec.insert("seconds".into(), json!(secs(self.t0)));
@@ -847,7 +1234,9 @@ impl Rung<'_> {
             "net_int_sha256": self.rec.get("net").and_then(|n| n.get("int_sha256")).cloned(),
             "net_int_key": self.rec.get("net").and_then(|n| n.get("int_key")).cloned(),
             "audit": { "stop": stop, "rounds": st.rounds.len(), "flat": st.flat,
-                       "summary_key": summary_key },
+                       "summary_key": summary_key, "standard_pct": st.standard,
+                       "best_round": best.as_ref().map(|b| b.0),
+                       "flat_at_pct": match level { 2 => st.s.push_standard, 1 => Some(st.s.standard), _ => None } },
             "steps": self.steps,
             "warnings": self.warnings,
         }))
@@ -929,7 +1318,16 @@ impl Rung<'_> {
                             ));
                             self.audit_hb
                                 .insert("round".into(), json!(format!("{} of {rmax}", p.r)));
-                            return Ok(nothing_reason(p.r));
+                            return Ok(nothing_reason(st, p.r));
+                        }
+                        After::Diminishing => {
+                            self.stop_train(&format!(
+                                "{step}: not needed, diminishing returns after round {}",
+                                p.r
+                            ));
+                            self.audit_hb
+                                .insert("round".into(), json!(format!("{} of {rmax}", p.r)));
+                            return Ok(st.diminishing.clone().unwrap_or_default());
                         }
                         After::Go => {}
                     }
@@ -943,7 +1341,10 @@ impl Rung<'_> {
                 if let Some(p) = prev.take() {
                     match self.after_round(st, &p, None, true)? {
                         After::Flat => return Ok(flat_reason(st, p.r)),
-                        After::Nothing => return Ok(nothing_reason(p.r)),
+                        After::Nothing => return Ok(nothing_reason(st, p.r)),
+                        After::Diminishing => {
+                            return Ok(st.diminishing.clone().unwrap_or_default());
+                        }
                         After::Go => {}
                     }
                 }
@@ -954,26 +1355,18 @@ impl Rung<'_> {
             }
             let mut round = self.audit_round(st, r, &net_dir, &key, shard)?;
             let no_gain = capacity_check(st, &mut round);
-            if no_gain && r < rmax {
-                if st.step + 1 < st.s.shapes.len() {
-                    // The next round retrains from scratch, one step up, on all the data so far.
-                    st.step += 1;
-                    round.capacity["next_shape"] = json!(shape_text(&st.s.shapes[st.step]));
-                } else {
-                    if self.after_round(st, &round, None, false)? == After::Flat {
-                        return Ok(flat_reason(st, r));
-                    }
-                    return Ok(format!(
-                        "capacity ladder exhausted (round {r}: the worst group's SD fell by less \
-                         than {:.0}% on the largest shape, {})",
-                        100.0 * st.s.min_gain,
-                        round.shape
-                    ));
-                }
+            // On the largest shape the loop goes on; the diminishing-returns stop (two rounds
+            // there without a gain at the decision level) ends it (owner, 2026-10-16 night).
+            if no_gain && r < rmax && st.step + 1 < st.s.shapes.len() {
+                // The next round retrains from scratch, one step up, on all the data so far.
+                st.step += 1;
+                round.capacity["next_shape"] = json!(shape_text(&st.s.shapes[st.step]));
             }
             if r == rmax {
-                if self.after_round(st, &round, None, false)? == After::Flat {
-                    return Ok(flat_reason(st, r));
+                match self.after_round(st, &round, None, false)? {
+                    After::Flat => return Ok(flat_reason(st, r)),
+                    After::Diminishing => return Ok(st.diminishing.clone().unwrap_or_default()),
+                    _ => {}
                 }
                 let left = failing(st).len();
                 return Ok(format!(
@@ -987,7 +1380,8 @@ impl Rung<'_> {
                 // first time may still fail, and is then targeted into the next training).
                 match self.after_round(st, &round, None, true)? {
                     After::Flat => return Ok(flat_reason(st, r)),
-                    After::Nothing => return Ok(nothing_reason(r)),
+                    After::Nothing => return Ok(nothing_reason(st, r)),
+                    After::Diminishing => return Ok(st.diminishing.clone().unwrap_or_default()),
                     After::Go => {}
                 }
             } else {
@@ -1208,18 +1602,26 @@ impl Rung<'_> {
                     .arg(&shard)
                     .arg("--out")
                     .arg(&adir)
-                    .args(["--seed", &st.s.audit_seed(r).to_string()]);
+                    .args(["--seed", &st.s.audit_seed(r).to_string()])
+                    .args(["--gamma", &st.s.gamma.to_string()])
+                    .args(["--workers", &self.fg_threads().to_string()])
+                    .arg("--work")
+                    .arg(st.wdir.join(format!("auditor-r{r}")));
                 self.audit_step(
                     &step,
                     c,
                     &format!("hybrid/audit-r{r}.log"),
                     None,
-                    Some(AUDIT_LIMIT),
+                    Some(audit_limit(st.s.rows)),
                     None,
                 )?;
                 read_json(&adir.join("report.json")).unwrap_or(Value::Null)
             }
         };
+        // Nothing after the auditor reads the audit shard (the capacity check, the calibration
+        // and the slices read its report; the harvests make their own shards): it goes, its
+        // sidecar stays in round-<r>/ (20M rows at trick 4 are about 22 GB).
+        let _ = fs::remove_file(&shard);
         let preds_path = adir.join("predicates.json");
         if !preds_path.is_file() {
             return Err(format!(
@@ -1345,6 +1747,52 @@ impl Rung<'_> {
         watch: Option<&Path>,
         target: bool,
     ) -> Result<After, String> {
+        let mut tag = String::new();
+        loop {
+            let v = self.judge_round(st, p, watch, target, &tag)?;
+            match st.s.push_standard {
+                // Flat at the standard, with a tighter one to push to (owner, 2026-10-16
+                // night): the same round is judged again by the push standard (its golden
+                // slices and mini sets checked again; files `…-push`), and the loop goes on
+                // from there on the same rental and budget.
+                Some(push) if v == After::Flat && st.standard > push => {
+                    let from = st.standard;
+                    let line = format!(
+                        "flat at {} after round {}; pushing to {}",
+                        std_text(from),
+                        p.r,
+                        std_text(push)
+                    );
+                    println!("runner: hybrid_rung: {line}");
+                    st.lines.push(line);
+                    st.pushed = Some(Pushed { round: p.r, from });
+                    st.standard = push;
+                    self.audit_hb.insert(
+                        "standard".into(),
+                        json!(format!(
+                            "{} (pushing: flat at {} after round {})",
+                            std_text(push),
+                            std_text(from),
+                            p.r
+                        )),
+                    );
+                    tag = "-push".into();
+                }
+                _ => return Ok(v),
+            }
+        }
+    }
+
+    /// One judgement of round `p.r` by the current standard (`after_round`); `tag` names its
+    /// files (`""`, or `"-push"` when the round is judged again by the push standard).
+    fn judge_round(
+        &mut self,
+        st: &mut Loop,
+        p: &Round,
+        watch: Option<&Path>,
+        target: bool,
+        tag: &str,
+    ) -> Result<After, String> {
         let r = p.r;
         let rdir = st.dir.join(format!("round-{r}"));
         fs::create_dir_all(&rdir).map_err(|e| e.to_string())?;
@@ -1370,9 +1818,13 @@ impl Rung<'_> {
             Some(u)
         };
         let (g, k) = (self.p.golden_trick, self.p.cut);
-        let hc_json = rdir.join(format!("hc-t{g}-o{k}.json"));
-        let hc_txt = rdir.join(format!("hc-t{g}-o{k}.txt"));
-        let verify = if r == 1 { self.p.verify_pct } else { 0.0 };
+        let hc_json = rdir.join(format!("hc-t{g}-o{k}{tag}.json"));
+        let hc_txt = rdir.join(format!("hc-t{g}-o{k}{tag}.txt"));
+        let verify = if r == 1 && tag.is_empty() {
+            self.p.verify_pct
+        } else {
+            0.0
+        };
         let c = self.check_cmd(
             &p.net,
             &decisions,
@@ -1380,11 +1832,12 @@ impl Rung<'_> {
             union.as_deref(),
             &hc_json,
             verify,
+            st.standard,
         );
         self.audit_step(
-            &format!("golden slices (round {r})"),
+            &format!("golden slices (round {r}{tag})"),
             c,
-            &format!("hybrid/check-r{r}.log"),
+            &format!("hybrid/check-r{r}{tag}.log"),
             Some(&hc_txt),
             None,
             None,
@@ -1398,13 +1851,22 @@ impl Rung<'_> {
         let mut minis = Vec::new();
         for i in 0..st.groups.len() {
             if st.groups[i].mini.is_some() {
-                minis.push(self.check_mini(st, i, &p.net, &rdir, r)?);
+                minis.push(self.check_mini(st, i, &p.net, &rdir, r, tag)?);
             }
         }
         let judged = judge(st, &golden, &minis, r);
         update_failing(st, &judged, r);
         let mut targeted = None;
-        if target && (!overall_pass || !failing(st).is_empty()) {
+        let mut stop_dim = false;
+        if !overall_pass || !failing(st).is_empty() {
+            // Not flat whatever the new mini sets say: the diminishing-returns stop is decided
+            // now (new measurements can only add failing groups), before any harvest.
+            if let Some(why) = stall_check(st, p, &golden, &judged) {
+                st.diminishing = Some(why);
+                stop_dim = true;
+            }
+        }
+        if target && !stop_dim && (!overall_pass || !failing(st).is_empty()) {
             targeted = self.target(st, p, &rdir, watch)?;
         }
         // New mini golden sets: made once for a group whose slice is too small (the largest
@@ -1417,7 +1879,9 @@ impl Rung<'_> {
                 .unwrap_or(0)
         };
         let mut want: Vec<usize> = (0..st.groups.len())
-            .filter(|&i| st.groups[i].mini.is_none() && slice_n(&st.groups[i].name) < big)
+            .filter(|&i| {
+                !stop_dim && st.groups[i].mini.is_none() && slice_n(&st.groups[i].name) < big
+            })
             .collect();
         let severity = |e: &Value| {
             let (w, sd) = (
@@ -1444,7 +1908,7 @@ impl Rung<'_> {
         for &i in want.iter().take(cap) {
             let m = self.make_mini(st, i, &p.net, r)?;
             st.groups[i].mini = Some(m);
-            minis.push(self.check_mini(st, i, &p.net, &rdir, r)?);
+            minis.push(self.check_mini(st, i, &p.net, &rdir, r, tag)?);
         }
         // Every group at the decision level.
         let judged = judge(st, &golden, &minis, r);
@@ -1453,14 +1917,38 @@ impl Rung<'_> {
             .iter()
             .filter(|x| x["pass"].as_bool() == Some(false))
             .count();
-        let pending = judged
-            .iter()
-            .filter(|x| x["basis"] == "not yet measured")
-            .count();
+        let pending = judged.iter().filter(|x| unmeasured(x)).count();
         let n_failing = failing(st).len();
         let flat = overall_pass && n_failing == 0 && pending == 0;
         let mut verdict = if flat { After::Flat } else { After::Go };
-        if target && !flat && targeted.is_none() {
+        if !flat
+            && !stop_dim
+            && let Some(why) = stall_check(st, p, &golden, &judged)
+        {
+            st.diminishing = Some(why);
+            stop_dim = true;
+        }
+        if stop_dim {
+            verdict = After::Diminishing;
+            for x in judged
+                .iter()
+                .filter(|x| x["pass"].as_bool() == Some(false) || unmeasured(x))
+            {
+                st.lines.push(format!(
+                    "still limiting at round {r}: {}: weight {}, SD {} on the audit shard, {} \
+                     95% upper {}",
+                    x["group"].as_str().unwrap_or("?"),
+                    x["weight"]
+                        .as_f64()
+                        .map_or("?".into(), |w| format!("{:.4}%", 100.0 * w)),
+                    x["sd"]
+                        .as_f64()
+                        .map_or("?".into(), |v| format!("{:.2}%", 100.0 * v)),
+                    x["basis"].as_str().unwrap_or("?"),
+                    pct4(x["loss_upper95"].as_f64())
+                ));
+            }
+        } else if target && !flat && targeted.is_none() {
             targeted = self.target(st, p, &rdir, watch)?;
             if targeted.is_none() {
                 verdict = After::Nothing;
@@ -1498,6 +1986,16 @@ impl Rung<'_> {
                 }
             )),
         );
+        let level = flat_level(st, &golden, &judged);
+        st.results.retain(|x| x.r != r);
+        st.results.push(RoundResult {
+            r,
+            net: st.last_net.clone(),
+            check: Some((hc.clone(), hc_json.clone(), hc_txt.clone())),
+            level,
+            overall: golden["loss_upper95"].as_f64().unwrap_or(f64::INFINITY),
+            worst: worst_bound(&judged),
+        });
         st.last_check = Some((hc, hc_json, hc_txt));
         if !waiting.is_empty() {
             minis.push(json!({ "waiting": waiting, "pass": Value::Null,
@@ -1506,7 +2004,7 @@ impl Rung<'_> {
                                                st.s.mini_sets) }));
         }
         st.flat = flat;
-        self.round_report(st, p, &golden, &minis, &judged, targeted.as_ref())?;
+        self.round_report(st, p, &golden, &minis, &judged, targeted.as_ref(), tag)?;
         Ok(verdict)
     }
 
@@ -1557,7 +2055,7 @@ impl Rung<'_> {
     }
 
     /// Checks group `i`'s mini golden set with `net` (step `mini golden set m<k> (round r)`); its
-    /// record (`pass` null when the set found no decision: unmeasurable).
+    /// record (`pass` null when the set kept fewer than `audit_mini_min` decisions: `unfilled`).
     fn check_mini(
         &mut self,
         st: &mut Loop,
@@ -1565,6 +2063,7 @@ impl Rung<'_> {
         net: &Path,
         rdir: &Path,
         r: u64,
+        tag: &str,
     ) -> Result<Value, String> {
         let m = st.groups[i].mini.as_ref().expect("a mini golden set");
         let (id, mpred, mdec, mworlds, kept, drawn) = (
@@ -1575,7 +2074,13 @@ impl Rung<'_> {
             m.kept,
             m.drawn,
         );
-        let (made, mdir) = (m.made_round, m.dir.clone());
+        let (made, mdir, share) = (m.made_round, m.dir.clone(), m.share.clone());
+        let unfilled = kept < st.s.mini_min;
+        let fill = format!(
+            "{kept} decisions kept of {} wanted after drawing {drawn} candidates (the cap: {}; \
+             keep share {share}; a verdict needs {})",
+            st.s.mini_decisions, st.s.mini_candidates, st.s.mini_min
+        );
         let rel = mdir
             .strip_prefix(&self.out)
             .map_or_else(|_| mdir.display().to_string(), |x| x.display().to_string());
@@ -1584,17 +2089,18 @@ impl Rung<'_> {
             return Ok(
                 json!({ "group": name, "mini": id, "decisions": 0, "drawn": drawn,
                               "made_round": made, "dir": rel, "pass": Value::Null,
-                              "note": "no decision of the generator reaches this group at the share: \
-                                       unmeasurable at the decision level (the overall check covers it)" }),
+                              "unfilled": true, "fill": fill, "share": share,
+                              "note": "no decision of the generator reached this group at the keep share \
+                                       within the cap: unmeasurable at the decision level (reported, not judged)" }),
             );
         };
-        let mj = rdir.join(format!("mini-{id}.json"));
-        let mt = rdir.join(format!("mini-{id}.txt"));
-        let c = self.check_cmd(net, &mdec, &mworlds, Some(&mpred), &mj, 0.0);
+        let mj = rdir.join(format!("mini-{id}{tag}.json"));
+        let mt = rdir.join(format!("mini-{id}{tag}.txt"));
+        let c = self.check_cmd(net, &mdec, &mworlds, Some(&mpred), &mj, 0.0, st.standard);
         self.audit_step(
-            &format!("mini golden set {id} (round {r})"),
+            &format!("mini golden set {id} (round {r}{tag})"),
             c,
-            &format!("hybrid/mini-{id}-r{r}.log"),
+            &format!("hybrid/mini-{id}-r{r}{tag}.log"),
             Some(&mt),
             None,
             None,
@@ -1606,12 +2112,15 @@ impl Rung<'_> {
             json!({ "group": name, "mini": id, "decisions": kept, "drawn": drawn,
                    "made_round": made, "dir": rel, "mean_loss": all["mean_loss"],
                    "loss_upper95": all["loss_upper95"],
-                   "pass": all["loss_pass"].as_bool().unwrap_or(false),
-                   "report": format!("audit/round-{r}/mini-{id}.txt") }),
+                   // An unfilled set is reported, never judged (owner, 2026-10-16 night).
+                   "pass": if unfilled { Value::Null } else { json!(all["loss_pass"].as_bool().unwrap_or(false)) },
+                   "unfilled": unfilled, "fill": fill, "share": share,
+                   "report": format!("audit/round-{r}/mini-{id}{tag}.txt") }),
         )
     }
 
     /// `search hybrid-check` of `net` on a decision set and its exact worlds, with slices.
+    #[allow(clippy::too_many_arguments)]
     fn check_cmd(
         &self,
         net: &Path,
@@ -1620,6 +2129,7 @@ impl Rung<'_> {
         slices: Option<&Path>,
         json_out: &Path,
         verify: f64,
+        standard: f64,
     ) -> Command {
         let mut c = Command::new(&self.tools.search);
         c.args([
@@ -1641,7 +2151,8 @@ impl Rung<'_> {
         .args(["--seed", &self.p.golden_seed.to_string()])
         .args(["--threads", &self.fg_threads().to_string()])
         .args(["--tt-mb", &self.p.tt_mb.to_string()])
-        .args(["--verify-pct", &verify.to_string()]);
+        .args(["--verify-pct", &verify.to_string()])
+        .args(["--standard", &standard.to_string()]);
         if let Some(s) = slices {
             c.arg("--slices")
                 .arg(s)
@@ -1659,10 +2170,14 @@ impl Rung<'_> {
         let pred = dir.join("group.json");
         write_json(&pred, &json!([st.groups[i].entry.clone()]))?;
         let decisions = dir.join("decisions.jsonl");
+        let share = share_text(keep_share(
+            st.groups[i].entry["weight"].as_f64().unwrap_or(1.0),
+        ));
         let mut c = Command::new(&self.tools.search);
         c.args(["decisions", "--keep"])
             .arg(&pred)
-            .args(["--keep-share", SLICE_SHARE])
+            .args(["--keep-share", &share])
+            .args(["--max-candidates", &st.s.mini_candidates.to_string()])
             .args(["--keep-worlds", &MINI_WORLDS.to_string()])
             .args(["--trick", &self.p.golden_trick.to_string()])
             .args(["--cut", &self.p.cut.to_string()])
@@ -1737,6 +2252,7 @@ impl Rung<'_> {
             kept,
             drawn,
             made_round: r,
+            share,
         })
     }
 
@@ -1825,6 +2341,7 @@ impl Rung<'_> {
 
     /// Writes round `p.r`'s report (`round-<r>.json` and `.txt`), shares it and the round's
     /// predicate files, and adds its summary line.
+    #[allow(clippy::too_many_arguments)]
     fn round_report(
         &mut self,
         st: &mut Loop,
@@ -1833,11 +2350,18 @@ impl Rung<'_> {
         minis: &[Value],
         judged: &[Value],
         targeted: Option<&Value>,
+        tag: &str,
     ) -> Result<(), String> {
         let r = p.r;
+        let std = std_text(st.standard);
         let remaining: Vec<String> = judged
             .iter()
             .filter(|x| x["pass"].as_bool() == Some(false))
+            .map(|x| x["group"].as_str().unwrap_or("?").to_string())
+            .collect();
+        let unmeasurable: Vec<String> = judged
+            .iter()
+            .filter(|x| x["basis"] == UNFILLED)
             .map(|x| x["group"].as_str().unwrap_or("?").to_string())
             .collect();
         let failing_now: Vec<Value> = failing(st)
@@ -1861,6 +2385,8 @@ impl Rung<'_> {
         }
         let rec = json!({
             "round": r,
+            "standard_pct": st.standard,
+            "judged_again_by_push_standard": !tag.is_empty(),
             "net": { "sha256": p.net_sha, "key": p.net_key, "path": p.net.display().to_string() },
             "train": { "epochs_run": p.train["epochs_run"], "best_epoch": p.train["best_epoch"],
                        "int_error": int_err, "minutes": p.train["minutes"],
@@ -1887,13 +2413,23 @@ impl Rung<'_> {
             "targeted": targeted,
             "groups_remaining": remaining,
             "groups_failing": failing_now,
+            "groups_unmeasurable": unmeasurable,
             "flat": st.flat,
             "shared": keys,
         });
-        let json_path = st.dir.join(format!("round-{r}.json"));
+        let json_path = st.dir.join(format!("round-{r}{tag}.json"));
         write_json(&json_path, &rec)?;
         // Plain English.
-        let mut t = format!("Audit loop, round {r} of {}\n\n", st.s.rounds);
+        let mut t = format!(
+            "Audit loop, round {r} of {}{}\n\nThe standard: decision loss 95% upper bound <= {std} \
+             (overall, every slice and mini set).\n",
+            st.s.rounds,
+            if tag.is_empty() {
+                String::new()
+            } else {
+                format!(", judged again by the push standard {std}")
+            }
+        );
         t += &format!(
             "Network: {} (int SD {} on the validation shard), trained {} epochs on {} shards ({} \
              rows).\n",
@@ -1978,13 +2514,14 @@ impl Rung<'_> {
                 Some(true) => 2,
             });
             t += &format!(
-                "Decision level (the standard), {} groups: {} over 0.01%, {} not yet measured:\n",
+                "Decision level (the standard), {} groups: {} over {std}, {} not yet measured \
+                 and {} unmeasurable (a mini golden set of fewer than {} decisions: reported, \
+                 not judged; the overall row covers them):\n",
                 judged.len(),
                 remaining.len(),
-                judged
-                    .iter()
-                    .filter(|x| x["basis"] == "not yet measured")
-                    .count()
+                judged.iter().filter(|x| unmeasured(x)).count(),
+                judged.iter().filter(|x| x["basis"] == UNFILLED).count(),
+                st.s.mini_min
             );
             for x in lines.iter().take(20) {
                 t += &format!(
@@ -2059,9 +2596,12 @@ impl Rung<'_> {
                 m["decisions"],
                 pct4(m["loss_upper95"].as_f64()),
                 match m["pass"].as_bool() {
-                    Some(true) => " (passes)",
-                    Some(false) => " (FAILS)",
-                    None => " (unmeasured: no decision reaches the group at the share)",
+                    Some(true) => " (passes)".to_string(),
+                    Some(false) => " (FAILS)".to_string(),
+                    None => format!(
+                        " (unmeasurable at the decision level: {}; reported, not judged)",
+                        m["fill"].as_str().unwrap_or("?")
+                    ),
                 }
             );
         }
@@ -2093,7 +2633,15 @@ impl Rung<'_> {
             );
         }
         t += &format!(
-            "Still out of spec: {}.\n",
+            "Unmeasurable at the decision level (mini golden sets of fewer than {} decisions; \
+             reported, not judged): {} groups{}.\nStill out of spec: {}.\n",
+            st.s.mini_min,
+            unmeasurable.len(),
+            if unmeasurable.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", unmeasurable.join("; "))
+            },
             if remaining.is_empty() {
                 "nothing".to_string()
             } else {
@@ -2114,7 +2662,7 @@ impl Rung<'_> {
                     .join("; ")
             );
         }
-        let txt_path = st.dir.join(format!("round-{r}.txt"));
+        let txt_path = st.dir.join(format!("round-{r}{tag}.txt"));
         fs::write(&txt_path, &t).map_err(|e| format!("write {}: {e}", txt_path.display()))?;
         let jk = self.share_file(st, &json_path);
         let tk = self.share_file(st, &txt_path);
@@ -2123,8 +2671,14 @@ impl Rung<'_> {
         rec["shared"]["report_txt"] = json!(tk);
         write_json(&json_path, &rec)?;
         st.lines.push(format!(
-            "round {r}: {} groups confirmed ({} found) -> {} remaining, {} failing; golden 95% \
-             upper {} ({}); worst slice {}; shape {}; network {}",
+            "round {r}{}: {} groups confirmed ({} found) -> {} remaining, {} failing; golden 95% \
+             upper {} ({}); worst slice {}; shape {}; network {}; standard {std}; unmeasurable: \
+             {} groups",
+            if tag.is_empty() {
+                ""
+            } else {
+                " (judged again by the push standard)"
+            },
             groups.len(),
             p.found,
             remaining.len(),
@@ -2143,7 +2697,8 @@ impl Rung<'_> {
                     pct4(w["loss_upper95"].as_f64())
                 )),
             p.shape,
-            p.net_sha.get(..12).unwrap_or("?")
+            p.net_sha.get(..12).unwrap_or("?"),
+            unmeasurable.len()
         ));
         st.rounds.push(rec);
         self.rec.insert(

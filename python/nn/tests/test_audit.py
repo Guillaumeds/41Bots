@@ -336,37 +336,70 @@ def plain_enumeration(items, xbool, cols, screen, max_conj):
     return found
 
 
+def item_matrix(binary, items):
+    """bool [n, len(items)]: item (f, v) holds in a row when binary feature f is v."""
+    return np.column_stack([binary[:, f] if v == 1 else ~binary[:, f] for f, v in items]) if items else \
+        np.zeros((len(binary), 0), dtype=bool)
+
+
 class EnumerationExact(unittest.TestCase):
-    def check(self, screen_level, minsup, gamma=None):
+    def check(self, screen_level, minsup, workers):
         # A bias on a triple (8% of rows) that its pairs (20% or more) dilute below the threshold,
         # a pair's bias, a spread.
         triple = ((300, 433, au.OFF_TRICKS + 6), 0.005)
         err, binary, dense, _ = synthetic(6000, 13, rms=0.006, bias=[triple, (BIAS_PAIR, 0.004)],
                                           spread=(SPREAD_DENSE, 0.03, 2.5))
-        items, x = au.enumeration_items(binary, minsup)
-        cols = err.columns()[:, list(au.SCREEN_COLS)]
+        n = len(err)
         scr = au.Screen(0.0025, 0.01, minsup, screen_level)
-        old = au.GAMMA32
-        try:
-            if gamma is not None:
-                au.GAMMA32 = gamma
-            en = au.Enumeration(items, x, cols, scr, 3)
-        finally:
-            au.GAMMA32 = old
-        got = {frozenset(t): (d, b) for t, d, b in en.found}
-        want = plain_enumeration(items, x, cols, scr, 3)
+        with tempfile.TemporaryDirectory() as w, au.Workers(workers) as pool:
+            # Every row in half A: the enumeration sees them all.
+            d = au.prepare_memory(w, err, binary, dense, np.zeros(n, dtype=bool), np.zeros(n))
+            sums1 = au.prepare_items(d, pool, minsup)
+            en = au.Enumeration(d, pool, scr, 3, sums1)
+            items = d.items
+            au._cleanup(w, keep=True)
+        got = {frozenset(t): (sd, b) for t, sd, b in en.found}
+        x = item_matrix(binary, items)
+        want = plain_enumeration(items, x, err.columns()[:, list(au.SCREEN_COLS)], scr, 3)
         self.assertEqual(got, want)
         self.assertTrue(any(len(k) == 3 for k in want))
         self.assertTrue(any(len(k) == 2 for k in want))
         return en
 
-    def test_bounded_float32_gives_the_exact_candidates(self):
-        self.check(1.0, 30)
-        self.check(0.2, 30)
+    def test_sparse_sums_give_the_exact_candidates(self):
+        self.check(1.0, 30, 1)
+        self.check(0.2, 30, 1)
 
-    def test_undecided_sums_are_summed_again_exactly(self):
-        en = self.check(1.0, 30, gamma=0.05)
-        self.assertGreater(sum(en.rechecked), 100)
+    def test_any_number_of_workers(self):
+        a = self.check(0.2, 30, 1)
+        b = self.check(0.2, 30, 4)
+        self.assertEqual(a.found, b.found)
+        self.assertEqual((a.counted, a.frequent, a.pruned), (b.counted, b.frequent, b.pruned))
+
+    def test_the_bound_is_valid(self):
+        """``Screen.extendable``: whenever a group's sums say no extension can be a candidate, no
+        subset of at least ``minsup`` of its rows passes a threshold (random groups, subsets of the
+        largest errors: the most extreme subsets there are); and it does prune small calm groups."""
+        rng = np.random.default_rng(17)
+        minsup = 40
+        scr = au.Screen(0.0025, 0.01, minsup, 1.0)
+        pruned = 0
+        for trial in range(300):
+            n = int(rng.integers(minsup, 400))
+            rms = float(rng.choice([0.0001, 0.0003, 0.002, 0.008]))
+            e = rng.standard_t(4, size=(n, 4)) * rms
+            e -= e.mean(axis=1, keepdims=True)
+            cols = au.error_columns(np.clip(np.rint(e * ONE), -ONE, ONE).astype(np.int64))
+            ext = bool(scr.extendable([cols[:, 9].sum()], [cols[:, au.COL_M].sum()])[0])
+            pruned += not ext
+            if ext:
+                continue
+            for key in (cols[:, 9], cols[:, au.COL_M], cols[:, 1], -cols[:, 1], cols[:, 4], -cols[:, 4]):
+                for k in (minsup, minsup + 7, n):
+                    sub = cols[np.argsort(-key, kind="stable")[:k]][:, list(au.SCREEN_COLS)]
+                    c, _, _ = scr(sub.sum(axis=0)[None, :])
+                    self.assertFalse(c[0], (trial, k))
+        self.assertGreater(pruned, 20)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -569,6 +602,113 @@ class CommandLine(unittest.TestCase):
                 self.assertIn("Rows audited: 5,760", txt)
                 self.assertIn("Verdict:", txt)
                 au.load_predicates(Path(outs[0], "predicates.json"))
+
+    def test_any_number_of_workers_gives_the_same_files(self):
+        """The same predicates.json and report.json (but its timings) for 1 and 4 workers."""
+        rows = fixture_rows()
+        big = np.tile(rows, 40)
+        with tempfile.TemporaryDirectory() as d:
+            shard = os.path.join(d, "audit.npy")
+            np.save(shard, big)
+            net = os.path.join(d, "net.safetensors")
+            write_int(net, quantize(random_float_net(9, (32, 16), VOCAB[4])), 4, {"test": "audit"}, head="outcome-v1")
+            outs = []
+            for w in (1, 4):
+                out = os.path.join(d, f"out-{w}")
+                with contextlib.redirect_stdout(io.StringIO()):
+                    au.main(["--net", net, "--shard", shard, "--shard", shard, "--out", out, "--gamma", "0.02",
+                             "--seed", "7", "--workers", str(w)])
+                outs.append(out)
+                self.assertFalse(os.path.exists(os.path.join(out, "work")))
+            preds = [Path(o, "predicates.json").read_text() for o in outs]
+            self.assertEqual(preds[0], preds[1])
+            reps = [json.loads(Path(o, "report.json").read_text()) for o in outs]
+            self.assertEqual(reps[1]["seconds"]["workers"], 4)
+            for r in reps:
+                r.pop("seconds")
+                r["audit"].pop("seconds")
+            self.assertEqual(json.dumps(reps[0], sort_keys=True), json.dumps(reps[1], sort_keys=True))
+            self.assertGreater(reps[0]["audit"]["candidates"], 0)
+
+
+# ---------------------------------------------------------------------------------------------
+# At scale: gamma 0.0001 (docs/m3-hybrid/audit-loop.md, decisions of 2026-10-16 night).
+
+# Background features (index, share of rows) and the planted groups' features: a bias pair of
+# weight 2% x 1% = 0.02% and a spread pair of weight 4% x 0.5% = 0.02% (each alone diluted 50
+# to 200 times).
+SCALE_FEATURES = [(3, 0.12), (40, 0.3), (129, 0.2), (300, 0.5), (433, 0.4), (au.OFF_TRUMP + 1, 0.25),
+                  (au.OFF_SCORE + 9, 0.15), (au.OFF_FLAG + 2, 0.35), (au.OFF_FIVE_PLAYED, 0.5),
+                  (au.OFF_GAMES + 0, 0.3), (au.OFF_DEALER + 1, 0.25),
+                  (57, 0.02), (au.OFF_SCORE + 30 + 4, 0.01), (210, 0.04), (au.OFF_TRICKS + 6, 0.005)]
+SCALE_BIAS = (57, au.OFF_SCORE + 30 + 4)
+SCALE_SPREAD = (210, au.OFF_TRICKS + 6)
+
+
+def scale_shard(n, seed, dense_path):
+    """(Errors, active lists [n, 15] PAD-padded, dense values (a memory-mapped file), truth bias
+    rows, truth spread rows): sum-zero Student-t(5) errors of RMS 0.4%, +1% / -1% on teams 1 / 3
+    in the bias pair, noise x8 (SD 3.2%) in the spread pair."""
+    rng = np.random.default_rng(seed)
+    on = np.column_stack([rng.random(n) < p for _, p in SCALE_FEATURES])
+    feats = np.array([f for f, _ in SCALE_FEATURES], dtype=np.uint16)
+    active = np.where(on, feats[None, :], np.uint16(PAD)).astype(np.uint16)
+    active.sort(axis=1)
+    dense = np.lib.format.open_memmap(dense_path, mode="w+", dtype=np.int32, shape=(n, N_DENSE))
+    for i in range(0, n, 1 << 18):
+        k = min(n, i + (1 << 18)) - i
+        dense[i : i + k] = 0
+        dense[i : i + k, :4] = rng.integers(-(1 << 24), 1, size=(k, 4))
+    col = {f: j for j, (f, _) in enumerate(SCALE_FEATURES)}
+    bias = on[:, col[SCALE_BIAS[0]]] & on[:, col[SCALE_BIAS[1]]]
+    spread = on[:, col[SCALE_SPREAD[0]]] & on[:, col[SCALE_SPREAD[1]]]
+    z = rng.standard_t(5, size=(n, 4)) / math.sqrt(5 / 3)
+    z -= z.mean(axis=1, keepdims=True)
+    sigma = np.full(n, 0.004 / math.sqrt(0.75))
+    sigma[spread] *= 8
+    e = z * sigma[:, None]
+    e[bias, 1] += 0.01
+    e[bias, 3] -= 0.01
+    err = au.Errors.of(np.clip(np.rint(e * ONE), -ONE, ONE).astype(np.int64))
+    return err, active, dense, bias, spread
+
+
+class Scale(unittest.TestCase):
+    def test_groups_of_weight_0_0002_found_at_gamma_0_0001(self):
+        """2M rows (1M in each half), gamma 0.0001 (groups of 100 rows of half A): both planted
+        groups of weight 0.02% are confirmed and named exactly by the enumeration; every confirmed
+        group really holds a planted group's rows; 4 workers."""
+        n = 2_000_000
+        with tempfile.TemporaryDirectory() as d:
+            err, active, dense, bias, spread = scale_shard(n, 41, os.path.join(d, "dense.npy"))
+            self.assertAlmostEqual(bias.mean(), 0.0002, delta=0.00004)
+            self.assertAlmostEqual(spread.mean(), 0.0002, delta=0.00004)
+            is_b = au.half_b(5, n)
+            body = au.audit(err, active, dense, is_b, np.zeros(n, dtype=np.int64), gamma=0.0001, max_depth=2,
+                            workers=4, work=os.path.join(d, "work"), log=lambda s: None)
+            del dense
+        self.assertEqual(body["min_group_rows"], math.ceil(0.0001 * body["half_a_rows"]))
+        preds = {tuple(c["feature"] for c in p["conditions"]): p for p in body["predicates"]}
+        for feats, crit, rows in ((SCALE_BIAS, "bias", bias), (SCALE_SPREAD, "sd", spread)):
+            key = tuple(sorted(feats))
+            self.assertIn(key, preds, [p["name"] for p in body["predicates"]])
+            p = preds[key]
+            self.assertIn(crit, p["criteria"])
+            self.assertEqual(p["rows"], int(rows.sum()))
+            self.assertTrue(all(c["op"] == "==" and c["value"] == 1 for c in p["conditions"]))
+            self.assertIn("conj-2", p["source"])
+        b = preds[tuple(sorted(SCALE_BIAS))]
+        self.assertAlmostEqual(b["bias"][1], 0.01, delta=0.002)
+        self.assertGreater(preds[tuple(sorted(SCALE_SPREAD))]["sd"], 0.02)
+        planted = bias | spread
+        for g in body["groups"]:
+            m = np.zeros(n, dtype=bool)
+            m[:] = True
+            for c in g["conditions"]:
+                f = c["feature"]
+                self.assertLess(f, N_BINARY, g["name"])
+                m &= (active == f).any(axis=1) == (c["value"] == 1)
+            self.assertGreater((m & planted).sum() / m.sum(), 0.5, g["name"])
 
 
 if __name__ == "__main__":

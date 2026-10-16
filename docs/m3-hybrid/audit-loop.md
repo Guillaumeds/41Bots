@@ -165,6 +165,61 @@ joining when it lands (the streamed-labels mechanism of the step-overlap build);
 slices (a CPU check, a minute) run while the next training starts. The heartbeat shows both
 steps when two run at once. Neither device waits for the other when it has a big chunk to do.
 
+**Decisions of 2026-10-16 night** (owner, 22:00 Irish time):
+- **gamma 0.0001.** The audit must find weak groups down to 0.01% of positions (ten times finer
+  than 0.001). The runner's `audit_gamma` (default 0.001) reaches the auditor as `--gamma`; at
+  0.0002 or less the audit shard defaults to 20M rows at trick 4 and 10M at trick 3, so a group of
+  0.01% holds 1,000-2,000 rows (half of them for discovery). The shard is deleted once the auditor
+  has read it.
+- **The auditor at scale** (`fortyone_nn.audit`, numpy only): every pass runs on all threads in
+  tasks of a fixed size, the shard memory-mapped, shared arrays as work files, every sum a whole
+  number, so the output is byte-identical for any number of workers (tested 1 against 4). The
+  enumeration counts pairs and triples sparsely from each row's ~46 items (not dense products);
+  a group is not extended when its sums prove no extension can pass a threshold (the optimistic
+  estimate of exhaustive subgroup discovery, Grosskreutz et al. 2008, Lemmerich et al. 2016: a
+  subset of at least gamma's rows has mean square at most sum(q)/minsup and every team's |bias| at
+  most sum(max_t |e_t|)/minsup; valid, it never changes the candidates, and in practice it prunes
+  little). **Auditor timings** (this VM: 4 vCPU shared with three other agents, load 9-19, so
+  wall times are inflated; trick 4, the lead-4 network 1024-512-128, gamma 0.0001, 4 workers):
+  300k rows (minsup 15): network and error columns 43 s, items 2 s, trees 2 s, enumeration 990 s
+  wall of which about 6 minutes paused (508 items, 121k pairs, 8.7M triples counted, 7.0M
+  frequent), confirmation 7 s (191 candidates, 98 confirmed); 607 CPU-seconds in all, peak
+  3.1 GB (resident, shared pages counted per process). 1M rows (four trick-4 shards incl. race
+  harvests, minsup 50): network and error columns 73 s, trees 4 s, enumeration 792 s (8.1M
+  triples, 12,772 candidates); the confirmation of 12,772 candidates was cut by the measurement's
+  own 20-minute limit (since then confirmed 512 groups at a time per block). The triples dominate
+  (about 85% of the CPU). Projection, linear in rows: about 1,700 CPU-seconds per million rows for
+  the enumeration and 250-300 for the network at 1024 wide (about 12 times that at
+  4096-2048-1024-256); so 20M rows at trick 4 on a 128-thread machine (about 80 cores' worth)
+  about 7 minutes of enumeration plus 1 minute (1024 wide) to 14 minutes (4096 wide) of network,
+  and half that for 10M rows at trick 3. Not yet measured on a rental; the auditor's limit grows
+  with the shard (90 minutes plus 15 per million rows above 2M).
+- **The standard is a setting.** `search hybrid-check --standard PCT` (default 0.01) judges the
+  overall, band, position and slice rows; the runner's `audit_standard` (default 0.01) and
+  `audit_push_standard` (none by default). Once the loop is flat at the standard and a push
+  standard is set, the same round is judged again by the push standard (its golden slices and
+  mini sets checked again, files `…-push`) and the loop carries on, same rental, same dollar cap,
+  until flat at the push standard: **0.005% at trick 4 and 0.0075% at trick 3**. The heartbeat's
+  `standard` and the summary ("flat at 0.01% after round 3; pushing to 0.005%") show the phase.
+- **Mini golden sets for tiny groups.** A group lighter than 0.1% keeps decisions with at least
+  500 × its weight of their reached positions in it (at least 5%: a group of 0.01% keeps
+  decisions with 5% of their positions in it) instead of a half, so rejection sampling finds
+  decisions at all; at most `audit_mini_candidates` (200 × `audit_mini_decisions`) candidates are
+  drawn. A set's verdict needs at least `audit_mini_min` decisions (default 30; a handful that all
+  agree would give a bound of 0): with fewer (none included), the group is reported "unmeasurable
+  at the decision level (N decisions kept)" in every round report and the summary ("unmeasurable:
+  k groups"), never passed or failed, never failing and never blocking "flat": the overall row
+  covers it, and a group too rare to measure must not keep the loop from reaching flat (the push
+  starts only after flat). It is targeted only when the auditor confirms it again.
+- **Diminishing returns.** Two rounds in a row on the largest shape of the capacity ladder that
+  lower neither the worst failing group's decision-level bound nor the overall bound by
+  `audit_min_gain` end the loop ("diminishing returns"), with the groups still limiting it (weight,
+  SD, bound) in the summary; never while the shape can still step up. It replaces "capacity ladder
+  exhausted". The ladder holds only shapes larger than the rung's widths, each once.
+- **The chunk keeps the best round**, not the last: flat at the tightest standard first, then the
+  lowest golden overall bound, the lowest worst group bound, the earlier round; also on a stop
+  ("best: round k" in the summary).
+
 Everything the loop decides is data: the predicates, the weights, the thresholds, the stop
 condition. No rule about play is written anywhere; the labels are the solver's exact values
 throughout, and the golden sets are never trained on.
