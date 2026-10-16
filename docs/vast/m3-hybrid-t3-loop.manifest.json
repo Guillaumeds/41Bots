@@ -6,7 +6,7 @@
   "benchmark_seconds": 0,
   "upload_every_s": 300,
   "heartbeat_every_s": 30,
-  "note": "Trick-3 audit loop, overnight 2026-10-16/17 (owner): groups down to 0.01% of positions, standard 0.01% then push 0.0075%; data of trick-3 round 3 (40M), start shape 2048-1024-256 (round 3's validation loss 1.448 against round 2's 1.497); stored trick-2 golden set. Golden set generated at 2,000 trick-2 decisions x 320 exact worlds (5x the stored 400; about 75 minutes of the CPU beside round 1's training). Any GPU model (no gpu_names): trick 3 is mostly CPU work (labels, harvests, mini golden sets), and 190-thread machines with the fastest GPUs are rare.",
+  "note": "Trick-3 audit loop, overnight 2026-10-16/17 (owner): groups down to 0.01% of positions, standard 0.01% then push 0.0075%; data of trick-3 round 3 (40M), start shape 2048-1024-256 (round 3's validation loss 1.448 against round 2's 1.497); stored trick-2 golden set. Golden set generated at 2,000 trick-2 decisions x 320 exact worlds (5x the stored 400; about 75 minutes of the CPU beside round 1's training). Any GPU model (no gpu_names): trick 3 is mostly CPU work (labels, harvests, mini golden sets), and 190-thread machines with the fastest GPUs are rare. Audit shards of 10M positions (groups of 0.01% hold 1,000 of them): the second mechanism test measured the auditor at 2.2 minutes for 4M rows on 122 threads.",
   "machine": {
     "gpus": 1,
     "min_gpu_ram_gb": 20,
@@ -45,7 +45,7 @@
         "epochs": 40,
         "patience": 6,
         "audit_rounds": 8,
-        "audit_rows": 4000000,
+        "audit_rows": 10000000,
         "audit_seed": 331,
         "audit_target_rows": 2000000,
         "audit_weight": 2,

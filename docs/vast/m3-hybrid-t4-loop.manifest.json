@@ -6,7 +6,7 @@
   "benchmark_seconds": 0,
   "upload_every_s": 300,
   "heartbeat_every_s": 30,
-  "note": "Trick-4 audit loop, overnight 2026-10-16/17 (owner): groups down to 0.01% of positions, standard 0.01% then push 0.005%; start shape from the lead-5c/6a/6b comparison (docs/m3-hybrid/rung1.md). Golden set generated at 4,000 decisions x 320 exact worlds (10x the stored 400: a group's golden slice then holds enough decisions to prove 0.01% at 95%; about a minute to make, about 3 minutes a round to check).",
+  "note": "Trick-4 audit loop, overnight 2026-10-16/17 (owner): groups down to 0.01% of positions, standard 0.01% then push 0.005%; start shape from the lead-5c/6a/6b comparison (docs/m3-hybrid/rung1.md). Golden set generated at 4,000 decisions x 320 exact worlds (10x the stored 400: a group's golden slice then holds enough decisions to prove 0.01% at 95%; about a minute to make, about 3 minutes a round to check). Audit shards of 10M positions (groups of 0.01% hold 1,000 of them): the second mechanism test measured the auditor at 2.2 minutes for 4M rows on 122 threads.",
   "machine": {
     "gpus": 1,
     "min_gpu_ram_gb": 20,
@@ -63,7 +63,7 @@
         "epochs": 40,
         "patience": 6,
         "audit_rounds": 8,
-        "audit_rows": 4000000,
+        "audit_rows": 10000000,
         "audit_seed": 301,
         "audit_target_rows": 5000000,
         "audit_weight": 2,
