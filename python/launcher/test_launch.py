@@ -49,6 +49,8 @@ class World:
         self.id_lookup_fails = False  # the search by offer id fails
         self.search_fails = False  # a full search fails (vast's daily search quota: 429)
         self.hidden_listings = 0  # `show instances` leaves out the newest instance this many more times
+        self.destroy_fails = 0  # the next this many `destroy instance` calls fail (vast no longer knows the instance)
+        self.destroy_calls = 0  # how many `destroy instance` calls were made
 
     # ---- clock
     def time(self) -> float:
@@ -199,6 +201,10 @@ class World:
                                       "failed to inject CDI devices: OCI runtime create failed: sk-test-secret-3"}
             return {"actual_status": "running", "intended_status": "running"}
         if cmd == ("destroy", "instance"):
+            self.destroy_calls += 1
+            if self.destroy_fails > 0:
+                self.destroy_fails -= 1
+                raise RuntimeError("vastai destroy instance failed: 404 Not Found: no such instance")
             inst = self.instances.get(int(args[2]))
             if inst:
                 inst["alive"] = False
@@ -915,6 +921,102 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual((code, report["outcome"]), (0, "DONE"))
         self.assertEqual(w.created_on, [1])
         self.assertIn("adopting instance 100", self.log)
+
+    def destroy_world(self, alive: bool, destroyed: bool = False) -> World:
+        """A world holding only instance 100: running, or ended (and, if `destroyed`, gone from vast)."""
+        w = World([], [])
+        w.instances[100] = {"alive": alive, "polls": 0, "script": "work:0", "offer": 1, "created": w.t,
+                            "label": f"41bots-{RUN}", "destroyed": destroyed}
+        return w
+
+    def run_destroy(self, w: World) -> tuple[str, str]:
+        """launch.destroy(100) against `w`: its answer and what it logged."""
+        out = io.StringIO()
+        with self.patched(w):
+            with contextlib.redirect_stdout(out):
+                result = launch.destroy(100)
+        return result, out.getvalue()
+
+    def test_destroy_of_a_machine_that_already_destroyed_itself_is_verified(self):
+        # 2026-10-16: the runner's own self-destroy (or a stop that raced it) removed the instance,
+        # so vast no longer knows it and every destroy call fails. That is a success, not an error:
+        # once the listing (read successfully) does not hold the instance, it is verified.
+        for status_fails in (True, False):  # vast's `show instance` errors for an unknown id, or says exited
+            with self.subTest(status_fails=status_fails):
+                w = self.destroy_world(alive=False, destroyed=True)
+                w.destroy_fails = 10 ** 6
+                w.status_fails = status_fails
+                result, out = self.run_destroy(w)
+                self.assertEqual(result, "verified")
+                self.assertEqual(w.destroy_calls, 1)  # no pointless retries
+                self.assertIn("destroy attempt 1 failed", out)
+                self.assertIn("was already gone when the destroy call failed", out)
+                self.assertNotIn("::error::", out)
+                self.assertNotIn("::warning::", out)
+
+    def test_failed_destroy_with_an_unreadable_status_is_retried_and_ends_failed(self):
+        # The safety rule: an unreadable status (the instance listing itself fails) is never counted
+        # as destroyed, even when the machine really is gone. 5 attempts, then "failed" with the error.
+        w = self.destroy_world(alive=False, destroyed=True)
+        w.destroy_fails = 10 ** 6
+        w.status_fails = w.listing_fails = True
+        result, out = self.run_destroy(w)
+        self.assertEqual(result, "failed")
+        self.assertEqual(w.destroy_calls, 5)
+        self.assertIn("destroy attempt 5 failed", out)
+        self.assertIn("::error::could not destroy instance 100; destroy it by hand", out)
+        self.assertNotIn("already gone", out)
+        self.assertNotIn("verified", out)
+
+    def test_failed_destroy_of_an_instance_still_there_is_retried_and_ends_failed(self):
+        # The destroy call fails and a clean reading shows the instance still running: not gone.
+        w = self.destroy_world(alive=True)
+        w.destroy_fails = 10 ** 6
+        result, out = self.run_destroy(w)
+        self.assertEqual(result, "failed")
+        self.assertEqual(w.destroy_calls, 5)
+        self.assertIn("::error::could not destroy instance 100", out)
+        self.assertNotIn("already gone", out)
+        # A destroy call that fails twice and then goes through is the normal path after a retry.
+        w = self.destroy_world(alive=True)
+        w.destroy_fails = 2
+        result, out = self.run_destroy(w)
+        self.assertEqual((result, w.destroy_calls), ("verified", 3))
+        self.assertIn("destroyed instance 100 (verified: actual_status exited)", out)
+        self.assertNotIn("::error::", out)
+
+    def test_destroy_normal_path_is_unchanged(self):
+        # The call goes through and a later reading shows the instance gone: verified, one call.
+        w = self.destroy_world(alive=True)
+        result, out = self.run_destroy(w)
+        self.assertEqual((result, w.destroy_calls), ("verified", 1))
+        self.assertIn("destroyed instance 100 (verified: actual_status exited)", out)
+        self.assertNotIn("::error::", out)
+        self.assertNotIn("already gone", out)
+        self.assertTrue(w.instances[100]["destroyed"])
+        # The call goes through but vast's status cannot be read: unverified, never "verified".
+        w = self.destroy_world(alive=True)
+        w.status_fails = w.listing_fails = True
+        result, out = self.run_destroy(w)
+        self.assertEqual((result, w.destroy_calls), ("unverified", 1))
+        self.assertIn("::warning::destroy of instance 100 was sent, but vast's status could not be read", out)
+        self.assertNotIn("::error::", out)
+
+    def test_instance_state_is_dead_only_after_a_successful_reading(self):
+        w = self.destroy_world(alive=False, destroyed=True)
+        with self.patched(w):
+            # Absent from a successfully read listing (and `show instance` erroring): dead.
+            w.status_fails = True
+            self.assertEqual(launch.instance_state(100), ("dead", None))
+            # Neither call can be read: unknown, whether the machine is there or not.
+            w.listing_fails = True
+            self.assertEqual(launch.instance_state(100), ("unknown", None))
+            # An unreadable (non-list) listing is unknown too.
+            w.listing_fails = False
+            orig = w.vast
+            w.vast = lambda *a, **kw: {"error": "x"} if a[:2] == ("show", "instances") else orig(*a, **kw)
+            launch.vast = w.vast
+            self.assertEqual(launch.instance_state(100), ("unknown", None))
 
     def run_launch_minutes(self, world: World, manifest: dict, minutes: int) -> tuple[int, dict]:
         saved = {n: getattr(launch, n) for n in ("vast", "r2_get", "r2_put", "r2_list", "r2_exists", "r2_delete", "time")}
