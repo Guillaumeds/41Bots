@@ -467,13 +467,26 @@ def destroy(instance_id: int) -> str:
     """Destroys the instance and checks that it is gone. Returns "verified" (a later status call
     showed it exited, offline or absent from the instance list), "unverified" (the destroy call
     went through, but vast's status could not be read in 3 tries: check the console) or "failed"
-    (the destroy call itself failed 5 times). An unreadable status is never counted as destroyed."""
+    (the destroy call itself failed 5 times and the instance was not seen gone). An unreadable
+    status is never counted as destroyed.
+
+    A destroy call that fails is not the end of it: the machine may already have destroyed itself
+    (the runner does at the end of a run, or a stop raced it), and then vast no longer knows the
+    instance, so every destroy call fails. After each failed call the status is read; if that
+    reading shows the instance gone ("dead": exited, offline or absent from a listing that was
+    read successfully) it counts as verified. If the status cannot be read ("unknown"), or shows
+    the instance still there, the destroy is tried again."""
     for attempt in range(5):
         try:
             # -y: without it vastai asks "Are you sure?" on stdin, reads EOF and silently does nothing.
             vast("destroy", "instance", str(instance_id), "-y", raw=False)
         except RuntimeError as e:
             log(f"destroy attempt {attempt + 1} failed: {e}")
+            state, info = instance_state(instance_id)
+            if state == "dead":
+                log(f"instance {instance_id} was already gone when the destroy call failed "
+                    f"({info_word(info)}); counting it as destroyed (verified)")
+                return "verified"
             time.sleep(10)
             continue
         time.sleep(5)
