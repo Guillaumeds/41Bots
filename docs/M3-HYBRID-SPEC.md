@@ -78,7 +78,7 @@ searched with H_2 (exact through trick 1, O_2 from the start of trick 2), and tr
 good enough on that basis. The saved exact trick-1 worlds above (32 decisions, 386 worlds) remain
 the only trick-1 measurement: a rough test, reported with its thinness, never a gate. O_2's own
 standard is the audit loop at the position level on trick-2 positions plus that rough test.
-Later improvements go to the same two places only: tricks 2, 3 and 4 pushed below 0.01 (the
+For trick 1, later improvements are of two kinds only: tricks 2, 3 and 4 pushed below 0.01 (the
 loop run further), and more deals per trick-1 decision.
 
 ## 4. Golden sets and references
