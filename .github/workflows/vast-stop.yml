@@ -1,0 +1,49 @@
+name: vast-stop
+
+# Stops one run on purpose (owner's decision): writes the run's STOP request, waits (bounded) for
+# the runner to upload what it finished, then destroys the instance. Nothing else is touched.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "The run id to stop (e.g. m3-agree-t1-ab1)"
+        required: true
+      instance_id:
+        description: "Its vast instance id (from vast-status)"
+        required: true
+      wait_s:
+        description: "Seconds to wait for the upload before destroying (default 600)"
+        default: "600"
+      reason:
+        description: "Why (recorded in the run's STOP request)"
+        default: "stopped by the owner"
+
+permissions:
+  contents: read
+
+jobs:
+  stop:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      VAST_API_KEY: ${{ secrets.VAST_API_KEY }}
+      R2_ACCESS_KEY_ID: ${{ vars.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+      R2_S3_ENDPOINT: ${{ vars.R2_S3_ENDPOINT }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the vast.ai CLI
+        run: pip install -q vastai==1.8.3
+      - name: Stop, wait for the upload, destroy
+        env:
+          RUN_ID: ${{ inputs.run_id }}
+          INSTANCE_ID: ${{ inputs.instance_id }}
+          WAIT_S: ${{ inputs.wait_s }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          case "$RUN_ID" in *[!A-Za-z0-9._-]*) echo "bad run_id"; exit 1;; esac
+          case "$INSTANCE_ID" in *[!0-9]*) echo "bad instance_id"; exit 1;; esac
+          python3 python/launcher/launch.py stop "$RUN_ID" --instance "$INSTANCE_ID" --wait-s "$WAIT_S" --reason "$REASON"
