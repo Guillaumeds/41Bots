@@ -21,6 +21,55 @@
 //!
 //! Integer sums are exact and do not depend on the order of the terms, so the result is
 //! byte-identical on every machine and target.
+//!
+//! **Widths and the overflow bound** (why [`MAX_WIDTH`] can be 4096, raised from 1024 on
+//! 2026-10-16 with no output changed). Nothing in the arithmetic depends on a layer's width.
+//! What keeps every sum exact is the check [`IntMlp::new`] makes on each network's own weights,
+//! whatever its width: for every layer and output `j`, `|b_j| + Σ_i |w_ij| · X ≤ 2^62`, where `X`
+//! is the largest input magnitude (`2^24` into the first layer: a binary input that is on is
+//! `2^24`, a dense one lies in `−2^24..=0`; [`CLIP`] `= 2^26` after). The bit widths:
+//! - a weight is an `i32` (`|w| ≤ 2^31`), an input at most `2^26`, so each product is at most
+//!   `2^57` (exact in `i64`);
+//! - every partial sum the plain or the fast pass forms is the bias (or nothing) plus a sub-sum
+//!   of the terms `w_ij · x_i`, so its magnitude is at most the checked bound `2^62`, in any
+//!   order of the terms;
+//! - the rounding half added before the shift is at most `2^61`, so `acc + half < 2^63`.
+//!
+//! So no `i64` sum can overflow, for any input, at any width: the accumulator need not be wider.
+//! A wider layer changes only how many terms each sum of the next layer has (its fan-in `F`).
+//! For arbitrary `i32` weights the bound would fail already at `F = 33`
+//! (`2^31 · 2^26 · 33 > 2^62`), which is why it is checked per network and never assumed from
+//! the widths (at 1024 as at 4096). What the bound asks of a network, in the trainer's float
+//! units (weights stored as `round(w · 2^s)`; `python/nn/fortyone_nn/quantize.py` picks the
+//! largest `s ≤ 24` whose worst case stays within `2^61`, half the bound, as room for float
+//! rounding in its own check):
+//! - a hidden or output layer (`X = 2^26`): `Σ_i |w_ij| · 2^s ≤ 2^35`, i.e. with the full
+//!   `s = 24` fraction bits an L1 norm `Σ_i |w_ij| ≤ 2^11 = 2048` per output;
+//! - the first layer (`X = 2^24`, always 909 inputs, whatever its width):
+//!   `Σ_i |w_ij| ≤ 2^13` at `s = 24`.
+//!
+//! Trained weights are of the scale `1/√F` (Kaiming initialisation, then training), so the L1
+//! norm grows like `√F`: about 36 at `F = 2048` and 51 at `F = 4096` for normal weights of that
+//! scale (`0.8 · √F`), 40 times inside 2048 (tested in `python/nn`, `test_intnet`). A network
+//! whose weights were far larger would get fewer fraction bits (`s < 24`), so its integer form
+//! would follow the float one less closely, which the trainer measures and reports
+//! (`report.json`, the integer network's error against the float one's); it would never
+//! overflow, and a file that breaks the bound is refused here.
+//!
+//! What does depend on the width (audited for 4096):
+//! - the plain pass's working arrays (on the heap, the size of the network's widest layer) and
+//!   the fast pass's [`crate::fast::Scratch`] (`MAX_WIDTH` entries of 18 bytes: 72 KiB,
+//!   allocated once per thread and oracle);
+//! - the fast pass indexes a layer's inputs by `u16` (compaction and kernels): good to 65,536;
+//! - the first layer's binary sums in `i32` ([`crate::fast::FastMlp::bin_i32`]) are bounded by
+//!   the 96 largest weights of each output column: independent of the width;
+//! - Python's exact products (`intnet.exact_matmul`, and the auditor's in `audit.py`) cut the
+//!   weights into pieces of `53 − bits(F · max x)` bits: 15 bits at `F = 2048`, 14 at 4096,
+//!   still exact;
+//! - the oracle keeps, per thread, up to 256 first-layer dense parts of `8 × width` bytes: 4 MiB
+//!   at width 2048, 8 MiB at 4096.
+//!
+//! The limit is 4096 rather than 65,536 because wider is untested here and costs memory.
 
 use crate::encode::{Features, INPUT_SHIFT, N_BINARY, N_FEATURES};
 use crate::outcome::MAX_OUT;
@@ -31,14 +80,14 @@ pub const ACT_SHIFT: u32 = 20;
 pub const LOGIT_SHIFT: u32 = 24;
 /// The ReLU clip: 64.
 pub const CLIP: i64 = 64 << ACT_SHIFT;
-/// The widest layer supported: the audited limit of the integer inference. The scratch arrays of the
-/// plain and the fast forward pass hold this many units, and the overflow bound ([`SUM_BOUND`]) was
-/// audited for it. A network with a wider layer cannot be loaded ([`IntMlp::new`] refuses it), so
-/// training one is wasted time: every place that accepts a width checks it first with
-/// [`check_hidden_widths`]. Other places repeat this number, each with a test that it is this one:
-/// the trainer (`python/nn/fortyone_nn/formats.py` `MAX_WIDTH`, against `nn-tool limits`) and the
-/// runner's `hybrid_rung` settings (which call [`check_hidden_widths`]).
-pub const MAX_WIDTH: usize = 1024;
+/// The widest layer supported: the audited limit of the integer inference (the module notes,
+/// "Widths and the overflow bound": the bound [`SUM_BOUND`] is checked per network at any width;
+/// the fast pass's scratch holds this many units). A network with a wider layer cannot be loaded
+/// ([`IntMlp::new`] refuses it), so training one is wasted time: every place that accepts a width
+/// checks it first with [`check_hidden_widths`]. Other places repeat this number, each with a
+/// test that it is this one: the trainer (`python/nn/fortyone_nn/formats.py` `MAX_WIDTH`, against
+/// `nn-tool limits`) and the runner's `hybrid_rung` settings (which call [`check_hidden_widths`]).
+pub const MAX_WIDTH: usize = 4096;
 /// The bound every layer's worst-case sum must stay within.
 pub const SUM_BOUND: i128 = 1 << 62;
 
@@ -162,15 +211,17 @@ impl IntMlp {
     pub fn forward(&self, f: &Features) -> [i64; MAX_OUT] {
         let l0 = &self.layers[0];
         let n = l0.n_out;
+        // Working arrays the size of the widest layer (at most MAX_WIDTH), on the heap.
+        let wide = self.layers.iter().map(|l| l.n_out).max().unwrap_or(0);
         // Binary features: their rows summed once, then scaled by the input's 2^24.
-        let mut bin = [0i64; MAX_WIDTH];
+        let mut bin = vec![0i64; wide];
         for &i in f.active() {
             let row = &l0.w[usize::from(i) * n..(usize::from(i) + 1) * n];
             for (a, &w) in bin[..n].iter_mut().zip(row) {
                 *a += i64::from(w);
             }
         }
-        let mut acc = [0i64; MAX_WIDTH];
+        let mut acc = vec![0i64; wide];
         for j in 0..n {
             acc[j] = l0.b[j] + (bin[j] << INPUT_SHIFT);
         }
@@ -184,7 +235,7 @@ impl IntMlp {
                 *a += i64::from(w) * i64::from(x);
             }
         }
-        let mut h = [0i64; MAX_WIDTH];
+        let mut h = vec![0i64; wide];
         for j in 0..n {
             h[j] = round_shift(acc[j], l0.shift).clamp(0, CLIP);
         }
@@ -315,15 +366,15 @@ mod tests {
     }
 
     #[test]
-    fn the_width_limit_is_1024_and_its_refusals_name_it() {
+    fn the_width_limit_is_4096_and_its_refusals_name_it() {
         // The audited limit; python/nn/fortyone_nn/formats.py repeats it (tested against `nn-tool limits`).
-        assert_eq!(MAX_WIDTH, 1024);
+        assert_eq!(MAX_WIDTH, 4096);
         let e = IntMlp::new(wide(MAX_WIDTH + 1, 1)).unwrap_err();
         assert_eq!(e, width_error(0, MAX_WIDTH + 1));
         for want in [
             "layer 0",
-            "1025 units",
-            "wider than 1024",
+            "4097 units",
+            "wider than 4096",
             "MAX_WIDTH",
             "crates/nn/src/mlp.rs",
         ] {
@@ -331,16 +382,59 @@ mod tests {
         }
         // The check before training: the first hidden layer over the limit is named, by its number.
         assert_eq!(check_hidden_widths(&[1024, 512, 128]), Ok(()));
+        assert_eq!(check_hidden_widths(&[2048, 1024, 256]), Ok(()));
+        assert_eq!(check_hidden_widths(&[2048, 2048, 1024, 256]), Ok(()));
+        assert_eq!(check_hidden_widths(&[4096, 4096, 256]), Ok(()));
         assert_eq!(check_hidden_widths(&[]), Ok(()));
         assert_eq!(
-            check_hidden_widths(&[2048, 1024, 256]),
-            Err(width_error(0, 2048))
+            check_hidden_widths(&[8192, 1024, 256]),
+            Err(width_error(0, 8192))
         );
         assert_eq!(
-            check_hidden_widths(&[512, 4096, 2048]),
-            Err(width_error(1, 4096))
+            check_hidden_widths(&[512, 4097, 2048]),
+            Err(width_error(1, 4097))
         );
         // Exactly the limit passes both checks.
         assert!(IntMlp::new(wide(MAX_WIDTH, 1)).is_ok());
+    }
+
+    /// The bound at the widest fan-in (the module notes): 4096 inputs of at most 2^26 each allow
+    /// weights up to 2^24 in every place (4096 × 2^24 × 2^26 = 2^62 exactly), not one more; at
+    /// 2048 up to 2^25.
+    #[test]
+    fn the_bound_at_fan_ins_of_2048_and_4096() {
+        assert!(IntMlp::new(wide(4096, 1 << 24)).is_ok());
+        assert!(IntMlp::new(wide(4096, (1 << 24) + 1)).is_err());
+        assert!(IntMlp::new(wide(2048, 1 << 25)).is_ok());
+        assert!(IntMlp::new(wide(2048, (1 << 25) + 1)).is_err());
+        // The sums at the bound are exact: every input at the clip, every weight at the limit.
+        let net = IntMlp::new(vec![
+            Layer {
+                n_in: N_FEATURES,
+                n_out: 4096,
+                w: vec![0; N_FEATURES * 4096],
+                b: vec![CLIP << 24; 4096],
+                shift: 24,
+            },
+            Layer {
+                n_in: 4096,
+                n_out: 4,
+                w: [1 << 24, -(1 << 24), 1 << 24, -(1 << 24)].repeat(4096),
+                b: vec![0; 4],
+                shift: 40,
+            },
+        ])
+        .expect("at the bound");
+        let f = Features {
+            active: [PAD; MAX_ACTIVE],
+            n_active: 0,
+            dense: [0; N_DENSE],
+        };
+        // Each hidden unit is exactly 64 (the clip); each logit ±4096 · 2^24 · 2^26 = ±2^62,
+        // shifted right by 40: ±2^22.
+        assert_eq!(
+            net.forward(&f)[..4],
+            [1 << 22, -(1 << 22), 1 << 22, -(1 << 22)]
+        );
     }
 }

@@ -81,7 +81,7 @@ def synthetic_shard(path, rows, seed, trick=4):
 
 
 class WidthGuardTest(unittest.TestCase):
-    """``--widths`` over the integer inference's limit (formats.MAX_WIDTH, 1024) is refused before anything
+    """``--widths`` over the integer inference's limit (formats.MAX_WIDTH, 4096) is refused before anything
     else happens: no shard is read, no GPU probed, no output directory made."""
 
     def main_args(self, d, widths, device="cpu"):
@@ -90,13 +90,13 @@ class WidthGuardTest(unittest.TestCase):
 
     def test_a_layer_over_the_limit_is_refused_first(self):
         with tempfile.TemporaryDirectory() as d:
-            for widths, layer, units in (("2048,1024,256", 0, 2048), ("512,1025", 1, 1025)):
+            for widths, layer, units in (("8192,1024,256", 0, 8192), ("512,4097", 1, 4097)):
                 with mock.patch.object(train, "load_shard", side_effect=AssertionError("read a shard")), \
                         mock.patch.object(train, "probe", side_effect=AssertionError("probed the GPU")):
                     with self.assertRaises(SystemExit) as e:
                         train.main(self.main_args(d, widths, device="auto"))
                 msg = str(e.exception)
-                self.assertTrue(msg.startswith(f"--widths {widths}: layer {layer}: {units} units, wider than 1024"), msg)
+                self.assertTrue(msg.startswith(f"--widths {widths}: layer {layer}: {units} units, wider than 4096"), msg)
                 self.assertIn("MAX_WIDTH", msg)
                 self.assertFalse(os.path.exists(os.path.join(d, "net")))
 
@@ -113,7 +113,7 @@ class WidthGuardTest(unittest.TestCase):
             sentinel = RuntimeError("stop: the guard let the run start")
             with mock.patch.object(train, "load_shard", side_effect=sentinel) as load:
                 with self.assertRaises(RuntimeError) as e:
-                    train.main(self.main_args(d, "1024,512,128"))
+                    train.main(self.main_args(d, "4096,2048,256"))
             self.assertIs(e.exception, sentinel)
             load.assert_called_once_with("t.npy")
 

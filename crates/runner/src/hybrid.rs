@@ -795,7 +795,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         })?;
     // The integer inference cannot load a layer wider than nn::MAX_WIDTH, so a network with one is
     // refused here, before the machine installs or trains anything (a trick-3 run once trained
-    // 2048-1024-256 for 27 minutes and then failed at the check).
+    // 2048-1024-256 for 27 minutes and then failed at the check, when the limit was 1024).
     let hidden: Vec<usize> = widths.iter().map(|&w| w as usize).collect();
     nn::mlp::check_hidden_widths(&hidden)
         .map_err(|e| format!("hybrid_rung: widths {widths_text:?}: {e}"))?;
@@ -2714,16 +2714,20 @@ mod tests {
         bad(json!({ "widths": "1024,,128" }), "widths");
         bad(json!({ "widths": "" }), "widths");
         bad(json!({ "widths": 1024 }), "widths must be a string");
-        // A layer over the integer inference's limit (nn::MAX_WIDTH, 1024) is refused with the layer and the limit.
+        // A layer over the integer inference's limit (nn::MAX_WIDTH, 4096) is refused with the layer and the limit.
         bad(
-            json!({ "widths": "2048,1024,256" }),
-            "widths \"2048,1024,256\": layer 0: 2048 units, wider than 1024",
+            json!({ "widths": "8192,1024,256" }),
+            "widths \"8192,1024,256\": layer 0: 8192 units, wider than 4096",
         );
         bad(
-            json!({ "widths": "512, 4096" }),
-            "layer 1: 4096 units, wider than 1024",
+            json!({ "widths": "512, 4097" }),
+            "layer 1: 4097 units, wider than 4096",
         );
-        bad(json!({ "widths": "1025" }), "MAX_WIDTH");
+        bad(json!({ "widths": "4097" }), "MAX_WIDTH");
+        // 2048 and 4096 wide are within it.
+        for w in ["2048,1024,256", "2048,2048,1024,256", "4096,2048,256"] {
+            assert!(parse(&json!({ "widths": w })).is_ok(), "{w}");
+        }
         bad(json!({ "head": "values" }), "head \"values\"");
         bad(json!({ "device": "gpu" }), "device \"gpu\"");
         bad(json!({ "epochs": 0 }), "epochs and batch");
@@ -4360,8 +4364,17 @@ fi
             (4, 1_000_000, 301, 256, 2.0, 50, 4, 10_000_000)
         );
         assert_eq!((a.audit_seed(1), a.target_seed(4)), (30101, 30154));
-        // The default ladder: the rung's widths, then only the shapes the integer inference loads.
-        assert_eq!(a.shapes, vec![vec![1024, 512, 128]]);
+        // The default ladder: the rung's widths, then the larger shapes (all within nn::MAX_WIDTH,
+        // 4096 since 2026-10-16).
+        assert_eq!(
+            a.shapes,
+            vec![
+                vec![1024, 512, 128],
+                vec![2048, 1024, 256],
+                vec![2048, 2048, 1024, 256],
+                vec![4096, 2048, 1024, 256]
+            ]
+        );
         assert_eq!(a.min_gain, 0.15);
         let at3 = parse(&json!({ "cut": 3, "audit_rounds": 1 })).expect("trick 3");
         assert_eq!(at3.audit.expect("on").target_rows, 4_000_000);
@@ -4442,7 +4455,7 @@ fi
             "audit_target_rows",
         );
         bad(
-            json!({ "audit_rounds": 2, "audit_shapes": "<widths>;2048,1024,256" }),
+            json!({ "audit_rounds": 2, "audit_shapes": "<widths>;8192,1024,256" }),
             "MAX_WIDTH",
         );
         bad(
@@ -4908,7 +4921,7 @@ esac
         );
         assert_eq!(
             (p["shape"].as_str(), p["shape_step"].as_str()),
-            (Some("16,8"), Some("1 of 1"))
+            (Some("16,8"), Some("1 of 4"))
         );
         assert_eq!(
             p["thresholds"],

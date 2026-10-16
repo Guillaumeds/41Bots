@@ -659,6 +659,87 @@ mod tests {
         }
     }
 
+    /// Outputs and inputs 1024, 2048 and 4096 wide (the widest layers `MAX_WIDTH` allows, and
+    /// row indices up to 4095): every kernel at every level equals the plain sums and rules.
+    #[test]
+    fn kernels_at_widths_up_to_4096() {
+        let mut sm = SplitMix64::new(4);
+        for (n_in, n) in [(1024usize, 1024usize), (4096, 64), (2048, 2048), (64, 4096)] {
+            // Weights of a trained network's scale (2^24 / sqrt(fan-in)), and a few at the
+            // extremes; values at and below the clip.
+            let a = ((1u64 << 48) / n_in as u64).isqrt();
+            let w: Vec<i32> = (0..n_in * n)
+                .map(|_| match sm.next_u64() % 64 {
+                    0 => i32::MIN,
+                    1 => i32::MAX,
+                    _ => ((sm.next_u64() % (2 * a + 1)) as i64 - a as i64) as i32,
+                })
+                .collect();
+            let (wp, np) = pack_pairs(&w, n_in, n);
+            let k = n_in.min(600);
+            let mut idx: Vec<u16> = (0..k)
+                .map(|_| (sm.next_u64() % n_in as u64) as u16)
+                .collect();
+            idx[0] = (n_in - 1) as u16;
+            let val: Vec<i32> = (0..k)
+                .map(|_| match sm.next_u64() % 3 {
+                    0 => CLIP as i32,
+                    _ => (sm.next_u64() % (CLIP as u64 + 1)) as i32,
+                })
+                .collect();
+            let init: Vec<i64> = (0..np)
+                .map(|_| (sm.next_u64() >> 24) as i64 - (1 << 39))
+                .collect();
+            let want: Vec<i64> = (0..n)
+                .map(|j| {
+                    idx.iter().zip(&val).fold(init[j], |acc, (&i, &x)| {
+                        acc + i64::from(w[usize::from(i) * n + j]) * i64::from(x)
+                    })
+                })
+                .collect();
+            let mut want_h = vec![0i32; n];
+            for (y, &a) in want_h.iter_mut().zip(&want) {
+                *y = crate::mlp::round_shift(a, 24).clamp(0, CLIP) as i32;
+            }
+            let add: Vec<u16> = idx[..k.min(96)].to_vec();
+            let sub: Vec<u16> = idx[k.min(96) / 2..k.min(96)].to_vec();
+            let mut want_sum = vec![0i32; n];
+            for (j, s) in want_sum.iter_mut().enumerate() {
+                for &i in &add {
+                    *s = s.wrapping_add(w[usize::from(i) * n + j]);
+                }
+                for &i in &sub {
+                    *s = s.wrapping_sub(w[usize::from(i) * n + j]);
+                }
+            }
+            for l in levels() {
+                let mut got = vec![7i64; np];
+                mac_rows_at(l, &w, n, &idx, &val, &init, &mut got);
+                assert_eq!(&got[..n], &want[..], "rows {n_in}x{n} level {l:?}");
+                let mut got = vec![7i64; np];
+                mac_pairs_at(l, &wp, np, &idx, &val, &init, &mut got);
+                assert_eq!(&got[..n], &want[..], "pairs {n_in}x{n} level {l:?}");
+                let mut h = vec![-1; n];
+                activate_at(l, &got, 24, &mut h);
+                assert_eq!(h, want_h, "activation {n} level {l:?}");
+                let mut s = vec![0i32; n];
+                sum_rows_at(l, &w, n, &add, &sub, &mut s);
+                assert_eq!(s, want_sum, "binary sums {n_in}x{n} level {l:?}");
+            }
+            let mut ci = vec![0u16; n];
+            let mut cv = vec![0i32; n];
+            let c = compact(&want_h, &mut ci, &mut cv);
+            let nz: Vec<(u16, i32)> = want_h
+                .iter()
+                .enumerate()
+                .filter(|(_, y)| **y != 0)
+                .map(|(j, &y)| (j as u16, y))
+                .collect();
+            assert_eq!(c, nz.len());
+            assert!(ci[..c].iter().zip(&cv[..c]).map(|(&i, &v)| (i, v)).eq(nz));
+        }
+    }
+
     #[test]
     fn activation_and_compaction_equal_the_plain_rule() {
         let mut sm = SplitMix64::new(3);

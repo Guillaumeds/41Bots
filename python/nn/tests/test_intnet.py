@@ -3,8 +3,11 @@
 - golden: the seeded golden network and inputs (same recipe on both sides) give the outputs in
   ``crates/nn/tests/data/intnet-golden.json``, which the Rust tests also check;
 - quantisation: the integer network computes the float one closely, and safetensors round-trip;
+  wide networks (2048 and 4096 units) of a trained network's scale keep all 24 fraction bits with
+  the bound to spare, and weights too large for them get fewer, the bound holding exactly;
 - parity: on real encoded positions (``nn-tool fixture``) and a quantised random network, the
-  Rust integer forward pass (``nn-tool eval``) and this one give bit-identical money chances.
+  Rust integer forward pass (``nn-tool eval``) and this one give bit-identical money chances,
+  also at widths 2048 (2048-1024-256) and 4096 (4096-512).
   Needs the ``nn-tool`` binary: ``$NN_TOOL``, else ``target/release/nn-tool`` or
   ``target/debug/nn-tool`` (CI builds it); skipped when there is none.
 
@@ -126,6 +129,41 @@ class Quantise(unittest.TestCase):
         zi = intnet.logits(ints, x).astype(np.float64) / (1 << 24)
         self.assertLess(np.abs(zf - zi).max(), 1e-4)
 
+    def test_wide_networks_keep_every_fraction_bit(self):
+        # Trained-scale weights (normal, 1/sqrt(fan-in)) at widths 2048 and 4096: the largest scale
+        # s = 24 passes the 2^62 bound with room (the L1 norm per output is about 0.8 sqrt(F), far
+        # inside the 2^11 that s = 24 allows; crates/nn/src/mlp.rs, "Widths and the overflow
+        # bound"), so the shifts are those of a narrow network, and the integer network follows
+        # the float one as closely.
+        active, dense = intnet.golden_features(5, 40)
+        x = intnet.inputs(active, dense)
+        for seed, widths in ((7, (2048, 1024, 256)), (8, (2048, 2048, 1024, 256)), (9, (4096, 2048, 64))):
+            fl = random_float_net(seed, widths, 14)
+            ints = quantize(fl)
+            self.assertEqual([s for _, _, s in ints], [28] + [24] * (len(widths) - 1) + [20], widths)
+            for k, (w, b, _) in enumerate(ints):
+                max_in = 1 << 24 if k == 0 else intnet.CLIP
+                worst = max(abs(int(b[j])) + int(np.abs(w[:, j].astype(np.int64)).sum()) * max_in
+                            for j in range(w.shape[1]))
+                self.assertLessEqual(worst, intnet.SUM_BOUND // 2**4, f"{widths} layer {k}: room to spare")
+            zf = float_logits(fl, x)
+            zi = intnet.logits(ints, x).astype(np.float64) / (1 << 24)
+            self.assertLess(np.abs(zf - zi).max(), 1e-4, widths)
+
+    def test_large_wide_weights_get_fewer_fraction_bits(self):
+        # Weights of 1 on all 4096 inputs of an output: an L1 norm of 2^12, over the 2^11 that 24
+        # fraction bits allow, so the quantiser takes 23 (shift 23), and the bound holds exactly
+        # at half (2^12 * 2^23 * 2^26 = 2^61); a little more takes 22.
+        rng = np.random.default_rng(3)
+        for scale, frac in ((1.0, 23), (1.01, 22)):
+            fl = [(rng.normal(0, 0.05, size=(N_FEATURES, 4096)), np.zeros(4096)),
+                  (np.full((4096, 4), scale), np.zeros(4))]
+            ints = quantize(fl)
+            self.assertEqual(ints[0][2], 28)
+            self.assertEqual(ints[1][2], frac + 20 - 24, scale)
+            w = ints[1][0].astype(np.int64)
+            self.assertLessEqual(int(np.abs(w).sum(axis=0).max()) * intnet.CLIP, intnet.SUM_BOUND // 2)
+
     def test_safetensors_round_trip(self):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "x.safetensors")
@@ -159,7 +197,10 @@ class Parity(unittest.TestCase):
                 # Every row's outcome label carries exactly its target (completeness, spec 6a).
                 check_values(rows)
                 self.assertEqual(rows["outcomes"].shape[1], VOCAB[trick])
-                for seed, widths, head in ((1, (64, 16), "money4"), (2, (128, 32, 16), "outcome-v1")):
+                nets = [(1, (64, 16), "money4"), (2, (128, 32, 16), "outcome-v1")]
+                # Wide networks (MAX_WIDTH 4096): 2048 at trick 4, 4096 at trick 5.
+                nets += {3: [], 4: [(3, (2048, 1024, 256), "outcome-v1")], 5: [(4, (4096, 512), "outcome-v1")]}[trick]
+                for seed, widths, head in nets:
                     n_out = 4 if head == "money4" else VOCAB[trick]
                     net = os.path.join(d, f"net{seed}-{trick}.safetensors")
                     write_int(net, quantize(random_float_net(seed, widths, n_out)), trick, {"test": "parity"}, head=head)

@@ -42,18 +42,15 @@ fn a_weights_file_over_the_limit_is_refused_with_the_limit_named() {
     let leaf = Arc::new(SyntheticLeaf);
     let e = Oracle::from_bytes(&wide_net_bytes(MAX_WIDTH + 1), leaf.clone())
         .err()
-        .expect("a layer of 1025 units is refused");
+        .expect("a layer of 4097 units is refused");
     assert_eq!(e, width_error(0, MAX_WIDTH + 1));
     assert!(
-        e.contains("wider than 1024") && e.contains("layer 0"),
+        e.contains("wider than 4096") && e.contains("layer 0"),
         "{e}"
     );
-    // A 2048-unit first layer, as the trick-3 run that failed after 27 minutes of training had.
-    let e = Oracle::from_bytes(&wide_net_bytes(2048), leaf.clone())
-        .err()
-        .expect("refused");
-    assert!(e.contains("2048 units") && e.contains("MAX_WIDTH"), "{e}");
-    // The limit itself loads.
+    // A 2048-unit first layer, as the trick-3 run that failed after 27 minutes of training had
+    // (when the limit was 1024), now loads; so does the limit itself.
+    assert!(Oracle::from_bytes(&wide_net_bytes(2048), leaf.clone()).is_ok());
     assert!(Oracle::from_bytes(&wide_net_bytes(MAX_WIDTH), leaf).is_ok());
 }
 
@@ -76,15 +73,15 @@ fn nn_tool_prints_the_limit_and_refuses_a_wider_network() {
             .output()
             .expect("runs")
     };
-    let bad = run("2048,1024,256");
+    let bad = run("8192,1024,256");
     assert!(!bad.status.success());
     let err = String::from_utf8_lossy(&bad.stderr);
     assert!(
-        err.contains("--widths 2048,1024,256") && err.contains(&width_error(0, 2048)),
+        err.contains("--widths 8192,1024,256") && err.contains(&width_error(0, 8192)),
         "{err}"
     );
     assert!(!target.exists(), "nothing is written for a refused width");
-    assert!(run("1024,512,128").status.success());
-    assert_eq!(check_hidden_widths(&[1024, 512, 128]), Ok(()));
+    assert!(run("2048,1024,256").status.success());
+    assert_eq!(check_hidden_widths(&[2048, 1024, 256]), Ok(()));
     std::fs::remove_dir_all(&dir).ok();
 }
