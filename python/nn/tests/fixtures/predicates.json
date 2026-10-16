@@ -1,0 +1,126 @@
+[
+ {
+  "name": "every position",
+  "conditions": []
+ },
+ {
+  "name": "the 2nd-best live top trump (J, Joker, A of hearts) is card 2 of its holder's hand (card order)",
+  "conditions": [
+   {
+    "feature": 443,
+    "op": "==",
+    "value": 1
+   }
+  ]
+ },
+ {
+  "name": "the next team has no game",
+  "conditions": [
+   {
+    "feature": 802,
+    "op": "==",
+    "value": 0
+   }
+  ]
+ },
+ {
+  "name": "the leader's team's money chance if the hand ended now is at most 25.6%",
+  "conditions": [
+   {
+    "feature": 809,
+    "op": "<=",
+    "value": -1029656
+   }
+  ]
+ },
+ {
+  "name": "the leader's team's money chance if the hand ended now is above 25.6%",
+  "conditions": [
+   {
+    "feature": 809,
+    "op": ">",
+    "value": -1029656
+   }
+  ]
+ },
+ {
+  "name": "trumps are diamonds; the previous team has had no best-trump bonus this game; the opposite team's money chance after the leader's team wins the next trick is above 2.83%; the opposite team's money chance after the leader's team wins the next trick is at most 23.7%",
+  "conditions": [
+   {
+    "feature": 703,
+    "op": "==",
+    "value": 1
+   },
+   {
+    "feature": 774,
+    "op": "==",
+    "value": 0
+   },
+   {
+    "feature": 831,
+    "op": ">",
+    "value": -2697097
+   },
+   {
+    "feature": 831,
+    "op": "<=",
+    "value": -1088006
+   }
+  ]
+ },
+ {
+  "name": "the next team's money chance if the leader's team won the game now is at most 2.33e-08%",
+  "conditions": [
+   {
+    "feature": 814,
+    "op": "<=",
+    "value": -16777217
+   }
+  ]
+ },
+ {
+  "name": "the next team's money chance if the leader's team won the game now is at most 2.33e-08%",
+  "conditions": [
+   {
+    "feature": 814,
+    "op": "<=",
+    "value": -16777216
+   }
+  ]
+ },
+ {
+  "name": "the next team's money chance after the leader's team then the leader's team win the next two tricks is at most 2.33e-08%; the next team's money chance after the previous team then the previous team win the next two tricks is at most 2.33e-08%",
+  "conditions": [
+   {
+    "feature": 846,
+    "op": "<=",
+    "value": -16777216
+   },
+   {
+    "feature": 906,
+    "op": "<=",
+    "value": -16777216
+   }
+  ]
+ },
+ {
+  "name": "the next team's money chance after the opposite team then the opposite team win the next two tricks is above 2.33e-08%; the 2nd-best live card of plain suit 3 is not card 2 of its holder's hand (card order); the previous team has won a game",
+  "conditions": [
+   {
+    "feature": 886,
+    "op": ">",
+    "value": -16777216
+   },
+   {
+    "feature": 643,
+    "op": "==",
+    "value": 0
+   },
+   {
+    "feature": 804,
+    "op": "==",
+    "value": 1
+   }
+  ]
+ }
+]
