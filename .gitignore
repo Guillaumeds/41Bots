@@ -15,8 +15,6 @@ __pycache__/
 *.zst
 *.safetensors
 *.onnx
-# Small test fixtures shared with Python (a few tens of KB, checked by the tests that read them).
-!crates/nn/testdata/*.npy
 
 # Secrets
 .env

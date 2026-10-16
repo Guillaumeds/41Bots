@@ -30,7 +30,8 @@
 //!   (`-3.5`) is refused; one with a zero fraction (`1.0`) is read as the whole number.
 //!
 //! Anything else (another op, a binary value other than 0 or 1, an index out of range, a group
-//! without a name, two groups with one name) is refused with the reason. Every other key of a
+//! without a name) is refused with the reason. Names need not be unique (the auditor names a group
+//! by its conditions in words, rounded); a group is identified by its place in the file. Every other key of a
 //! group (`weight`, `bias`, `sd`, `example`, …: the auditor's measurements) is kept as it is, for
 //! reports only.
 //!
@@ -38,9 +39,10 @@
 //! position's groups are the same in a shard row and in a search: [`Predicates::features_of`]
 //! encodes a canonical position for them (the dense features only when a condition needs one).
 //!
-//! The parity fixture `crates/nn/testdata/predicate-fixture.{npy,json,expected.json}` (a small
-//! shard, a predicate file, and every row's membership) is checked here and by the Python side;
-//! `nn-tool groups` writes the membership of any shard.
+//! The parity fixture `python/nn/tests/fixtures/{predicate-rows,predicates,predicate-members}.json`
+//! (real rows, groups covering every op and boundary, and each group's members; written by the
+//! Python auditor's tests) is checked here too; `nn-tool groups` writes the membership of any
+//! shard.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -117,7 +119,7 @@ impl Condition {
 /// One group: a name and a conjunction of conditions.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Group {
-    /// Its name (unique in its file).
+    /// Its name (for reports; not necessarily unique).
     pub name: String,
     /// All of these hold.
     pub conditions: Vec<Condition>,
@@ -252,9 +254,6 @@ impl Predicates {
                 .filter(|n| !n.trim().is_empty())
                 .ok_or_else(|| format!("group {}: no name", k + 1))?
                 .to_string();
-            if groups.iter().any(|x| x.name == name) {
-                return Err(format!("two groups are named {name:?}"));
-            }
             let conds = o
                 .get("conditions")
                 .and_then(Value::as_array)
@@ -431,13 +430,6 @@ pub fn at_share(part: u64, whole: u64, micro: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shard::from_npy;
-
-    fn testdata(name: &str) -> std::path::PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("testdata")
-            .join(name)
-    }
 
     fn feat(active: &[u16], dense: [i32; N_DENSE]) -> Features {
         let mut a = [PAD; MAX_ACTIVE];
@@ -502,10 +494,6 @@ mod tests {
         bad(r#"[{"name": " ", "conditions": []}]"#, "no name");
         bad(r#"[{"name": "a"}]"#, "no conditions list");
         bad(
-            r#"[{"name": "a", "conditions": []}, {"name": "a", "conditions": []}]"#,
-            "two groups are named",
-        );
-        bad(
             &one(r#"{"feature": 909, "op": ">", "value": 0}"#),
             "feature must be",
         );
@@ -556,165 +544,55 @@ mod tests {
         assert!(!at_share(0, 0, 0), "no reached positions: in no group");
     }
 
-    /// The parity fixture: the committed shard, predicate file and memberships agree with this
-    /// evaluator, and are what [`fixture`] makes (so they cannot drift from the encoder).
+    /// The parity fixture shared with the Python auditor (`python/nn/tests/fixtures`: 48 real
+    /// trick-4 rows, 10 groups covering every op and boundary, and each group's members, written
+    /// by `fortyone_nn.audit`'s tests): this evaluator gives the same members.
     #[test]
-    fn parity_fixture_holds() {
-        let shard = std::fs::read(testdata("predicate-fixture.npy")).expect("shard");
-        let rows = from_npy(&shard).expect("a shard");
-        let p = Predicates::load(&testdata("predicate-fixture.json")).expect("predicates");
-        let want: Value = serde_json::from_slice(
-            &std::fs::read(testdata("predicate-fixture.expected.json")).expect("expected"),
-        )
-        .expect("json");
-        assert_eq!(want["predicates_sha256"], p.sha256.as_str());
-        assert_eq!(
-            want["shard_sha256"],
-            equity::sha256::sha256_hex(&shard).as_str()
-        );
-        let m = want["membership"].as_array().expect("membership");
-        assert_eq!(m.len(), rows.len());
-        let mut hits = vec![0usize; p.len()];
-        for (r, w) in rows.iter().zip(m) {
-            let got: Vec<u64> = (0..p.len())
-                .map(|g| u64::from(p.holds(g, &r.features)))
-                .collect();
-            let w: Vec<u64> = w
-                .as_array()
-                .expect("row")
-                .iter()
-                .map(|x| x.as_u64().expect("0 or 1"))
-                .collect();
-            assert_eq!(got, w);
-            for (h, g) in hits.iter_mut().zip(&got) {
-                *h += *g as usize;
-            }
-        }
-        // Every group holds for some rows and not for others, so the fixture tests something.
-        assert!(
-            hits.iter().all(|&h| h > 0 && h < rows.len()),
-            "{hits:?} of {}",
-            rows.len()
-        );
-        let (s, j, e) = fixture();
-        assert!(s == shard, "the committed shard is the fixture's");
-        assert_eq!(
-            j,
-            std::fs::read(testdata("predicate-fixture.json")).expect("json")
-        );
-        assert_eq!(
-            e,
-            std::fs::read(testdata("predicate-fixture.expected.json")).expect("expected")
-        );
-    }
-
-    /// Writes the parity fixture's files (run by hand after an encoder change:
-    /// `cargo test -p nn write_parity_fixture -- --ignored`).
-    #[test]
-    #[ignore = "writes crates/nn/testdata"]
-    fn write_parity_fixture() {
-        let (s, j, e) = fixture();
-        let dir = testdata("");
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        std::fs::write(testdata("predicate-fixture.npy"), s).expect("write");
-        std::fs::write(testdata("predicate-fixture.json"), j).expect("write");
-        std::fs::write(testdata("predicate-fixture.expected.json"), e).expect("write");
-    }
-
-    /// The parity fixture: 48 random trick-4 positions (as `nn-tool fixture --trick 4 --count 48
-    /// --seed 7`), a predicate file whose dense thresholds sit exactly on values the rows hold
-    /// (so `<=` and `>` are tested at equality), and every row's membership.
-    fn fixture() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-        use crate::encode::{OFF_GAMES, OFF_SCORE, OFF_TRICKS_DONE, OFF_TRUMP, encode};
-        use crate::outcome::{outcomes, vocab};
-        use crate::shard::{Row, SOURCE_FIXTURE, to_npy};
-        use crate::synthetic::SyntheticLeaf;
-        let leaf = SyntheticLeaf;
-        let rows: Vec<Row> = (0..48)
-            .map(|i| {
-                let (pos, ctx, _) = solver::worlds::sample_world(7, 4, i, 0);
-                let v = solver::solve_fast(&pos, ctx, &leaf, solver::FastOptions::default())
-                    .value
-                    .expect("solved");
-                let c = solver::canonical(&pos);
-                let (features, r) = encode(&c, &ctx, &leaf);
-                let value = v.rotate(r % 4);
-                let o = outcomes(&c, &ctx, &leaf);
-                let label = o.label(&value).expect("an outcome");
-                Row {
-                    features,
-                    value,
-                    source: SOURCE_FIXTURE,
-                    trick: 4,
-                    label,
-                    mask: o.mask,
-                    outcomes: o.vecs,
-                }
-            })
-            .collect();
-        let shard = to_npy(&rows, vocab(4));
-        // Thresholds on values the rows hold: the median of dense features 0 (the leader's team's
-        // chance if the hand ended now) and 36 (after the leader's team wins the next two tricks).
-        let median = |j: usize| {
-            let mut v: Vec<i32> = rows.iter().map(|r| r.features.dense[j]).collect();
-            v.sort_unstable();
-            v[v.len() / 2]
+    fn python_parity_fixture_holds() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../python/nn/tests/fixtures");
+        let read = |f: &str| -> Value {
+            serde_json::from_slice(&std::fs::read(dir.join(f)).expect("fixture")).expect("json")
         };
-        let (m0, m36) = (median(0), median(36));
-        // A binary feature on in some rows and off in others: the most balanced of the trump
-        // suits, tricks done, team 0's scores and the games won.
-        let candidates: Vec<usize> = (OFF_TRUMP..OFF_TRUMP + 4)
-            .chain(OFF_GAMES..OFF_GAMES + 4)
-            .chain(OFF_SCORE..OFF_SCORE + 15)
-            .chain(OFF_TRICKS_DONE..OFF_TRICKS_DONE + 5)
-            .collect();
-        let on = |i: usize| {
-            rows.iter()
-                .filter(|r| r.features.active().contains(&(i as u16)))
-                .count()
-        };
-        let b = *candidates
-            .iter()
-            .min_by_key(|&&i| (on(i) as i64 - 24).abs())
-            .expect("a feature");
-        let d = |j: usize| N_BINARY + j;
-        let text = serde_json::to_string_pretty(&serde_json::json!({
-            "about": "parity fixture of crates/nn/src/predicate.rs: the groups of \
-                      predicate-fixture.expected.json, evaluated on predicate-fixture.npy",
-            "groups": [
-                { "name": "binary on", "conditions": [{ "feature": b, "op": "==", "value": 1 }],
-                  "weight": 0.5, "bias": 0.001, "sd": 0.01 },
-                { "name": "binary off", "conditions": [{ "feature": b, "op": "==", "value": 0 }] },
-                { "name": "dense at most", "conditions": [{ "feature": d(0), "op": "<=", "value": m0 }] },
-                { "name": "dense above", "conditions": [{ "feature": d(0), "op": ">", "value": m0 }] },
-                { "name": "conjunction", "conditions": [
-                    { "feature": b, "op": "==", "value": 1 },
-                    { "feature": d(36), "op": ">", "value": m36 }] },
-                { "name": "below the median", "conditions": [
-                    { "feature": d(36), "op": "<=", "value": m36 - 1 }] },
-            ]
-        }))
-        .expect("json")
-            + "\n";
-        let p = Predicates::parse(text.as_bytes()).expect("the fixture's predicates parse");
-        let membership: Vec<Vec<u8>> = rows
+        let rows = read("predicate-rows.json");
+        let want = read("predicate-members.json");
+        let p = Predicates::load(&dir.join("predicates.json")).expect("predicates");
+        let rows = rows["rows"].as_array().expect("rows");
+        assert_eq!(rows.len() as u64, want["rows"].as_u64().expect("rows"));
+        let feats: Vec<Features> = rows
             .iter()
             .map(|r| {
-                (0..p.len())
-                    .map(|g| u8::from(p.holds(g, &r.features)))
-                    .collect()
+                let mut active = [PAD; MAX_ACTIVE];
+                let list: Vec<u16> = r["active"]
+                    .as_array()
+                    .expect("active")
+                    .iter()
+                    .map(|x| x.as_u64().expect("index") as u16)
+                    .filter(|&x| x != PAD)
+                    .collect();
+                active[..list.len()].copy_from_slice(&list);
+                let mut dense = [0i32; N_DENSE];
+                for (d, x) in dense.iter_mut().zip(r["dense"].as_array().expect("dense")) {
+                    *d = x.as_i64().expect("whole") as i32;
+                }
+                features_from(&active, &dense)
             })
             .collect();
-        let expected = serde_json::to_string(&serde_json::json!({
-            "about": "row r, group g: 1 when row r of predicate-fixture.npy is in group g of \
-                      predicate-fixture.json",
-            "shard_sha256": equity::sha256::sha256_hex(&shard),
-            "predicates_sha256": p.sha256,
-            "groups": p.names(),
-            "membership": membership,
-        }))
-        .expect("json")
-            + "\n";
-        (shard, text.into_bytes(), expected.into_bytes())
+        let members = want["members"].as_array().expect("members");
+        assert_eq!(members.len(), p.len());
+        for (g, m) in members.iter().enumerate() {
+            let want: Vec<u64> = m
+                .as_array()
+                .expect("list")
+                .iter()
+                .map(|x| x.as_u64().expect("row"))
+                .collect();
+            let got: Vec<u64> = (0..feats.len())
+                .filter(|&i| p.holds(g, &feats[i]))
+                .map(|i| i as u64)
+                .collect();
+            assert_eq!(got, want, "group {g}: {}", p.groups[g].name);
+        }
+        assert!(p.groups.iter().any(|g| g.conditions.is_empty()));
+        assert!(p.uses_dense());
     }
 }

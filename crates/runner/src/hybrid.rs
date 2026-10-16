@@ -58,8 +58,10 @@
 //! the auditor (`python -m fortyone_nn.audit`), the golden check with a slice per weak group and
 //! mini golden sets, and a targeted harvest that joins the next round's training, until the
 //! network is flat or `audit_rounds` is reached; with its settings `audit_rows`, `audit_seed`,
-//! `audit_keep_cap`, `audit_weight`, `audit_mini_decisions`, `audit_target_rows` and
-//! `audit_predicates_input` (refused without it). On a GPU with `overlap` each round's training
+//! `audit_keep_cap`, `audit_weight`, `audit_mini_decisions`, `audit_mini_sets`,
+//! `audit_shapes`, `audit_min_gain`, `audit_target_rows` and `audit_predicates_input` (refused
+//! without it); the network grows up the `audit_shapes` ladder when a round's targeted harvest
+//! stops helping. On a GPU with `overlap` each round's training
 //! runs beside the CPU steps that do not need it.
 //! Also: `mix_weight` (1.0), `start_hands` (20000, for the label roots and the golden
 //! decisions), `tt_mb` (64, the solver table per thread of the golden worlds
@@ -156,7 +158,7 @@ use crate::{Ctx, sibling};
 mod audit;
 
 /// The settings a `hybrid_rung` chunk takes; any other key is refused.
-pub(crate) const KEYS: [&str; 57] = [
+pub(crate) const KEYS: [&str; 60] = [
     "cut",
     "check",
     "audit_rounds",
@@ -165,6 +167,9 @@ pub(crate) const KEYS: [&str; 57] = [
     "audit_keep_cap",
     "audit_weight",
     "audit_mini_decisions",
+    "audit_mini_sets",
+    "audit_shapes",
+    "audit_min_gain",
     "audit_target_rows",
     "audit_predicates_input",
     "label_parts",
@@ -832,7 +837,13 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
                 .into(),
         );
     }
-    let audit = audit::parse_settings(o, check, &seen.iter().map(|(s, _)| *s).collect::<Vec<_>>())?;
+    let audit = audit::parse_settings(
+        o,
+        check,
+        cut,
+        &widths,
+        &seen.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
+    )?;
     Ok(Params {
         cut,
         check,
@@ -1137,6 +1148,7 @@ pub(crate) fn chunk_with(
         bg_train: None,
         beside: Vec::new(),
         audit_hb: Map::new(),
+        shape: None,
     };
     r.rec.insert("params".into(), params.to_json());
     r.rec.insert("table".into(), table_rec);
@@ -1272,11 +1284,19 @@ struct Rung<'a> {
     /// The audit loop's heartbeat fields ([`audit`]: `round`, `groups_found`, …), in every
     /// step's progress while the loop runs.
     audit_hb: Map<String, Value>,
+    /// The hidden widths the next training uses when the audit loop's capacity ladder has moved
+    /// (`None`: `widths`).
+    shape: Option<String>,
 }
 
 impl Rung<'_> {
     fn threads(&self) -> u64 {
         self.ctx.threads as u64
+    }
+
+    /// The hidden widths of the next training: the audit loop's current shape, else `widths`.
+    fn widths_now(&self) -> String {
+        self.shape.clone().unwrap_or_else(|| self.p.widths_arg())
     }
 
     /// The heartbeat's progress for a step: the kind, the step, `partial_cpu_ok` (always: module
@@ -2010,7 +2030,7 @@ impl Rung<'_> {
         }
         c.arg("--out")
             .arg(dir)
-            .args(["--head", &self.p.head, "--widths", &self.p.widths_arg()])
+            .args(["--head", &self.p.head, "--widths", &self.widths_now()])
             .args(["--epochs", &self.p.epochs.to_string()])
             .args(["--batch", &self.p.batch.to_string()])
             .args(["--lr", &self.p.lr.to_string()])
@@ -3034,6 +3054,7 @@ mod tests {
             bg_train: None,
             beside: Vec::new(),
             audit_hb: Map::new(),
+            shape: None,
         }
     }
 
@@ -4333,11 +4354,27 @@ fi
                 a.keep_cap,
                 a.weight,
                 a.mini_decisions,
+                a.mini_sets,
                 a.target_rows
             ),
-            (4, 1_000_000, 301, 256, 2.0, 50, 0)
+            (4, 1_000_000, 301, 256, 2.0, 50, 4, 10_000_000)
         );
         assert_eq!((a.audit_seed(1), a.target_seed(4)), (30101, 30154));
+        // The default ladder: the rung's widths, then only the shapes the integer inference loads.
+        assert_eq!(a.shapes, vec![vec![1024, 512, 128]]);
+        assert_eq!(a.min_gain, 0.15);
+        let at3 = parse(&json!({ "cut": 3, "audit_rounds": 1 })).expect("trick 3");
+        assert_eq!(at3.audit.expect("on").target_rows, 4_000_000);
+        let sh = parse(&json!({ "widths": "16,8", "audit_rounds": 2,
+                                "audit_shapes": "<widths>; 32,16 ;64,32,8", "audit_min_gain": 0.3 }))
+        .expect("shapes");
+        let a = sh.audit.clone().expect("on");
+        assert_eq!(a.shapes, vec![vec![16, 8], vec![32, 16], vec![64, 32, 8]]);
+        assert_eq!(a.min_gain, 0.3);
+        assert_eq!(
+            sh.to_json()["audit"]["shapes"],
+            json!(["16,8", "32,16", "64,32,8"])
+        );
         let j = p.to_json();
         assert_eq!(
             j["audit"]["audit_seeds"],
@@ -4401,6 +4438,30 @@ fi
             "audit_mini_decisions",
         );
         bad(
+            json!({ "audit_rounds": 2, "audit_target_rows": 0 }),
+            "audit_target_rows",
+        );
+        bad(
+            json!({ "audit_rounds": 2, "audit_shapes": "<widths>;2048,1024,256" }),
+            "MAX_WIDTH",
+        );
+        bad(
+            json!({ "audit_rounds": 2, "widths": "16,8", "audit_shapes": "32,16" }),
+            "must start with the rung's widths (16,8",
+        );
+        bad(
+            json!({ "audit_rounds": 2, "widths": "16,8", "audit_shapes": "16,8;x" }),
+            "is not a list of hidden widths",
+        );
+        bad(
+            json!({ "audit_rounds": 2, "widths": "16,8", "audit_shapes": "16,8;16,8" }),
+            "given twice",
+        );
+        bad(
+            json!({ "audit_rounds": 2, "audit_min_gain": 1 }),
+            "audit_min_gain",
+        );
+        bad(
             json!({ "audit_rounds": 2, "audit_predicates_input": "p.json" }),
             "must be a stored input's key",
         );
@@ -4459,7 +4520,14 @@ case $1 in
         i=$((i+1))
       done
     fi
-    echo "{{\"pass\": true, \"pass_without_slices\": true, \"groups\": [{{\"group\": \"all\", \"summary\": {{\"decisions\": 2, \"mean_loss\": 0.00002, \"loss_upper95\": 0.00005, \"loss_pass\": true}}}}], \"net\": {{\"sha256\": \"abc\"}}, \"values\": {{}}, \"slices\": {{\"groups\": [$s]}}}}" > "$(arg --json "$@")"
+    # A mini golden set's check fails with `mini-fail-all`, or with `mini-fail-r1` on round 1's
+    # network (out/hybrid/net).
+    ok=true
+    case "$sl" in */mini/*)
+      [ -f '{base}/mini-fail-all' ] && ok=false
+      case "$(arg --net "$@")" in */audit/round-*) ;; *) [ -f '{base}/mini-fail-r1' ] && ok=false;; esac;;
+    esac
+    echo "{{\"pass\": $ok, \"pass_without_slices\": $ok, \"groups\": [{{\"group\": \"all\", \"summary\": {{\"decisions\": 2, \"mean_loss\": 0.00002, \"loss_upper95\": 0.00005, \"loss_pass\": $ok, \"bias_pass\": true}}}}], \"net\": {{\"sha256\": \"abc\"}}, \"values\": {{}}, \"slices\": {{\"groups\": [$s]}}}}" > "$(arg --json "$@")"
     echo "standard: PASS";;
   *) exec '{search}' "$@";;
 esac
@@ -4506,7 +4574,7 @@ case "$2" in
     out=$(arg --out "$@"); mkdir -p "$out"
     n=$(cat '{base}/audit-count' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '{base}/audit-count'
     if [ -f '{base}/audit-'$n'.json' ]; then cp '{base}/audit-'$n'.json' "$out/predicates.json"; else echo '[]' > "$out/predicates.json"; fi
-    echo '{{"audit": {{"candidates": 5, "confirmed": 1}}}}' > "$out/report.json"; echo "the audit" > "$out/report.txt"
+    echo '{{"thresholds": {{"gamma": 0.001, "alpha_bias": 0.0025, "alpha_sd": 0.01, "fdr": 0.05}}, "audit": {{"candidates": 5, "confirmed": 1}}}}' > "$out/report.json"; echo "the audit" > "$out/report.txt"
     {stop_line};;
 esac
 "#,
@@ -4540,6 +4608,10 @@ esac
         }
     }
 
+    /// Two confirmed groups, as the auditor writes them.
+    const GROUPS_TWO: &str = r#"[{"name": "g-one", "conditions": [{"feature": 801, "op": "==", "value": 1}], "weight": 0.05, "bias": [0.004, -0.001, 0.0, -0.003], "sd": 0.03},
+        {"name": "g-two", "conditions": [{"feature": 845, "op": "<=", "value": -3145728}], "weight": 0.01, "bias": [0.001, 0.0, 0.0, -0.001], "sd": 0.02}]"#;
+
     /// One confirmed group, as the auditor writes it.
     const GROUP_ONE: &str = r#"[{"name": "g-one", "conditions": [{"feature": 801, "op": "==", "value": 1}], "weight": 0.05, "bias": [0.004, -0.001, 0.0, -0.003], "sd": 0.03}]"#;
 
@@ -4548,7 +4620,7 @@ esac
         let mut v = json!({ "labels_random": 7, "labels_rules": 0, "labels_harvest": 9,
                             "val_count": 3, "golden_count": 2, "golden_worlds": 4,
                             "widths": "16,8", "epochs": 1, "audit_rows": 50,
-                            "audit_mini_decisions": 2 });
+                            "audit_mini_decisions": 2, "audit_target_rows": 1000 });
         if let (Some(o), Value::Object(e)) = (v.as_object_mut(), extra) {
             o.extend(e);
         }
@@ -4565,10 +4637,11 @@ esac
             .collect()
     }
 
-    /// A loop that goes flat in two rounds, on a (fake) GPU: round 1 confirms a group, round 2
-    /// none. Round 2's training starts beside round 1's CPU steps, watching the directory its
-    /// targeted shard (with its weight) lands in; round 1's golden slices name the group and its
-    /// mini golden set is made (its slice is too small) and checked with both networks; the
+    /// A loop that goes flat in two rounds, on a (fake) GPU: round 1 confirms a group whose
+    /// golden slice is too small, so it gets a mini golden set, which fails with round 1's
+    /// network (the group is remaining) and passes with round 2's; round 2 confirms nothing. Round
+    /// 2's training starts beside round 1's CPU steps, watching the directory its targeted shard
+    /// (with its weight) lands in, the mini set first (the golden check left flatness open); the
     /// heartbeat carries the loop's fields; the reports, the summary and the stop reason are
     /// written; the last network is the chunk's.
     #[cfg(unix)]
@@ -4576,13 +4649,18 @@ esac
     fn audit_loop_goes_flat_in_two_rounds() {
         let f = fakes("auditflat");
         fs::write(f.base.join("audit-1.json"), GROUP_ONE).expect("write");
+        fs::write(f.base.join("mini-fail-r1"), "").expect("write");
         let tools = audit_tools(&f, true, None);
         let params = audit_params(json!({ "audit_rounds": 3 }));
         let root = f.base.join("run");
         let mut ctx = Ctx::local("hybrid-test", &root, 16);
         let r = chunk_steps(&mut ctx, &params, &tools, &f.table, json!({})).expect("the loop runs");
         assert_eq!(r["verdict"], "PASS", "{r}");
-        assert_eq!(r["audit"]["stop"], "flat after round 2");
+        assert_eq!(
+            r["audit"]["stop"],
+            "flat after round 2 (1 groups confirmed by the auditor so far, every one within 0.01% \
+             at the decision level)"
+        );
         assert_eq!(r["audit"]["rounds"], 2);
         let out = root.join("out").join("hybrid");
         let rung = read_json(&out.join("rung.json")).expect("rung.json");
@@ -4597,8 +4675,7 @@ esac
             ("golden worlds", "train (round 1)"),
             ("audit shard (round 1)", "train (round 1)"),
             ("train (round 1)", "audit (round 1)"),
-            ("audit (round 1)", "targeted harvest (round 1)"),
-            ("targeted harvest (round 1)", "golden slices (round 1)"),
+            ("audit (round 1)", "golden slices (round 1)"),
             (
                 "golden slices (round 1)",
                 "mini golden set m1 decisions (round 1)",
@@ -4611,7 +4688,8 @@ esac
                 "mini golden set m1 worlds (round 1)",
                 "mini golden set m1 (round 1)",
             ),
-            ("mini golden set m1 (round 1)", "audit shard (round 2)"),
+            ("mini golden set m1 (round 1)", "targeted harvest (round 1)"),
+            ("targeted harvest (round 1)", "audit shard (round 2)"),
             ("audit shard (round 2)", "train (round 2)"),
             ("train (round 2)", "audit (round 2)"),
             ("audit (round 2)", "golden slices (round 2)"),
@@ -4635,7 +4713,7 @@ esac
                 && !l.contains("--harvest-net")
         }));
         // The targeted harvest: round 1's groups, in-group positions only, into round 2's
-        // watched directory, with its weight file; the computed rows: 2·0.05·16/(1−0.15) → 1000.
+        // watched directory, with its weight file.
         let target = line("search labels --trick 4 --count 1000 --seed 30151 --source harvest");
         assert_eq!(target.len(), 1, "{log}");
         let watch = std::path::absolute(root.join("hybrid-work/audit/train-r2")).expect("abs");
@@ -4667,7 +4745,7 @@ esac
             "{}",
             trains[1]
         );
-        assert!(trains[1].contains("--device cuda"));
+        assert!(trains[1].contains("--widths 16,8") && trains[1].contains("--device cuda"));
         assert_eq!(
             fs::read_to_string(out.join("audit/round-2/net/seen.txt")).expect("seen"),
             "t4-target-r1-s30151.npy\nt4-target-r1-s30151.npy.json\nt4-target-r1-s30151.npy.weight\n"
@@ -4722,7 +4800,10 @@ esac
             lines[1].starts_with("round 2: 0 groups confirmed (5 found) -> 0 remaining"),
             "{summary}"
         );
-        assert_eq!(lines[2], "stop: flat after round 2");
+        assert!(
+            lines[2].starts_with("stop: flat after round 2"),
+            "{summary}"
+        );
         assert!(
             lines[3].starts_with("final network: audit/round-2/net (sha256 "),
             "{summary}"
@@ -4731,8 +4812,16 @@ esac
         assert_eq!(r1["groups_confirmed"][0]["name"], "g-one");
         assert_eq!(r1["golden"]["slices"][0]["decisions"], 1);
         assert_eq!(r1["mini_sets"][0]["decisions"], 2);
+        assert_eq!(r1["mini_sets"][0]["pass"], false);
+        assert_eq!(r1["decision_level"][0]["basis"], "mini golden set");
+        assert_eq!(r1["groups_remaining"], json!(["g-one"]));
+        assert_eq!(r1["calibration"]["pairs"][0]["sd"], 0.03);
         assert_eq!(r1["targeted"]["rows"], 1000);
         assert_eq!(r1["targeted"]["weight"], 2.0);
+        assert_eq!(
+            (r1["shape"].as_str(), r1["shape_step"].as_u64()),
+            (Some("16,8"), Some(1))
+        );
         assert!(
             r1["shared"]["report_json"]
                 .as_str()
@@ -4743,6 +4832,9 @@ esac
                 .as_str()
                 .is_some_and(|k| k.starts_with("inputs/sha256/"))
         );
+        let r2 = read_json(&audit.join("round-2.json")).expect("round 2");
+        assert_eq!(r2["decision_level"][0]["pass"], true);
+        assert_eq!(r2["flat"], true);
         let txt = fs::read_to_string(audit.join("round-1.txt")).expect("txt");
         assert!(
             txt.contains("g-one: weight 5.00%, bias +0.40%, SD 3.00%"),
@@ -4750,6 +4842,10 @@ esac
         );
         assert!(
             txt.contains("Harvested for the next round: 1000 positions"),
+            "{txt}"
+        );
+        assert!(
+            txt.contains("g-one: SD 3.00% on the audit shard; mini golden set -> 95% upper"),
             "{txt}"
         );
         // The last network is the chunk's; every round's network is shared.
@@ -4760,7 +4856,11 @@ esac
                 .is_some_and(|k| k.starts_with("inputs/sha256/"))
         );
         assert!(rung["net_r2"]["int_key"].as_str().is_some());
-        assert_eq!(rung["audit"]["stop"], "flat after round 2");
+        assert!(
+            rung["audit"]["stop"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("flat after round 2"))
+        );
         assert_eq!(rung["check"]["verdict"], "PASS");
         assert!(out.join("hc-t3-o4.json").is_file());
         // The heartbeat carries the loop's fields.
@@ -4781,30 +4881,83 @@ esac
             p["last_check"],
             "round 2: mean loss 0.0020%, 95% upper 0.0050% (PASS)"
         );
-        assert_eq!(p["audit_stop"], "flat after round 2");
+        assert_eq!(
+            (p["shape"].as_str(), p["shape_step"].as_str()),
+            (Some("16,8"), Some("1 of 1"))
+        );
+        assert_eq!(
+            p["thresholds"],
+            "gamma 0.10%, alpha_bias 0.25%, alpha_sd 1.00%, fdr 5%"
+        );
+        assert!(
+            p["audit_stop"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("flat after round 2"))
+        );
         let _ = fs::remove_dir_all(&f.base);
     }
 
-    /// A loop stopped by its round limit, on the CPU: every round confirms the group, the
+    /// A round whose confirmed group is within 0.01% at the decision level is flat: on a GPU the
+    /// next round's training, started beside its checks, is stopped unused and nothing is
+    /// harvested.
+    #[cfg(unix)]
+    #[test]
+    fn audit_loop_flat_with_a_confirmed_group() {
+        let f = fakes("auditflat1");
+        fs::write(f.base.join("audit-1.json"), GROUP_ONE).expect("write");
+        let tools = audit_tools(&f, true, None);
+        let params = audit_params(json!({ "audit_rounds": 3 }));
+        let root = f.base.join("run");
+        let mut ctx = Ctx::local("hybrid-test", &root, 16);
+        let r = chunk_steps(&mut ctx, &params, &tools, &f.table, json!({})).expect("the loop runs");
+        assert_eq!(r["verdict"], "PASS", "{r}");
+        assert!(
+            r["audit"]["stop"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("flat after round 1 (1 groups")),
+            "{r}"
+        );
+        let rung = read_json(&root.join("out/hybrid/rung.json")).expect("rung.json");
+        let steps = steps_of(&rung);
+        assert!(
+            steps
+                .iter()
+                .any(|s| s == "train (round 2): not needed, round 1 is flat"),
+            "{steps:?}"
+        );
+        assert!(
+            !steps.iter().any(|s| s.starts_with("targeted harvest")),
+            "{steps:?}"
+        );
+        assert_eq!(rung["net"]["dir"], "net");
+        let log = fs::read_to_string(&f.calls).expect("calls");
+        assert!(!log.contains("--harvest-keep"), "{log}");
+        let _ = fs::remove_dir_all(&f.base);
+    }
+
+    /// A loop stopped by its round limit, on the CPU: every round confirms two groups, the
     /// targeted shard of round 1 (with its weight) joins round 2's training as a file, round 2
-    /// harvests nothing (no round 3) but still checks its slices and mini set.
+    /// harvests nothing (no round 3) but still checks its slices and mini sets; one new mini set
+    /// a round (`audit_mini_sets` 1), the most severe group's first.
     #[cfg(unix)]
     #[test]
     fn audit_loop_stops_at_the_round_limit() {
         let f = fakes("auditlimit");
         for n in 1..=2 {
-            fs::write(f.base.join(format!("audit-{n}.json")), GROUP_ONE).expect("write");
+            fs::write(f.base.join(format!("audit-{n}.json")), GROUPS_TWO).expect("write");
         }
+        fs::write(f.base.join("mini-fail-all"), "").expect("write");
         let tools = audit_tools(&f, false, None);
         let params = audit_params(json!({ "audit_rounds": 2, "audit_target_rows": 4000,
-                                           "audit_weight": 3 }));
+                                           "audit_weight": 3, "audit_mini_sets": 1 }));
         let root = f.base.join("run");
         let mut ctx = Ctx::local("hybrid-test", &root, 4);
         let r = chunk_steps(&mut ctx, &params, &tools, &f.table, json!({})).expect("the loop runs");
         assert_eq!(r["verdict"], "FAIL");
         assert_eq!(
             r["audit"]["stop"],
-            "round limit (2 rounds; 1 groups remain: the next lever is network capacity)"
+            "round limit (2 rounds; 2 groups remain at the decision level: the next lever is \
+             network capacity)"
         );
         let log = fs::read_to_string(&f.calls).expect("calls");
         let line = |p: &str| -> Vec<&str> { log.lines().filter(|l| l.starts_with(p)).collect() };
@@ -4840,22 +4993,112 @@ esac
         assert!(i("audit (round 2)") < i("golden slices (round 2)"));
         assert!(i("golden slices (round 2)") < i("mini golden set m1 (round 2)"));
         assert!(!steps.iter().any(|s| s == "targeted harvest (round 2)"));
+        // One new mini set a round: g-one's in round 1 (g-two waits), g-two's in round 2.
+        assert!(i("mini golden set m1 decisions (round 1)") < i("audit shard (round 2)"));
+        assert!(
+            !steps
+                .iter()
+                .any(|s| s == "mini golden set m2 decisions (round 1)")
+        );
+        assert!(i("mini golden set m2 decisions (round 2)") < i("mini golden set m1 (round 2)"));
+        let r1 = read_json(&root.join("out/hybrid/audit/round-1.json")).expect("round 1");
+        assert_eq!(r1["mini_sets"][1]["waiting"], json!(["g-two"]));
+        let r1t = fs::read_to_string(root.join("out/hybrid/audit/round-1.txt")).expect("txt");
+        assert!(r1t.contains("No mini golden set yet for 1 groups"), "{r1t}");
         let summary =
             fs::read_to_string(root.join("out/hybrid/audit/audit-summary.txt")).expect("summary");
         assert!(
-            summary.contains("round 2: 1 groups confirmed (5 found) -> 1 remaining"),
+            summary.contains("round 2: 2 groups confirmed (5 found) -> 2 remaining"),
             "{summary}"
         );
         assert!(summary.contains("stop: round limit"), "{summary}");
         let hb = read_json(&root.join("heartbeat.json")).expect("heartbeat");
         assert_eq!(hb["progress"]["round"], "2 of 2");
-        assert_eq!(hb["progress"]["groups_remaining"], 1);
+        assert_eq!(hb["progress"]["groups_remaining"], 2);
         assert!(
             hb["progress"]["worst_group"]
                 .as_str()
                 .is_some_and(|w| w.starts_with("g-one: weight 5.00%"))
         );
         let _ = fs::remove_dir_all(&f.base);
+    }
+
+    /// The capacity ladder: round 2's targeted data lowers the worst group's SD by only 3% (less
+    /// than `audit_min_gain`), so round 3 retrains on everything with the next shape; with a
+    /// ladder of one shape the same round ends the loop ("capacity ladder exhausted").
+    #[cfg(unix)]
+    #[test]
+    fn audit_loop_climbs_the_capacity_ladder() {
+        let group = |sd: f64| {
+            format!(
+                r#"[{{"name": "g-one", "conditions": [{{"feature": 801, "op": "==", "value": 1}}], "weight": 0.05, "bias": [0.004, 0.0, 0.0, -0.004], "sd": {sd}}}]"#
+            )
+        };
+        for (tag, shapes, stop) in [
+            ("auditshape", "16,8;32,16;64,32", "round limit"),
+            ("auditshape1", "<widths>", "capacity ladder exhausted"),
+        ] {
+            let f = fakes(tag);
+            for (n, sd) in [(1, 0.03), (2, 0.029), (3, 0.02)] {
+                fs::write(f.base.join(format!("audit-{n}.json")), group(sd)).expect("write");
+            }
+            fs::write(f.base.join("mini-fail-all"), "").expect("write");
+            let tools = audit_tools(&f, false, None);
+            let params = audit_params(json!({ "audit_rounds": 3, "audit_shapes": shapes }));
+            let root = f.base.join("run");
+            let mut ctx = Ctx::local("hybrid-test", &root, 4);
+            let r = chunk_steps(&mut ctx, &params, &tools, &f.table, json!({})).expect("runs");
+            let why = r["audit"]["stop"].as_str().expect("stop");
+            assert!(why.starts_with(stop), "{tag}: {why}");
+            let log = fs::read_to_string(&f.calls).expect("calls");
+            let trains: Vec<&str> = log
+                .lines()
+                .filter(|l| l.starts_with("python -m fortyone_nn.train"))
+                .collect();
+            let out = root.join("out/hybrid/audit");
+            let r2 = read_json(&out.join("round-2.json")).expect("round 2");
+            let c = &r2["capacity"]["compared"];
+            assert_eq!(
+                (c["sd_before"].as_f64(), c["sd_now"].as_f64()),
+                (Some(0.03), Some(0.029))
+            );
+            assert_eq!(c["no_gain"], true);
+            if stop == "round limit" {
+                assert_eq!(trains.len(), 3, "{log}");
+                assert!(
+                    trains[0].contains("--widths 16,8 ") && trains[1].contains("--widths 16,8 ")
+                );
+                assert!(trains[2].contains("--widths 32,16 "), "{}", trains[2]);
+                assert_eq!(r2["capacity"]["next_shape"], "32,16");
+                let r3 = read_json(&out.join("round-3.json")).expect("round 3");
+                assert_eq!(
+                    (r3["shape"].as_str(), r3["shape_step"].as_u64()),
+                    (Some("32,16"), Some(2))
+                );
+                // Round 3 compares with round 2: 0.029 -> 0.02 is a gain of 31%.
+                assert_eq!(r3["capacity"]["compared"]["no_gain"], false);
+                let t2 = fs::read_to_string(out.join("round-2.txt")).expect("txt");
+                assert!(
+                    t2.contains("the next round trains the larger shape 32,16"),
+                    "{t2}"
+                );
+                let hb = read_json(&root.join("heartbeat.json")).expect("heartbeat");
+                assert_eq!(
+                    (
+                        hb["progress"]["shape"].as_str(),
+                        hb["progress"]["shape_step"].as_str()
+                    ),
+                    (Some("32,16"), Some("2 of 3"))
+                );
+                let summary = fs::read_to_string(out.join("audit-summary.txt")).expect("summary");
+                assert!(summary.contains("shape 32,16"), "{summary}");
+            } else {
+                assert_eq!(trains.len(), 2, "{log}");
+                assert!(!out.join("round-3.json").exists());
+                assert!(why.contains("on the largest shape, 16,8"), "{why}");
+            }
+            let _ = fs::remove_dir_all(&f.base);
+        }
     }
 
     /// A stop file that appears during round 2's audit: the step that follows is not started,
@@ -4887,6 +5130,7 @@ esac
         for n in 1..=3 {
             fs::write(f.base.join(format!("audit-{n}.json")), GROUP_ONE).expect("write");
         }
+        fs::write(f.base.join("mini-fail-all"), "").expect("write");
         fs::write(f.base.join("stop-at-2"), "").expect("write");
         let root = f.base.join("run");
         let tools = audit_tools(&f, false, Some(&root.join("STOP")));

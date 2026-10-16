@@ -2244,8 +2244,14 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
                 if failing.is_empty() { "yes" } else { "no" },
                 if failing.is_empty() {
                     String::new()
-                } else {
+                } else if failing.len() <= 5 {
                     format!(" (failing: {})", failing.join(", "))
+                } else {
+                    format!(
+                        " (failing: {} and {} more)",
+                        failing[..5].join(", "),
+                        failing.len() - 5
+                    )
                 },
                 if pass { "PASS" } else { "FAIL" }
             );
