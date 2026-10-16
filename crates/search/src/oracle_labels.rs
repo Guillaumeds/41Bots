@@ -21,7 +21,9 @@
 //!   are solved, which is what makes harvesting at trick 3 affordable). A harvest may draw its
 //!   decisions from some strata only ([`HarvestJob::strata`]) and keep the positions of chosen
 //!   race classes (`nn::outcome::race_class`) up to a cap of their own ([`RaceKeep`]: the race
-//!   harvest, docs/m3-hybrid/rung1.md "Why seats 3-4 fail").
+//!   harvest, docs/m3-hybrid/rung1.md "Why seats 3-4 fail"), or the positions inside any group of
+//!   a predicate file up to a cap of their own ([`PredKeep`]: the audit loop's targeted harvest,
+//!   docs/m3-hybrid/audit-loop.md §4 step 5).
 //!
 //! A line on which the game ends before trick `k` is replayed with fresh randomness.
 //!
@@ -54,9 +56,9 @@
 
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -66,6 +68,7 @@ use engine::rng::Rng;
 use equity::MoneyChance;
 use nn::encode::encode;
 use nn::outcome::{N_RACE_CLASSES, outcomes};
+use nn::predicate::{Evaluator, Predicates};
 use nn::shard::{Row, SOURCE_HARVEST, SOURCE_RANDOM, SOURCE_RULES, row_bytes, row_bytes_for};
 use serde::Serialize;
 use solver::frontier::{CanonPos, Frontier};
@@ -458,6 +461,50 @@ pub struct ShardSummary {
     /// A harvest's time labelling the sampled positions (their exact solves when a network drove
     /// the search), summed over threads (the log only).
     pub label_time: Duration,
+    /// A targeted harvest's rows and reached positions per group (`None` for other runs).
+    pub groups: Option<GroupTally>,
+}
+
+/// A targeted harvest's counts per group of its predicate file ([`PredKeep`]); a position in
+/// several groups counts in each.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct GroupTally {
+    /// Rows of the shard in each group.
+    pub rows: Vec<u64>,
+    /// Rows in at least one group.
+    pub rows_in_any: u64,
+    /// Distinct reached positions (per decision, over the shard's decisions) in each group.
+    pub reached: Vec<u64>,
+    /// Distinct reached positions in at least one group.
+    pub reached_in_any: u64,
+    /// Distinct reached positions in all.
+    pub reached_all: u64,
+}
+
+impl GroupTally {
+    /// An empty tally of `g` groups.
+    pub fn new(g: usize) -> GroupTally {
+        GroupTally {
+            rows: vec![0; g],
+            reached: vec![0; g],
+            ..GroupTally::default()
+        }
+    }
+
+    /// Count one decision: its reached positions' tallies, and the groups of the rows kept.
+    fn add(&mut self, d: &HarvestDecision, reached: &[u32], rows: &[Vec<u32>]) {
+        for (a, &b) in self.reached.iter_mut().zip(reached) {
+            *a += u64::from(b);
+        }
+        self.reached_in_any += u64::from(d.keep_distinct);
+        self.reached_all += u64::from(d.distinct);
+        for r in rows {
+            for &g in r {
+                self.rows[g as usize] += 1;
+            }
+            self.rows_in_any += u64::from(!r.is_empty());
+        }
+    }
 }
 
 /// Where a shard's bytes go, in order: into the SHA-256 here, and to the writer thread.
@@ -596,6 +643,7 @@ pub fn write_label_shard<W: Write + Send>(
         write_time,
         search_time: Duration::ZERO,
         label_time: Duration::ZERO,
+        groups: None,
     })
 }
 
@@ -645,6 +693,23 @@ pub struct HarvestJob {
     /// up to their own cap, the others up to `cap` (which may then be 0). `None`: every
     /// position up to `cap`.
     pub race: Option<RaceKeep>,
+    /// The targeted harvest (`--harvest-keep`): positions in any group of a predicate file are
+    /// kept up to their own cap, the others up to `cap` (which may then be 0). Not with `race`.
+    pub keep: Option<PredKeep>,
+}
+
+/// The default cap of a targeted harvest's in-group positions per decision.
+pub const KEEP_CAP: u32 = 256;
+
+/// A targeted harvest's selection (docs/m3-hybrid/audit-loop.md §4 step 5): the frontier
+/// positions inside any group of `preds` (`nn::predicate`, decided on the position's encoded
+/// features) are kept, up to `cap` per decision.
+#[derive(Clone, Debug)]
+pub struct PredKeep {
+    /// The groups.
+    pub preds: Arc<Predicates>,
+    /// At most this many in-group positions per decision (at least 1).
+    pub cap: u32,
 }
 
 /// Every stratum: the yardstick's decisions.
@@ -931,6 +996,14 @@ pub struct HarvestDecision {
     /// A race harvest: distinct positions of the race classes among the reached ones (0
     /// otherwise).
     pub race_distinct: u32,
+    /// A targeted harvest: distinct reached positions inside any group (0 otherwise; not written
+    /// then, so other runs' facts are as before).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub keep_distinct: u32,
+}
+
+fn is_zero(x: &u32) -> bool {
+    *x == 0
 }
 
 /// Everything one harvest decision gives: its facts, its rows (already labelled) in the order
@@ -944,6 +1017,11 @@ pub struct DecisionHarvest {
     pub positions: Vec<(Position, MatchCtx)>,
     /// Every distinct reached position, in first-visit order (before sampling).
     pub reached: Vec<Reached>,
+    /// A targeted harvest: each row's groups (ascending; empty for a row in none), in row order
+    /// (empty for other runs).
+    pub row_groups: Vec<Vec<u32>>,
+    /// A targeted harvest: distinct reached positions in each group (empty for other runs).
+    pub reached_groups: Vec<u32>,
     /// Time in the search (reports only).
     pub search_time: Duration,
     /// Time labelling the sample, its exact solves included when a network drove the search
@@ -1056,9 +1134,30 @@ pub fn harvest_decision(
         idx
     };
     let mut race_distinct = 0;
-    let mut chosen = match job.race {
-        None => sample((0..n).collect(), job.cap as usize, &mut rng),
-        Some(race) => {
+    let mut keep_distinct = 0;
+    // A targeted harvest's groups of every reached position.
+    let mut members: Vec<Vec<u32>> = Vec::new();
+    let mut reached_groups: Vec<u32> = Vec::new();
+    let mut chosen = match (job.race, &job.keep) {
+        (None, Some(keep)) => {
+            // The in-group positions first, up to their cap, then the others up to `cap`.
+            let mut ev = Evaluator::new(&keep.preds, leaf);
+            members = list.iter().map(|r| ev.members(&r.canon, &r.ctx)).collect();
+            reached_groups = vec![0; keep.preds.len()];
+            for m in &members {
+                for &g in m {
+                    reached_groups[g as usize] += 1;
+                }
+            }
+            let (hit, other): (Vec<usize>, Vec<usize>) =
+                (0..n).partition(|&i| !members[i].is_empty());
+            keep_distinct = hit.len() as u32;
+            let mut c = sample(hit, keep.cap as usize, &mut rng);
+            c.extend(sample(other, job.cap as usize, &mut rng));
+            c
+        }
+        (None, None) => sample((0..n).collect(), job.cap as usize, &mut rng),
+        (Some(race), _) => {
             // The race classes' positions first, up to their cap, then the others up to `cap`.
             let (hit, other): (Vec<usize>, Vec<usize>) = (0..n).partition(|&i| {
                 race.has(nn::outcome::race_class_of(
@@ -1098,6 +1197,11 @@ pub fn harvest_decision(
         ));
         positions.push((r.pos, r.ctx));
     }
+    let row_groups = if members.is_empty() {
+        Vec::new()
+    } else {
+        chosen.iter().map(|&i| members[i].clone()).collect()
+    };
     DecisionHarvest {
         info: HarvestDecision {
             id: j,
@@ -1110,10 +1214,13 @@ pub fn harvest_decision(
             rows: take as u32,
             search_nodes: run.stats.nodes,
             race_distinct,
+            keep_distinct,
         },
         rows,
         positions,
         reached: list,
+        row_groups,
+        reached_groups,
         search_time,
         label_time: t1.elapsed(),
     }
@@ -1131,9 +1238,19 @@ fn check_harvest_job(job: &HarvestJob) {
         job.trick
     );
     assert!(
-        job.cap >= 1 || job.race.is_some(),
-        "the cap per decision is at least 1 (0 only in a race harvest)"
+        job.cap >= 1 || job.race.is_some() || job.keep.is_some(),
+        "the cap per decision is at least 1 (0 only in a race or targeted harvest)"
     );
+    assert!(
+        job.race.is_none() || job.keep.is_none(),
+        "a harvest keeps race classes or a predicate file's groups, not both"
+    );
+    if let Some(k) = &job.keep {
+        assert!(
+            k.cap >= 1 && !k.preds.is_empty(),
+            "a targeted harvest keeps at least one group, at least 1 a decision"
+        );
+    }
     if let Some(r) = job.race {
         assert!(
             r.cap >= 1 && r.classes != 0 && usize::from(r.classes) < 1 << N_RACE_CLASSES,
@@ -1242,6 +1359,7 @@ pub fn write_harvest_shard<W: Write + Send>(
     let mut decisions = Vec::new();
     let mut left = job.count;
     let (mut search_time, mut label_time) = (Duration::ZERO, Duration::ZERO);
+    let mut groups = job.keep.as_ref().map(|k| GroupTally::new(k.preds.len()));
     let ((), sha256, hash_time, write_time) = stream_shard(out, job.count, v, |sink| {
         if left == 0 {
             return Ok(());
@@ -1260,15 +1378,24 @@ pub fn write_harvest_shard<W: Write + Send>(
                     row_bytes(row, &mut bytes);
                     infos.push(*info);
                 }
-                (out.info, bytes, infos, (out.search_time, out.label_time))
+                (
+                    out.info,
+                    bytes,
+                    infos,
+                    (out.search_time, out.label_time),
+                    (out.row_groups, out.reached_groups),
+                )
             },
-            |_, (mut info, mut bytes, infos, (ts, tl))| {
+            |_, (mut info, mut bytes, infos, (ts, tl), (row_groups, reached_groups))| {
                 search_time += ts;
                 label_time += tl;
                 let keep = left.min(infos.len() as u64) as usize;
                 bytes.truncate(keep * rb);
                 for i in &infos[..keep] {
                     counts.add(i);
+                }
+                if let Some(t) = &mut groups {
+                    t.add(&info, &reached_groups, &row_groups[..keep]);
                 }
                 info.rows = keep as u32;
                 decisions.push(info);
@@ -1287,6 +1414,7 @@ pub fn write_harvest_shard<W: Write + Send>(
         write_time,
         search_time,
         label_time,
+        groups,
     })
 }
 
@@ -1375,6 +1503,7 @@ mod tests {
             schedule: position_schedule(weights),
             strata: HARVEST_STRATA.to_vec(),
             race: None,
+            keep: None,
         }
     }
 
@@ -1963,6 +2092,174 @@ mod tests {
             }
         }
         assert!(rows > 0);
+    }
+
+    /// A predicate file for the targeted-harvest tests: the next team (after the leader's) without
+    /// a trick this hand (binary), and the leader's team's chance if the hand ended now above a
+    /// threshold (dense; the median of the parity fixture's rows, `nn::predicate`).
+    fn test_predicates() -> Arc<Predicates> {
+        let text = format!(
+            r#"[{{"name": "next team no trick", "conditions": [{{"feature": {}, "op": "==", "value": 1}}]}},
+                {{"name": "leader team ahead", "conditions": [{{"feature": {}, "op": ">", "value": {}}}]}}]"#,
+            nn::encode::OFF_TRICKS + 5,
+            nn::encode::N_BINARY + nn::encode::DENSE_NOW,
+            -983_597
+        );
+        Arc::new(Predicates::parse(text.as_bytes()).expect("parses"))
+    }
+
+    /// The targeted harvest (`--harvest-keep`): every reached position inside a group is kept up
+    /// to the keep cap, sampled first on the decision's stream, the others up to `cap`; the rows
+    /// keep reach order, each row's groups are its features' (as a shard reader finds them), the
+    /// per-group counts are the reached positions', and the shard, its counts and its group
+    /// tallies are byte-identical on 1 and 4 threads. Driven by a network at trick 3 too.
+    #[test]
+    fn targeted_harvest_keeps_the_groups() {
+        let starts = collect_starts(400, 9);
+        let l = leaf();
+        let source = BeliefSource::new();
+        let mut mem = SolveMem::new();
+        let preds = test_predicates();
+        let keep = PredKeep {
+            preds: preds.clone(),
+            cap: 5,
+        };
+        let base = harvest_job(4, vec![3], [1; 8], 2);
+        let mut kept_any = 0;
+        for other in [0u32, 2] {
+            let job = HarvestJob {
+                keep: Some(keep.clone()),
+                cap: other,
+                ..base.clone()
+            };
+            check_harvest_job(&job);
+            for j in 0..16u64 {
+                let out = harvest_decision(&job, j, &starts, &*l, &source, Driver::Exact, &mut mem);
+                let members: Vec<Vec<u32>> = out
+                    .reached
+                    .iter()
+                    .map(|r| preds.members_of(&r.canon, &r.ctx, &*l))
+                    .collect();
+                let hit = members.iter().filter(|m| !m.is_empty()).count();
+                assert_eq!(out.info.keep_distinct as usize, hit, "decision {j}");
+                let per_group: Vec<u32> = (0..preds.len() as u32)
+                    .map(|g| members.iter().filter(|m| m.contains(&g)).count() as u32)
+                    .collect();
+                assert_eq!(out.reached_groups, per_group);
+                assert_eq!(out.row_groups.len(), out.rows.len());
+                let kept_hit = out.row_groups.iter().filter(|g| !g.is_empty()).count();
+                assert_eq!(kept_hit, hit.min(5), "decision {j}");
+                assert_eq!(
+                    out.rows.len() - kept_hit,
+                    (members.len() - hit).min(other as usize)
+                );
+                for ((row, _), g) in out.rows.iter().zip(&out.row_groups) {
+                    assert_eq!(&preds.members(&row.features), g, "the row's own features");
+                }
+                let at: Vec<usize> = out
+                    .positions
+                    .iter()
+                    .map(|(p, _)| {
+                        out.reached
+                            .iter()
+                            .position(|r| r.pos == *p)
+                            .expect("reached")
+                    })
+                    .collect();
+                assert!(at.windows(2).all(|w| w[0] < w[1]), "reach order");
+                kept_any += kept_hit;
+            }
+            // Byte-identical for any thread count, with the same group tallies.
+            let mk = |threads| HarvestJob {
+                count: 50,
+                threads,
+                ..job.clone()
+            };
+            let (a, _) = harvest_rows(&mk(1), &starts, &*l, Driver::Exact, None);
+            let want = nn::shard::to_npy(
+                &a.iter().map(|x| x.0.clone()).collect::<Vec<_>>(),
+                nn::outcome::vocab(4),
+            );
+            let mut tallies = Vec::new();
+            for threads in [1, 4] {
+                let mut bytes = Vec::new();
+                let sum = write_harvest_shard(
+                    &mk(threads),
+                    &starts,
+                    &*l,
+                    Driver::Exact,
+                    None,
+                    &mut bytes,
+                )
+                .expect("written");
+                assert!(bytes == want, "{threads} threads");
+                let t = sum.groups.expect("a targeted harvest's tally");
+                let rows_in: Vec<u64> = (0..preds.len())
+                    .map(|g| a.iter().filter(|r| preds.holds(g, &r.0.features)).count() as u64)
+                    .collect();
+                assert_eq!(t.rows, rows_in);
+                assert_eq!(
+                    t.rows_in_any,
+                    a.iter().filter(|r| preds.any(&r.0.features)).count() as u64
+                );
+                if other == 0 {
+                    assert_eq!(t.rows_in_any, 50, "in-group rows only");
+                }
+                assert_eq!(
+                    t.reached_all,
+                    sum.decisions
+                        .iter()
+                        .map(|d| u64::from(d.distinct))
+                        .sum::<u64>()
+                );
+                tallies.push(t);
+            }
+            assert_eq!(tallies[0], tallies[1]);
+        }
+        assert!(kept_any > 0, "the groups are reached");
+        // Driven by a network at trick 3: the kept rows are in a group and labelled exactly.
+        let net = random_oracle(3, 29);
+        let job = HarvestJob {
+            keep: Some(PredKeep {
+                preds: preds.clone(),
+                cap: 3,
+            }),
+            cap: 0,
+            ..harvest_job(3, vec![2], [0, 0, 0, 0, 0, 0, 0, 1], 0)
+        };
+        let mut rows = 0;
+        for j in 0..2 {
+            let out = harvest_decision(&job, j, &starts, &*l, &source, Driver::Net(&net), &mut mem);
+            for (row, (pos, ctx)) in out.rows.iter().map(|r| &r.0).zip(&out.positions) {
+                assert!(preds.any(&row.features));
+                let v = solve_fast(pos, *ctx, &SyntheticLeaf, FastOptions::default())
+                    .value
+                    .expect("solved");
+                assert_eq!(
+                    row.value,
+                    v.rotate(nn::encode::rotation(&canonical(pos)) % 4)
+                );
+                rows += 1;
+            }
+        }
+        assert!(rows > 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "not both")]
+    fn race_and_keep_together_are_refused() {
+        let job = HarvestJob {
+            race: Some(RaceKeep {
+                classes: 0b10000,
+                cap: 1,
+            }),
+            keep: Some(PredKeep {
+                preds: test_predicates(),
+                cap: 1,
+            }),
+            ..harvest_job(4, vec![3], [1; 8], 1)
+        };
+        check_harvest_job(&job);
     }
 
     #[test]

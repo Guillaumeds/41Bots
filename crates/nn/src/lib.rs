@@ -17,6 +17,8 @@
 //! - [`outcome`]: the outcome head (spec §6a): how the hand can end from a position, the exact
 //!   money vector of each ending, and the value of a distribution over them.
 //! - [`oracle`]: a loaded network as a solver frontier evaluator ([`solver::Frontier`]).
+//! - [`predicate`]: the audit loop's groups of positions, as conditions on the encoder's
+//!   features (docs/m3-hybrid/audit-loop.md §6), shared with the Python auditor.
 //! - [`synthetic`]: a synthetic leaf, network and features for tests and fixtures.
 //!
 //! Everything here is integer arithmetic, so a network's money chances are byte-identical on
@@ -29,6 +31,7 @@ pub mod mlp;
 pub mod money;
 pub mod oracle;
 pub mod outcome;
+pub mod predicate;
 pub mod safetensors;
 pub mod shard;
 pub mod synthetic;

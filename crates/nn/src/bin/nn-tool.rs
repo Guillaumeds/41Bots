@@ -4,6 +4,7 @@
 //! nn-tool fixture --trick K --count N --seed S --out FILE.npy
 //! nn-tool eval    --net WEIGHTS.safetensors --shard FILE.npy --out OUT.npy [--reps R]
 //! nn-tool classes --shard FILE.npy --out OUT.npy
+//! nn-tool groups  --predicates PRED.json --shard FILE.npy --out OUT.npy
 //! nn-tool golden  --out FILE.json [--seed 41] [--count 200]
 //! nn-tool random  --trick K --widths 512,256,64 --out FILE.safetensors [--seed 17] [--head outcome-v1|money4]
 //! nn-tool bench   --equity TABLE --trick K [--worlds 4] [--max 20000] [--seed 5]
@@ -20,6 +21,10 @@
 //!   its position decoded from the binary features (`nn::encode::decode`), not from the record's
 //!   mask: a `uint64` `.npy` of shape `[N]`, and the count per class on stderr. For the Python
 //!   parity check of the trainer's per-class report (`python/nn`).
+//! - `groups`: the membership of every record of a shard in every group of a predicate file
+//!   (`nn::predicate`), from the record's stored features: a `uint64` `.npy` of shape `[N, G]`
+//!   (1: in the group), and the rows per group on stderr. For the Python parity check of the
+//!   auditor's predicate evaluator (`python/nn`).
 //! - `golden`: the golden network's outputs on the golden inputs (`nn::synthetic`), as JSON.
 //! - `random`: a random integer network for frontier trick `K` (`nn::synthetic::random_net`,
 //!   the outcome head by default), for benchmarks only: never for a yardstick value.
@@ -77,6 +82,7 @@ fn main() -> ExitCode {
         Some("fixture") => fixture(&a),
         Some("eval") => eval(&a),
         Some("classes") => classes(&a),
+        Some("groups") => groups(&a),
         Some("golden") => golden(&a),
         Some("bench") => bench(&a),
         Some("random") => random(&a),
@@ -85,7 +91,7 @@ fn main() -> ExitCode {
             Ok(())
         }
         _ => Err(
-            "usage: nn-tool fixture|eval|classes|golden|random|bench|limits … (see the source docs)"
+            "usage: nn-tool fixture|eval|classes|groups|golden|random|bench|limits … (see the source docs)"
                 .into(),
         ),
     };
@@ -160,6 +166,26 @@ fn classes(a: &Args) -> Result<(), String> {
         rows.len()
     );
     Ok(())
+}
+
+fn groups(a: &Args) -> Result<(), String> {
+    let p = nn::predicate::Predicates::load(Path::new(a.req("--predicates")?))?;
+    let spath = a.req("--shard")?;
+    let rows = from_npy(&std::fs::read(spath).map_err(|e| format!("{spath}: {e}"))?)?;
+    let g = p.len();
+    let mut out = Vec::with_capacity(rows.len() * g);
+    let mut counts = vec![0u64; g];
+    for r in &rows {
+        for (k, c) in counts.iter_mut().enumerate() {
+            let x = u64::from(p.holds(k, &r.features));
+            *c += x;
+            out.push(x);
+        }
+    }
+    for (name, c) in p.names().iter().zip(&counts) {
+        eprintln!("{name}: {c} of {} rows", rows.len());
+    }
+    std::fs::write(a.req("--out")?, to_npy_u64(&[rows.len(), g], &out)).map_err(|e| e.to_string())
 }
 
 fn eval(a: &Args) -> Result<(), String> {

@@ -1,0 +1,73 @@
+{
+  "about": "parity fixture of crates/nn/src/predicate.rs: the groups of predicate-fixture.expected.json, evaluated on predicate-fixture.npy",
+  "groups": [
+    {
+      "bias": 0.001,
+      "conditions": [
+        {
+          "feature": 702,
+          "op": "==",
+          "value": 1
+        }
+      ],
+      "name": "binary on",
+      "sd": 0.01,
+      "weight": 0.5
+    },
+    {
+      "conditions": [
+        {
+          "feature": 702,
+          "op": "==",
+          "value": 0
+        }
+      ],
+      "name": "binary off"
+    },
+    {
+      "conditions": [
+        {
+          "feature": 809,
+          "op": "<=",
+          "value": -983597
+        }
+      ],
+      "name": "dense at most"
+    },
+    {
+      "conditions": [
+        {
+          "feature": 809,
+          "op": ">",
+          "value": -983597
+        }
+      ],
+      "name": "dense above"
+    },
+    {
+      "conditions": [
+        {
+          "feature": 702,
+          "op": "==",
+          "value": 1
+        },
+        {
+          "feature": 845,
+          "op": ">",
+          "value": -807007
+        }
+      ],
+      "name": "conjunction"
+    },
+    {
+      "conditions": [
+        {
+          "feature": 845,
+          "op": "<=",
+          "value": -807008
+        }
+      ],
+      "name": "below the median"
+    }
+  ]
+}
