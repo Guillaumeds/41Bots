@@ -4364,8 +4364,17 @@ fi
             (4, 1_000_000, 301, 256, 2.0, 50, 4, 10_000_000)
         );
         assert_eq!((a.audit_seed(1), a.target_seed(4)), (30101, 30154));
-        // The default ladder: the rung's widths, then only the shapes the integer inference loads.
-        assert_eq!(a.shapes, vec![vec![1024, 512, 128]]);
+        // The default ladder: the rung's widths, then the larger shapes (all within nn::MAX_WIDTH,
+        // 4096 since 2026-10-16).
+        assert_eq!(
+            a.shapes,
+            vec![
+                vec![1024, 512, 128],
+                vec![2048, 1024, 256],
+                vec![2048, 2048, 1024, 256],
+                vec![4096, 2048, 1024, 256]
+            ]
+        );
         assert_eq!(a.min_gain, 0.15);
         let at3 = parse(&json!({ "cut": 3, "audit_rounds": 1 })).expect("trick 3");
         assert_eq!(at3.audit.expect("on").target_rows, 4_000_000);
@@ -4446,7 +4455,7 @@ fi
             "audit_target_rows",
         );
         bad(
-            json!({ "audit_rounds": 2, "audit_shapes": "<widths>;2048,1024,256" }),
+            json!({ "audit_rounds": 2, "audit_shapes": "<widths>;8192,1024,256" }),
             "MAX_WIDTH",
         );
         bad(
@@ -4912,7 +4921,7 @@ esac
         );
         assert_eq!(
             (p["shape"].as_str(), p["shape_step"].as_str()),
-            (Some("16,8"), Some("1 of 1"))
+            (Some("16,8"), Some("1 of 4"))
         );
         assert_eq!(
             p["thresholds"],
