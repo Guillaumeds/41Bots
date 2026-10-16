@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! search decisions --trick T --count N --out FILE [--seed S] [--start-hands H] [--allow-uneven]
+//!                  [--threads T]
 //! search worlds    --decisions FILE --method exact|rollout --to N --out FILE
 //!                  [--from-world A] [--label L] [--seed S] [--first I] [--last J]
 //!                  [--ids 3,17,42 | --ids FILE] [--threads K] [--solve-threads K] [--tt-mb M]
@@ -27,7 +28,7 @@
 //!                  [--boot 1000] [--seed 1]
 //! search teacher   --hands N --out DIR --equity TABLE [--seed S] [--config NAME] [--start-hands H]
 //! search labels    --trick K --count N --seed S --source random|rules|harvest --out FILE.npy
-//!                  --equity TABLE [--threads T] [--start-hands 20000]
+//!                  --equity TABLE [--threads T] [--start-hands 20000] [--chunk-rows 32]
 //!                  harvest only: [--harvest-cap 16] [--harvest-positions 0.25,0.25,0.5]
 //!                  [--harvest-tricks K-1 | --harvest-tricks 2,3]
 //! search hybrid-check --trick T --cut K --net WEIGHTS --equity TABLE
@@ -40,9 +41,14 @@
 //! `search::oracle_labels`): a label shard (`nn::shard`, `.npy` records: encoded features, the exact
 //! value as four u64, the source tag, the trick) and a JSON sidecar `FILE.npy.json` with the
 //! encoder, values version, tie rule, this binary's SHA-256, the equity table's SHA-256, the seed,
-//! counts and the shard's SHA-256. Byte-identical for any `--threads`; seed 1 (the golden sets')
-//! is refused. `--source harvest` (spec §5 source (c), `search::oracle_labels::harvest_rows`):
-//! training decisions drawn by the yardstick's generator at the tricks `--harvest-tricks`
+//! counts and the shard's SHA-256. Byte-identical for any `--threads` and `--chunk-rows`; seed 1
+//! (the golden sets') is refused. The shard is streamed
+//! (`search::oracle_labels::write_label_shard`): chunks of `--chunk-rows` rows are made on every
+//! thread, then hashed and written in row order as they come, under the name `FILE.npy.part`,
+//! renamed to `FILE.npy` once whole. The start states (`--start-hands`; `decisions` and
+//! `hybrid-check` too) are played on `--threads` threads, the same states for any count
+//! (`search::measure::collect_starts_with`). `--source harvest` (spec §5 source (c),
+//! `search::oracle_labels::harvest_rows`): training decisions drawn by the yardstick's generator at the tricks `--harvest-tricks`
 //! (default K−1), a world from the decider's belief each, the frontier positions the hybrid's
 //! search from the decision reaches (exact values at the frontier), deduplicated by canonical
 //! form, at most `--harvest-cap` per decision (a seeded sample); `--harvest-positions` gives the
@@ -108,8 +114,8 @@ use search::bot::{PimcFactory, PimcSpec, load_equity, load_equity_sha};
 use search::curves::{CurveParams, N_CAP, TrickReport, analyse, score_groups};
 use search::measure::{
     BatchProgress, DecisionSpec, DecisionTiming, Schedule, WorldRows, WorldsJob, agreement_curve,
-    build_decisions, collect_starts, feature_band_name, paired, parse_ids, read_jsonl, read_worlds,
-    relabel, score, stratum_of, summarise, timing_path, worlds_file_sched,
+    build_decisions, collect_starts, collect_starts_with, feature_band_name, paired, parse_ids,
+    read_jsonl, read_worlds, relabel, score, stratum_of, summarise, timing_path, worlds_file_sched,
 };
 use search::pimc::{Ctx, Method, SearchConfig, SharedLeaf};
 use search::plan::AutoParams;
@@ -208,7 +214,8 @@ fn decisions(a: &Args) -> Result<(), String> {
              (use {use_}, or pass --allow-uneven)"
         ));
     }
-    let starts = collect_starts(a.num("--start-hands", 20_000)?, seed);
+    let threads = a.num("--threads", 1)?.max(1) as usize;
+    let starts = collect_starts_with(a.num("--start-hands", 20_000)?, seed, threads);
     let ds = build_decisions(trick, count, seed, &starts);
     let mut cells = [[0usize; 4]; 8];
     for d in &ds {
@@ -1189,8 +1196,8 @@ fn binary_sha256() -> String {
 /// `search labels`: a label shard for the oracle network O_K and its sidecar.
 fn labels_cmd(a: &Args) -> Result<(), String> {
     use search::oracle_labels::{
-        GOLDEN_SEED, HARVEST_CAP, HARVEST_SHARES, HARVEST_TT_MB, HarvestJob, LabelJob, Source,
-        harvest_rows, label_rows, parse_band_shares, position_schedule,
+        CHUNK_ROWS, GOLDEN_SEED, HARVEST_CAP, HARVEST_SHARES, HARVEST_TT_MB, HarvestJob, LabelJob,
+        Source, parse_band_shares, position_schedule, write_harvest_shard, write_label_shard,
     };
     let trick = a.num("--trick", 4)? as u8;
     if !(2..=5).contains(&trick) {
@@ -1265,13 +1272,15 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         None
     };
     let out = PathBuf::from(a.req("--out")?);
+    let chunk_rows = a.num("--chunk-rows", CHUNK_ROWS)?.max(1);
     let t0 = Instant::now();
     let (table, table_sha) = load_equity_sha(a.req("--equity")?)?;
     let leaf: Arc<SharedLeaf> = Arc::new(table);
+    let table_s = t0.elapsed().as_secs_f64();
     let start_hands = a.num("--start-hands", 20_000)?;
-    let starts = collect_starts(start_hands, seed);
+    let starts = collect_starts_with(start_hands, seed, job.threads);
     eprintln!(
-        "labels: trick {trick}, {} rows from {}, seed {seed}, {} threads (table and start states in {:.1} s)",
+        "labels: trick {trick}, {} rows from {}, seed {seed}, {} threads (table and start states in {:.1} s: table {table_s:.1} s)",
         job.count,
         job.source.name(),
         job.threads,
@@ -1280,7 +1289,7 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
     let done = std::sync::atomic::AtomicUsize::new(0);
     let finished = AtomicBool::new(false);
     let t1 = Instant::now();
-    let rows = std::thread::scope(|s| {
+    let shard = std::thread::scope(|s| {
         let (done, finished) = (&done, &finished);
         s.spawn(move || {
             let mut last = Instant::now();
@@ -1305,30 +1314,32 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
             }
         }
         let _finish = Finish(finished);
-        match &harvest {
-            Some((h, _, _)) => harvest_rows(h, &starts, &*leaf, Some(done)),
-            None => (label_rows(&job, &starts, &*leaf, Some(done)), Vec::new()),
+        // The shard goes to a temporary name, renamed once whole: a stopped run leaves no
+        // shard that looks finished.
+        let mut part = out.as_os_str().to_owned();
+        part.push(".part");
+        let part = PathBuf::from(part);
+        let mut file =
+            std::fs::File::create(&part).map_err(|e| format!("{}: {e}", part.display()))?;
+        let summary = match &harvest {
+            Some((h, _, _)) => write_harvest_shard(h, &starts, &*leaf, Some(done), &mut file),
+            None => write_label_shard(&job, &starts, &*leaf, Some(done), chunk_rows, &mut file),
         }
-    });
-    let (rows, decisions) = rows;
+        .map_err(|e| format!("{}: {e}", part.display()))?;
+        drop(file);
+        std::fs::rename(&part, &out).map_err(|e| format!("{}: {e}", out.display()))?;
+        Ok::<_, String>(summary)
+    })?;
     let rows_s = t1.elapsed().as_secs_f64();
-    // Moved apart, not copied: a shard of millions of rows is held once, then as bytes.
-    let (shard, infos): (Vec<nn::shard::Row>, Vec<_>) = rows.into_iter().unzip();
-    let bytes = nn::shard::to_npy(&shard, nn::outcome::vocab(trick));
-    let n_rows = shard.len();
-    drop(shard);
-    std::fs::write(&out, &bytes).map_err(|e| format!("{}: {e}", out.display()))?;
-    let mut by_stratum = [0u64; 4];
-    let mut by_root = [0u64; 6];
-    let mut by_position = [0u64; 9];
-    let (mut retries, mut nodes) = (0u64, 0u64);
-    for i in &infos {
-        by_stratum[usize::from(i.stratum - 1)] += 1;
-        by_root[usize::from(i.root_trick)] += 1;
-        by_position[usize::from(i.position)] += 1;
-        retries += u64::from(i.retries);
-        nodes += i.nodes;
-    }
+    let n_rows = shard.rows;
+    let c = shard.counts;
+    let (by_stratum, by_root, by_position) = (c.by_stratum, c.by_root_trick, c.by_position);
+    let (retries, nodes) = (c.retries, c.nodes);
+    let (hash_s, write_s) = (
+        shard.hash_time.as_secs_f64(),
+        shard.write_time.as_secs_f64(),
+    );
+    let decisions = shard.decisions;
     let secs = t0.elapsed().as_secs_f64();
     let mut side = serde_json::json!({
         "format": "41bots-label-shard-v1",
@@ -1349,7 +1360,7 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         "tie_rule": "first strictly best card in increasing card index (solver default)",
         "binary_sha256": binary_sha256(),
         "equity_sha256": table_sha,
-        "shard_sha256": equity::sha256::sha256_hex(&bytes),
+        "shard_sha256": shard.sha256,
         "rows_by_stratum": by_stratum,
         "rows_by_root_trick": &by_root[1..trick as usize],
         "replayed_lines": retries,
@@ -1382,11 +1393,14 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     eprintln!(
-        "labels: {} rows in {:.1} s ({:.3} ms a row on {} threads; {secs:.1} s in all); shard sha256 {}",
+        "labels: {} rows made, hashed and written in {:.1} s ({:.3} ms a row on {} threads; \
+         hashing {:.1} s and writing {:.1} s alongside; {secs:.1} s in all); shard sha256 {}",
         n_rows,
         rows_s,
         rows_s * 1000.0 / n_rows.max(1) as f64,
         job.threads,
+        hash_s,
+        write_s,
         side["shard_sha256"].as_str().unwrap_or("")
     );
     Ok(())
@@ -1485,7 +1499,8 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             .filter(|d| d.trick == trick)
             .collect(),
         None => {
-            let starts = collect_starts(a.num("--start-hands", 20_000)?, seed);
+            let threads = a.num("--threads", 1)?.max(1) as usize;
+            let starts = collect_starts_with(a.num("--start-hands", 20_000)?, seed, threads);
             build_decisions(trick, a.num("--count", 32)?, seed, &starts)
         }
     };

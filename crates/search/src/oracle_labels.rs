@@ -28,22 +28,35 @@
 //!
 //! **Determinism**: row `i` depends only on (seed, source, trick, `i`) through
 //! `Rng::derive(seed, &[NN_LABEL, source, trick, i])`; rows are computed on any number of
-//! threads into their slots, so the shard is byte-identical for any thread count. Harvested rows
-//! come by decision: decision `j`'s rows depend only on (seed, trick, `j`) and the harvest's
+//! threads and put in row order, so the shard is byte-identical for any thread count. Harvested
+//! rows come by decision: decision `j`'s rows depend only on (seed, trick, `j`) and the harvest's
 //! settings, and the shard is decisions 0, 1, 2, … in order, cut at the row count.
+//!
+//! **Streaming** ([`write_label_shard`], [`write_harvest_shard`]): a shard of millions of rows is
+//! never held in memory. Workers make chunks of consecutive rows (or harvest decisions), each
+//! claimed as a worker comes free (`crate::ordered`), already as the shard's bytes; the chunks are
+//! hashed (SHA-256, for the sidecar) in row order as they arrive and written in that order by a
+//! writer thread, so hashing and writing overlap the making of later rows instead of following
+//! it. The bytes and the hash are those of [`nn::shard::to_npy`] of [`label_rows`] /
+//! [`harvest_rows`] (tested), for any thread count and chunk size.
 //!
 //! **Disjoint from the golden sets**: the golden decision sets use seed 1; seed 1 is refused.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+use sha2::{Digest, Sha256};
 
 use engine::game::{HandStartState, Match, Phase, Rules};
 use engine::rng::Rng;
 use equity::MoneyChance;
 use nn::encode::encode;
 use nn::outcome::outcomes;
-use nn::shard::{Row, SOURCE_HARVEST, SOURCE_RANDOM, SOURCE_RULES};
+use nn::shard::{Row, SOURCE_HARVEST, SOURCE_RANDOM, SOURCE_RULES, row_bytes, row_bytes_for};
 use serde::Serialize;
 use solver::frontier::{CanonPos, Frontier};
 use solver::{
@@ -51,6 +64,7 @@ use solver::{
 };
 
 use crate::measure::{DecisionSpec, build_decision};
+use crate::ordered::{ordered, window_for};
 use crate::pimc::{
     Candidate, Ctx, DynLeaf, SearchConfig, SharedLeaf, WorldSolve, candidates, exact_world,
 };
@@ -132,6 +146,52 @@ pub struct RowInfo {
     pub retries: u32,
     /// Solver nodes of the exact value.
     pub nodes: u64,
+}
+
+/// Rows' facts totalled (the sidecar's counts); the totals do not depend on the order rows are
+/// added in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RowCounts {
+    /// Rows.
+    pub rows: u64,
+    /// Rows by stratum 1–4 (index stratum − 1).
+    pub by_stratum: [u64; 4],
+    /// Rows by the trick of the decision root (index 0: `rules`, no root).
+    pub by_root_trick: [u64; 6],
+    /// Rows by the decider's position 1–8 (index 0: `rules`, no decider).
+    pub by_position: [u64; 9],
+    /// Lines replayed because the game ended before the trick.
+    pub retries: u64,
+    /// Solver nodes of the exact values.
+    pub nodes: u64,
+}
+
+impl RowCounts {
+    /// Count one row.
+    pub fn add(&mut self, i: &RowInfo) {
+        self.rows += 1;
+        self.by_stratum[usize::from(i.stratum - 1)] += 1;
+        self.by_root_trick[usize::from(i.root_trick)] += 1;
+        self.by_position[usize::from(i.position)] += 1;
+        self.retries += u64::from(i.retries);
+        self.nodes += i.nodes;
+    }
+
+    /// Add another total.
+    pub fn merge(&mut self, o: &RowCounts) {
+        self.rows += o.rows;
+        for (a, b) in self.by_stratum.iter_mut().zip(o.by_stratum) {
+            *a += b;
+        }
+        for (a, b) in self.by_root_trick.iter_mut().zip(o.by_root_trick) {
+            *a += b;
+        }
+        for (a, b) in self.by_position.iter_mut().zip(o.by_position) {
+            *a += b;
+        }
+        self.retries += o.retries;
+        self.nodes += o.nodes;
+    }
 }
 
 /// Play random legal actions from `m` to the start of trick `k`; `None` if the hand (or game, or
@@ -281,6 +341,38 @@ fn labelled_row(
     }
 }
 
+/// Row `i` of a job, labelled, and its facts.
+fn make_row(
+    job: &LabelJob,
+    i: u64,
+    starts: &[Vec<HandStartState>; 4],
+    source: &dyn WorldSource,
+    leaf: &SharedLeaf,
+    mem: &mut SolveMem,
+) -> (Row, RowInfo) {
+    let opts = FastOptions {
+        tt_mb: tt_mb_for(job.trick),
+        ..FastOptions::default()
+    };
+    let (pos, ctx, mut info) = row_position(job, i, starts, source);
+    let (v, nodes) = exact_value(&pos, ctx, leaf, opts, mem);
+    info.nodes = nodes;
+    (labelled_row(&pos, &ctx, v, job.source.tag(), leaf), info)
+}
+
+fn check_label_job(job: &LabelJob) {
+    assert_ne!(
+        job.seed, GOLDEN_SEED,
+        "seed 1 is the golden sets' seed: labels must use another"
+    );
+    assert!((2..=5).contains(&job.trick), "frontier tricks are 2..=5");
+    assert_ne!(
+        job.source,
+        Source::Harvest,
+        "harvested rows come by decision: harvest_rows"
+    );
+}
+
 /// Every row of a job, in row order, and each row's facts. Byte-identical for any thread count.
 ///
 /// # Panics
@@ -292,57 +384,191 @@ pub fn label_rows(
     leaf: &SharedLeaf,
     progress: Option<&AtomicUsize>,
 ) -> Vec<(Row, RowInfo)> {
-    assert_ne!(
-        job.seed, GOLDEN_SEED,
-        "seed 1 is the golden sets' seed: labels must use another"
-    );
-    assert!((2..=5).contains(&job.trick), "frontier tricks are 2..=5");
-    assert_ne!(
-        job.source,
-        Source::Harvest,
-        "harvested rows come by decision: harvest_rows"
-    );
-    let n = job.count as usize;
-    let slots: Mutex<Vec<Option<(Row, RowInfo)>>> = Mutex::new(vec![None; n]);
-    let next = AtomicUsize::new(0);
+    check_label_job(job);
     let source = BeliefSource::new();
-    let opts = FastOptions {
-        tt_mb: tt_mb_for(job.trick),
-        ..FastOptions::default()
-    };
-    let work = || {
-        let mut mem = SolveMem::new();
-        loop {
-            let i = next.fetch_add(1, Ordering::Relaxed);
-            if i >= n {
-                break;
-            }
-            let (pos, ctx, mut info) = row_position(job, i as u64, starts, &source);
-            let (v, nodes) = exact_value(&pos, ctx, leaf, opts, &mut mem);
-            info.nodes = nodes;
-            let row = labelled_row(&pos, &ctx, v, job.source.tag(), leaf);
-            slots.lock().unwrap_or_else(|e| e.into_inner())[i] = Some((row, info));
+    let mut rows = Vec::with_capacity(job.count as usize);
+    ordered(
+        job.threads,
+        Some(job.count),
+        window_for(job.threads),
+        SolveMem::new,
+        |mem, i| {
+            let r = make_row(job, i, starts, &source, leaf, mem);
             if let Some(p) = progress {
                 p.fetch_add(1, Ordering::Relaxed);
             }
-        }
-    };
-    let threads = job.threads.max(1).min(n.max(1));
-    if threads == 1 {
-        work();
-    } else {
-        std::thread::scope(|s| {
-            for _ in 0..threads {
-                s.spawn(work);
-            }
-        });
+            r
+        },
+        |_, r| {
+            rows.push(r);
+            Ok(true)
+        },
+    )
+    .expect("collecting rows cannot fail");
+    rows
+}
+
+/// Rows a unit of [`write_label_shard`]'s work makes by default: small enough that the last
+/// units leave no long tail on hundreds of threads (32 rows are about 10 ms of work), large
+/// enough that handing them over costs nothing.
+pub const CHUNK_ROWS: u64 = 32;
+
+/// Chunks queued for the writer thread before the hashing waits for the disk.
+const WRITE_QUEUE: usize = 64;
+
+/// A written shard: its rows, the SHA-256 of its bytes (lowercase hex), its rows' facts, and
+/// for a harvest the facts of the decisions its rows came from.
+#[derive(Clone, Debug)]
+pub struct ShardSummary {
+    /// Rows written.
+    pub rows: u64,
+    /// SHA-256 of every byte written (header and records), lowercase hex.
+    pub sha256: String,
+    /// The rows' facts.
+    pub counts: RowCounts,
+    /// Harvest decisions 0, 1, 2, … whose rows the shard holds (empty for other sources).
+    pub decisions: Vec<HarvestDecision>,
+    /// Time spent hashing (on the thread that puts the chunks in order), for the log.
+    pub hash_time: Duration,
+    /// Time spent writing (on the writer thread), for the log.
+    pub write_time: Duration,
+}
+
+/// Where a shard's bytes go, in order: into the SHA-256 here, and to the writer thread.
+struct ShardSink {
+    hash: Sha256,
+    tx: mpsc::SyncSender<Vec<u8>>,
+    bytes: u64,
+    hash_time: Duration,
+}
+
+impl ShardSink {
+    /// The next bytes of the shard.
+    fn put(&mut self, b: Vec<u8>) -> Result<(), String> {
+        let t = Instant::now();
+        self.hash.update(&b);
+        self.hash_time += t.elapsed();
+        self.bytes += b.len() as u64;
+        self.tx
+            .send(b)
+            .map_err(|_| "the shard's writer stopped".to_string())
     }
-    slots
-        .into_inner()
-        .unwrap_or_else(|e| e.into_inner())
-        .into_iter()
-        .map(|r| r.expect("every row made"))
-        .collect()
+}
+
+fn hex(d: &[u8]) -> String {
+    d.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Runs `fill` with a sink for the records of a shard of `rows` rows with `v` outcomes: the
+/// header, then what `fill` puts, goes in order to `out` on a writer thread (so a slow disk
+/// overlaps the hashing and the making of later rows) and into a SHA-256. Returns `fill`'s
+/// result, the SHA-256 (lowercase hex) of every byte written, and the time spent hashing and
+/// writing; an error writing comes first.
+fn stream_shard<W: Write + Send, R>(
+    out: &mut W,
+    rows: u64,
+    v: usize,
+    fill: impl FnOnce(&mut ShardSink) -> Result<R, String>,
+) -> Result<(R, String, Duration, Duration), String> {
+    let head = nn::shard::header(rows as usize, v);
+    let want = head.len() as u64 + rows * row_bytes_for(v) as u64;
+    std::thread::scope(|s| {
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(WRITE_QUEUE);
+        let writer = s.spawn(move || -> std::io::Result<Duration> {
+            let mut busy = Duration::ZERO;
+            for b in rx {
+                let t = Instant::now();
+                out.write_all(&b)?;
+                busy += t.elapsed();
+            }
+            let t = Instant::now();
+            out.flush()?;
+            Ok(busy + t.elapsed())
+        });
+        let mut sink = ShardSink {
+            hash: Sha256::new(),
+            tx,
+            bytes: 0,
+            hash_time: Duration::ZERO,
+        };
+        let r = sink.put(head).and_then(|()| fill(&mut sink));
+        let ShardSink {
+            hash,
+            tx,
+            bytes,
+            hash_time,
+        } = sink;
+        drop(tx);
+        let w = writer
+            .join()
+            .unwrap_or_else(|p| std::panic::resume_unwind(p));
+        let write_time = w.map_err(|e| format!("writing the shard: {e}"))?;
+        let r = r?;
+        if bytes != want {
+            return Err(format!(
+                "the shard has {bytes} bytes, but {rows} rows make {want}"
+            ));
+        }
+        Ok((r, hex(&hash.finalize()), hash_time, write_time))
+    })
+}
+
+/// A job's shard ([`nn::shard`]'s `.npy` bytes of [`label_rows`]) streamed to `out`: chunks of
+/// `chunk_rows` consecutive rows made on `job.threads` threads, hashed and written in row order
+/// as they come (module notes), so no more than a window of chunks is ever held. The same bytes,
+/// hash and counts for any thread count and chunk size.
+///
+/// # Panics
+/// As [`label_rows`].
+pub fn write_label_shard<W: Write + Send>(
+    job: &LabelJob,
+    starts: &[Vec<HandStartState>; 4],
+    leaf: &SharedLeaf,
+    progress: Option<&AtomicUsize>,
+    chunk_rows: u64,
+    out: &mut W,
+) -> Result<ShardSummary, String> {
+    check_label_job(job);
+    let (n, v) = (job.count, nn::outcome::vocab(job.trick));
+    let chunk = chunk_rows.max(1);
+    let source = BeliefSource::new();
+    let mut counts = RowCounts::default();
+    let ((), sha256, hash_time, write_time) = stream_shard(out, n, v, |sink| {
+        ordered(
+            job.threads,
+            Some(n.div_ceil(chunk)),
+            window_for(job.threads),
+            SolveMem::new,
+            |mem, c| {
+                let (lo, hi) = (c * chunk, ((c + 1) * chunk).min(n));
+                let mut bytes = Vec::with_capacity((hi - lo) as usize * row_bytes_for(v));
+                let mut cnt = RowCounts::default();
+                for i in lo..hi {
+                    let (row, info) = make_row(job, i, starts, &source, leaf, mem);
+                    assert_eq!(row.outcomes.len(), v, "every row has the trick's outcomes");
+                    row_bytes(&row, &mut bytes);
+                    cnt.add(&info);
+                }
+                if let Some(p) = progress {
+                    p.fetch_add((hi - lo) as usize, Ordering::Relaxed);
+                }
+                (bytes, cnt)
+            },
+            |_, (bytes, cnt)| {
+                counts.merge(&cnt);
+                sink.put(bytes)?;
+                Ok(true)
+            },
+        )
+    })?;
+    Ok(ShardSummary {
+        rows: n,
+        sha256,
+        counts,
+        decisions: Vec::new(),
+        hash_time,
+        write_time,
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -688,6 +914,50 @@ pub fn harvest_decision(
     }
 }
 
+fn check_harvest_job(job: &HarvestJob) {
+    assert_ne!(
+        job.seed, GOLDEN_SEED,
+        "seed 1 is the golden sets' seed: labels must use another"
+    );
+    assert!((2..=5).contains(&job.trick), "frontier tricks are 2..=5");
+    assert!(
+        !job.tricks.is_empty() && job.tricks.iter().all(|&t| (1..job.trick).contains(&t)),
+        "harvest decisions are at tricks 1..{} (before the frontier)",
+        job.trick
+    );
+    assert!(job.cap >= 1, "the cap per decision is at least 1");
+    assert!(!job.schedule.is_empty() && job.schedule.iter().all(|&p| p < 8));
+}
+
+/// Harvest decisions 0, 1, 2, … made on `job.threads` threads ([`harvest_decision`]) and handed
+/// to `take` in order with their rows (each worker with its own solver memory) until `take`
+/// returns `false` (decisions are claimed as workers come free, at most a window ahead of
+/// `take`: `crate::ordered`).
+fn harvest_decisions<T: Send>(
+    job: &HarvestJob,
+    starts: &[Vec<HandStartState>; 4],
+    leaf: &SharedLeaf,
+    progress: Option<&AtomicUsize>,
+    make: impl Fn(DecisionHarvest) -> T + Sync,
+    take: impl FnMut(u64, T) -> Result<bool, String>,
+) -> Result<(), String> {
+    let source = BeliefSource::new();
+    ordered(
+        job.threads,
+        None,
+        window_for(job.threads),
+        SolveMem::new,
+        |mem, j| {
+            let out = harvest_decision(job, j, starts, leaf, &source, mem);
+            if let Some(p) = progress {
+                p.fetch_add(out.rows.len(), Ordering::Relaxed);
+            }
+            make(out)
+        },
+        take,
+    )
+}
+
 /// The rows of a harvest run and the facts of the decisions they came from: decisions 0, 1, 2, …
 /// in order, each giving its rows ([`harvest_decision`]), until `job.count` rows (the last
 /// decision cut short). Decisions run on `job.threads` threads; the result is byte-identical for
@@ -702,86 +972,91 @@ pub fn harvest_rows(
     leaf: &SharedLeaf,
     progress: Option<&AtomicUsize>,
 ) -> (Vec<(Row, RowInfo)>, Vec<HarvestDecision>) {
-    assert_ne!(
-        job.seed, GOLDEN_SEED,
-        "seed 1 is the golden sets' seed: labels must use another"
-    );
-    assert!((2..=5).contains(&job.trick), "frontier tricks are 2..=5");
-    assert!(
-        !job.tricks.is_empty() && job.tricks.iter().all(|&t| (1..job.trick).contains(&t)),
-        "harvest decisions are at tricks 1..{} (before the frontier)",
-        job.trick
-    );
-    assert!(job.cap >= 1, "the cap per decision is at least 1");
-    assert!(!job.schedule.is_empty() && job.schedule.iter().all(|&p| p < 8));
-    struct Done {
-        /// Finished decisions' facts and rows (not their positions: a run holds only its rows).
-        outs: BTreeMap<u64, (HarvestDecision, Vec<(Row, RowInfo)>)>,
-        /// Decisions `0..prefix` are done, giving `prefix_rows` rows.
-        prefix: u64,
-        prefix_rows: u64,
-    }
-    let state = Mutex::new(Done {
-        outs: BTreeMap::new(),
-        prefix: 0,
-        prefix_rows: 0,
-    });
-    let next = std::sync::atomic::AtomicU64::new(0);
-    let source = BeliefSource::new();
-    let work = || {
-        let mut mem = SolveMem::new();
-        loop {
-            // Decisions are taken in increasing order: once the finished prefix has the rows,
-            // every decision the shard needs is done (a later one may still be running).
-            if state.lock().unwrap_or_else(|e| e.into_inner()).prefix_rows >= job.count {
-                break;
-            }
-            let j = next.fetch_add(1, Ordering::Relaxed);
-            let out = harvest_decision(job, j, starts, leaf, &source, &mut mem);
-            let got = out.rows.len();
-            let mut d = state.lock().unwrap_or_else(|e| e.into_inner());
-            d.outs.insert(j, (out.info, out.rows));
-            loop {
-                let p = d.prefix;
-                let Some(r) = d.outs.get(&p).map(|o| o.1.len() as u64) else {
-                    break;
-                };
-                d.prefix += 1;
-                d.prefix_rows += r;
-            }
-            drop(d);
-            if let Some(p) = progress {
-                p.fetch_add(got, Ordering::Relaxed);
-            }
-        }
-    };
-    let threads = job.threads.max(1);
-    if job.count > 0 {
-        if threads == 1 {
-            work();
-        } else {
-            std::thread::scope(|s| {
-                for _ in 0..threads {
-                    s.spawn(work);
-                }
-            });
-        }
-    }
-    let d = state.into_inner().unwrap_or_else(|e| e.into_inner());
+    check_harvest_job(job);
     let mut rows = Vec::with_capacity(job.count as usize);
     let mut decisions = Vec::new();
-    for (j, (mut info, mut got)) in d.outs {
-        if rows.len() as u64 >= job.count || j >= d.prefix {
-            break;
-        }
-        let keep = ((job.count - rows.len() as u64) as usize).min(got.len());
-        got.truncate(keep);
-        info.rows = keep as u32;
-        rows.extend(got);
-        decisions.push(info);
+    if job.count > 0 {
+        harvest_decisions(
+            job,
+            starts,
+            leaf,
+            progress,
+            |out| (out.info, out.rows),
+            |_, (mut info, mut got)| {
+                let keep = ((job.count - rows.len() as u64) as usize).min(got.len());
+                got.truncate(keep);
+                info.rows = keep as u32;
+                rows.extend(got);
+                decisions.push(info);
+                Ok((rows.len() as u64) < job.count)
+            },
+        )
+        .expect("collecting rows cannot fail");
     }
     debug_assert_eq!(rows.len() as u64, job.count);
     (rows, decisions)
+}
+
+/// A harvest run's shard ([`nn::shard`]'s `.npy` bytes of [`harvest_rows`]) streamed to `out`:
+/// each decision's rows hashed and written in decision order as they come (module notes). The
+/// same bytes, hash, counts and decisions as [`harvest_rows`] for any thread count.
+///
+/// # Panics
+/// As [`harvest_rows`].
+pub fn write_harvest_shard<W: Write + Send>(
+    job: &HarvestJob,
+    starts: &[Vec<HandStartState>; 4],
+    leaf: &SharedLeaf,
+    progress: Option<&AtomicUsize>,
+    out: &mut W,
+) -> Result<ShardSummary, String> {
+    check_harvest_job(job);
+    let v = nn::outcome::vocab(job.trick);
+    let rb = row_bytes_for(v);
+    let mut counts = RowCounts::default();
+    let mut decisions = Vec::new();
+    let mut left = job.count;
+    let ((), sha256, hash_time, write_time) = stream_shard(out, job.count, v, |sink| {
+        if left == 0 {
+            return Ok(());
+        }
+        harvest_decisions(
+            job,
+            starts,
+            leaf,
+            progress,
+            |out| {
+                let mut bytes = Vec::with_capacity(out.rows.len() * rb);
+                let mut infos = Vec::with_capacity(out.rows.len());
+                for (row, info) in &out.rows {
+                    assert_eq!(row.outcomes.len(), v, "every row has the trick's outcomes");
+                    row_bytes(row, &mut bytes);
+                    infos.push(*info);
+                }
+                (out.info, bytes, infos)
+            },
+            |_, (mut info, mut bytes, infos)| {
+                let keep = left.min(infos.len() as u64) as usize;
+                bytes.truncate(keep * rb);
+                for i in &infos[..keep] {
+                    counts.add(i);
+                }
+                info.rows = keep as u32;
+                decisions.push(info);
+                left -= keep as u64;
+                sink.put(bytes)?;
+                Ok(left > 0)
+            },
+        )
+    })?;
+    Ok(ShardSummary {
+        rows: job.count,
+        sha256,
+        counts,
+        decisions,
+        hash_time,
+        write_time,
+    })
 }
 
 #[cfg(test)]
@@ -1105,6 +1380,160 @@ mod tests {
         assert_eq!(want, ra);
         let empty = HarvestJob { count: 0, ..job(2) };
         assert!(harvest_rows(&empty, &starts, &*l, None).0.is_empty());
+    }
+
+    fn counts_of(rows: &[(Row, RowInfo)]) -> RowCounts {
+        let mut c = RowCounts::default();
+        for (_, i) in rows {
+            c.add(i);
+        }
+        c
+    }
+
+    /// The streamed shard is exactly `to_npy` of the rows, whatever the thread count and chunk
+    /// size (dividing the row count or not, larger than it, one row), with the SHA-256 of its
+    /// bytes and the rows' counts; written to a file, the file hashes to the summary's SHA-256.
+    #[test]
+    fn streamed_shards_are_the_rows_bytes() {
+        let starts = collect_starts(400, 9);
+        let l = leaf();
+        for (trick, source, count) in [(4, Source::Random, 23), (5, Source::Rules, 16)] {
+            let job = |threads| LabelJob {
+                trick,
+                count,
+                seed: 11,
+                source,
+                threads,
+            };
+            let rows = label_rows(&job(1), &starts, &*l, None);
+            let want = nn::shard::to_npy(
+                &rows.iter().map(|r| r.0.clone()).collect::<Vec<_>>(),
+                nn::outcome::vocab(trick),
+            );
+            let sha = equity::sha256::sha256_hex(&want);
+            for threads in [1, 4] {
+                for chunk in [1, 4, 8, 16, 23, 50] {
+                    let mut out = Vec::new();
+                    let done = AtomicUsize::new(0);
+                    let sum = write_label_shard(
+                        &job(threads),
+                        &starts,
+                        &*l,
+                        Some(&done),
+                        chunk,
+                        &mut out,
+                    )
+                    .expect("written");
+                    assert!(
+                        out == want,
+                        "{source:?} {threads} threads, chunks of {chunk}"
+                    );
+                    assert_eq!(sum.sha256, sha);
+                    assert_eq!(sum.rows, count);
+                    assert_eq!(sum.counts, counts_of(&rows));
+                    assert!(sum.decisions.is_empty());
+                    assert_eq!(done.load(Ordering::Relaxed) as u64, count);
+                }
+            }
+            let path = std::env::temp_dir()
+                .join(format!("oracle-labels-{}-{trick}.npy", std::process::id()));
+            let mut f = std::fs::File::create(&path).expect("create");
+            let sum = write_label_shard(&job(3), &starts, &*l, None, 5, &mut f).expect("written");
+            drop(f);
+            let bytes = std::fs::read(&path).expect("read");
+            let _ = std::fs::remove_file(&path);
+            assert!(bytes == want);
+            assert_eq!(sum.sha256, equity::sha256::sha256_hex(&bytes));
+        }
+        // No rows: the header alone.
+        let empty = LabelJob {
+            trick: 4,
+            count: 0,
+            seed: 11,
+            source: Source::Random,
+            threads: 4,
+        };
+        let mut out = Vec::new();
+        let sum = write_label_shard(&empty, &starts, &*l, None, 8, &mut out).expect("written");
+        assert_eq!(out, nn::shard::to_npy(&[], nn::outcome::vocab(4)));
+        assert_eq!((sum.rows, sum.counts), (0, RowCounts::default()));
+    }
+
+    /// A writer that fails after some bytes.
+    struct Failing(usize);
+
+    impl Write for Failing {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            if self.0 < b.len() {
+                return Err(std::io::Error::other("disk full"));
+            }
+            self.0 -= b.len();
+            Ok(b.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A failing disk ends the run with its error (no hang, whatever the thread count).
+    #[test]
+    fn a_write_error_stops_the_run() {
+        let starts = collect_starts(400, 9);
+        let l = leaf();
+        for threads in [1, 4] {
+            let job = LabelJob {
+                trick: 5,
+                count: 40,
+                seed: 11,
+                source: Source::Rules,
+                threads,
+            };
+            let e = write_label_shard(&job, &starts, &*l, None, 2, &mut Failing(5000))
+                .expect_err("the disk fails");
+            assert!(e.contains("disk full"), "{e}");
+            let h = HarvestJob {
+                count: 30,
+                threads,
+                ..harvest_job(5, vec![4], [1; 8], 4)
+            };
+            let e = write_harvest_shard(&h, &starts, &*l, None, &mut Failing(3000))
+                .expect_err("the disk fails");
+            assert!(e.contains("disk full"), "{e}");
+        }
+    }
+
+    /// The streamed harvest shard is exactly `to_npy` of [`harvest_rows`], with the same
+    /// decisions' facts, on 1 and 4 threads.
+    #[test]
+    fn streamed_harvest_shards_are_the_rows_bytes() {
+        let starts = collect_starts(400, 9);
+        let l = leaf();
+        let job = |threads, count| HarvestJob {
+            count,
+            threads,
+            ..harvest_job(4, vec![3], [1; 8], 5)
+        };
+        let (rows, ds) = harvest_rows(&job(1, 41), &starts, &*l, None);
+        let want = nn::shard::to_npy(
+            &rows.iter().map(|r| r.0.clone()).collect::<Vec<_>>(),
+            nn::outcome::vocab(4),
+        );
+        let facts = |d: &[HarvestDecision]| serde_json::to_string(d).expect("json");
+        for threads in [1, 4] {
+            let mut out = Vec::new();
+            let sum = write_harvest_shard(&job(threads, 41), &starts, &*l, None, &mut out)
+                .expect("written");
+            assert!(out == want, "{threads} threads");
+            assert_eq!(sum.sha256, equity::sha256::sha256_hex(&want));
+            assert_eq!(facts(&sum.decisions), facts(&ds));
+            assert_eq!(sum.counts, counts_of(&rows));
+            assert_eq!(sum.rows, 41);
+        }
+        let mut out = Vec::new();
+        let sum = write_harvest_shard(&job(4, 0), &starts, &*l, None, &mut out).expect("written");
+        assert_eq!(out, nn::shard::to_npy(&[], nn::outcome::vocab(4)));
+        assert!(sum.decisions.is_empty());
     }
 
     #[test]

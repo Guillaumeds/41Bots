@@ -69,7 +69,9 @@ pub fn descr(v: usize) -> String {
     )
 }
 
-fn header(n: usize, v: usize) -> Vec<u8> {
+/// The `.npy` header of a shard of `n` rows with `v` outcomes (what [`to_npy`] writes before the
+/// records), for writers that stream the records after it.
+pub fn header(n: usize, v: usize) -> Vec<u8> {
     let mut h = format!(
         "{{'descr': {}, 'fortran_order': False, 'shape': ({n},), }}",
         descr(v)

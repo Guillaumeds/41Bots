@@ -32,6 +32,7 @@ pub mod eta;
 pub mod hybrid;
 pub mod measure;
 pub mod oracle_labels;
+pub mod ordered;
 pub mod pimc;
 pub mod plan;
 pub mod t1bench;

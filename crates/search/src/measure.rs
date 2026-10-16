@@ -90,6 +90,61 @@ pub fn collect_starts(hands: u64, seed: u64) -> [Vec<HandStartState>; 4] {
     out
 }
 
+/// The hand starts of self-play match `k` of [`collect_starts`] (seed `seed`), in visit order,
+/// to the end of the match.
+fn match_starts(seed: u64, k: u64) -> Vec<HandStartState> {
+    let mut m = Match::new(
+        Rng::derive(seed, &[labels::STRATUM, k]).next_u64(),
+        Rules::HOUSE,
+    );
+    let mut out = Vec::new();
+    let mut last = u32::MAX;
+    while m.phase() != Phase::MatchOver {
+        if m.hand_index() != last {
+            last = m.hand_index();
+            out.push(m.current_hand_start());
+        }
+        let seat = m.to_act().expect("to act");
+        let legal = m.legal_actions();
+        let a = bots::decide(&m.view(seat), &Rules::HOUSE, &legal).0;
+        m.apply(a).expect("legal");
+    }
+    out
+}
+
+/// [`collect_starts`] with its self-play matches played on `threads` threads (each match on
+/// one thread, taken in match order: `crate::ordered`): exactly the same states, in the same
+/// order, for any thread count (the matches are independent, and the hand starts are those of
+/// matches 0, 1, 2, … one after another, cut at `hands`).
+pub fn collect_starts_with(hands: u64, seed: u64, threads: usize) -> [Vec<HandStartState>; 4] {
+    if threads <= 1 {
+        return collect_starts(hands, seed);
+    }
+    let mut out: [Vec<HandStartState>; 4] = Default::default();
+    let mut n = 0u64;
+    if hands > 0 {
+        crate::ordered::ordered(
+            threads,
+            None,
+            crate::ordered::window_for(threads),
+            || (),
+            |_, k| match_starts(seed, k),
+            |_, starts| {
+                for s in starts {
+                    if n == hands {
+                        break;
+                    }
+                    out[usize::from(stratum_of(&s) - 1)].push(s);
+                    n += 1;
+                }
+                Ok(n < hands)
+            },
+        )
+        .expect("collecting cannot fail");
+    }
+    out
+}
+
 /// One decision of a measurement set.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecisionSpec {
@@ -2269,6 +2324,23 @@ mod tests {
                 1 + u128::from(s.scores[t]) + 40 * u128::from(s.games[t])
             }))
         }))
+    }
+
+    /// The start states played on several threads are exactly the sequential ones, in order,
+    /// for counts that end inside a match and at none.
+    #[test]
+    fn start_states_are_thread_independent() {
+        for (hands, seed) in [(0, 3), (1, 3), (37, 3), (400, 5), (1000, 2)] {
+            let want = collect_starts(hands, seed);
+            assert_eq!(want.iter().map(Vec::len).sum::<usize>() as u64, hands);
+            for threads in [2, 3, 4] {
+                assert_eq!(
+                    collect_starts_with(hands, seed, threads),
+                    want,
+                    "{hands} hands, seed {seed}, {threads} threads"
+                );
+            }
+        }
     }
 
     /// A small mixed set: exact-cheap trick-4 decisions and trick-3 ones (ids kept distinct).

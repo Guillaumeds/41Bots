@@ -31,7 +31,10 @@ GPU path existed (same networks, byte for byte).
 
 Data: the training shards are read memory-mapped and converted a block of rows at a time into
 one compact array per input (``compact``: 847 bytes a row at trick 4; the full record array is
-never held in memory). Each batch is expanded to the network's inputs (``expand``) on the
+never held in memory). The blocks are checked (``check_shards``) and converted (``load_compact``)
+on ``--load-threads`` threads (numpy lets other threads run while it works on a block; each block
+fills its own rows), and the shards' SHA-256 are computed on threads of their own meanwhile: the
+same arrays, checks and hashes as one thread gives. Each batch is expanded to the network's inputs (``expand``) on the
 training device; the batches are exactly those of the former full-width columns (tested).
 ``--feed`` (class ``Feed``): ``resident`` keeps the compact rows in the device's memory and
 gathers each batch there, so within an epoch the host only queues GPU work and never waits for
@@ -75,6 +78,7 @@ import json
 import math
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import torch
@@ -86,10 +90,11 @@ from .formats import (
     N_DENSE,
     ONE,
     PAD,
-    check_values,
+    VALUE_FAULTS,
     load_shard,
     mask_bits,
     sha256_file,
+    value_fault,
     write_safetensors,
 )
 from .device import deterministic, facts_base, probe
@@ -163,20 +168,77 @@ def compact(a):
     return act.view(np.int16), dense, tgt, lab, mask, vecs
 
 
-def load_compact(shards, block=1 << 18):
+# Rows a block of the loading steps: small enough that a block's temporary arrays (about 50 MB)
+# are reused rather than mapped afresh, and that many threads share the work evenly.
+LOAD_BLOCK = 1 << 15
+
+
+def load_threads_default():
+    """Threads for loading: the usable CPUs, at most 32 (the loading is bound by memory long
+    before, and each thread holds a block's temporaries)."""
+    n = os.process_cpu_count() if hasattr(os, "process_cpu_count") else os.cpu_count()
+    return max(1, min(n or 1, 32))
+
+
+def on_threads(fn, jobs, threads):
+    """``fn`` of every job, on ``threads`` threads (in order on one); the results in job order. An
+    exception in a job is raised here."""
+    if threads <= 1 or len(jobs) <= 1:
+        return [fn(j) for j in jobs]
+    with ThreadPoolExecutor(min(threads, len(jobs))) as ex:
+        return list(ex.map(fn, jobs))
+
+
+def row_blocks(shards, block):
+    """(shard index, first row, rows before the shard) of every block of ``block`` rows, shard by
+    shard."""
+    out = []
+    before = 0
+    for k, s in enumerate(shards):
+        out += [(k, j, before) for j in range(0, len(s), block)]
+        before += len(s)
+    return out
+
+
+def check_shards(shards, block=LOAD_BLOCK, threads=1):
+    """``check_values`` of each shard in turn (raising the error it raises first, from the first
+    shard that has one) and the set of tricks the shards hold, worked out a block of rows at a
+    time on ``threads`` threads."""
+
+    def one(job):
+        k, j, _ = job
+        a = shards[k][j : j + block]
+        return value_fault(a), set(np.unique(a["trick"]).tolist())
+
+    jobs = row_blocks(shards, block)
+    res = on_threads(one, jobs, threads)
+    for k in range(len(shards)):
+        faults = [f for (kk, _, _), (f, _) in zip(jobs, res) if kk == k and f is not None]
+        if faults:
+            raise ValueError(VALUE_FAULTS[min(faults)])
+    tricks = set()
+    for _, t in res:
+        tricks |= t
+    return tricks
+
+
+def load_compact(shards, block=LOAD_BLOCK, threads=1):
     """``compact`` of the shards one after another (as of one concatenated array), built a block
     of rows at a time from the memory-mapped shards (the full record array is never held in
-    memory), as numpy arrays: 847 bytes a row at trick 4 (``columns`` takes 1430)."""
+    memory) on ``threads`` threads, each block into its own rows, as numpy arrays: 847 bytes a row
+    at trick 4 (``columns`` takes 1430). The same arrays for any block size and thread count."""
     n = sum(len(s) for s in shards)
     first = compact(shards[0][:1])
     out = [np.empty((n,) + c.shape[1:], dtype=c.dtype) for c in first]
-    i = 0
-    for s in shards:
-        for j in range(0, len(s), block):
-            part = compact(s[j : j + block])
-            for o, p in zip(out, part):
-                o[i : i + len(p)] = p
-            i += len(part[0])
+
+    def fill(job):
+        k, j, before = job
+        part = compact(shards[k][j : j + block])
+        at = before + j
+        for o, p in zip(out, part):
+            o[at : at + len(p)] = p
+
+    on_threads(fill, row_blocks(shards, block), threads)
     return out
 
 
@@ -656,6 +718,8 @@ def main(argv=None):
     ap.add_argument("--patience", type=int, default=4)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--threads", type=int, default=4)
+    ap.add_argument("--load-threads", type=int, default=0,
+                    help="threads that check and convert the shards (0: the usable CPUs, at most 32)")
     ap.add_argument("--max-minutes", type=float, default=0.0, help="stop training after this long (0 = no limit)")
     ap.add_argument("--int-eval-rows", type=int, default=20000, help="validation rows for the integer network")
     ap.add_argument("--device", choices=["cpu", "cuda", "auto"], default="cpu",
@@ -696,21 +760,21 @@ def main(argv=None):
     progress = Progress(args.progress, t0, facts["device"])
     progress(step="load")
 
+    load_threads = args.load_threads if args.load_threads > 0 else load_threads_default()
     shards = [load_shard(p) for p in args.train]
     val = np.asarray(load_shard(args.val))
-    for sh in shards:
-        check_values(sh)
-    check_values(val)
-    tricks = set(np.unique(val["trick"]).tolist())
-    for sh in shards:
-        tricks |= set(np.unique(sh["trick"]).tolist())
+    # The files' SHA-256 (for the report and the network's metadata), each on a thread of its own
+    # while the rows are checked and converted (hashlib lets other threads run as it hashes).
+    hashing = ThreadPoolExecutor(len(args.train) + 1)
+    train_sha = [hashing.submit(sha256_file, p) for p in args.train]
+    val_sha = hashing.submit(sha256_file, args.val)
+    tricks = check_shards(shards + [val], threads=load_threads)
     if len(tricks) != 1:
         raise SystemExit(f"shards hold tricks {sorted(tricks)}: one frontier trick per network")
     trick = tricks.pop()
     v = shards[0].dtype["outcomes"].shape[0]
     n_out = v if args.head == "outcome" else 4
     head_name = "outcome-v1" if args.head == "outcome" else "money4"
-    hashes = {"train": [sha256_file(p) for p in args.train], "val": sha256_file(args.val)}
     n = sum(len(sh) for sh in shards)
     print(
         f"train {n} rows, val {len(val)} rows, trick {trick}, head {head_name} "
@@ -718,8 +782,10 @@ def main(argv=None):
         flush=True,
     )
 
-    comp = load_compact(shards)
+    comp = load_compact(shards, threads=load_threads)
     del shards
+    hashes = {"train": [f.result() for f in train_sha], "val": val_sha.result()}
+    hashing.shutdown()
     va = tensors(val)
     feed = Feed(comp, device, args.batch, args.feed)
     del comp

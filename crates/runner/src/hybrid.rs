@@ -48,7 +48,8 @@
 //!    hashed (it must match its sidecar) and uploaded content-addressed to `inputs/sha256/<hex>`
 //!    (skipped when already there; checked by size), and `out/hybrid/shards.json` lists them in
 //!    the form a format-2 manifest's `inputs` takes.
-//! 5. **Golden set** (`search decisions --allow-uneven`, then `search worlds --method exact`):
+//! 5. **Golden set** (`search decisions --allow-uneven`, its start states on all usable threads,
+//!    then `search worlds --method exact`):
 //!    `golden_count` decisions at trick `golden_trick` (seed `golden_seed`), `golden_worlds`
 //!    worlds each, valued exactly; `out/hybrid/decisions-t<G>.jsonl`, `exact-t<G>-n<W>.jsonl`.
 //! 6. **Training** (`python -m fortyone_nn.train`, which also quantises the network and measures
@@ -63,9 +64,10 @@
 //! CPU use: every step sets `partial_cpu_ok`, so the launcher's low-CPU rule (85% for 5 minutes)
 //! does not apply to this kind. The long stretches leave the CPU idle by design (the download of
 //! the environment, and the training on the GPU, where the CPU only feeds it), and on hundreds of
-//! threads the CPU steps finish in seconds to a minute, mostly in their serial parts (start
-//! states, writing gigabytes of shards), so their heartbeats read low too: the rule would stop a
-//! healthy run. Instead the steps that could hang are time-limited (killed, and the chunk fails):
+//! threads the CPU steps finish in seconds to a minute, partly in serial parts (loading the
+//! table, the last rows of a shard; the shards are hashed and written while their rows are made,
+//! and the start states are played on every thread), so their heartbeats can read low too: the
+//! rule would stop a healthy run. Instead the steps that could hang are time-limited (killed, and the chunk fails):
 //! each `uv sync` attempt 30 minutes, the GPU check 10 minutes, the training `max_minutes` plus
 //! 30 minutes; the run's dollar cap bounds everything.
 //!
@@ -994,6 +996,7 @@ impl Rung<'_> {
         c.args(["decisions", "--trick", &g.to_string()])
             .args(["--count", &self.p.golden_count.to_string()])
             .args(["--seed", &seed.to_string(), "--allow-uneven"])
+            .args(["--threads", &self.threads().to_string()])
             .args(["--start-hands", &self.p.start_hands.to_string(), "--out"])
             .arg(&decisions);
         self.ctx.run_child(c, "hybrid/golden.log")?;

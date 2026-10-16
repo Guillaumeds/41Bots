@@ -356,7 +356,8 @@ pub(crate) fn other_bytes(equity: &Path, threads: u64) -> u64 {
 ///   its tables at the size its own plan will choose on this machine, plus its other memory;
 /// - `search_measure` with `"auto"` anywhere, `solver_spike` and `t1bench`: the whole budget
 ///   (they size their tables to the machine), so they never run beside another such chunk; and
-///   `hybrid_rung` (millions of label rows in memory, then the trainer's arrays);
+///   `hybrid_rung` (the trainer's arrays of millions of label rows; the label shards themselves
+///   are streamed to disk);
 /// - every other kind: 0 (small, as before).
 pub(crate) fn chunk_need(
     kind: &str,

@@ -67,21 +67,40 @@ def mask_bits(mask, v):
     return ((m[:, None] >> np.arange(v, dtype=np.uint64)[None, :]) & np.uint64(1)).astype(bool)
 
 
-def check_values(a):
-    """Targets sum to 2^32, and every row's label is a possible outcome whose money vector is
-    exactly the target (the outcome vocabulary's completeness, spec 6a)."""
+# What ``check_values`` checks, in its order.
+VALUE_FAULTS = (
+    "a target that does not sum to 2^32",
+    "a label outside the vocabulary",
+    "a label that is not a possible outcome",
+    "a label whose money vector is not the target",
+)
+
+
+def value_fault(a):
+    """The first of ``check_values``' checks (an index into ``VALUE_FAULTS``) that rows ``a`` fail,
+    or None. Every check is row by row, so the first fault of a whole array is the smallest of its
+    blocks' first faults."""
     s = a["value"].astype(np.uint64).sum(axis=1, dtype=np.uint64)
     if not np.all(s == np.uint64(ONE)):
-        raise ValueError("a target that does not sum to 2^32")
+        return 0
     v = a["outcomes"].shape[1]
     lab = np.asarray(a["label"]).astype(np.int64)
     if np.any(lab >= v):
-        raise ValueError("a label outside the vocabulary")
+        return 1
     rows = np.arange(len(a))
     if not np.all(mask_bits(a["mask"], v)[rows, lab]):
-        raise ValueError("a label that is not a possible outcome")
+        return 2
     if not np.array_equal(np.asarray(a["outcomes"])[rows, lab], np.asarray(a["value"])):
-        raise ValueError("a label whose money vector is not the target")
+        return 3
+    return None
+
+
+def check_values(a):
+    """Targets sum to 2^32, and every row's label is a possible outcome whose money vector is
+    exactly the target (the outcome vocabulary's completeness, spec 6a)."""
+    f = value_fault(a)
+    if f is not None:
+        raise ValueError(VALUE_FAULTS[f])
 
 
 _DTYPES = {"I32": "<i4", "I64": "<i8", "F32": "<f4"}

@@ -522,6 +522,7 @@ dependencies = [
  "nn",
  "serde",
  "serde_json",
+ "sha2",
  "solver",
 ]
 

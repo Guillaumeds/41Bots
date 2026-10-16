@@ -7,7 +7,10 @@ also run: the CUDA-graph step against the eager step, and training on the GPU ag
 - the GPU check's architecture rule (``arch_supported``) and its CPU answer without a GPU;
 - the compact training columns built a block at a time from memory-mapped shards, expanded,
   equal the full-width columns of the concatenated record array (the trainer's former way), for
-  any block size, and an active index that is neither a feature nor the padding is refused;
+  any block size and number of threads, and an active index that is neither a feature nor the
+  padding is refused;
+- the shards checked a block at a time on threads give ``check_values``' verdict on each shard
+  in turn (the same first error, from the first shard that has one) and the tricks they hold;
 - the feed gives exactly the former batches (the same indices and tensors, in order, for a seed,
   over two epochs), both resident and staged;
 - training on the CPU is bit-for-bit repeatable, ``--device auto`` without a usable GPU,
@@ -44,7 +47,9 @@ except ImportError:  # the numpy-only CI job
     raise unittest.SkipTest("PyTorch is not installed") from None
 
 from fortyone_nn import device, train
-from fortyone_nn.formats import MAX_ACTIVE, N_BINARY, N_DENSE, ONE, PAD, VOCAB, load_shard, shard_dtype, sha256_file
+from fortyone_nn.formats import (
+    MAX_ACTIVE, N_BINARY, N_DENSE, ONE, PAD, VOCAB, check_values, load_shard, shard_dtype, sha256_file,
+)
 
 
 def synthetic_shard(path, rows, seed, trick=4):
@@ -115,19 +120,62 @@ class TrainTest(unittest.TestCase):
 
     def test_compact_columns_by_blocks_expand_to_the_concatenation(self):
         whole = self.whole()
-        for block in (7, 300, 1 << 18):
-            comp = train.load_compact([load_shard(p) for p in self.train], block=block)
+        for block, threads in ((7, 1), (7, 4), (300, 1), (300, 3), (64, 8), (1 << 15, 2), (1 << 18, 1)):
+            comp = train.load_compact([load_shard(p) for p in self.train], block=block, threads=threads)
             self.assertLess(sum(c.nbytes for c in comp), 0.6 * sum(x.numel() * x.element_size() for x in whole))
             got = train.expand(*(torch.from_numpy(c) for c in comp))
             for x, y in zip(whole, got):
                 self.assertEqual((x.dtype, x.shape), (y.dtype, y.shape))
-                self.assertTrue(torch.equal(x, y), block)
+                self.assertTrue(torch.equal(x, y), (block, threads))
         idx = whole[0]
         self.assertEqual(int(idx.max()), N_BINARY, "padding becomes the zero row")
         bad = np.asarray(load_shard(self.train[0]))[:5].copy()
         bad["active"][3, 0] = N_BINARY
         with self.assertRaises(ValueError):
             train.compact(bad)
+        shards = [load_shard(self.train[0]), bad]
+        for threads in (1, 3):
+            with self.assertRaises(ValueError):
+                train.load_compact(shards, block=2, threads=threads)
+
+    def test_checked_shards_by_blocks_give_check_values_verdicts(self):
+        good = [np.asarray(load_shard(p)) for p in self.train]
+        for block, threads in ((1 << 15, 1), (7, 1), (7, 4), (64, 3)):
+            self.assertEqual(train.check_shards(good, block=block, threads=threads), {4})
+        mixed = [good[0], good[1].copy()]
+        mixed[1]["trick"][5] = 3
+        self.assertEqual(train.check_shards(mixed, block=50, threads=2), {3, 4})
+
+        # Faults placed in different blocks: the verdict is check_values' on the whole shard.
+        for rows_at, faults in (([3], [2]), ([3, 250], [3, 0]), ([10, 400], [1, 2]), ([100, 600], [2, 1])):
+            a = good[0][:700].copy()
+            v = a["outcomes"].shape[1]
+            for i, f in zip(rows_at, faults):
+                if f == 0:
+                    a["value"][i, 0] += np.uint64(1)
+                elif f == 1:
+                    a["label"][i] = v
+                elif f == 2:
+                    a["mask"][i] &= ~(np.uint64(1) << np.uint64(int(a["label"][i])))
+                else:
+                    a["label"][i] = (int(a["label"][i]) + 1) % v
+            with self.assertRaises(ValueError) as want:
+                check_values(a)
+            for block, threads in ((1 << 15, 1), (64, 1), (64, 4), (7, 3)):
+                for shards in ([a], [good[1], a], [a, good[1]]):
+                    with self.assertRaises(ValueError) as got:
+                        train.check_shards(shards, block=block, threads=threads)
+                    self.assertEqual(str(got.exception), str(want.exception), (rows_at, faults, block, threads))
+        # The first shard with a fault gives the error.
+        b = good[1].copy()
+        b["value"][0, 0] += np.uint64(1)
+        c = good[0].copy()
+        c["label"][699] = c["outcomes"].shape[1]
+        for threads in (1, 4):
+            with self.assertRaisesRegex(ValueError, "outside the vocabulary"):
+                train.check_shards([c, b], block=64, threads=threads)
+            with self.assertRaisesRegex(ValueError, "sum to 2"):
+                train.check_shards([b, c], block=64, threads=threads)
 
     def test_feed_gives_the_former_batches(self):
         whole = self.whole()
