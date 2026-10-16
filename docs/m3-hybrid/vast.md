@@ -27,8 +27,14 @@ binaries → Run workflow, branch `m3-hybrid-vtrain`). The bundle it uploads now
 training code (`python/nn`: its source, `pyproject.toml`, `uv.lock`) and `uv` 0.13.0 (PLAN §11.2,
 checked against its published SHA-256), all hash-checked by the boot script.
 
-The image does not change: `ghcr.io/guillaumeds/41bots-base:20261015-0a4f3e598996` (built at
-0a4f3e5; `deploy/docker` has not changed since). Its `nvidia/cuda:12.6.3-base` base is enough:
+The image changes (owner, 2026-10-16): it now carries `uv` 0.13.0 (checksum-verified) and a uv cache
+with Python 3.14 and the whole cu126 group of `python/nn/uv.lock` (torch 2.14.1+cu126, by hash)
+already in it, so `uv sync --locked` on the machine installs from disk in seconds instead of
+downloading about 3.7 GB (`UV_CACHE_DIR` and `UV_PYTHON_INSTALL_DIR` are fixed in the image's ENV).
+If the lock used by a run differs from the one baked in, uv downloads only what differs; the run
+still works. Rebuild the image (Actions → image) whenever `python/nn/uv.lock` changes. Image tag:
+IMAGE_TAG_PLACEHOLDER. Expected size: about 6-7 GB compressed (the old image was under 1 GB); the
+vast.ai pull is not billed. Its `nvidia/cuda:12.6.3-base` base is enough:
 the PyTorch cu126 packages bring their own CUDA libraries (cuBLAS, cuDNN and the rest, about 3.7 GB
 downloaded per run), and only the GPU driver comes from the host, which the launcher's filter
 `cuda_vers>=12.6` guarantees is new enough. `uv` installs Python 3.14 and the packages as the
@@ -45,7 +51,7 @@ would rent), then without:
 | input | smoke run | full run |
 |---|---|---|
 | manifest | `docs/vast/m3-hybrid-smoke.manifest.json` | `docs/vast/m3-hybrid-rung1b.manifest.json` |
-| image | `ghcr.io/guillaumeds/41bots-base:20261015-0a4f3e598996` | same |
+| image | IMAGE_TAG_PLACEHOLDER | same |
 | bin_sha | the branch commit released above | same |
 | max_dollars | 2 | 6 |
 | offer_id | the offer the owner picked (or blank: the search) | same |

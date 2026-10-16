@@ -1,0 +1,4 @@
+*
+!deploy/docker/boot.sh
+!python/nn/pyproject.toml
+!python/nn/uv.lock
