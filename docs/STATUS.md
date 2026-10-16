@@ -198,3 +198,42 @@ Owner request: a database of every machine we rent with its real cost per 10^12 
 - **Backfill run and committed:** 18 past runs (the four killed trick-1 runs b2/a7/b3/b, t2d/t3/t4c, and eleven `t1bench-*` runs) now have records in R2 under `machines/`, copied to `docs/vast/measured-machines.json`, and summarised in `docs/VAST-MACHINES.md` ("Measured on our runs"). The t1bench records are measured (their results' node totals); the older `search_measure` runs recorded no node counts, so their nodes are estimated from the worlds' thread-seconds and the measured thread speed of the CPU model (marked `~`, left out of the measured means). Run `m3-agree-t1-ab1` (in progress on the old binary) has no record.
 - **Checks:** fmt, clippy -D warnings, `cargo test --workspace` green (runner +2 tally tests); launcher 37 + cleanup 19 + tools 21 Python tests; a local `search_measure` chunk (trick 3, 32 decisions × 48 worlds, `RUNNER_REMOTE_DIR`) wrote the running record, then the final one (two history copies), with `nodes_total` 4.87e7, 1,536 worlds and the cost per node in its heartbeats and log lines.
 - **Caveat for readers:** early figures read high because the hardest deals run first; a run killed early keeps that figure. Short runs are dominated by boot and setup (m3-agree-t4c: 3 minutes, $0.07, about 4e7 nodes).
+
+## 2026-10-15/16 (Mauritius night): exact robber burn, five adversarial reviews, new runs (branch `p3-burn`, pushed as `origin/m3-pimc`)
+**Who builds what (owner, 2026-10-16, now in CLAUDE.md):** Fable 5.1 reviews, specifies and owns quality; Opus does the difficult builds (solver, search, anything touching correctness); Sonnet does the basic builds (scripts, docs, small fixes, tooling).
+
+**Phase 3, exact robber burn, landed** (commits 13d3858 and 65b6a96, built by Opus, then reviewed). Another seat's rob burn is now searched inside the exact solve [its team picks the burn that is best for it] instead of being fixed in the world. Another seat robs in about 74% of sampled trick-1 worlds (count 32, seed 1, 4,000 worlds) and 65% with count 128, so this matters for most trick-1 values. The review found a wrong-answer bug, fixed in 7253b48: the turned card of a pending rob is still live (someone else can play it) until the burn is made.
+
+**Five independent adversarial reviews** (A solver; B equity leaf and scoring; C PIMC and measurement; D engine rules and reference; E runner and cost safety), all merged into `m3-pimc` (commits 52c0253, a00d46d, 0c39384, bd1edb7, 64738d4, d2b7407, 7ec127b, c65a130, 4c58c06, 3e2dedc; merges c7aa75c, f40f7d8, 0a4f3e5). Every finding below was fixed with a test that failed before the fix.
+- **Solver (A): wrong values.** Merging equivalent cards ignored the tie order: cards of one hand on either side of another card of that hand were merged, so values were wrong for other teams and sometimes the mover's own team. The fix cuts a group at any card of the hand standing between; about 3% more solver nodes.
+- **Yardstick records (C).** Records and checkpoints now carry `VALUES_VERSION` (= 2, M3-SPEC §13.1 item 12). Records valued by another code version are refused on resume, extend or join, and records without a fingerprint cannot be joined with ones that have it. **Every worlds file made before 2026-10-15 cannot be extended by the new binaries** (their values differ: burn rule and merge fix).
+- **Decision sets (C)** no longer draw the play straight after a seat's own rob burn (the bot decides burn and first card together); about 40% of the robber decisions drawn before were these. Sets rebuilt with the same seed differ from old ones; fingerprints keep them apart.
+- **Rollout leaf (B):** the match winner is read from games won, not from money (it was wrong only with a stake of 0).
+- **Engine (D):** hand-start states refuse the unreachable scores 1 and 6.
+- **Runner, launcher, cleanup (E):**
+  - No default time limit (`max_minutes` 0) and a $20 default dollar cap.
+  - A replacement machine is not stopped by its predecessor's STOP.
+  - The busy threshold for a silent machine follows `low_cpu_pct`, so low-CPU runs are not destroyed as idle.
+  - A failed done-list write no longer ends a format-2 run; failed final uploads no longer self-destroy (format 1).
+  - A failed create that appears late is adopted, not rented twice.
+  - Cleanup keeps "offline" machines that still heartbeat and never closes a handed-over run on an incomplete listing.
+  - `--offer-id` checks RAM and cores; a hung `vastai` call times out at 180 s.
+  - Unknown stream keys in a format-2 manifest are refused by the runner and the launcher (a stream-level `threads` was silently ignored before).
+  - Format-2 chunks run together only when their tables fit in memory (else lower priorities wait).
+  - `boot.sh` writes FAILED when the runner refuses a manifest. Image rebuilt: `ghcr.io/guillaumeds/41bots-base:20261015-0a4f3e598996`.
+  - The `cleanup.py` changes are also on main (8f2b903).
+- **Found sound, with evidence:** every numbered rule and H rule has a direct test; 150,000 differential matches (65M actions) with zero disagreements; hand scoring recomputed by hand over about 3M cases; the equity table's index and rotation recomputed by independent recursion; the table rebuild is byte-identical on 1 and 4 threads; world sampling matches an exact counter (6,510 card-by-place checks) and the rejection sampler; outputs are byte-identical across threads and chunking; no floats or iterated HashMaps in value paths; RNG golden vectors match.
+
+**Open items from the reviews (not done):**
+- A format-2 run cannot be continued under its own run id after FAILED or out-of-memory. The golden run should use format 1 with `resume_from`, or a "continue" mode must be built.
+- No machine-cost record (`machines/<run>.json`) for format-2 runs.
+- A format-2 run stopped by the cap or a person writes DONE (not STOPPED).
+- Recorded dollars leave out boot time and storage/network.
+- The heartbeat ETA of a format-2 `search_measure` stream reads done_frac 1.0 before any world finishes (cosmetic).
+- `vastai search offers id=N` reported two offers "not on offer" within a minute of a listing that showed them: the offer-id path is unreliable; the normal search with `cpu_match` worked.
+- **Question for the owner:** breaking ties by rank instead of card index would make every equivalent-card merge valid (saves about 3% nodes) but changes the documented tie rule (M2, M3-SPEC). Not changed.
+- `read_jsonl` skips unreadable lines silently; `score` matches records by id alone and ids repeat across tricks; the curve fit drops grid points with mean at or below 0; the "95% upper bound" is a bootstrap 97.5th percentile (wording).
+
+**Runs in progress (times Mauritius, UTC+4):**
+- `m3-agree-t1-ab1` (the other thread's run; old binary from the 56851ce era, so old values and the rules burn; useful only for the deal-count curves) is still running on instance 56149309: AMD EPYC 9654 server chip (368 threads, $1.02/h). At 04:08 on 16 Oct: 352 of 2,560 worlds, $3.78 spent. The runner's rough ETA is the evening of 17 Oct at about $45; the $20 cap would stop it at about 20:00 on 16 Oct. It can be resumed only with its own binary.
+- **Phase 4 table measurement `m3-t1-tables-1`** launched 04:11 on 16 Oct on instance 56173856: AMD EPYC 7542 server chip (122 usable threads, $1.92/h), cap $10, `low_cpu_pct` 1, binaries 0a4f3e5 and the image above. Format-2 manifest (`docs/vast/m3-t1-tables-1.manifest.json`) with three `search_measure` streams on worlds 0-3 of the trick-1 decision set (count 32, seed 1; ids 0-7, one world per thread, 32 at once) with tables of 12 GB, 3 GB and 1 GB; the 12 GB stream runs alone, then the 3 GB and 1 GB streams together. Purpose: nodes and seconds per deal against table size for the one-deal-per-thread scheduler (Phase 4) and for pricing the golden set.
