@@ -70,7 +70,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::bundle::{bundle_dir, sha256_file};
+use crate::bundle::bundle_dir;
 use crate::net::{self, Net};
 use crate::remote::{DirRemote, Remote, UPLOAD_ENTRY, kill_point, retry, retry_patient};
 use crate::sched::{
@@ -621,19 +621,9 @@ impl Run {
         let dir = self.root.parent().unwrap_or(&self.root).join("inputs");
         for (name, hex) in self.m.inputs.clone() {
             let local = dir.join(&hex);
-            let have = local.is_file() && sha256_file(&local).map(|x| x.0) == Ok(hex.clone());
-            if !have {
-                let key = format!("inputs/sha256/{hex}");
-                let (k2, l2) = (key.clone(), local.clone());
-                if !self.net_call(move |r| retry(3, || r.get(&k2, &l2)))? {
-                    return Err(format!("input `{name}`: {key} not found"));
-                }
-                let (h, _) = sha256_file(&local)?;
-                if h != hex {
-                    let _ = fs::remove_file(&local);
-                    return Err(format!("input `{name}`: downloaded sha256 {h}, want {hex}"));
-                }
-            }
+            let (h2, l2) = (hex.clone(), local.clone());
+            self.net_call(move |r| crate::remote::fetch_input(r, &h2, &l2))
+                .map_err(|e| format!("input `{name}`: {e}"))?;
             let abs = fs::canonicalize(&local).unwrap_or(local);
             self.inputs.insert(name, abs.display().to_string());
         }

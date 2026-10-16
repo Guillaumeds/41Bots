@@ -615,6 +615,84 @@ pub fn retry<T>(attempts: u32, mut f: impl FnMut() -> Result<T, String>) -> Resu
     last
 }
 
+// ---------------------------------------------------------------- content-addressed inputs
+
+/// The prefix of content-addressed inputs: `inputs/sha256/<hex>` holds the file whose SHA-256 is
+/// `<hex>` (format-2 manifests' `inputs`, `launch.py put-input`, the label shards of
+/// `hybrid_rung`'s `upload_shards`).
+pub const INPUTS_PREFIX: &str = "inputs/sha256/";
+
+/// The key of the content-addressed input with SHA-256 `hex`.
+pub fn input_key(hex: &str) -> String {
+    format!("{INPUTS_PREFIX}{hex}")
+}
+
+/// The SHA-256 (lowercase hex) named by an input reference: a key `inputs/sha256/<64 hex>` or a
+/// manifest value `sha256:<64 hex>`; `None` for anything else.
+pub fn input_hex(reference: &str) -> Option<String> {
+    let hex = reference
+        .strip_prefix(INPUTS_PREFIX)
+        .or_else(|| reference.strip_prefix("sha256:"))?;
+    (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| hex.to_ascii_lowercase())
+}
+
+/// Fetches the content-addressed input `inputs/sha256/<hex>` to `local` (up to 3 attempts),
+/// unless a file with that SHA-256 is there already, and checks the SHA-256 of what arrived: a
+/// file that does not match is deleted and refused. Returns whether it was downloaded.
+pub fn fetch_input(r: &dyn Remote, hex: &str, local: &Path) -> Result<bool, String> {
+    if local.is_file() && sha256_file(local).is_ok_and(|(h, _)| h == hex) {
+        return Ok(false);
+    }
+    let key = input_key(hex);
+    if !retry(3, || r.get(&key, local))? {
+        return Err(format!("{key} not found"));
+    }
+    let (h, _) = sha256_file(local)?;
+    if h != hex {
+        let _ = fs::remove_file(local);
+        return Err(format!("{key}: downloaded sha256 {h}, want {hex}"));
+    }
+    Ok(true)
+}
+
+/// Uploads `local` content-addressed, to `inputs/sha256/<its SHA-256>` (up to 3 attempts), unless
+/// an object of that key and size is there already; checks the size after the upload. With
+/// `want`, the file's SHA-256 must be that (e.g. the one its sidecar recorded). Returns the
+/// SHA-256, the size and what happened (`"uploaded"` or `"already there"`).
+pub fn put_input(
+    r: &dyn Remote,
+    local: &Path,
+    want: Option<&str>,
+) -> Result<(String, u64, &'static str), String> {
+    let (sha, bytes) = sha256_file(local)?;
+    if let Some(w) = want
+        && sha != w
+    {
+        return Err(format!(
+            "{}: SHA-256 {sha}, but its record says {w}",
+            local.display()
+        ));
+    }
+    let key = input_key(&sha);
+    let size = || -> Result<Option<u64>, String> {
+        Ok(r.list_sized(INPUTS_PREFIX)?
+            .into_iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, n)| n))
+    };
+    if size()? == Some(bytes) {
+        return Ok((sha, bytes, "already there"));
+    }
+    retry(3, || r.put(local, &key, true))?;
+    match size()? {
+        Some(n) if n == bytes => Ok((sha, bytes, "uploaded")),
+        other => Err(format!(
+            "{key}: {other:?} bytes after the upload, want {bytes}"
+        )),
+    }
+}
+
 /// The pause before attempt `a` (from 1) of [`retry_patient`]: 2, 4, 8, 16, 32 s, then 60 s.
 pub fn backoff(a: u32) -> Duration {
     Duration::from_secs((2u64 << a.saturating_sub(1).min(5)).min(60))
@@ -712,6 +790,60 @@ mod tests {
         assert_eq!(r.list("nothing/").unwrap(), Vec::<String>::new());
         assert_eq!(r.sha256("x/y/1.tar.zst").unwrap().unwrap().1, 3);
         assert_eq!(r.sha256("x/none").unwrap(), None);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Content-addressed inputs: references, upload (once), download (verified, kept when the
+    /// local copy already matches), a missing key and an object whose bytes are not its key's.
+    #[test]
+    fn inputs_by_sha256() {
+        let h = "ab".repeat(32);
+        assert_eq!(input_hex(&format!("inputs/sha256/{h}")), Some(h.clone()));
+        assert_eq!(
+            input_hex(&format!("sha256:{}", h.to_uppercase())),
+            Some(h.clone())
+        );
+        for bad in [
+            "inputs/sha256/abc".to_string(),
+            format!("inputs/sha256/{}", "g".repeat(64)),
+            format!("inputs/{h}"),
+            h.clone(),
+            format!("runs/x/{h}"),
+            format!("inputs/sha256/{h}/x"),
+        ] {
+            assert_eq!(input_hex(&bad), None, "{bad}");
+        }
+        let base = std::env::temp_dir().join(format!("runner-inputs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let r = DirRemote {
+            root: base.join("r"),
+        };
+        let f = base.join("net.safetensors");
+        fs::write(&f, b"weights").unwrap();
+        let sha = crate::bundle::sha256_hex(b"weights");
+        assert_eq!(
+            put_input(&r, &f, Some(&sha)),
+            Ok((sha.clone(), 7, "uploaded"))
+        );
+        assert_eq!(
+            put_input(&r, &f, None),
+            Ok((sha.clone(), 7, "already there"))
+        );
+        let e = put_input(&r, &f, Some(&h)).expect_err("not its record's hash");
+        assert!(e.contains("but its record says"), "{e}");
+        let got = base.join("in").join(&sha);
+        assert_eq!(fetch_input(&r, &sha, &got), Ok(true));
+        assert_eq!(fs::read(&got).unwrap(), b"weights");
+        assert_eq!(fetch_input(&r, &sha, &got), Ok(false), "kept: it matches");
+        let e = fetch_input(&r, &h, &base.join("in").join(&h)).expect_err("missing");
+        assert_eq!(e, format!("inputs/sha256/{h} not found"));
+        // An object whose bytes do not hash to its key is refused and not kept.
+        fs::write(base.join("r/inputs/sha256").join(&h), b"other").unwrap();
+        let local = base.join("in").join(&h);
+        let e = fetch_input(&r, &h, &local).expect_err("wrong bytes");
+        assert!(e.contains("downloaded sha256"), "{e}");
+        assert!(!local.exists());
         let _ = fs::remove_dir_all(&base);
     }
 }
