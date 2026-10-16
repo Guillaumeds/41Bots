@@ -32,12 +32,18 @@ impl Leaf for SyntheticLeaf {
     }
 }
 
-/// The golden network: widths `[N_FEATURES, 32, 16, 4]`, weights uniform in `[−2^20, 2^20)`,
+/// The golden network: widths `[N_FEATURES, 32, 16, 4]` (see [`golden_net_out`]).
+pub fn golden_net(seed: u64) -> IntMlp {
+    golden_net_out(seed, 4)
+}
+
+/// The golden network with `n_out` outputs: widths `[N_FEATURES, 32, 16, n_out]`, weights
+/// uniform in `[−2^20, 2^20)`,
 /// biases uniform in `[−2^39, 2^39)`, shifts `[27, 23, 16]`, drawn in order (layer by layer,
 /// weights input-major then biases) from SplitMix64 seeded with `seed`.
-pub fn golden_net(seed: u64) -> IntMlp {
+pub fn golden_net_out(seed: u64, n_out: usize) -> IntMlp {
     let mut sm = SplitMix64::new(seed);
-    let dims = [N_FEATURES, 32, 16, 4];
+    let dims = [N_FEATURES, 32, 16, n_out];
     let shifts = [27, 23, 16];
     let layers = (0..3)
         .map(|k| {
@@ -82,6 +88,28 @@ pub fn golden_features(seed: u64, count: usize) -> Vec<Features> {
                 *d = -((sm.next_u64() % ((1 << 24) + 1)) as i32);
             }
             f
+        })
+        .collect()
+}
+
+/// Golden outcome tables for the outcome head: `count` tables of `v` outcomes; for each, the
+/// mask is the next draw mod 2^v with the bit (next draw mod v) set, then for each outcome three
+/// entries are the next draws mod 2^30 and the fourth makes the sum 2^32.
+pub fn golden_outcomes(seed: u64, count: usize, v: usize) -> Vec<crate::outcome::Outcomes> {
+    let mut sm = SplitMix64::new(seed);
+    (0..count)
+        .map(|_| {
+            let mut mask = sm.next_u64() % (1 << v);
+            mask |= 1 << (sm.next_u64() % v as u64);
+            let vecs = (0..v)
+                .map(|_| {
+                    let a = sm.next_u64() % (1 << 30);
+                    let b = sm.next_u64() % (1 << 30);
+                    let c = sm.next_u64() % (1 << 30);
+                    MoneyChance([a, b, c, equity::ONE - a - b - c])
+                })
+                .collect();
+            crate::outcome::Outcomes { n: v, mask, vecs }
         })
         .collect()
 }

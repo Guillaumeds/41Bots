@@ -45,8 +45,9 @@ def quantize(float_layers):
     return out
 
 
-def write_int(path, int_layers, trick, meta):
-    """Write an integer network in the format ``crates/nn`` reads."""
+def write_int(path, int_layers, trick, meta, head="money4"):
+    """Write an integer network in the format ``crates/nn`` reads (``head``: ``money4`` or
+    ``outcome-v1``)."""
     tensors = {}
     for k, (w, b, _) in enumerate(int_layers):
         tensors[f"w{k}"] = w
@@ -59,6 +60,7 @@ def write_int(path, int_layers, trick, meta):
             "n_features": str(N_FEATURES),
             "trick": str(trick),
             "shifts": json.dumps([int(s) for _, _, s in int_layers]),
+            "head": head,
         }
     )
     write_safetensors(path, tensors, m)

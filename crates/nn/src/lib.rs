@@ -11,6 +11,8 @@
 //!   exactly 2^32 (an integer exponential, then largest-remainder normalisation).
 //! - [`safetensors`]: a tiny reader and writer of safetensors files (the weights format).
 //! - [`shard`]: label shards, `.npy` files of fixed little-endian records (PLAN §12.7).
+//! - [`outcome`]: the outcome head (spec §6a): how the hand can end from a position, the exact
+//!   money vector of each ending, and the value of a distribution over them.
 //! - [`oracle`]: a loaded network as a solver frontier evaluator ([`solver::Frontier`]).
 //! - [`synthetic`]: a synthetic leaf, network and features for tests and fixtures.
 //!
@@ -21,6 +23,7 @@ pub mod encode;
 pub mod mlp;
 pub mod money;
 pub mod oracle;
+pub mod outcome;
 pub mod safetensors;
 pub mod shard;
 pub mod synthetic;

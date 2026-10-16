@@ -1,5 +1,9 @@
 //! A quantised oracle network as a solver frontier evaluator: canonical position → encoder →
-//! integer MLP → integer softmax → money chance (rotated back to the real teams).
+//! integer MLP → money chance (rotated back to the real teams). Two heads (metadata `head`):
+//! - `money4` (spec §6; the default when absent): four logits, an integer softmax;
+//! - `outcome-v1` (spec §6a): one logit per outcome of the position's trick
+//!   ([`crate::outcome`]), an integer softmax over the possible ones, then the mixture of their
+//!   exact money vectors.
 //!
 //! Weights file (`41bots-int-mlp-v1`, safetensors): tensors `w0, b0, w1, b1, …` (`I32`
 //! `[n_in, n_out]` input-major, `I64` `[n_out]`), and metadata `format`, `encoder` (must be
@@ -20,7 +24,36 @@ use solver::{Leaf, MatchCtx};
 use crate::encode::{ENCODER, N_FEATURES, encode, unrotate};
 use crate::mlp::{IntMlp, Layer};
 use crate::money::money_from_logits;
+use crate::outcome::{money_from_outcomes, outcomes, vocab};
 use crate::safetensors;
+
+/// The network's output head.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Head {
+    /// Four money logits (spec §6).
+    Money4,
+    /// One logit per outcome (spec §6a).
+    Outcome,
+}
+
+impl Head {
+    /// Its name in weights files.
+    pub fn name(self) -> &'static str {
+        match self {
+            Head::Money4 => "money4",
+            Head::Outcome => "outcome-v1",
+        }
+    }
+
+    /// The head of a weights file (`money4` when the file names none).
+    pub fn of(f: &safetensors::File) -> Result<Head, String> {
+        match f.meta.get("head").map(String::as_str) {
+            None | Some("money4") => Ok(Head::Money4),
+            Some("outcome-v1") => Ok(Head::Outcome),
+            Some(h) => Err(format!("unknown head {h}")),
+        }
+    }
+}
 
 /// The weights format this crate reads.
 pub const FORMAT: &str = "41bots-int-mlp-v1";
@@ -29,6 +62,8 @@ pub const FORMAT: &str = "41bots-int-mlp-v1";
 pub struct Oracle {
     net: IntMlp,
     leaf: Arc<dyn Leaf + Send + Sync>,
+    /// The output head.
+    pub head: Head,
     /// The frontier trick the network was trained for.
     pub trick: u8,
     /// SHA-256 of the weights file (hex).
@@ -75,7 +110,7 @@ pub fn parse_net(f: &safetensors::File) -> Result<IntMlp, String> {
 }
 
 /// A weights file for an integer network (the format [`parse_net`] reads), with the frontier
-/// trick and any extra metadata.
+/// trick and any extra metadata (a `head` entry names the head; none means `money4`).
 pub fn write_net(net: &IntMlp, trick: u8, extra: &BTreeMap<String, String>) -> Vec<u8> {
     let mut f = safetensors::File::default();
     for (k, l) in net.layers().iter().enumerate() {
@@ -116,9 +151,22 @@ impl Oracle {
             .meta("trick")?
             .parse()
             .map_err(|_| "trick: not a number".to_string())?;
+        let head = Head::of(&f)?;
+        let want = match head {
+            Head::Money4 => 4,
+            Head::Outcome => vocab(trick),
+        };
+        if net.n_out() != want {
+            return Err(format!(
+                "a {} head for trick {trick} has {want} outputs, not {}",
+                head.name(),
+                net.n_out()
+            ));
+        }
         Ok(Oracle {
             net,
             leaf,
+            head,
             trick,
             sha256: sha256_hex(bytes),
             meta: f.meta,
@@ -131,9 +179,24 @@ impl Oracle {
     }
 
     /// The network's money chance of a canonical position (real team order).
+    ///
+    /// # Panics
+    /// With the outcome head, for a position of another trick than the network's.
     pub fn eval(&self, c: &CanonPos, ctx: &MatchCtx) -> MoneyChance {
         let (f, r) = encode(c, ctx, &*self.leaf);
-        unrotate(money_from_logits(&self.net.forward(&f)), r)
+        let z = self.net.forward(&f);
+        let m = match self.head {
+            Head::Money4 => money_from_logits(&z),
+            Head::Outcome => {
+                assert_eq!(
+                    c.tricks_done + 1,
+                    self.trick,
+                    "a position of the net's trick"
+                );
+                money_from_outcomes(&z, &outcomes(c, ctx, &*self.leaf))
+            }
+        };
+        unrotate(m, r)
     }
 }
 

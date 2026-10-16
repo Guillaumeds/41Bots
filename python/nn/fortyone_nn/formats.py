@@ -21,15 +21,25 @@ MAX_ACTIVE = 96
 PAD = 0xFFFF
 INPUT_SHIFT = 24  # a binary feature that is on, and a dense value of 1, are 2^24
 
-SHARD_DTYPE = np.dtype(
-    [
-        ("active", "<u2", (MAX_ACTIVE,)),
-        ("dense", "<i4", (N_DENSE,)),
-        ("value", "<u8", (4,)),
-        ("source", "u1"),
-        ("trick", "u1"),
-    ]
-)
+# Outcome-head vocabulary size by frontier trick (crates/nn/src/outcome.rs).
+VOCAB = {5: 8, 4: 14, 3: 24, 2: 39}
+
+
+def shard_dtype(v):
+    """The label-shard record type with ``v`` outcomes (crates/nn/src/shard.rs)."""
+    return np.dtype(
+        [
+            ("active", "<u2", (MAX_ACTIVE,)),
+            ("dense", "<i4", (N_DENSE,)),
+            ("value", "<u8", (4,)),
+            ("source", "u1"),
+            ("trick", "u1"),
+            ("label", "u1"),
+            ("mask", "<u8"),
+            ("outcomes", "<u8", (v, 4)),
+        ]
+    )
+
 
 ONE = 1 << 32
 
@@ -43,17 +53,35 @@ def sha256_file(path):
 
 
 def load_shard(path, mmap=True):
-    """A label shard as a numpy record array (checked: record type, values summing to 2^32)."""
+    """A label shard as a numpy record array (checked: record type)."""
     a = np.load(path, mmap_mode="r" if mmap else None)
-    if a.dtype != SHARD_DTYPE:
+    names = a.dtype.names or ()
+    if "outcomes" not in names or a.dtype != shard_dtype(a.dtype["outcomes"].shape[0]):
         raise ValueError(f"{path}: record type {a.dtype} is not a label shard")
     return a
 
 
+def mask_bits(mask, v):
+    """The possible-outcome bits as a boolean array [n, v]."""
+    m = np.asarray(mask).astype(np.uint64)
+    return ((m[:, None] >> np.arange(v, dtype=np.uint64)[None, :]) & np.uint64(1)).astype(bool)
+
+
 def check_values(a):
+    """Targets sum to 2^32, and every row's label is a possible outcome whose money vector is
+    exactly the target (the outcome vocabulary's completeness, spec 6a)."""
     s = a["value"].astype(np.uint64).sum(axis=1, dtype=np.uint64)
     if not np.all(s == np.uint64(ONE)):
         raise ValueError("a target that does not sum to 2^32")
+    v = a["outcomes"].shape[1]
+    lab = np.asarray(a["label"]).astype(np.int64)
+    if np.any(lab >= v):
+        raise ValueError("a label outside the vocabulary")
+    rows = np.arange(len(a))
+    if not np.all(mask_bits(a["mask"], v)[rows, lab]):
+        raise ValueError("a label that is not a possible outcome")
+    if not np.array_equal(np.asarray(a["outcomes"])[rows, lab], np.asarray(a["value"])):
+        raise ValueError("a label whose money vector is not the target")
 
 
 _DTYPES = {"I32": "<i4", "I64": "<i8", "F32": "<f4"}

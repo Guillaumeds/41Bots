@@ -15,13 +15,15 @@
 //! - **Activation** (hidden layers): ReLU clipped at 64, `min(max(y, 0), 64 · 2^ACT_SHIFT)`
 //!   (training uses the same clip, so the float network and the integer one compute the same
 //!   function up to rounding).
-//! - **Output**: four logits in units of `2^-LOGIT_SHIFT`, turned into a money chance by
-//!   [`crate::money::money_from_logits`].
+//! - **Output**: logits in units of `2^-LOGIT_SHIFT`: four money logits, turned into a money
+//!   chance by [`crate::money::money_from_logits`], or one per outcome of the outcome head,
+//!   turned into a money chance by [`crate::outcome::money_from_outcomes`].
 //!
 //! Integer sums are exact and do not depend on the order of the terms, so the result is
 //! byte-identical on every machine and target.
 
 use crate::encode::{Features, INPUT_SHIFT, N_BINARY, N_FEATURES};
+use crate::outcome::MAX_OUT;
 
 /// Activations are in units of 2^-20.
 pub const ACT_SHIFT: u32 = 20;
@@ -76,8 +78,11 @@ impl IntMlp {
                 layers[0].n_in
             ));
         }
-        if layers[layers.len() - 1].n_out != 4 {
-            return Err("the last layer must give 4 logits".into());
+        let out = layers[layers.len() - 1].n_out;
+        if !(4..=MAX_OUT).contains(&out) {
+            return Err(format!(
+                "the last layer gives {out} logits (4 money logits, or up to {MAX_OUT} outcomes)"
+            ));
         }
         for (k, l) in layers.iter().enumerate() {
             if l.w.len() != l.n_in * l.n_out || l.b.len() != l.n_out {
@@ -122,8 +127,14 @@ impl IntMlp {
         self.layers.iter().map(|l| l.n_out).collect()
     }
 
-    /// The four logits (units of 2^-[`LOGIT_SHIFT`]) of an encoded position.
-    pub fn forward(&self, f: &Features) -> [i64; 4] {
+    /// Logits of the last layer.
+    pub fn n_out(&self) -> usize {
+        self.layers[self.layers.len() - 1].n_out
+    }
+
+    /// The logits (units of 2^-[`LOGIT_SHIFT`]) of an encoded position: the first
+    /// [`IntMlp::n_out`] entries (4 money logits, or one per outcome); the rest are 0.
+    pub fn forward(&self, f: &Features) -> [i64; MAX_OUT] {
         let l0 = &self.layers[0];
         let n = l0.n_out;
         // Binary features: their rows summed once, then scaled by the input's 2^24.
@@ -167,7 +178,13 @@ impl IntMlp {
                 }
             }
             if k == last {
-                return core::array::from_fn(|j| round_shift(acc[j], l.shift));
+                return core::array::from_fn(|j| {
+                    if j < m {
+                        round_shift(acc[j], l.shift)
+                    } else {
+                        0
+                    }
+                });
             }
             for j in 0..m {
                 h[j] = round_shift(acc[j], l.shift).clamp(0, CLIP);
@@ -228,7 +245,7 @@ mod tests {
         let h1 = round_shift(-(1 << 24) + 3 * (1 << 24) * 2 - 3 * (1 << 22), 24);
         assert_eq!((h0, h1), (5, 4));
         assert_eq!(
-            net.forward(&f),
+            net.forward(&f)[..4],
             [h0 - h1, 2 * h0 - 2 * h1, 3 * h0 - 3 * h1, 4 * h0 - 4 * h1]
         );
     }
@@ -264,6 +281,8 @@ mod tests {
         assert!(IntMlp::new(wide(MAX_WIDTH + 1, 1)).is_err());
         let mut bad = tiny(1, 24);
         bad[1].n_out = 3;
+        bad[1].w.truncate(6);
+        bad[1].b.truncate(3);
         assert!(IntMlp::new(bad).is_err());
         let mut bad = tiny(1, 24);
         bad[0].shift = 63;

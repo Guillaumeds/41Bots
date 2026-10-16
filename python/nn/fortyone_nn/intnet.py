@@ -38,9 +38,9 @@ def round_shift(x, k):
 
 
 def check_layers(layers):
-    """The Rust checks: chained shapes, 829 inputs, 4 outputs, shifts < 63, and no sum can leave
-    +-2^62 for any input."""
-    if layers[0][0].shape[0] != N_FEATURES or layers[-1][0].shape[1] != 4:
+    """The Rust checks: chained shapes, N_FEATURES inputs, 4 to 64 outputs, shifts < 63, and no
+    sum can leave +-2^62 for any input."""
+    if layers[0][0].shape[0] != N_FEATURES or not 4 <= layers[-1][0].shape[1] <= 64:
         raise ValueError("shapes")
     for k, (w, b, shift) in enumerate(layers):
         if k and w.shape[0] != layers[k - 1][0].shape[1]:
@@ -118,12 +118,44 @@ def money(z):
     return from_weights([exp_weight(m - v) for v in z])
 
 
-def money_rows(layers, active, dense, chunk=1024):
-    """Money chances (uint64 [n, 4]) of shard rows."""
+def mix_wide(terms):
+    """``equity::MoneyChance::mix_wide``: the weighted mean of money vectors, u128 sums, then
+    largest remainder (ties to the lower team); zero weights ignored."""
+    num = [0, 0, 0, 0]
+    den = 0
+    for w, c in terms:
+        if w == 0:
+            continue
+        den += w
+        for t in range(4):
+            num[t] += w * int(c[t])
+    q = [x // den for x in num]
+    r = [x % den for x in num]
+    missing = ONE - sum(q)
+    for i in sorted(range(4), key=lambda i: (-r[i], i))[:missing]:
+        q[i] += 1
+    return q
+
+
+def money_outcomes(z, mask, vecs):
+    """The outcome head's money chance: integer softmax over the possible outcomes' logits, then
+    the mixture of their money vectors (``nn::outcome::money_from_outcomes``)."""
+    mask = int(mask)
+    idx = [o for o in range(len(vecs)) if (mask >> o) & 1]
+    m = max(int(z[o]) for o in idx)
+    return mix_wide([(exp_weight(m - int(z[o])), vecs[o]) for o in idx])
+
+
+def money_rows(layers, active, dense, chunk=1024, mask=None, outcomes=None):
+    """Money chances (uint64 [n, 4]) of shard rows: the four-logit head, or with ``mask`` and
+    ``outcomes`` the outcome head."""
     out = []
     for i in range(0, len(active), chunk):
         z = logits(layers, inputs(active[i : i + chunk], dense[i : i + chunk]))
-        out.extend(money(row) for row in z)
+        if mask is None:
+            out.extend(money(row) for row in z)
+        else:
+            out.extend(money_outcomes(row, mask[i + j], outcomes[i + j]) for j, row in enumerate(z))
     return np.array(out, dtype=np.uint64).reshape(-1, 4)
 
 
@@ -139,10 +171,10 @@ class SplitMix64:
         return z ^ (z >> 31)
 
 
-def golden_net(seed):
+def golden_net(seed, n_out=4):
     """The golden network of ``crates/nn/src/synthetic.rs`` (same recipe)."""
     sm = SplitMix64(seed)
-    dims = [N_FEATURES, 32, 16, 4]
+    dims = [N_FEATURES, 32, 16, n_out]
     shifts = [27, 23, 16]
     layers = []
     for k in range(3):
@@ -168,3 +200,18 @@ def golden_features(seed, count):
         for d in range(N_DENSE):
             dense[r, d] = -(sm.next() % ((1 << 24) + 1))
     return active, dense
+
+
+def golden_outcomes(seed, count, v):
+    """The golden outcome tables of ``crates/nn/src/synthetic.rs``: [(mask, vecs)]."""
+    sm = SplitMix64(seed)
+    out = []
+    for _ in range(count):
+        mask = sm.next() % (1 << v)
+        mask |= 1 << (sm.next() % v)
+        vecs = []
+        for _ in range(v):
+            a, b, c = sm.next() % (1 << 30), sm.next() % (1 << 30), sm.next() % (1 << 30)
+            vecs.append([a, b, c, ONE - a - b - c])
+        out.append((mask, vecs))
+    return out

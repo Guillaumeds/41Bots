@@ -59,8 +59,10 @@ pub fn exp_weight(d: u64) -> u64 {
     (w >> n) as u64
 }
 
-/// The money chance of four logits (units of 2^-24): the integer softmax above.
-pub fn money_from_logits(z: &[i64; 4]) -> MoneyChance {
+/// The money chance of four logits (units of 2^-24; the first four entries of `z`): the integer
+/// softmax above.
+pub fn money_from_logits(z: &[i64]) -> MoneyChance {
+    let z = &z[..4];
     let m = *z.iter().max().expect("four logits");
     let w: [u128; 4] = core::array::from_fn(|t| u128::from(exp_weight((m - z[t]) as u64)));
     MoneyChance::from_weights(w)

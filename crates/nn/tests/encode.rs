@@ -14,7 +14,8 @@ use engine::rng::Rng;
 use nn::encode::{MAX_ACTIVE, N_DENSE, decode, encode, rotate_canon, rotation};
 use nn::money::money_from_logits;
 use nn::oracle::{Oracle, write_net};
-use nn::synthetic::{SyntheticLeaf, golden_features, golden_net};
+use nn::outcome::{money_from_outcomes, outcomes, vocab};
+use nn::synthetic::{SyntheticLeaf, golden_features, golden_net, golden_net_out, golden_outcomes};
 use solver::worlds::sample_world;
 use solver::{
     FastOptions, FrontierCut, MatchCtx, Options, Position, SolveMem, Step, TieOrder, canonical,
@@ -104,11 +105,99 @@ fn integer_network_matches_the_golden_outputs() {
     let mid = got.iter().filter(|o| o.iter().all(|&x| x > 0)).count();
     assert!(mid > count / 4, "{mid} of {count}");
     let _ = N_DENSE;
+    // The outcome head: the same inputs, a 14-outcome network, golden outcome tables.
+    let n_out = v["outcome"]["n_out"].as_u64().expect("n_out") as usize;
+    let want: Vec<[u64; 4]> =
+        serde_json::from_value(v["outcome"]["outputs"].clone()).expect("outputs");
+    let onet = golden_net_out(seed, n_out);
+    let tables = golden_outcomes(seed + 2, count, n_out);
+    let got: Vec<[u64; 4]> = fs
+        .iter()
+        .zip(&tables)
+        .map(|(f, o)| money_from_outcomes(&onet.forward(f), o).0)
+        .collect();
+    assert_eq!(got, want);
+}
+
+/// Completeness of the outcome vocabulary (spec §6a): for every position at the start of
+/// tricks 3, 4 and 5 (random deals and play, both tie orders), the exact value is the money
+/// vector of a possible outcome, so the masks never remove the true one; with a validating
+/// leaf, so every vector is a state the table holds.
+#[test]
+fn every_exact_value_is_a_possible_outcome() {
+    let mut n = 0;
+    let mut by_label = std::collections::BTreeMap::new();
+    for k in 3..=5u8 {
+        let count = if k == 3 { 300 } else { 2000 };
+        for i in 0..count {
+            let (p, ctx) = frontier_position(31, k, i);
+            let c = canonical(&p);
+            let o = outcomes(&c, &ctx, &Validating);
+            assert_eq!(o.n, vocab(k));
+            for order in [TieOrder::Ascending, TieOrder::Descending] {
+                let v = solver::solve_fast(
+                    &p,
+                    ctx,
+                    &Validating,
+                    FastOptions {
+                        order,
+                        ..FastOptions::default()
+                    },
+                )
+                .value
+                .expect("solved");
+                let r = nn::encode::rotation(&c);
+                let label = o
+                    .label(&v.rotate(r % 4))
+                    .unwrap_or_else(|| panic!("trick {k} position {i}: no outcome"));
+                *by_label.entry((k, label)).or_insert(0u32) += 1;
+                n += 1;
+            }
+        }
+    }
+    assert_eq!(n, 2 * (300 + 4000));
+    // Both kinds of outcome occur (games won and hands over).
+    assert!(by_label.keys().any(|&(_, l)| l < 4));
+    assert!(by_label.keys().any(|&(_, l)| l >= 4));
 }
 
 fn golden_oracle(trick: u8) -> Oracle {
     let bytes = write_net(&golden_net(41), trick, &BTreeMap::new());
     Oracle::from_bytes(&bytes, Arc::new(SyntheticLeaf)).expect("loads")
+}
+
+/// A golden outcome-head oracle for frontier trick `trick`.
+fn outcome_oracle(trick: u8) -> Oracle {
+    let mut meta = BTreeMap::new();
+    meta.insert("head".to_string(), "outcome-v1".to_string());
+    let bytes = write_net(&golden_net_out(41, vocab(trick)), trick, &meta);
+    Oracle::from_bytes(&bytes, Arc::new(SyntheticLeaf)).expect("loads")
+}
+
+#[test]
+fn outcome_oracle_rotates_and_is_a_mixture_of_outcomes() {
+    for k in [4u8, 5] {
+        let o = outcome_oracle(k);
+        assert_eq!(o.head, nn::oracle::Head::Outcome);
+        for i in 0..200 {
+            let (p, ctx) = frontier_position(9, k, i);
+            let c = canonical(&p);
+            let v = o.eval(&c, &ctx);
+            for s in 1..8 {
+                let (c2, ctx2) = rotate_canon(&c, &ctx, s);
+                assert_eq!(
+                    o.eval(&c2, &ctx2),
+                    v.rotate(s % 4),
+                    "trick {k} {i} rotation {s}"
+                );
+            }
+        }
+    }
+    // A head of the wrong size is refused.
+    let mut meta = BTreeMap::new();
+    meta.insert("head".to_string(), "outcome-v1".to_string());
+    let bytes = write_net(&golden_net_out(41, vocab(4)), 3, &meta);
+    assert!(Oracle::from_bytes(&bytes, Arc::new(SyntheticLeaf)).is_err());
 }
 
 #[test]
@@ -146,13 +235,20 @@ fn mid(seed: u64, k: u8, extra: u8) -> (Position, MatchCtx) {
 #[test]
 fn oracle_frontier_hybrid_identity() {
     let leaf = SyntheticLeaf;
-    let o = golden_oracle(4);
+    let money4 = golden_oracle(4);
+    let outcome4 = outcome_oracle(4);
+    let outcome5 = outcome_oracle(5);
     let mut evals = 0;
     for seed in 0..10 {
         for (k, extra, cut) in [(3, 0, 4), (3, 4, 4), (3, 2, 5), (4, 1, 5)] {
             let (p, ctx) = mid(seed, k, extra);
+            let o: &Oracle = match (seed % 2, cut) {
+                (0, _) => &money4,
+                (_, 4) => &outcome4,
+                _ => &outcome5,
+            };
             for order in [TieOrder::Ascending, TieOrder::Descending] {
-                let c = Some(FrontierCut::new(cut, &o));
+                let c = Some(FrontierCut::new(cut, o));
                 let naive = solve_cut(
                     &p,
                     ctx,

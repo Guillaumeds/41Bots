@@ -3,7 +3,8 @@
 //!
 //! ```text
 //! dtype [('active', '<u2', (96,)), ('dense', '<i4', (100,)), ('value', '<u8', (4,)),
-//!        ('source', '|u1'), ('trick', '|u1')]
+//!        ('source', '|u1'), ('trick', '|u1'), ('label', '|u1'), ('mask', '<u8'),
+//!        ('outcomes', '<u8', (V, 4))]
 //! ```
 //! - `active`: the encoder's active binary feature indices, ascending, then 65535 (padding);
 //! - `dense`: the encoder's dense values (`log2` of money chances / 32, units of 2^-24);
@@ -11,9 +12,13 @@
 //!   rotated team order (four u64 in units of 2^-32, summing to exactly 2^32);
 //! - `source`: where the position came from ([`SOURCE_RANDOM`], [`SOURCE_RULES`],
 //!   [`SOURCE_HARVEST`]);
-//! - `trick`: the trick whose start the position is (2..=5).
+//! - `trick`: the trick whose start the position is (2..=5);
+//! - `label`, `mask`, `outcomes`: the outcome head's target (spec §6a, `crate::outcome`): the
+//!   label (first possible outcome whose money vector equals `value`), the possible outcomes
+//!   (bit `o`), and every outcome's exact money vector (an even split where impossible); `V` is
+//!   the vocabulary size of the trick (8, 14, 24, 39 for tricks 5, 4, 3, 2).
 //!
-//! Records are packed (626 bytes each, no padding). The header is format version 1.0, padded so
+//! Records are packed (no padding). The header is format version 1.0, padded so
 //! the data starts on a 64-byte boundary.
 
 use equity::MoneyChance;
@@ -29,13 +34,15 @@ pub const SOURCE_HARVEST: u8 = 3;
 /// Synthetic positions for tests (`nn-tool fixture`).
 pub const SOURCE_FIXTURE: u8 = 9;
 
-/// Bytes per record.
-pub const ROW_BYTES: usize = 2 * MAX_ACTIVE + 4 * N_DENSE + 32 + 2;
+/// Bytes per record with `v` outcomes.
+pub const fn row_bytes_for(v: usize) -> usize {
+    2 * MAX_ACTIVE + 4 * N_DENSE + 32 + 2 + 1 + 8 + 32 * v
+}
 
 const MAGIC: &[u8; 6] = b"\x93NUMPY";
 
 /// One labelled position.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
     /// The encoded position.
     pub features: Features,
@@ -45,20 +52,27 @@ pub struct Row {
     pub source: u8,
     /// The trick whose start it is.
     pub trick: u8,
+    /// The outcome label.
+    pub label: u8,
+    /// The possible outcomes.
+    pub mask: u64,
+    /// Every outcome's money vector.
+    pub outcomes: Vec<MoneyChance>,
 }
 
-/// The record type as NumPy writes it.
-pub fn descr() -> String {
+/// The record type with `v` outcomes, as NumPy writes it.
+pub fn descr(v: usize) -> String {
     format!(
         "[('active', '<u2', ({MAX_ACTIVE},)), ('dense', '<i4', ({N_DENSE},)), \
-         ('value', '<u8', (4,)), ('source', '|u1'), ('trick', '|u1')]"
+         ('value', '<u8', (4,)), ('source', '|u1'), ('trick', '|u1'), ('label', '|u1'), \
+         ('mask', '<u8'), ('outcomes', '<u8', ({v}, 4))]"
     )
 }
 
-fn header(n: usize) -> Vec<u8> {
+fn header(n: usize, v: usize) -> Vec<u8> {
     let mut h = format!(
         "{{'descr': {}, 'fortran_order': False, 'shape': ({n},), }}",
-        descr()
+        descr(v)
     );
     let unpadded = 10 + h.len() + 1;
     let pad = (64 - unpadded % 64) % 64;
@@ -87,13 +101,24 @@ pub fn row_bytes(r: &Row, out: &mut Vec<u8>) {
     }
     out.push(r.source);
     out.push(r.trick);
+    out.push(r.label);
+    out.extend_from_slice(&r.mask.to_le_bytes());
+    for m in &r.outcomes {
+        for x in m.0 {
+            out.extend_from_slice(&x.to_le_bytes());
+        }
+    }
 }
 
-/// The `.npy` bytes of a shard.
-pub fn to_npy(rows: &[Row]) -> Vec<u8> {
-    let mut out = header(rows.len());
-    out.reserve(rows.len() * ROW_BYTES);
+/// The `.npy` bytes of a shard whose rows all have `v` outcomes.
+///
+/// # Panics
+/// If a row has another number of outcomes.
+pub fn to_npy(rows: &[Row], v: usize) -> Vec<u8> {
+    let mut out = header(rows.len(), v);
+    out.reserve(rows.len() * row_bytes_for(v));
     for r in rows {
+        assert_eq!(r.outcomes.len(), v, "every row has the trick's outcomes");
         row_bytes(r, &mut out);
     }
     out
@@ -115,7 +140,13 @@ pub fn from_npy(bytes: &[u8]) -> Result<Vec<Row>, String> {
     let h = core::str::from_utf8(bytes.get(start..start + hlen).ok_or("truncated header")?)
         .map_err(|_| "header is not text")?;
     let compact: String = h.chars().filter(|c| !c.is_whitespace()).collect();
-    let want: String = descr().chars().filter(|c| !c.is_whitespace()).collect();
+    let v: usize = compact
+        .split("('outcomes','<u8',(")
+        .nth(1)
+        .and_then(|x| x.split(',').next())
+        .and_then(|x| x.parse().ok())
+        .ok_or("not a label shard (no outcomes field)")?;
+    let want: String = descr(v).chars().filter(|c| !c.is_whitespace()).collect();
     if !compact.contains(&format!("'descr':{want}")) || !compact.contains("'fortran_order':False") {
         return Err(format!("not a label shard (record type): {h}"));
     }
@@ -128,16 +159,15 @@ pub fn from_npy(bytes: &[u8]) -> Result<Vec<Row>, String> {
         .trim_end_matches(',')
         .parse()
         .map_err(|_| format!("bad shape {shape}"))?;
+    let rb = row_bytes_for(v);
     let body = &bytes[start + hlen..];
-    if body.len() != n * ROW_BYTES {
-        return Err(format!(
-            "{} data bytes for {n} records of {ROW_BYTES}",
-            body.len()
-        ));
+    if body.len() != n * rb {
+        return Err(format!("{} data bytes for {n} records of {rb}", body.len()));
     }
     let mut rows = Vec::with_capacity(n);
-    for rec in body.as_chunks::<ROW_BYTES>().0 {
+    for rec in body.chunks(rb) {
         let u16_at = |i: usize| u16::from_le_bytes([rec[i], rec[i + 1]]);
+        let u64_at = |i: usize| u64::from_le_bytes(rec[i..i + 8].try_into().expect("8 bytes"));
         let mut f = Features {
             active: [PAD; MAX_ACTIVE],
             n_active: 0,
@@ -158,14 +188,23 @@ pub fn from_npy(bytes: &[u8]) -> Result<Vec<Row>, String> {
             f.dense[k] = i32::from_le_bytes([rec[i], rec[i + 1], rec[i + 2], rec[i + 3]]);
         }
         let o = 2 * MAX_ACTIVE + 4 * N_DENSE;
-        let v: [u64; 4] = core::array::from_fn(|t| {
-            u64::from_le_bytes(rec[o + 8 * t..o + 8 * t + 8].try_into().expect("8 bytes"))
-        });
+        let money = |at: usize| -> Result<MoneyChance, String> {
+            MoneyChance::from_raw(core::array::from_fn(|t| u64_at(at + 8 * t)))
+                .ok_or_else(|| "a money vector that does not sum to 2^32".to_string())
+        };
+        let value = money(o)?;
+        let mut outcomes = Vec::with_capacity(v);
+        for k in 0..v {
+            outcomes.push(money(o + 32 + 2 + 1 + 8 + 32 * k)?);
+        }
         rows.push(Row {
             features: f,
-            value: MoneyChance::from_raw(v).ok_or("a value that does not sum to 2^32")?,
+            value,
             source: rec[o + 32],
             trick: rec[o + 33],
+            label: rec[o + 34],
+            mask: u64_at(o + 35),
+            outcomes,
         });
     }
     Ok(rows)
@@ -183,22 +222,32 @@ mod tests {
             dense: [-7; N_DENSE],
         };
         f.active[..3].copy_from_slice(&[1, 400, 808]);
+        let outs = vec![
+            MoneyChance::even(),
+            MoneyChance::certain(3),
+            MoneyChance::from_weights([1, 2, 3, 4]),
+        ];
         let rows = vec![
             Row {
                 features: f,
                 value: MoneyChance::from_weights([1, 2, 3, 4]),
                 source: SOURCE_RANDOM,
                 trick: 4,
+                label: 2,
+                mask: 0b110,
+                outcomes: outs.clone(),
             },
             Row {
                 features: f,
-                value: MoneyChance::certain(2),
+                value: MoneyChance::certain(3),
                 source: SOURCE_RULES,
                 trick: 3,
+                label: 1,
+                mask: u64::MAX,
+                outcomes: outs,
             },
         ];
-        let b = to_npy(&rows);
-        assert_eq!(b.len() % 2, 0);
+        let b = to_npy(&rows, 3);
         assert_eq!(from_npy(&b).expect("reads"), rows);
         assert!(from_npy(&b[..b.len() - 1]).is_err());
     }

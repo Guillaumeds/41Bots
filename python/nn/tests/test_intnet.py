@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from fortyone_nn import intnet
-from fortyone_nn.formats import N_FEATURES, load_shard, read_safetensors, write_safetensors
+from fortyone_nn.formats import N_FEATURES, VOCAB, check_values, load_shard, read_safetensors, write_safetensors
 from fortyone_nn.quantize import quantize, write_int
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -38,9 +38,9 @@ def nn_tool():
     return None
 
 
-def random_float_net(seed, widths=(64, 16)):
+def random_float_net(seed, widths=(64, 16), n_out=4):
     rng = np.random.default_rng(seed)
-    dims = [N_FEATURES, *widths, 4]
+    dims = [N_FEATURES, *widths, n_out]
     layers = []
     for k in range(len(dims) - 1):
         w = rng.normal(0.0, 1.0 / np.sqrt(dims[k] if k else 60), size=(dims[k], dims[k + 1]))
@@ -67,6 +67,16 @@ class Golden(unittest.TestCase):
         want = np.array(d["outputs"], dtype=np.uint64)
         np.testing.assert_array_equal(got, want)
         self.assertTrue(np.all(got.sum(axis=1, dtype=np.uint64) == np.uint64(1 << 32)))
+
+    def test_golden_outcome_head(self):
+        d = json.loads(GOLDEN.read_text())
+        n_out = d["outcome"]["n_out"]
+        layers = intnet.golden_net(d["seed"], n_out)
+        active, dense = intnet.golden_features(d["seed"] + 1, d["count"])
+        tables = intnet.golden_outcomes(d["seed"] + 2, d["count"], n_out)
+        z = intnet.logits(layers, intnet.inputs(active, dense))
+        got = [intnet.money_outcomes(z[i], m, vecs) for i, (m, vecs) in enumerate(tables)]
+        self.assertEqual(got, d["outcome"]["outputs"])
 
     def test_softmax_edges(self):
         self.assertEqual(intnet.money([0, 0, 0, 0]), [1 << 30] * 4)
@@ -108,30 +118,35 @@ class Parity(unittest.TestCase):
         tool = nn_tool()
         count = int(os.environ.get("NN_PARITY_COUNT", "3000"))
         with tempfile.TemporaryDirectory() as d:
-            shard = os.path.join(d, "fixture.npy")
-            outs = []
             for trick in (3, 4, 5):
-                part = os.path.join(d, f"fixture-{trick}.npy")
+                shard = os.path.join(d, f"fixture-{trick}.npy")
                 subprocess.run(
-                    [tool, "fixture", "--trick", str(trick), "--count", str(count // 3), "--seed", "17", "--out", part],
+                    [tool, "fixture", "--trick", str(trick), "--count", str(count // 3), "--seed", "17", "--out", shard],
                     check=True,
                 )
-                outs.append(np.asarray(load_shard(part)))
-            rows = np.concatenate(outs)
-            np.save(shard, rows)
-            for seed, widths in ((1, (64, 16)), (2, (128, 32, 16))):
-                net = os.path.join(d, f"net{seed}.safetensors")
-                write_int(net, quantize(random_float_net(seed, widths)), 4, {"test": "parity"})
-                out = os.path.join(d, f"out{seed}.npy")
-                subprocess.run([tool, "eval", "--net", net, "--shard", shard, "--out", out, "--reps", "1"], check=True)
-                rust = np.load(out)
-                layers, _ = intnet.load(net)
-                py = intnet.money_rows(layers, rows["active"], rows["dense"])
-                self.assertEqual(rust.shape, (len(rows), 4))
-                np.testing.assert_array_equal(rust, py)
-                # Not degenerate: the outputs spread.
-                self.assertGreater(len(np.unique(rust[:, 0])), len(rows) // 2)
-
+                rows = np.asarray(load_shard(shard))
+                # Every row's outcome label carries exactly its target (completeness, spec 6a).
+                check_values(rows)
+                self.assertEqual(rows["outcomes"].shape[1], VOCAB[trick])
+                for seed, widths, head in ((1, (64, 16), "money4"), (2, (128, 32, 16), "outcome-v1")):
+                    n_out = 4 if head == "money4" else VOCAB[trick]
+                    net = os.path.join(d, f"net{seed}-{trick}.safetensors")
+                    write_int(net, quantize(random_float_net(seed, widths, n_out)), trick, {"test": "parity"}, head=head)
+                    out = os.path.join(d, f"out{seed}-{trick}.npy")
+                    subprocess.run([tool, "eval", "--net", net, "--shard", shard, "--out", out, "--reps", "1"], check=True)
+                    rust = np.load(out)
+                    layers, meta = intnet.load(net)
+                    self.assertEqual(meta["head"], head)
+                    if head == "money4":
+                        py = intnet.money_rows(layers, rows["active"], rows["dense"])
+                    else:
+                        py = intnet.money_rows(
+                            layers, rows["active"], rows["dense"], mask=rows["mask"], outcomes=rows["outcomes"]
+                        )
+                    self.assertEqual(rust.shape, (len(rows), 4))
+                    np.testing.assert_array_equal(rust, py)
+                    # Not degenerate: the outputs spread.
+                    self.assertGreater(len(np.unique(rust[:, 0])), len(rows) // 3)
 
 if __name__ == "__main__":
     unittest.main()
