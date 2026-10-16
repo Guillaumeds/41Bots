@@ -11,20 +11,20 @@ import struct
 
 import numpy as np
 
-# The encoder's layout (crates/nn/src/encode.rs, encoder "oracle-v1"). Python never encodes; these
+# The encoder's layout (crates/nn/src/encode.rs, encoder "oracle-v2"). Python never encodes; these
 # only size the network and expand the shards' active-index lists.
-ENCODER = "oracle-v1"
+ENCODER = "oracle-v2"
 N_BINARY = 809
-N_DENSE = 20
+N_DENSE = 100
 N_FEATURES = N_BINARY + N_DENSE
 MAX_ACTIVE = 96
 PAD = 0xFFFF
-INPUT_SHIFT = 15  # a binary feature that is on, and a dense value of 1, are 2^15
+INPUT_SHIFT = 24  # a binary feature that is on, and a dense value of 1, are 2^24
 
 SHARD_DTYPE = np.dtype(
     [
         ("active", "<u2", (MAX_ACTIVE,)),
-        ("dense", "<u2", (N_DENSE,)),
+        ("dense", "<i4", (N_DENSE,)),
         ("value", "<u8", (4,)),
         ("source", "u1"),
         ("trick", "u1"),

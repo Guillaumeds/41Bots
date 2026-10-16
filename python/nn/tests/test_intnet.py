@@ -50,7 +50,7 @@ def random_float_net(seed, widths=(64, 16)):
 
 
 def float_logits(layers, x_int):
-    h = x_int.astype(np.float64) / (1 << 15)
+    h = x_int.astype(np.float64) / (1 << 24)
     for k, (w, b) in enumerate(layers):
         h = h @ w + b
         if k < len(layers) - 1:

@@ -27,6 +27,38 @@ fn frontier_position(seed: u64, k: u8, i: u64) -> (Position, MatchCtx) {
     (p, ctx)
 }
 
+/// The synthetic leaf, refusing any state the equity table would refuse (a score no team can
+/// stand on, a finished match).
+struct Validating;
+
+impl solver::Leaf for Validating {
+    fn value(&self, s: &equity::MatchState) -> equity::MoneyChance {
+        s.validate()
+            .expect("the encoder asks only for valid states");
+        assert!(
+            s.winner().is_none(),
+            "a finished match is valued without the leaf"
+        );
+        SyntheticLeaf.value(s)
+    }
+}
+
+/// Every equity feature asks the leaf only for states the real table holds (it panics on any
+/// other), from every trick.
+#[test]
+fn equity_features_ask_only_for_valid_states() {
+    let mut n = 0;
+    for k in 2..=5u8 {
+        for i in 0..3000 {
+            let (p, ctx) = frontier_position(23, k, i);
+            let (f, _) = encode(&canonical(&p), &ctx, &Validating);
+            assert!(f.dense.iter().all(|&d| (-(1 << 24)..=0).contains(&d)));
+            n += 1;
+        }
+    }
+    assert_eq!(n, 12_000);
+}
+
 #[test]
 fn encoding_is_complete_and_rotation_invariant() {
     let leaf = SyntheticLeaf;

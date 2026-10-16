@@ -2,18 +2,18 @@
 //! array file] of fixed little-endian records, readable (and memory-mappable) by `numpy.load`:
 //!
 //! ```text
-//! dtype [('active', '<u2', (96,)), ('dense', '<u2', (20,)), ('value', '<u8', (4,)),
+//! dtype [('active', '<u2', (96,)), ('dense', '<i4', (100,)), ('value', '<u8', (4,)),
 //!        ('source', '|u1'), ('trick', '|u1')]
 //! ```
 //! - `active`: the encoder's active binary feature indices, ascending, then 65535 (padding);
-//! - `dense`: the encoder's dense values (2^15 = 1);
+//! - `dense`: the encoder's dense values (`log2` of money chances / 32, units of 2^-24);
 //! - `value`: the target, the exact solver's money chance of the position in the encoder's
 //!   rotated team order (four u64 in units of 2^-32, summing to exactly 2^32);
 //! - `source`: where the position came from ([`SOURCE_RANDOM`], [`SOURCE_RULES`],
 //!   [`SOURCE_HARVEST`]);
 //! - `trick`: the trick whose start the position is (2..=5).
 //!
-//! Records are packed (266 bytes each, no padding). The header is format version 1.0, padded so
+//! Records are packed (626 bytes each, no padding). The header is format version 1.0, padded so
 //! the data starts on a 64-byte boundary.
 
 use equity::MoneyChance;
@@ -30,7 +30,7 @@ pub const SOURCE_HARVEST: u8 = 3;
 pub const SOURCE_FIXTURE: u8 = 9;
 
 /// Bytes per record.
-pub const ROW_BYTES: usize = 2 * MAX_ACTIVE + 2 * N_DENSE + 32 + 2;
+pub const ROW_BYTES: usize = 2 * MAX_ACTIVE + 4 * N_DENSE + 32 + 2;
 
 const MAGIC: &[u8; 6] = b"\x93NUMPY";
 
@@ -50,7 +50,7 @@ pub struct Row {
 /// The record type as NumPy writes it.
 pub fn descr() -> String {
     format!(
-        "[('active', '<u2', ({MAX_ACTIVE},)), ('dense', '<u2', ({N_DENSE},)), \
+        "[('active', '<u2', ({MAX_ACTIVE},)), ('dense', '<i4', ({N_DENSE},)), \
          ('value', '<u8', (4,)), ('source', '|u1'), ('trick', '|u1')]"
     )
 }
@@ -154,9 +154,10 @@ pub fn from_npy(bytes: &[u8]) -> Result<Vec<Row>, String> {
             return Err("active indices after the padding".into());
         }
         for k in 0..N_DENSE {
-            f.dense[k] = u16_at(2 * MAX_ACTIVE + 2 * k);
+            let i = 2 * MAX_ACTIVE + 4 * k;
+            f.dense[k] = i32::from_le_bytes([rec[i], rec[i + 1], rec[i + 2], rec[i + 3]]);
         }
-        let o = 2 * MAX_ACTIVE + 2 * N_DENSE;
+        let o = 2 * MAX_ACTIVE + 4 * N_DENSE;
         let v: [u64; 4] = core::array::from_fn(|t| {
             u64::from_le_bytes(rec[o + 8 * t..o + 8 * t + 8].try_into().expect("8 bytes"))
         });
@@ -179,7 +180,7 @@ mod tests {
         let mut f = Features {
             active: [PAD; MAX_ACTIVE],
             n_active: 3,
-            dense: [7; N_DENSE],
+            dense: [-7; N_DENSE],
         };
         f.active[..3].copy_from_slice(&[1, 400, 808]);
         let rows = vec![

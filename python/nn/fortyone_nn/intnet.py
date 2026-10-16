@@ -1,6 +1,6 @@
 """The integer network, bit for bit as ``crates/nn`` computes it (format ``41bots-int-mlp-v1``).
 
-- Inputs: binary features that are on are 2^15, dense values 0..2^15.
+- Inputs: binary features that are on are 2^24, dense values -2^24..0.
 - Layer: ``acc = b + x @ w`` in int64 (exact: the files are checked so that no sum can leave
   +-2^62), then ``y = (acc + 2^(k-1)) >> k`` (arithmetic shift, round half up); hidden layers clip
   ``y`` to ``[0, 64 * 2^20]``; the output layer gives logits in units of 2^-24.
@@ -143,7 +143,7 @@ def golden_net(seed):
     """The golden network of ``crates/nn/src/synthetic.rs`` (same recipe)."""
     sm = SplitMix64(seed)
     dims = [N_FEATURES, 32, 16, 4]
-    shifts = [18, 23, 16]
+    shifts = [27, 23, 16]
     layers = []
     for k in range(3):
         n_in, n_out = dims[k], dims[k + 1]
@@ -158,7 +158,7 @@ def golden_features(seed, count):
     """The golden inputs of ``crates/nn/src/synthetic.rs``: (active [count, 96], dense [count, 20])."""
     sm = SplitMix64(seed)
     active = np.full((count, MAX_ACTIVE), PAD, dtype=np.uint16)
-    dense = np.zeros((count, N_DENSE), dtype=np.uint16)
+    dense = np.zeros((count, N_DENSE), dtype=np.int32)
     for r in range(count):
         n = 0
         for i in range(N_BINARY):
@@ -166,5 +166,5 @@ def golden_features(seed, count):
                 active[r, n] = i
                 n += 1
         for d in range(N_DENSE):
-            dense[r, d] = sm.next() % 32769
+            dense[r, d] = -(sm.next() % ((1 << 24) + 1))
     return active, dense

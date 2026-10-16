@@ -28,6 +28,7 @@ import torch
 import torch.nn as nn
 
 from .formats import (
+    INPUT_SHIFT,
     MAX_ACTIVE,
     N_BINARY,
     N_DENSE,
@@ -76,7 +77,7 @@ def tensors(a):
     """(index tensor with padding -> N_BINARY, dense float tensor, target float tensor)."""
     idx = np.asarray(a["active"]).astype(np.int64)
     idx[idx == PAD] = N_BINARY
-    dense = np.asarray(a["dense"]).astype(np.float32) / float(1 << 15)
+    dense = np.asarray(a["dense"]).astype(np.float32) / float(1 << INPUT_SHIFT)
     tgt = np.asarray(a["value"]).astype(np.float64) / float(ONE)
     return torch.from_numpy(idx), torch.from_numpy(dense), torch.from_numpy(tgt.astype(np.float32))
 

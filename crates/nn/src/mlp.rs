@@ -2,10 +2,10 @@
 //!
 //! The scheme (format `41bots-int-mlp-v1`; the Python quantiser `python/nn` writes it and its
 //! integer forward pass mirrors this one bit for bit):
-//! - **Inputs**: a binary feature that is on is `2^15`; a dense value is `0..=2^15`
+//! - **Inputs**: a binary feature that is on is `2^24`; a dense value is in `−2^24..=0`
 //!   ([`INPUT_SHIFT`]).
 //! - **Weights**: `i32`, layer `l` holding `round(w × 2^s_l)`; **biases** `i64` holding
-//!   `round(b × 2^(s_l + in_l))`, where `in_l` is the layer's input scale (15 for the first
+//!   `round(b × 2^(s_l + in_l))`, where `in_l` is the layer's input scale (24 for the first
 //!   layer, [`ACT_SHIFT`] after). Stored input-major: `w[i × n_out + j]`.
 //! - **Layer**: `acc_j = b_j + Σ_i w_ij · x_i` in `i64` (exact: the file is refused unless
 //!   `Σ_i |w_ij| · max x_i + |b_j| ≤ 2^62` for every `j`, so no sum can overflow for any input),
@@ -126,7 +126,7 @@ impl IntMlp {
     pub fn forward(&self, f: &Features) -> [i64; 4] {
         let l0 = &self.layers[0];
         let n = l0.n_out;
-        // Binary features: their rows summed once, then scaled by the input's 2^15.
+        // Binary features: their rows summed once, then scaled by the input's 2^24.
         let mut bin = [0i64; MAX_WIDTH];
         for &i in f.active() {
             let row = &l0.w[usize::from(i) * n..(usize::from(i) + 1) * n];
@@ -189,7 +189,7 @@ mod tests {
                 n_in: N_FEATURES,
                 n_out: 2,
                 w: vec![w0; N_FEATURES * 2],
-                b: vec![0, -5],
+                b: vec![0, -(1 << 24)],
                 shift,
             },
             Layer {
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn forward_by_hand() {
-        let net = IntMlp::new(tiny(3, 15)).expect("valid");
+        let net = IntMlp::new(tiny(3, 24)).expect("valid");
         let mut f = Features {
             active: [PAD; MAX_ACTIVE],
             n_active: 2,
@@ -222,11 +222,11 @@ mod tests {
         };
         f.active[0] = 0;
         f.active[1] = 7;
-        f.dense[0] = 1 << 14;
-        // Layer 0: 3·2^15·2 + 3·2^14 = 3·2^14·5; >> 15 rounds 7.5 to 8 (and −5 + … to 7).
-        let h0 = round_shift(3 * (1 << 15) * 2 + 3 * (1 << 14), 15);
-        let h1 = round_shift(-5 + 3 * (1 << 15) * 2 + 3 * (1 << 14), 15);
-        assert_eq!((h0, h1), (8, 7));
+        f.dense[0] = -(1 << 22);
+        // Layer 0: 3·2^24·2 − 3·2^22 = 21·2^22; >> 24 rounds 5.25 to 5 (and 4.25 to 4).
+        let h0 = round_shift(3 * (1 << 24) * 2 - 3 * (1 << 22), 24);
+        let h1 = round_shift(-(1 << 24) + 3 * (1 << 24) * 2 - 3 * (1 << 22), 24);
+        assert_eq!((h0, h1), (5, 4));
         assert_eq!(
             net.forward(&f),
             [h0 - h1, 2 * h0 - 2 * h1, 3 * h0 - 3 * h1, 4 * h0 - 4 * h1]
@@ -241,7 +241,7 @@ mod tests {
                 n_out: width,
                 w: vec![1; N_FEATURES * width],
                 b: vec![0; width],
-                shift: 15,
+                shift: 24,
             },
             Layer {
                 n_in: width,
@@ -255,15 +255,17 @@ mod tests {
 
     #[test]
     fn overflowing_networks_are_refused() {
+        // A first layer of weights 2^31: 2^31 × 2^24 × N_FEATURES > 2^62.
+        assert!(IntMlp::new(tiny(i32::MAX, 24)).is_err());
         // 1024 inputs × 2^31 × 64·2^20 = 2^67 > 2^62.
         assert!(IntMlp::new(wide(1024, i32::MAX)).is_err());
         // 1024 × 2^20 × 2^26 = 2^56.
         assert!(IntMlp::new(wide(1024, 1 << 20)).is_ok());
         assert!(IntMlp::new(wide(MAX_WIDTH + 1, 1)).is_err());
-        let mut bad = tiny(1, 15);
+        let mut bad = tiny(1, 24);
         bad[1].n_out = 3;
         assert!(IntMlp::new(bad).is_err());
-        let mut bad = tiny(1, 15);
+        let mut bad = tiny(1, 24);
         bad[0].shift = 63;
         assert!(IntMlp::new(bad).is_err());
     }

@@ -33,12 +33,12 @@ impl Leaf for SyntheticLeaf {
 }
 
 /// The golden network: widths `[N_FEATURES, 32, 16, 4]`, weights uniform in `[−2^20, 2^20)`,
-/// biases uniform in `[−2^39, 2^39)`, shifts `[18, 23, 16]`, drawn in order (layer by layer,
+/// biases uniform in `[−2^39, 2^39)`, shifts `[27, 23, 16]`, drawn in order (layer by layer,
 /// weights input-major then biases) from SplitMix64 seeded with `seed`.
 pub fn golden_net(seed: u64) -> IntMlp {
     let mut sm = SplitMix64::new(seed);
     let dims = [N_FEATURES, 32, 16, 4];
-    let shifts = [18, 23, 16];
+    let shifts = [27, 23, 16];
     let layers = (0..3)
         .map(|k| {
             let (n_in, n_out) = (dims[k], dims[k + 1]);
@@ -61,8 +61,8 @@ pub fn golden_net(seed: u64) -> IntMlp {
 }
 
 /// The golden inputs: `count` feature vectors; for each, every binary index in order is active
-/// when the next draw is 0 mod 10 (up to [`MAX_ACTIVE`]), then each dense value is the next
-/// draw mod 32769.
+/// when the next draw is 0 mod 10 (up to [`MAX_ACTIVE`]), then each dense value is minus the
+/// next draw mod (2^24 + 1).
 pub fn golden_features(seed: u64, count: usize) -> Vec<Features> {
     let mut sm = SplitMix64::new(seed);
     (0..count)
@@ -79,7 +79,7 @@ pub fn golden_features(seed: u64, count: usize) -> Vec<Features> {
                 }
             }
             for d in f.dense.iter_mut() {
-                *d = (sm.next_u64() % 32769) as u16;
+                *d = -((sm.next_u64() % ((1 << 24) + 1)) as i32);
             }
             f
         })

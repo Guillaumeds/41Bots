@@ -1,4 +1,4 @@
-//! The oracle encoder (docs/M3-HYBRID-SPEC.md §6, encoder `oracle-v1`): a position at the start
+//! The oracle encoder (docs/M3-HYBRID-SPEC.md §6, encoder `oracle-v2`): a position at the start
 //! of a trick, in the solver's canonical form ([`CanonPos`]), with the match context, as feature
 //! indices for the network.
 //!
@@ -18,23 +18,37 @@
 //!   tricks this hand (4 × 5);
 //! - the 5 of trumps played (1); the end-of-hand bonus team (none or a team: 5);
 //! - each team with one game won (4); the dealer's team (4);
-//! - dense, from the equity leaf (20 values in 0..=2^15, 2^15 = certain): every team's money
-//!   chance if the hand ended now with the current scores (4), and if team `t` won the game now,
-//!   for each `t` (4 × 4). These are functions of the scores, games and dealer, which are also
-//!   given as binary features; they only help the network.
+//! - dense, from the equity leaf (PLAN §6.5: "each team's equity if the hand ended now … and
+//!   the reachable successor equities"), each money chance `p` given as `log2(p) / 32` (`p` at
+//!   least 2^-32, so values lie in `[−1, 0]`), in units of 2^-24 ([`log2_feature`], integer
+//!   only):
+//!   - every team's money chance if the hand ended now with the current scores (4), and if team
+//!     `t` won the game now, for each `t` (4 × 4);
+//!   - the successor equities of the next trick: for each team `a`, the money chances after `a`
+//!     wins the next trick (4 × 4), and of the next two tricks: after `a` then `b` win them
+//!     (16 × 4). Each is scored exactly as the hand is (`equity::hand::InHand`: trick points, the
+//!     5 of trumps' bonus at once in the first of these tricks its holder's team wins, 41, then
+//!     after trick 5 the jink, the end-of-hand bonus to the end-bonus team and 41); when the hand
+//!     goes on after those tricks the leaf is taken as if it ended there. With one trick left the
+//!     two-trick block repeats the one-trick one.
+//!
+//!   These are functions of fields the binary features already hold; they let the network
+//!   *select* an outcome instead of learning the match-equity table, and in log form a selected
+//!   outcome's chances are exactly its logits.
 //!
 //! The binary features are a complete description of the canonical form and the match context
 //! (see [`decode`], tested), so equal encodings mean equal canonical forms, and so equal exact
 //! values (`solver::frontier`).
 
 use engine::cards::Suit;
+use equity::hand::{AfterHand, AfterTrick, InHand, Scoring};
 use equity::state::{N_SCORES, SCORE_VALUES, score_index};
 use equity::{MatchState, MoneyChance, ONE};
 use solver::frontier::{CanonPos, SLOTS};
 use solver::{Leaf, MatchCtx};
 
 /// The encoder's name, recorded in every weights file and shard sidecar.
-pub const ENCODER: &str = "oracle-v1";
+pub const ENCODER: &str = "oracle-v2";
 
 /// Places a card can have in its holder's hand (a hand holds at most 4 cards at the start of
 /// trick 2; 5 keeps room).
@@ -64,16 +78,24 @@ pub const OFF_GAMES: usize = OFF_END_BONUS + 5;
 pub const OFF_DEALER: usize = OFF_GAMES + 4;
 /// Binary features.
 pub const N_BINARY: usize = OFF_DEALER + 4;
+/// Dense: money chance if the hand ended now (team).
+pub const DENSE_NOW: usize = 0;
+/// Dense: money chance if team `t` won the game now (`t × 4 + team`).
+pub const DENSE_GAME: usize = 4;
+/// Dense: after team `a` wins the next trick (`a × 4 + team`).
+pub const DENSE_NEXT1: usize = 20;
+/// Dense: after `a` then `b` win the next two tricks (`a × 16 + b × 4 + team`).
+pub const DENSE_NEXT2: usize = 36;
 /// Dense features (they follow the binary ones).
-pub const N_DENSE: usize = 20;
+pub const N_DENSE: usize = 100;
 /// All features.
 pub const N_FEATURES: usize = N_BINARY + N_DENSE;
 /// Room for active binary features (at most 84 occur: 2 per live card, at most 32 live cards).
 pub const MAX_ACTIVE: usize = 96;
 /// Padding of the active list.
 pub const PAD: u16 = u16::MAX;
-/// The input scale: a binary feature that is on, and a dense value of 1, are 2^15.
-pub const INPUT_SHIFT: u32 = 15;
+/// The input scale: a binary feature that is on, and a dense value of 1, are 2^24.
+pub const INPUT_SHIFT: u32 = 24;
 
 /// An encoded position: the active binary features (ascending, then [`PAD`]) and the dense
 /// values.
@@ -83,8 +105,8 @@ pub struct Features {
     pub active: [u16; MAX_ACTIVE],
     /// How many are active.
     pub n_active: u8,
-    /// Dense values, 0..=2^15.
-    pub dense: [u16; N_DENSE],
+    /// Dense values, `−2^24..=0` (`log2(p) / 32` in units of 2^-24).
+    pub dense: [i32; N_DENSE],
 }
 
 impl Features {
@@ -108,9 +130,86 @@ pub fn rotation(c: &CanonPos) -> u8 {
     (8 - c.leader % 8) % 8
 }
 
-/// A money chance as a dense value: units of 2^-15, rounded (2^15 = certain).
-fn dense_value(v: u64) -> u16 {
-    ((v + (1 << 16)) >> 17) as u16
+/// A chance `v` (units of 2^-32, at least 1 counted) as a dense value: `log2(v / 2^32) / 32` in
+/// units of 2^-24, so in `[−2^24, 0]`, rounded down. Integer only: the integer part from the
+/// highest set bit, then 19 fraction bits by the classic squaring method (square the mantissa
+/// in `[1, 2)`, held with 31 fraction bits and truncated after each square; a square of 2 or
+/// more gives a fraction bit 1 and is halved).
+pub fn log2_feature(v: u64) -> i32 {
+    let v = v.clamp(1, ONE);
+    let n = 63 - v.leading_zeros();
+    let mut m: u64 = if n >= 31 {
+        v >> (n - 31)
+    } else {
+        v << (31 - n)
+    };
+    let mut frac: i64 = 0;
+    for i in (0..19).rev() {
+        m = (m * m) >> 31;
+        if m >= 1 << 32 {
+            m >>= 1;
+            frac |= 1 << i;
+        }
+    }
+    (((i64::from(n) - 32) << 19) + frac) as i32
+}
+
+/// The money chance after the given teams win the next tricks in order, scored as the hand is
+/// (see the module notes; `five`: the team holding the live 5 of trumps, whose bonus comes in
+/// the first of these tricks that team wins; `end`: the end-of-hand bonus team, paid only if
+/// that team has won a trick this hand: the best trump wins its own trick, so a line where its
+/// team wins none cannot happen, and paying it would give a score no team can stand on). When
+/// the hand goes on after them, the leaf of the scores reached (as if the hand ended there).
+fn successor(
+    h: InHand,
+    winners: &[u8],
+    five: Option<u8>,
+    end: Option<u8>,
+    games: [u8; 4],
+    next_dealer: u8,
+    leaf: &dyn Leaf,
+) -> MoneyChance {
+    let won = |t: u8| {
+        let mut g = games;
+        g[usize::from(t)] += 1;
+        if g[usize::from(t)] >= engine::game::GAMES_TO_WIN {
+            MoneyChance::certain(t)
+        } else {
+            leaf.value(&MatchState {
+                scores: [0; 4],
+                games: g,
+                dealer_team: next_dealer,
+            })
+        }
+    };
+    let mut h = h;
+    let mut five_due = five;
+    for &w in winners {
+        let five_here = five_due == Some(w);
+        if five_here {
+            five_due = None;
+        }
+        match h.play_trick(w, five_here, Scoring::HOUSE) {
+            AfterTrick::GameWon(t, _) => return won(t),
+            AfterTrick::Next(n) => h = n,
+            AfterTrick::TricksDone(n) => {
+                let end = end.filter(|&t| n.tricks[usize::from(t)] > 0);
+                return match n.finish(end, Scoring::HOUSE) {
+                    AfterHand::GameWon(t, _) => won(t),
+                    AfterHand::HandOver(sc) => leaf.value(&MatchState {
+                        scores: sc,
+                        games,
+                        dealer_team: next_dealer,
+                    }),
+                };
+            }
+        }
+    }
+    leaf.value(&MatchState {
+        scores: h.scores,
+        games,
+        dealer_team: next_dealer,
+    })
 }
 
 /// Encode a canonical position with its match context; `leaf` gives the dense equity features.
@@ -179,14 +278,17 @@ pub fn encode(c: &CanonPos, ctx: &MatchCtx, leaf: &dyn Leaf) -> (Features, u8) {
     let dealer = rt(ctx.dealer_team) as u8;
     f.push(OFF_DEALER + usize::from(dealer));
     let next = (dealer + 1) % 4;
+    let put = |f: &mut Features, at: usize, v: MoneyChance| {
+        for (u, &x) in v.0.iter().enumerate() {
+            f.dense[at + u] = log2_feature(x);
+        }
+    };
     let now = leaf.value(&MatchState {
         scores,
         games,
         dealer_team: next,
     });
-    for t in 0..4 {
-        f.dense[t] = dense_value(now.0[t]);
-    }
+    put(&mut f, DENSE_NOW, now);
     for t in 0..4u8 {
         let mut g = games;
         g[usize::from(t)] += 1;
@@ -199,11 +301,36 @@ pub fn encode(c: &CanonPos, ctx: &MatchCtx, leaf: &dyn Leaf) -> (Features, u8) {
                 dealer_team: next,
             })
         };
-        for u in 0..4 {
-            f.dense[4 + 4 * usize::from(t) + u] = dense_value(v.0[u]);
+        put(&mut f, DENSE_GAME + 4 * usize::from(t), v);
+    }
+    let h = InHand {
+        scores,
+        flags,
+        tricks,
+        five_played: c.five_played,
+        tricks_done: c.tricks_done,
+    };
+    // The live 5's holder is slot 0's; its team in the rotated order.
+    let five = c.slot(0).map(|(s, _)| (s + r) % 4);
+    let end = c.end_bonus.map(|t| rt(t) as u8);
+    let two = c.tricks_done + 2 <= engine::game::TRICKS_PER_HAND;
+    for a in 0..4u8 {
+        let v1 = successor(h, &[a], five, end, games, next, leaf);
+        put(&mut f, DENSE_NEXT1 + 4 * usize::from(a), v1);
+        for b in 0..4u8 {
+            let v2 = if two {
+                successor(h, &[a, b], five, end, games, next, leaf)
+            } else {
+                v1
+            };
+            put(
+                &mut f,
+                DENSE_NEXT2 + 16 * usize::from(a) + 4 * usize::from(b),
+                v2,
+            );
         }
     }
-    debug_assert!(f.dense.iter().all(|&d| u64::from(d) <= ONE >> 17));
+    debug_assert!(f.dense.iter().all(|&d| (-(1 << 24)..=0).contains(&d)));
     (f, r)
 }
 
@@ -308,4 +435,33 @@ pub fn rotate_canon(c: &CanonPos, ctx: &MatchCtx, r: u8) -> (CanonPos, MatchCtx)
     d.end_bonus = c.end_bonus.map(|t| rt(t) as u8);
     x.dealer_team = rt(ctx.dealer_team) as u8;
     (d, x)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log2_feature_matches_the_logarithm() {
+        assert_eq!(log2_feature(ONE), 0);
+        assert_eq!(log2_feature(1), -(1 << 24));
+        assert_eq!(log2_feature(0), -(1 << 24));
+        assert_eq!(log2_feature(ONE / 2), -(1 << 19));
+        assert_eq!(log2_feature(ONE / 4), -(2 << 19));
+        for v in [3u64, 1000, 123_456_789, ONE / 3, ONE - 1, 3_000_000_000] {
+            let exact = ((v as f64) / (ONE as f64)).log2() * f64::from(1 << 19);
+            let got = f64::from(log2_feature(v));
+            assert!(
+                got <= exact + 1e-6 && got > exact - 4.0,
+                "{v}: {got} vs {exact}"
+            );
+        }
+        // Monotone.
+        let mut last = i32::MIN;
+        for k in 0..2000u64 {
+            let x = log2_feature(1 + k * (ONE / 2000));
+            assert!(x >= last);
+            last = x;
+        }
+    }
 }
