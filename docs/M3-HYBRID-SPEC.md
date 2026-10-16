@@ -63,8 +63,11 @@ current exact solver with that switch).
 
 ## 4. Golden sets and references
 
-- Trick 4: run `m3-agree-t4c`; trick 3: `m3-agree-t3`; trick 2: `m3-agree-t2d` (each 400
-  decisions × 320 worlds, values version 1). At tricks 2–4 no rob is pending and today's fixes
+- Trick 4: run `m3-agree-t4c`; trick 2: `m3-agree-t2d` (each 400 decisions × 320 worlds, values
+  version 1; copies in `/home/user/41Bots-golden/` on the build VM). Trick 3: the R2 run
+  `m3-agree-t3` holds no output (killed 2026-10-14), so the trick-3 golden set (400 decisions ×
+  320 worlds, seed 1, as `docs/m3-ncurves/curves-t3.txt`) is regenerated with the current binary
+  (about 20 core-minutes: off this VM). At tricks 2–4 no rob is pending and today's fixes
   cannot change a value except through the tie-order merge fix, so the harness recomputes exact
   values on the current binary where that is cheap (tricks 3 and 4, locally) and for trick 2
   checks a 1% sample byte-identical before reusing the stored values (any mismatch: recompute
