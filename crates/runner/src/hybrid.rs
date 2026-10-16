@@ -38,6 +38,21 @@
 //! trick-1 check on the saved exact worlds, `hybrid_t1check`): no golden set (step 5) and no
 //! hybrid check (step 7), and the verdict is [`TRAIN_ONLY`]; the golden set's and the check's
 //! settings (`golden_*`, `verify_pct`, `tt_mb`) are then refused, not ignored.
+//! The GPU need not wait for the CPU (owner, 2026-10-16), answer-neutral in the golden set and
+//! the check: `overlap` (true): on a GPU, a golden set to generate (step 5) is made while the
+//! network trains (step 6), on the threads the trainer leaves (all usable threads less its 8);
+//! either failing stops the other at once and the chunk fails with the reason; `rung.json`'s
+//! `overlap` records both times and how long they ran together. `label_parts` (1): the
+//! random-play and rules-v1 labels are made in that many shards each ([`Params::shards`]: part `k`
+//! of a set with seed `s` has its share of the rows and the seed `s × 100 + k`, so the rows are a
+//! pure function of the manifest, whatever the machine), the validation shard first; on a GPU
+//! the training starts once part 1 is made, watching the parts' directory (`train.py
+//! --watch-dir --expect`: each later shard joins between epochs; patience, the learning-rate
+//! scheduler and the best network count only epochs on every shard), and the later parts are
+//! made on the threads it leaves; its time limit counts from the last shard. `partial_epochs`
+//! (0: no limit) caps the epochs on each partial set (`--partial-epochs`). One part is the former
+//! behaviour, step for step. Epochs on part of the data warm-start the full training, which can
+//! cost a little accuracy (docs/m3-hybrid/overlap.md); the validation loss says.
 //! Also: `mix_weight` (1.0), `start_hands` (20000, for the label roots and the golden
 //! decisions), `tt_mb` (64, the solver table per thread of the golden worlds
 //! and the check), `verify_pct` (1, the check's recomputed sample of stored exact worlds),
@@ -131,9 +146,12 @@ use crate::spike::build_table_from;
 use crate::{Ctx, sibling};
 
 /// The settings a `hybrid_rung` chunk takes; any other key is refused.
-pub(crate) const KEYS: [&str; 46] = [
+pub(crate) const KEYS: [&str; 49] = [
     "cut",
     "check",
+    "label_parts",
+    "overlap",
+    "partial_epochs",
     "labels_random",
     "labels_random_seed",
     "labels_rules",
@@ -287,6 +305,46 @@ pub(crate) struct Params {
     /// `golden_decisions_input` and `golden_worlds_input`: the SHA-256 of a stored golden set's
     /// decisions and exact worlds files, reused instead of generated; `None`: generated.
     pub golden_inputs: Option<(String, String)>,
+    /// `label_parts`: the random-play and rules-v1 labels are made in this many shards each
+    /// ([`Params::shards`]), and on a GPU the training starts after the first ones (1: one shard
+    /// each, the training after all of them, as before).
+    pub label_parts: u64,
+    /// `overlap` (true): on a GPU, a generated golden set is made while the network trains.
+    pub overlap: bool,
+    /// `partial_epochs` (0: no limit): with `label_parts` above 1, at most this many epochs on
+    /// each partial set of shards (the trainer's `--partial-epochs`).
+    pub partial_epochs: u64,
+}
+
+/// One label shard to make: its set, and its part (`(k, of)`, 1-based) when the set is made in
+/// parts.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ShardJob {
+    pub set: LabelSet,
+    pub part: Option<(u64, u64)>,
+}
+
+impl ShardJob {
+    /// `t<cut>-<name>-s<seed>.npy`, or `t<cut>-<name>-p<k>of<n>-s<seed>.npy` for a part (its
+    /// own seed).
+    pub fn file(&self, cut: u64) -> String {
+        match self.part {
+            None => format!("t{cut}-{}-s{}.npy", self.set.name, self.set.seed),
+            Some((k, n)) => format!("t{cut}-{}-p{k}of{n}-s{}.npy", self.set.name, self.set.seed),
+        }
+    }
+}
+
+/// The seed of part `k` (1-based) of a set with seed `seed` made in parts: `seed × 100 + k`
+/// (so part 2 of seed 101 is 10102), `None` on overflow. A pure function of the manifest.
+pub(crate) fn part_seed(seed: u64, k: u64) -> Option<u64> {
+    seed.checked_mul(100)?.checked_add(k)
+}
+
+/// Rows of part `k` (1-based) of `count` rows in `n` parts: equal, the first `count mod n`
+/// parts one more.
+pub(crate) fn part_count(count: u64, k: u64, n: u64) -> u64 {
+    count / n + u64::from(k <= count % n)
 }
 
 impl Params {
@@ -323,7 +381,44 @@ impl Params {
                      "mix_weight": self.mix_weight },
             "device": self.device.name(), "train_threads": self.train_threads,
             "compare_cpu": self.compare_cpu, "upload_shards": self.upload_shards,
+            "label_parts": self.label_parts, "overlap": self.overlap,
+            "partial_epochs": self.partial_epochs,
         })
+    }
+
+    /// The label shards in the order they are made. One part: the training sets, then the
+    /// validation shard (as before). More: the validation shard, then part 1 of the random-play
+    /// and rules-v1 sets, part 2, …, each part `part_count` rows with its own seed
+    /// (`part_seed`), then the harvest (one shard).
+    pub(crate) fn shards(&self) -> Vec<ShardJob> {
+        let one = |set: &LabelSet| ShardJob {
+            set: set.clone(),
+            part: None,
+        };
+        if self.label_parts <= 1 {
+            return self
+                .train
+                .iter()
+                .chain(std::iter::once(&self.val))
+                .map(one)
+                .collect();
+        }
+        let n = self.label_parts;
+        let mut out = vec![one(&self.val)];
+        for k in 1..=n {
+            for s in self.train.iter().filter(|s| s.source != "harvest") {
+                out.push(ShardJob {
+                    set: LabelSet {
+                        count: part_count(s.count, k, n),
+                        seed: part_seed(s.seed, k).expect("checked when read"),
+                        ..s.clone()
+                    },
+                    part: Some((k, n)),
+                });
+            }
+        }
+        out.extend(self.train.iter().filter(|s| s.source == "harvest").map(one));
+        out
     }
 
     fn widths_arg(&self) -> String {
@@ -594,9 +689,44 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
     if val.count == 0 {
         return Err("hybrid_rung: val_count must be at least 1".into());
     }
+    let label_parts = u("label_parts", 1)?;
+    if !(1..=99).contains(&label_parts) {
+        return Err("hybrid_rung: label_parts must be 1 to 99".into());
+    }
+    let overlap = match o.get("overlap") {
+        None | Some(Value::Null) => true,
+        Some(v) => v
+            .as_bool()
+            .ok_or("hybrid_rung: overlap must be true or false")?,
+    };
+    let partial_epochs = u("partial_epochs", 0)?;
+    if partial_epochs > 0 && label_parts == 1 {
+        return Err(
+            "hybrid_rung: partial_epochs limits the epochs on part of the labels: it needs \
+             label_parts above 1"
+                .into(),
+        );
+    }
+    // The seeds the shards are made with: a set's own, or with parts each part's.
+    let mut effective: Vec<LabelSet> = Vec::new();
+    for x in train.iter().chain(std::iter::once(&val)) {
+        if label_parts > 1 && x.source != "harvest" && x.name != "val" {
+            for k in 1..=label_parts {
+                let seed = part_seed(x.seed, k).ok_or_else(|| {
+                    format!(
+                        "hybrid_rung: the {} labels' seed {} is too large for parts",
+                        x.name, x.seed
+                    )
+                })?;
+                effective.push(LabelSet { seed, ..x.clone() });
+            }
+        } else {
+            effective.push(x.clone());
+        }
+    }
     // Training, validation and golden-set positions use disjoint seeds (spec §5).
     let mut seen: Vec<(u64, &str)> = Vec::new();
-    for x in train.iter().chain(std::iter::once(&val)) {
+    for x in &effective {
         if x.seed == GOLDEN_SEED {
             return Err(format!(
                 "hybrid_rung: the {} labels' seed is {GOLDEN_SEED}, the golden sets' seed; use another",
@@ -708,6 +838,9 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         harvest_net,
         race: race_settings,
         golden_inputs,
+        label_parts,
+        overlap,
+        partial_epochs,
     })
 }
 
@@ -827,6 +960,78 @@ fn read_json(p: &Path) -> Option<Value> {
         .and_then(|t| serde_json::from_str(&t).ok())
 }
 
+/// A step's progress file (`prog`, a JSON object the child rewrites) into another step's
+/// heartbeat progress `p`: its fields as `<prefix>_<field>` (its `device` left out), and its name
+/// `name` added to the step's (`"golden worlds + train"`), so the run's heartbeat shows both
+/// steps (`progress.chunk_steps` keeps fields that end in `_done` or `_total` and the trainer's
+/// `train_` fields). A missing or half-written file adds only the name.
+fn merge_step(p: &mut Value, prefix: &str, name: &str, prog: Option<&Path>) {
+    if let Some(Value::Object(x)) = prog.and_then(read_json) {
+        for (k, v) in x {
+            if k != "device" {
+                p[format!("{prefix}_{k}")] = v;
+            }
+        }
+    }
+    let joined = format!(" + {name}");
+    match p["step"].as_str() {
+        Some(step)
+            if step == name || step.ends_with(&joined) || step.contains(&format!("{name} + ")) => {}
+        Some(step) => p["step"] = json!(format!("{step}{joined}")),
+        None => p["step"] = json!(name),
+    }
+}
+
+/// The trainer's progress (`prog`) into another step's heartbeat progress ([`merge_step`]).
+fn merge_train(p: &mut Value, prog: &Path) {
+    merge_step(p, "train", "train", Some(prog));
+}
+
+/// Steps running beside the current one, for the heartbeat: (prefix, step name, progress file).
+type Beside = Vec<(String, String, Option<PathBuf>)>;
+
+fn merge_beside(p: &mut Value, beside: &Beside) {
+    for (prefix, name, prog) in beside {
+        merge_step(p, prefix, name, prog.as_deref());
+    }
+}
+
+/// One step of [`Rung::concurrent`]: a child process run at the same time as others, with its
+/// own share of the threads (`threads`; its command is given that many), its log, the JSON
+/// progress file it rewrites, if any (its fields join the heartbeat as `<prefix>_<field>`), and
+/// a time limit.
+// For the audit loop (docs/m3-hybrid/audit-loop.md §4: its CPU steps beside the GPU); tested here.
+#[allow(dead_code)]
+pub(crate) struct ConcurrentStep {
+    pub step: String,
+    pub cmd: Command,
+    pub threads: u64,
+    pub log: String,
+    pub progress: Option<PathBuf>,
+    pub prefix: String,
+    pub limit: Option<Duration>,
+}
+
+/// What a trainer reads: given shards (the training ones, then the validation one), or the
+/// parts' directory it watches (`--watch-dir`, `expect` shards) and the validation shard.
+enum Feed {
+    Files(Vec<PathBuf>),
+    Watch {
+        dir: PathBuf,
+        expect: usize,
+        val: PathBuf,
+    },
+}
+
+/// A training running in the background ([`Rung::start_train`]).
+struct BgTrain {
+    progress: PathBuf,
+    dir: PathBuf,
+    device: String,
+    threads: u64,
+    t: Instant,
+}
+
 fn write_json(p: &Path, v: &Value) -> Result<(), String> {
     if let Some(d) = p.parent() {
         fs::create_dir_all(d).map_err(|e| format!("mkdir {}: {e}", d.display()))?;
@@ -837,6 +1042,11 @@ fn write_json(p: &Path, v: &Value) -> Result<(), String> {
 
 fn path_str(p: &Path) -> String {
     p.display().to_string()
+}
+
+/// To a tenth.
+fn round1(x: f64) -> f64 {
+    (x * 10.0).round() / 10.0
 }
 
 /// Rounded seconds.
@@ -853,7 +1063,22 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         json!({ "kind": "hybrid_rung", "step": "setup: table v0", "partial_cpu_ok": true }),
     );
     let (table, table_rec) = build_table_from(ctx, p.get("table").unwrap_or(&json!({})), "auto")?;
-    chunk_with(ctx, &params, &tools, &table, table_rec)
+    chunk_steps(ctx, &params, &tools, &table, table_rec)
+}
+
+/// [`chunk_with`] that never leaves a child running beside the steps when it fails.
+fn chunk_steps(
+    ctx: &mut Ctx,
+    params: &Params,
+    tools: &Tools,
+    table: &Path,
+    table_rec: Value,
+) -> Result<Value, String> {
+    let r = chunk_with(ctx, params, tools, table, table_rec);
+    if r.is_err() {
+        ctx.kill_bg();
+    }
+    r
 }
 
 /// The steps of a chunk after the equity table (module notes), with the given programs.
@@ -885,6 +1110,8 @@ pub(crate) fn chunk_with(
         python: PathBuf::new(),
         device: String::new(),
         inputs: BTreeMap::new(),
+        bg_train: None,
+        beside: Vec::new(),
     };
     r.rec.insert("params".into(), params.to_json());
     r.rec.insert("table".into(), table_rec);
@@ -892,17 +1119,57 @@ pub(crate) fn chunk_with(
     r.fetch_inputs()?;
     r.python_env()?;
     r.device_check()?;
-    let shards = r.labels()?;
+    // The GPU need not wait for the CPU (owner, 2026-10-16): with label parts it starts on the
+    // first ones while the rest are made, and a golden set to generate is made while it trains.
+    // Both only on a GPU: on the CPU they would share the same threads.
+    let gpu = r.device == "cuda";
+    let shards = r.labels(gpu && params.label_parts > 1)?;
     if params.upload_shards {
         r.upload_shards(&shards)?;
     }
+    let generate = params.check && params.golden_inputs.is_none();
+    let overlap = gpu && params.overlap && generate;
+    if overlap && r.bg_train.is_none() {
+        r.start_train(&Feed::Files(shards.clone()))?;
+    }
+    let tg = Instant::now();
     let golden = if params.check {
         Some(r.golden()?)
     } else {
         None
     };
+    let golden_ran = (tg, Instant::now());
     let net = r.out.join("net");
-    r.train(&shards, &net, &r.device.clone(), "train", "net")?;
+    if r.bg_train.is_some() {
+        let (ts, te) = r.finish_train()?;
+        let (gs, ge) = golden_ran;
+        let span = |a: Instant, b: Instant| b.saturating_duration_since(a).as_secs_f64();
+        let both = span(ts.max(gs), te.min(ge));
+        r.rec.insert(
+            "overlap".into(),
+            json!({ "golden_with_training": overlap,
+                    "train_threads": r.train_threads(),
+                    "golden_threads": if overlap { json!(r.threads().saturating_sub(r.train_threads()).max(1)) } else { Value::Null },
+                    "train_s": round1(span(ts, te)),
+                    "golden_s": if generate { json!(round1(span(gs, ge))) } else { Value::Null },
+                    // When each began (seconds into the chunk): the trainer is started before
+                    // the golden set, in the runner's own order.
+                    "train_started_s": round1(span(r.t0, ts)),
+                    "golden_started_s": if generate { json!(round1(span(r.t0, gs))) } else { Value::Null },
+                    "both_s": if overlap { json!(round1(both)) } else { Value::Null } }),
+        );
+        r.save()?;
+    } else {
+        if params.check && generate && params.overlap {
+            r.rec.insert(
+                "overlap".into(),
+                json!({ "golden_with_training": false,
+                        "why": "training on the CPU: the golden set and the training would share \
+                                its threads" }),
+            );
+        }
+        r.train(&shards, &net, &r.device.clone(), "train", "net")?;
+    }
     if params.compare_cpu {
         if r.device == "cuda" {
             r.train(
@@ -969,6 +1236,11 @@ struct Rung<'a> {
     device: String,
     /// Stored inputs fetched and checked (`harvest_net`, `golden_decisions`, `golden_worlds`).
     inputs: BTreeMap<&'static str, PathBuf>,
+    /// The training, while it runs in the background.
+    bg_train: Option<BgTrain>,
+    /// Steps running beside the current one ([`Rung::concurrent`], the background training):
+    /// their thread shares and progress, for the heartbeat.
+    beside: Vec<(String, String, Option<PathBuf>, u64)>,
 }
 
 impl Rung<'_> {
@@ -1208,26 +1480,147 @@ impl Rung<'_> {
         })
     }
 
-    /// Step 4: the label shards (training sets, then validation). Returns their paths in that
-    /// order.
-    fn labels(&mut self) -> Result<Vec<PathBuf>, String> {
-        let dir = self.work.join("labels");
-        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let sets: Vec<LabelSet> = self
-            .p
-            .train
+    /// Threads for a step while the network may be training beside it: all usable threads,
+    /// less the trainer's when it runs ([`Rung::train_threads`]; at least 1).
+    fn step_threads(&self) -> u64 {
+        let taken: u64 = self.beside.iter().map(|b| b.3).sum();
+        self.threads().saturating_sub(taken).max(1)
+    }
+
+    /// The steps beside the current one, for [`merge_beside`].
+    fn beside_progress(&self) -> Beside {
+        self.beside
             .iter()
-            .chain(std::iter::once(&self.p.val))
+            .map(|(prefix, name, prog, _)| (prefix.clone(), name.clone(), prog.clone()))
+            .collect()
+    }
+
+    /// Runs `steps` at the same time, each a child with its own share of the threads (their
+    /// shares, and those of any step already running beside, may not exceed the machine's), the
+    /// heartbeat showing every one (names joined by `+`, each one's progress fields prefixed);
+    /// when one fails, the others are stopped at once and that is the error (nothing is left
+    /// running). Records each as a finished step, in the order given, with its share and when it
+    /// started and ended (`rung.json`'s `concurrent`). Returns when each ran. For the audit loop's
+    /// CPU steps beside the GPU, and any other answer-neutral overlap (the results never depend
+    /// on what runs beside: each child gets a fixed thread count).
+    #[allow(dead_code)]
+    pub(crate) fn concurrent(
+        &mut self,
+        steps: Vec<ConcurrentStep>,
+    ) -> Result<Vec<(Instant, Instant)>, String> {
+        let want: u64 = steps.iter().map(|s| s.threads).sum::<u64>()
+            + self.beside.iter().map(|b| b.3).sum::<u64>();
+        if want > self.threads() {
+            return Err(format!(
+                "hybrid_rung: steps {} ask for {want} threads at once, more than the machine's {}",
+                steps
+                    .iter()
+                    .map(|s| s.step.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" + "),
+                self.threads()
+            ));
+        }
+        let t0 = Instant::now();
+        let names: Vec<String> = steps.iter().map(|s| s.step.clone()).collect();
+        let shares: Vec<u64> = steps.iter().map(|s| s.threads).collect();
+        for s in steps {
+            if let Err(e) = self.ctx.spawn_bg(s.cmd, &s.log, &s.step, s.limit) {
+                self.ctx.kill_bg();
+                self.beside.clear();
+                return Err(e);
+            }
+            self.beside.push((
+                s.prefix.clone(),
+                s.step.clone(),
+                s.progress.clone(),
+                s.threads,
+            ));
+        }
+        let mut ran = Vec::new();
+        for name in &names {
+            let base = json!({ "kind": "hybrid_rung", "step": names.join(" + "),
+                               "partial_cpu_ok": true, "steps_done": self.steps.len(),
+                               "warnings": self.warnings });
+            self.ctx.set_phase("chunk", base.clone());
+            let beside = self.beside_progress();
+            let r = self.ctx.wait_bg(name, &mut |ctx| {
+                let mut p = base.clone();
+                merge_beside(&mut p, &beside);
+                ctx.progress = p;
+            });
+            match r {
+                // The group's steps stay in the heartbeat (with their last progress) until all
+                // have finished.
+                Ok(Some(x)) => ran.push(x),
+                Ok(None) => {
+                    self.beside.clear();
+                    return Err(format!("hybrid_rung: step {name} was not running"));
+                }
+                Err(e) => {
+                    self.ctx.kill_bg();
+                    self.beside.clear();
+                    return Err(format!("hybrid_rung: {e}"));
+                }
+            }
+        }
+        self.beside.retain(|b| !names.contains(&b.1));
+        let at = |t: Instant| round1(t.saturating_duration_since(self.t0).as_secs_f64());
+        let mut group = Vec::new();
+        for ((name, (a, b)), share) in names.iter().zip(&ran).zip(&shares) {
+            self.steps.push(json!({ "step": name, "seconds": round1(b.saturating_duration_since(*a).as_secs_f64()),
+                                    "threads": share, "started_s": at(*a), "ended_s": at(*b) }));
+            group.push(
+                json!({ "step": name, "threads": share, "started_s": at(*a), "ended_s": at(*b) }),
+            );
+        }
+        let mut all = self
+            .rec
+            .get("concurrent")
+            .and_then(Value::as_array)
             .cloned()
-            .collect();
-        let mut paths = Vec::new();
+            .unwrap_or_default();
+        all.push(json!({ "steps": group, "wall_s": round1(t0.elapsed().as_secs_f64()) }));
+        self.rec.insert("concurrent".into(), Value::Array(all));
+        self.save()?;
+        Ok(ran)
+    }
+
+    /// Step 4: the label shards ([`Params::shards`]). Returns the training shards' paths, then
+    /// the validation shard's. With `stream` (parts, on a GPU), the training starts in the
+    /// background once the validation shard and every shard of part 1 are made
+    /// ([`Rung::start_train`], watching the parts' directory), and the later parts are made on
+    /// the threads it leaves.
+    fn labels(&mut self, stream: bool) -> Result<Vec<PathBuf>, String> {
+        let dir = self.work.join("labels");
+        // Training shards made in parts go to a directory of their own, which a streamed
+        // trainer watches; the validation shard stays outside it.
+        let parts_dir = dir.join("train");
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let parted = self.p.label_parts > 1;
+        if parted {
+            fs::create_dir_all(&parts_dir).map_err(|e| e.to_string())?;
+        }
+        let jobs = self.p.shards();
+        let mut train = Vec::new();
+        let mut val = None;
         let mut recs = Vec::new();
-        for (i, s) in sets.iter().enumerate() {
+        for (i, job) in jobs.iter().enumerate() {
+            let s = &job.set;
             let t = Instant::now();
-            let file = format!("t{}-{}-s{}.npy", self.p.cut, s.name, s.seed);
-            let path = dir.join(&file);
+            let started_s = secs(self.t0);
+            let file = job.file(self.p.cut);
+            let path = if parted && s.name != "val" {
+                parts_dir.join(&file)
+            } else {
+                dir.join(&file)
+            };
             let log = format!("hybrid/labels-{}.log", s.name);
-            let step = format!("labels {} ({} of {})", s.name, i + 1, sets.len());
+            let part = job
+                .part
+                .map_or(String::new(), |(k, n)| format!(" p{k}/{n}"));
+            let step = format!("labels {}{part} ({} of {})", s.name, i + 1, jobs.len());
+            let threads = self.step_threads();
             let mut c = Command::new(&self.tools.search);
             c.args(["labels", "--trick", &self.p.cut.to_string()])
                 .args([
@@ -1240,7 +1633,7 @@ impl Rung<'_> {
                 .arg(&path)
                 .arg("--equity")
                 .arg(&self.table)
-                .args(["--threads", &self.threads().to_string()])
+                .args(["--threads", &threads.to_string()])
                 .args(["--start-hands", &self.p.start_hands.to_string()])
                 .args(&s.args);
             // The network that drives the harvest's search (`harvest_net`), fetched and checked.
@@ -1254,12 +1647,14 @@ impl Rung<'_> {
             let base = self.progress(&step, json!({ "rows_total": s.count }));
             self.ctx.set_phase("chunk", base.clone());
             let log_path = self.ctx.logs.join(&log);
+            let beside = self.beside_progress();
             self.ctx.run_child_with(c, &log, &mut |ctx| {
                 let mut p = base.clone();
                 if let Some((done, total)) = label_progress(&log_path) {
                     p["rows_done"] = json!(done);
                     p["rows_total"] = json!(total);
                 }
+                merge_beside(&mut p, &beside);
                 ctx.progress = p;
             })?;
             let side_src = PathBuf::from(format!("{}.json", path.display()));
@@ -1271,7 +1666,11 @@ impl Rung<'_> {
             let mut rec = json!({ "name": s.name, "source": s.source, "count": s.count,
                                   "seed": s.seed, "file": file, "bytes": bytes,
                                   "shard_sha256": side["shard_sha256"],
+                                  "threads": threads, "started_s": started_s,
                                   "seconds": secs(t) });
+            if let Some((k, n)) = job.part {
+                rec["part"] = json!([k, n]);
+            }
             if net.is_some() {
                 rec["harvest_net_sha256"] = json!(self.p.harvest_net);
                 rec["harvest_driver"] = side["harvest"]["frontier_driver"].clone();
@@ -1282,9 +1681,43 @@ impl Rung<'_> {
             recs.push(rec);
             self.rec.insert("labels".into(), json!(recs));
             self.done(&step, t)?;
-            paths.push(path);
+            if s.name == "val" {
+                val = Some(path);
+            } else {
+                train.push(path);
+            }
+            // Part 1 made (and the validation shard): the training starts beside the rest.
+            let next_part = jobs.get(i + 1).and_then(|j| j.part).map(|(k, _)| k);
+            if stream
+                && self.bg_train.is_none()
+                && job.part.is_some_and(|(k, _)| k == 1)
+                && next_part != Some(1)
+            {
+                let expect = jobs.iter().filter(|j| j.set.name != "val").count();
+                let v = val
+                    .clone()
+                    .ok_or("hybrid_rung: the validation shard comes first")?;
+                self.start_train(&Feed::Watch {
+                    dir: parts_dir.clone(),
+                    expect,
+                    val: v,
+                })?;
+                self.rec.insert(
+                    "stream".into(),
+                    json!({ "label_parts": self.p.label_parts, "shards": expect,
+                            "train_started_after": format!("{} of {} shards (part 1)", train.len(), expect),
+                            "train_started_s": secs(self.t0),
+                            "label_threads_while_training": self.step_threads(),
+                            "partial_epochs": self.p.partial_epochs }),
+                );
+            }
         }
-        Ok(paths)
+        if self.bg_train.is_some() {
+            // The trainer's time limit counts from when its last shard is made.
+            self.ctx.bg_limit_from_now("train");
+        }
+        train.push(val.ok_or("hybrid_rung: no validation shard")?);
+        Ok(train)
     }
 
     /// Step 4b (`upload_shards`): each shard to `inputs/sha256/<hex>`.
@@ -1303,12 +1736,20 @@ impl Rung<'_> {
         let labels = self.rec.get("labels").cloned().unwrap_or(Value::Null);
         let mut list = Vec::new();
         let mut inputs = Map::new();
-        for (k, path) in shards.iter().enumerate() {
-            let want = labels[k]["shard_sha256"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string();
-            let file = labels[k]["file"].as_str().unwrap_or_default().to_string();
+        for path in shards {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let rec = labels
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|r| r["file"].as_str() == Some(name.as_str()))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let want = rec["shard_sha256"].as_str().unwrap_or_default().to_string();
+            let file = name;
             let (p2, r) = (path.clone(), Arc::clone(&remote));
             let (sha, bytes, status) = self
                 .ctx
@@ -1350,7 +1791,7 @@ impl Rung<'_> {
         c.args(["decisions", "--trick", &g.to_string()])
             .args(["--count", &self.p.golden_count.to_string()])
             .args(["--seed", &seed.to_string(), "--allow-uneven"])
-            .args(["--threads", &self.threads().to_string()])
+            .args(["--threads", &self.step_threads().to_string()])
             .args(["--start-hands", &self.p.start_hands.to_string(), "--out"])
             .arg(&decisions);
         self.ctx.run_child(c, "hybrid/golden.log")?;
@@ -1368,14 +1809,16 @@ impl Rung<'_> {
             .arg(&worlds)
             .arg("--equity")
             .arg(&self.table)
-            .args(["--threads", &self.threads().to_string()])
+            .args(["--threads", &self.step_threads().to_string()])
             .args(["--tt-mb", &self.p.tt_mb.to_string(), "--progress"])
             .arg(&prog);
         let base = self.progress("golden worlds", json!({}));
         self.ctx.set_phase("chunk", base.clone());
+        let beside = self.beside_progress();
         self.ctx
             .run_child_with(c, "hybrid/golden.log", &mut |ctx| {
                 let mut p = base.clone();
+                merge_beside(&mut p, &beside);
                 if let Some(x) = read_json(&prog) {
                     let g = |k: &str| x.get(k).and_then(Value::as_u64).unwrap_or(0);
                     for k in [
@@ -1494,26 +1937,36 @@ impl Rung<'_> {
         self.done("share golden set", t)
     }
 
-    /// Step 6: one training run on `device` into `dir`, recorded under `key`.
-    fn train(
-        &mut self,
-        shards: &[PathBuf],
+    /// The trainer's command: on `feed`, into `dir`, on `device` with `threads` threads, its
+    /// progress to `prog`.
+    fn train_cmd(
+        &self,
+        feed: &Feed,
         dir: &Path,
         device: &str,
-        step: &str,
-        key: &str,
-    ) -> Result<(), String> {
-        let t = Instant::now();
-        let (train, val) = shards.split_at(shards.len() - 1);
-        let prog = self.work.join(format!("{key}.progress.json"));
-        let _ = fs::remove_file(&prog);
-        let threads = self.train_threads_on(device);
+        threads: u64,
+        prog: &Path,
+    ) -> Command {
         let mut c = self.python_cmd("fortyone_nn.train");
-        c.arg("--train")
-            .args(train)
-            .arg("--val")
-            .arg(&val[0])
-            .arg("--out")
+        match feed {
+            Feed::Files(shards) => {
+                let (train, val) = shards.split_at(shards.len() - 1);
+                c.arg("--train").args(train).arg("--val").arg(&val[0]);
+            }
+            Feed::Watch { dir, expect, val } => {
+                c.arg("--watch-dir")
+                    .arg(dir)
+                    .args(["--expect", &expect.to_string()])
+                    .arg("--val")
+                    .arg(val)
+                    // Loading a new part must not take the threads the labels are made on.
+                    .args(["--load-threads", &threads.to_string()]);
+                if self.p.partial_epochs > 0 {
+                    c.args(["--partial-epochs", &self.p.partial_epochs.to_string()]);
+                }
+            }
+        }
+        c.arg("--out")
             .arg(dir)
             .args(["--head", &self.p.head, "--widths", &self.p.widths_arg()])
             .args(["--epochs", &self.p.epochs.to_string()])
@@ -1525,28 +1978,107 @@ impl Rung<'_> {
             .args(["--max-minutes", &self.p.max_minutes.to_string()])
             .args(["--mix-weight", &self.p.mix_weight.to_string()])
             .args(["--device", device, "--progress"])
-            .arg(&prog);
+            .arg(prog);
+        c
+    }
+
+    /// The trainer's time limit: it stops itself after `max_minutes` (between epochs); loading,
+    /// the last epoch, quantising and the integer check get 30 minutes more.
+    fn train_limit(&self) -> Option<Duration> {
+        (self.p.max_minutes > 0.0)
+            .then(|| Duration::from_secs_f64(self.p.max_minutes * 60.0) + TRAIN_EXTRA)
+    }
+
+    /// Step 6: one training run on `device` into `dir`, recorded under `key`.
+    fn train(
+        &mut self,
+        shards: &[PathBuf],
+        dir: &Path,
+        device: &str,
+        step: &str,
+        key: &str,
+    ) -> Result<(), String> {
+        let t = Instant::now();
+        let prog = self.work.join(format!("{key}.progress.json"));
+        let _ = fs::remove_file(&prog);
+        let threads = self.train_threads_on(device);
+        let c = self.train_cmd(&Feed::Files(shards.to_vec()), dir, device, threads, &prog);
         let base = self.progress(
             step,
             json!({ "train_device": device, "train_threads": threads }),
         );
         self.ctx.set_phase("chunk", base.clone());
-        // The trainer stops itself after `max_minutes` (between epochs); loading, the last epoch,
-        // quantising and the integer check get 30 minutes more.
-        let limit = (self.p.max_minutes > 0.0)
-            .then(|| Duration::from_secs_f64(self.p.max_minutes * 60.0) + TRAIN_EXTRA);
+        let limit = self.train_limit();
         self.ctx
             .run_child_io(c, &format!("hybrid/{key}.log"), None, limit, &mut |ctx| {
                 let mut p = base.clone();
-                if let Some(Value::Object(x)) = read_json(&prog) {
-                    for (k, v) in x {
-                        if k != "device" {
-                            p[format!("train_{k}")] = v;
-                        }
-                    }
-                }
+                merge_train(&mut p, &prog);
                 ctx.progress = p;
             })?;
+        self.train_record(dir, device, threads, key, step, t)
+    }
+
+    /// Step 6 in the background (on the GPU, beside the later label parts or the golden set):
+    /// the trainer of the network `net` started on `feed`; [`Rung::finish_train`] waits for it.
+    fn start_train(&mut self, feed: &Feed) -> Result<(), String> {
+        let dir = self.out.join("net");
+        let prog = self.work.join("net.progress.json");
+        let _ = fs::remove_file(&prog);
+        let device = self.device.clone();
+        let threads = self.train_threads();
+        let c = self.train_cmd(feed, &dir, &device, threads, &prog);
+        let limit = self.train_limit();
+        self.ctx.spawn_bg(c, "hybrid/net.log", "train", limit)?;
+        self.beside
+            .push(("train".into(), "train".into(), Some(prog.clone()), threads));
+        println!(
+            "runner: hybrid_rung: training started beside the next steps ({threads} threads on {device})"
+        );
+        self.bg_train = Some(BgTrain {
+            progress: prog,
+            dir,
+            device,
+            threads,
+            t: Instant::now(),
+        });
+        Ok(())
+    }
+
+    /// Waits for the background training ([`Rung::start_train`]) and records it as the step
+    /// `train`. Returns when it ran.
+    fn finish_train(&mut self) -> Result<(Instant, Instant), String> {
+        let b = self
+            .bg_train
+            .take()
+            .ok_or("hybrid_rung: no training is running")?;
+        let base = self.progress(
+            "train",
+            json!({ "train_device": b.device, "train_threads": b.threads }),
+        );
+        self.ctx.set_phase("chunk", base.clone());
+        let prog = b.progress.clone();
+        let ran = self.ctx.wait_bg("train", &mut |ctx| {
+            let mut p = base.clone();
+            merge_train(&mut p, &prog);
+            ctx.progress = p;
+        });
+        self.beside.retain(|x| x.1 != "train");
+        let ran = ran?.ok_or("hybrid_rung: the training was not running")?;
+        self.train_record(&b.dir, &b.device, b.threads, "net", "train", b.t)?;
+        Ok(ran)
+    }
+
+    /// Records a finished training (its report, the networks' SHA-256, the shared key) under
+    /// `key` and the step `step`, begun at `t`.
+    fn train_record(
+        &mut self,
+        dir: &Path,
+        device: &str,
+        threads: u64,
+        key: &str,
+        step: &str,
+        t: Instant,
+    ) -> Result<(), String> {
         let report = read_json(&dir.join("report.json")).ok_or_else(|| {
             format!(
                 "hybrid_rung: training wrote no {}/report.json",
@@ -1565,22 +2097,23 @@ impl Rung<'_> {
         } else {
             None
         };
-        self.rec.insert(
-            key.into(),
-            json!({ "dir": rel, "device": device, "threads": threads,
-                    "int_sha256": int_sha, "int_key": int_key,
-                    "float_sha256": sha("float.safetensors")?,
-                    "epochs_run": report["history"].as_array().map_or(0, Vec::len),
-                    "best_epoch": report["best_epoch"],
-                    "float": report["float"],
-                    "int": report["int"],
-                    "val_loss_by_epoch": report["history"].as_array().map(|h| {
-                        h.iter().map(|e| e["val_loss"].clone()).collect::<Vec<_>>()
-                    }),
-                    "minutes": report["minutes"],
-                    "device_facts": report["device"],
-                    "seconds": secs(t) }),
-        );
+        let mut rec = json!({ "dir": rel, "device": device, "threads": threads,
+                "int_sha256": int_sha, "int_key": int_key,
+                "float_sha256": sha("float.safetensors")?,
+                "epochs_run": report["history"].as_array().map_or(0, Vec::len),
+                "best_epoch": report["best_epoch"],
+                "float": report["float"],
+                "int": report["int"],
+                "val_loss_by_epoch": report["history"].as_array().map(|h| {
+                    h.iter().map(|e| e["val_loss"].clone()).collect::<Vec<_>>()
+                }),
+                "minutes": report["minutes"],
+                "device_facts": report["device"],
+                "seconds": secs(t) });
+        if !report["stream"].is_null() {
+            rec["stream"] = report["stream"].clone();
+        }
+        self.rec.insert(key.into(), rec);
         self.done(step, t)
     }
 
@@ -1753,6 +2286,19 @@ mod tests {
             (p.harvest_net.as_ref(), p.golden_inputs.as_ref()),
             (None, None)
         );
+        assert_eq!((p.label_parts, p.overlap, p.partial_epochs), (1, true, 0));
+        assert_eq!(
+            p.shards()
+                .iter()
+                .map(|j| (j.set.name, j.part, j.file(4)))
+                .collect::<Vec<_>>(),
+            [
+                ("random", None, "t4-random-s101.npy".to_string()),
+                ("rules", None, "t4-rules-s102.npy".to_string()),
+                ("val", None, "t4-val-s201.npy".to_string()),
+            ],
+            "one part: the training sets, then the validation shard, as before"
+        );
         assert_eq!(p.to_json()["harvest_net"], Value::Null);
         assert_eq!(p.to_json()["golden"]["worlds_input"], Value::Null);
         assert_eq!(parse(&Value::Null).expect("null"), p);
@@ -1799,6 +2345,66 @@ mod tests {
         let e = parse(&json!({ "golden_count": 0 })).expect_err("no golden set");
         assert!(e.contains("\"check\": false"), "{e}");
         assert!(parse(&json!({ "check": "no" })).is_err());
+    }
+
+    /// Label parts: the validation shard first, then part 1 of each set, part 2, …, each part
+    /// its share of the rows with its own seed (seed × 100 + part), the harvest last; seeds that
+    /// would collide, and settings that contradict each other, are refused.
+    #[test]
+    fn label_parts_settings() {
+        let p = parse(
+            &json!({ "label_parts": 4, "labels_random": 10, "labels_rules": 3,
+                               "labels_harvest": 5, "val_count": 2, "partial_epochs": 2,
+                               "overlap": false }),
+        )
+        .expect("parts");
+        assert_eq!((p.label_parts, p.overlap, p.partial_epochs), (4, false, 2));
+        let jobs = p.shards();
+        type Got<'a> = (&'a str, Option<(u64, u64)>, u64, u64);
+        let got: Vec<Got> = jobs
+            .iter()
+            .map(|j| (j.set.name, j.part, j.set.count, j.set.seed))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("val", None, 2, 201),
+                ("random", Some((1, 4)), 3, 10101),
+                ("rules", Some((1, 4)), 1, 10201),
+                ("random", Some((2, 4)), 3, 10102),
+                ("rules", Some((2, 4)), 1, 10202),
+                ("random", Some((3, 4)), 2, 10103),
+                ("rules", Some((3, 4)), 1, 10203),
+                ("random", Some((4, 4)), 2, 10104),
+                ("rules", Some((4, 4)), 0, 10204),
+                ("harvest", None, 5, 103),
+            ]
+        );
+        assert_eq!(jobs[1].file(4), "t4-random-p1of4-s10101.npy");
+        assert_eq!((part_count(10, 1, 4), part_count(10, 4, 4)), (3, 2));
+        assert_eq!(part_seed(u64::MAX, 1), None);
+        let j = p.to_json();
+        assert_eq!(
+            (j["label_parts"].clone(), j["overlap"].clone()),
+            (json!(4), json!(false))
+        );
+        for (bad, why) in [
+            (json!({ "label_parts": 0 }), "1 to 99"),
+            (json!({ "label_parts": 100 }), "1 to 99"),
+            (json!({ "partial_epochs": 1 }), "needs label_parts above 1"),
+            (
+                json!({ "label_parts": 2, "labels_random_seed": 2 }),
+                "share seed 201",
+            ),
+            (json!({ "overlap": "yes" }), "overlap must be"),
+            (
+                json!({ "label_parts": 2, "labels_random_seed": u64::MAX }),
+                "too large",
+            ),
+        ] {
+            let e = parse(&bad).expect_err(why);
+            assert!(e.contains(why), "{bad}: {e}");
+        }
     }
 
     #[test]
@@ -2344,6 +2950,175 @@ mod tests {
         );
     }
 
+    /// A `Rung` on fake programs, for the steps' own tests.
+    #[cfg(unix)]
+    fn test_rung<'a>(ctx: &'a mut Ctx, p: &'a Params, tools: &'a Tools, root: &Path) -> Rung<'a> {
+        let out = root.join("out").join("hybrid");
+        let work = root.join("hybrid-work");
+        fs::create_dir_all(&out).expect("mkdir");
+        fs::create_dir_all(&work).expect("mkdir");
+        Rung {
+            ctx,
+            p,
+            tools,
+            table: root.join("equity-v0.npy"),
+            out,
+            work,
+            rec: Map::new(),
+            warnings: Vec::new(),
+            steps: Vec::new(),
+            t0: Instant::now(),
+            python: PathBuf::new(),
+            device: String::new(),
+            inputs: BTreeMap::new(),
+            bg_train: None,
+            beside: Vec::new(),
+        }
+    }
+
+    /// `concurrent`: steps at once within the thread budget, each recorded with its share and
+    /// times, the heartbeat naming them all with each one's progress; one failing stops the
+    /// others at once; a budget over the machine's threads is refused.
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_steps() {
+        let base = std::env::temp_dir().join(format!("hybrid-conc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).expect("mkdir");
+        let p = parse(&json!({})).expect("defaults");
+        let tools = Tools {
+            search: PathBuf::from("search"),
+            uv: PathBuf::from("uv"),
+            python_dir: base.clone(),
+            nvidia_smi: PathBuf::from("nvidia-smi"),
+            remote: None,
+        };
+        let sh = |script: String| {
+            let mut c = Command::new("sh");
+            c.args(["-c", &script]);
+            c
+        };
+        let step =
+            |name: &str, script: String, threads: u64, prog: Option<PathBuf>| ConcurrentStep {
+                step: name.to_string(),
+                cmd: sh(script),
+                threads,
+                log: format!("hybrid/{name}.log"),
+                progress: prog,
+                prefix: name.replace(' ', "_"),
+                limit: None,
+            };
+        let mut ctx = Ctx::local("hybrid-test", &base, 4);
+        let mut r = test_rung(&mut ctx, &p, &tools, &base);
+        let prog = base.join("audit.progress.json");
+        let ran = r
+            .concurrent(vec![
+                step(
+                    "audit shard",
+                    format!(
+                        "echo '{{\"rows_done\": 5, \"rows_total\": 9}}' > '{}'; sleep 0.6",
+                        prog.display()
+                    ),
+                    3,
+                    Some(prog.clone()),
+                ),
+                step("golden slices", "sleep 0.3".into(), 1, None),
+            ])
+            .expect("both run");
+        assert_eq!(ran.len(), 2);
+        assert!(ran.iter().all(|(a, b)| b > a));
+        let steps: Vec<(&str, u64)> = r
+            .steps
+            .iter()
+            .map(|s| {
+                (
+                    s["step"].as_str().unwrap_or(""),
+                    s["threads"].as_u64().unwrap_or(0),
+                )
+            })
+            .collect();
+        assert_eq!(steps, [("audit shard", 3), ("golden slices", 1)]);
+        assert_eq!(
+            r.rec["concurrent"][0]["steps"].as_array().map(Vec::len),
+            Some(2)
+        );
+        let hb = &r.ctx.progress;
+        assert_eq!(hb["step"], "audit shard + golden slices", "{hb}");
+        assert_eq!(
+            (
+                hb["audit_shard_rows_done"].clone(),
+                hb["audit_shard_rows_total"].clone()
+            ),
+            (json!(5), json!(9)),
+            "{hb}"
+        );
+        assert!(r.beside.is_empty() && r.ctx.bg.is_empty());
+        // One fails: the other is stopped at once.
+        let marker = base.join("finished");
+        let t0 = Instant::now();
+        let e = r
+            .concurrent(vec![
+                step(
+                    "long",
+                    format!("sleep 30; touch '{}'", marker.display()),
+                    2,
+                    None,
+                ),
+                step("broken", "sleep 0.2; exit 4".into(), 2, None),
+            ])
+            .expect_err("one failed");
+        assert!(e.contains("step broken (run beside others) exited"), "{e}");
+        assert!(t0.elapsed() < Duration::from_secs(25));
+        assert!(r.beside.is_empty() && r.ctx.bg.is_empty());
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!marker.exists());
+        // Over the machine's threads: refused before anything starts.
+        let e = r
+            .concurrent(vec![
+                step("a", "true".into(), 3, None),
+                step("b", "true".into(), 2, None),
+            ])
+            .expect_err("5 threads of 4");
+        assert!(
+            e.contains("ask for 5 threads at once, more than the machine's 4"),
+            "{e}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// The trainer's progress joins another step's heartbeat (`chunk_steps` shows both).
+    #[test]
+    fn training_progress_joins_another_steps() {
+        let d = std::env::temp_dir().join(format!("hybrid-merge-{}", std::process::id()));
+        fs::create_dir_all(&d).expect("mkdir");
+        let prog = d.join("p.json");
+        let mut p = json!({ "step": "golden worlds", "worlds_done": 3, "worlds_total": 9 });
+        merge_train(&mut p, &prog);
+        assert_eq!(
+            p["step"], "golden worlds + train",
+            "no file yet: the step is still named"
+        );
+        fs::write(
+            &prog,
+            r#"{"step": "train", "epoch": 2, "batches_done": 5, "device": "cuda"}"#,
+        )
+        .expect("write");
+        merge_train(&mut p, &prog);
+        assert_eq!(p["step"], "golden worlds + train");
+        assert_eq!(
+            (p["train_epoch"].clone(), p["train_batches_done"].clone()),
+            (json!(2), json!(5))
+        );
+        assert_eq!(
+            (p["worlds_done"].clone(), p.get("train_device")),
+            (json!(3), None)
+        );
+        let mut t = json!({ "step": "train" });
+        merge_train(&mut t, &prog);
+        assert_eq!(t["step"], "train");
+        let _ = fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn label_progress_reads_the_log() {
         let d = std::env::temp_dir().join(format!("hybrid-lp-{}", std::process::id()));
@@ -2742,10 +3517,59 @@ esac
             .filter(|l| l.starts_with("python -m fortyone_nn.train"))
             .collect();
         assert_eq!(trains.len(), 2, "{log}");
+        // On the GPU the golden set is made while the network trains, on the threads it leaves
+        // (which began first is the runner's own record, below: the children's log lines may
+        // come in either order).
+        for l in log
+            .lines()
+            .filter(|l| l.starts_with("search decisions") || l.starts_with("search worlds"))
+        {
+            assert!(l.contains("--threads 8 "), "{l}");
+        }
+        assert!(
+            log.lines()
+                .find(|l| l.starts_with("search hybrid-check"))
+                .is_some_and(|l| l.contains("--threads 16 ")),
+            "{log}"
+        );
         assert!(trains[0].contains("--threads 8 ") && trains[0].contains("--device cuda"));
         assert!(trains[1].contains("--threads 16 ") && trains[1].contains("--device cpu"));
         assert!(trains[1].contains("net-cpu"));
         let rung = read_json(&root.join("out/hybrid/rung.json")).expect("rung.json");
+        let o = &rung["overlap"];
+        assert_eq!(
+            (
+                o["golden_with_training"].clone(),
+                o["train_threads"].clone(),
+                o["golden_threads"].clone()
+            ),
+            (json!(true), json!(8), json!(8)),
+            "{rung}"
+        );
+        assert!(o["both_s"].as_f64().is_some_and(|x| x >= 0.0));
+        assert!(
+            o["train_started_s"].as_f64().is_some()
+                && o["train_started_s"].as_f64() <= o["golden_started_s"].as_f64(),
+            "the trainer starts before the golden set: {o}"
+        );
+        let steps: Vec<&str> = rung["steps"]
+            .as_array()
+            .expect("steps")
+            .iter()
+            .filter_map(|s| s["step"].as_str())
+            .collect();
+        assert_eq!(
+            &steps[6..],
+            [
+                "golden decisions",
+                "golden worlds",
+                "share golden set",
+                "train",
+                "train (CPU comparison)",
+                "hybrid check"
+            ],
+            "the same steps in the same order as without the overlap"
+        );
         assert_eq!(rung["compare_cpu"]["same_int_net"], false);
         assert_eq!(
             rung["compare_cpu"]["max_abs_val_loss_difference_per_epoch"],
@@ -2775,6 +3599,267 @@ esac
     /// golden set generated, and the stored files given to the check with its 1% recheck. A
     /// missing key, an object whose bytes are not its key's, a decision count that is not
     /// `golden_count` and no remote store each stop the chunk before anything is installed.
+    /// Tools for a machine with a (fake) GPU: the fake python, preceded by `prefix` (a shell
+    /// line, e.g. a slow or failing trainer), behind a fake `uv` that installs it, and `search`.
+    #[cfg(unix)]
+    fn gpu_tools(f: &Fakes, tag: &str, prefix: &str, search: PathBuf) -> Tools {
+        let py = fake_script(
+            &f.bin,
+            &format!("fake-python-{tag}"),
+            &format!(
+                "{prefix}\nFAKE_GPU=1 exec '{}' \"$@\"\n",
+                f.fake_py.display()
+            ),
+        );
+        let uv = fake_script(
+            &f.bin,
+            &format!("uv-{tag}"),
+            &format!(
+                r#"echo "uv $*" >> '{calls}'
+case $1 in
+  --version) echo "uv 0.13.0";;
+  sync) mkdir -p "$UV_PROJECT_ENVIRONMENT/bin"; cp '{py}' "$UV_PROJECT_ENVIRONMENT/bin/python";;
+esac
+"#,
+                calls = f.calls.display(),
+                py = py.display()
+            ),
+        );
+        Tools {
+            search,
+            uv,
+            python_dir: f.py.clone(),
+            nvidia_smi: f.gpu.clone(),
+            remote: None,
+        }
+    }
+
+    /// The golden set made beside the training: when either fails the other is stopped at once
+    /// and the chunk fails with the reason (nothing is left running).
+    #[cfg(unix)]
+    #[test]
+    fn golden_beside_training_fails_cleanly() {
+        let f = fakes("overlapfail");
+        let params = parse(
+            &json!({ "labels_random": 7, "labels_rules": 0, "val_count": 3,
+                                    "golden_count": 2, "golden_worlds": 4, "widths": "16,8",
+                                    "epochs": 2 }),
+        )
+        .expect("params");
+        let wrap = |name: &str, line: &str| {
+            fake_script(
+                &f.bin,
+                name,
+                &format!("{line}\nexec '{}' \"$@\"\n", f.search.display()),
+            )
+        };
+        // 1. The training fails while the golden worlds are being made (5 s).
+        let marker = f.base.join("worlds-finished");
+        let slow = wrap(
+            "search-slow-worlds",
+            &format!(
+                "[ \"$1\" = worlds ] && {{ sleep 30; touch '{}'; }}",
+                marker.display()
+            ),
+        );
+        let tools = gpu_tools(
+            &f,
+            "failing-train",
+            r#"case "$2" in fortyone_nn.train) sleep 1; echo "no memory" >&2; exit 1;; esac"#,
+            slow,
+        );
+        let mut ctx = Ctx::local("hybrid-test", &f.base.join("a"), 16);
+        let t = Instant::now();
+        let e = chunk_steps(&mut ctx, &params, &tools, &f.table, json!({}))
+            .expect_err("the training failed");
+        assert!(e.contains("step train (run beside others) exited"), "{e}");
+        assert!(
+            t.elapsed() < Duration::from_secs(25),
+            "the golden worlds were stopped"
+        );
+        assert!(!marker.exists());
+        assert!(ctx.bg.is_empty());
+        let log = fs::read_to_string(f.base.join("a/logs/hybrid/net.log")).expect("log");
+        assert!(log.contains("no memory"), "{log}");
+        // 2. The golden worlds fail while the network trains (5 s).
+        let marker = f.base.join("training-finished");
+        let failing = wrap(
+            "search-failing-worlds",
+            r#"[ "$1" = worlds ] && { echo "worlds broke" >&2; exit 1; }"#,
+        );
+        let tools = gpu_tools(
+            &f,
+            "slow-train",
+            &format!(
+                "case \"$2\" in fortyone_nn.train) sleep 30; touch '{}';; esac",
+                marker.display()
+            ),
+            failing,
+        );
+        let mut ctx = Ctx::local("hybrid-test", &f.base.join("b"), 16);
+        let t = Instant::now();
+        let e = chunk_steps(&mut ctx, &params, &tools, &f.table, json!({}))
+            .expect_err("the golden worlds failed");
+        assert!(e.contains("exited with") && e.contains("golden.log"), "{e}");
+        assert!(
+            t.elapsed() < Duration::from_secs(25),
+            "the training was stopped"
+        );
+        assert!(ctx.bg.is_empty());
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!marker.exists());
+        let _ = fs::remove_dir_all(&f.base);
+    }
+
+    /// Label parts on a GPU: the validation shard and part 1 first, then the training starts
+    /// (watching the parts' directory, expecting every training shard) while the later parts are
+    /// made on the threads it leaves.
+    #[cfg(unix)]
+    #[test]
+    fn label_parts_stream_into_the_training() {
+        let f = fakes("stream");
+        let params = parse(&json!({ "cut": 2, "check": false, "label_parts": 2,
+                                    "labels_random": 8, "labels_random_seed": 511,
+                                    "labels_rules": 4, "labels_rules_seed": 512, "val_count": 3,
+                                    "val_seed": 601, "widths": "16,8", "epochs": 2,
+                                    "partial_epochs": 3 }))
+        .expect("params");
+        let tools = gpu_tools(&f, "stream", "", f.search.clone());
+        let root = f.base.join("run");
+        let mut ctx = Ctx::local("hybrid-test", &root, 16);
+        let r = chunk_steps(&mut ctx, &params, &tools, &f.table, json!({})).expect("runs");
+        assert_eq!(
+            (r["device"].clone(), r["verdict"].clone()),
+            (json!("cuda"), json!(TRAIN_ONLY))
+        );
+        let log = fs::read_to_string(&f.calls).expect("calls");
+        // The label steps run one after another (their calls in order); the trainer runs beside
+        // them, so its line may come anywhere: when it started is the runner's own record below.
+        let lines: Vec<&str> = log.lines().filter(|l| l.starts_with("search")).collect();
+        let want = [
+            (
+                "search labels --trick 2 --count 3 --seed 601 --source random",
+                "--threads 16 ",
+            ),
+            (
+                "search labels --trick 2 --count 4 --seed 51101 --source random",
+                "--threads 16 ",
+            ),
+            (
+                "search labels --trick 2 --count 2 --seed 51201 --source rules",
+                "--threads 16 ",
+            ),
+            (
+                "search labels --trick 2 --count 4 --seed 51102 --source random",
+                "--threads 8 ",
+            ),
+            (
+                "search labels --trick 2 --count 2 --seed 51202 --source rules",
+                "--threads 8 ",
+            ),
+        ];
+        assert_eq!(lines.len(), want.len(), "{log}");
+        for (l, (start, has)) in lines.iter().zip(want) {
+            assert!(
+                l.starts_with(start) && l.contains(has),
+                "{l} (want {start} … {has})"
+            );
+        }
+        let trains: Vec<&str> = log
+            .lines()
+            .filter(|l| l.starts_with("python -m fortyone_nn.train"))
+            .collect();
+        assert_eq!(trains.len(), 1, "{log}");
+        let train = trains[0];
+        assert!(
+            train.contains("--watch-dir") && train.contains("--expect 4 "),
+            "{train}"
+        );
+        for has in [
+            "labels/train ",
+            "t2-val-s601.npy",
+            "--load-threads 8 ",
+            "--partial-epochs 3 ",
+            "--threads 8 ",
+            "--device cuda ",
+        ] {
+            assert!(train.contains(has), "{has} in {train}");
+        }
+        assert!(!train.contains("--train "), "{train}");
+        let work = root.join("hybrid-work/labels");
+        for p in [
+            "train/t2-random-p1of2-s51101.npy",
+            "train/t2-rules-p2of2-s51202.npy",
+            "t2-val-s601.npy",
+        ] {
+            assert!(work.join(p).is_file(), "{p}");
+        }
+        let rung = read_json(&root.join("out/hybrid/rung.json")).expect("rung.json");
+        let steps: Vec<&str> = rung["steps"]
+            .as_array()
+            .expect("steps")
+            .iter()
+            .filter_map(|s| s["step"].as_str())
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                "python environment",
+                "GPU check",
+                "labels val (1 of 5)",
+                "labels random p1/2 (2 of 5)",
+                "labels rules p1/2 (3 of 5)",
+                "labels random p2/2 (4 of 5)",
+                "labels rules p2/2 (5 of 5)",
+                "train"
+            ]
+        );
+        assert_eq!(
+            rung["stream"]["train_started_after"],
+            "2 of 4 shards (part 1)"
+        );
+        // The trainer started after part 1 was made and before part 2 began.
+        let started = |k: usize| rung["labels"][k]["started_s"].as_f64().expect("started_s");
+        let train_at = rung["stream"]["train_started_s"]
+            .as_f64()
+            .expect("train_started_s");
+        assert!(started(2) <= train_at && train_at <= started(3), "{rung}");
+        assert_eq!(rung["stream"]["label_threads_while_training"], 8);
+        assert_eq!(rung["labels"][4]["part"], json!([2, 2]));
+        assert_eq!(rung["labels"][4]["threads"], 8);
+        assert!(rung["net"]["int_sha256"].is_string());
+        // Without a GPU the same parts are made (the data never depends on the machine), then
+        // the training on all of them, as before.
+        fs::write(&f.calls, "").expect("truncate");
+        let tools = Tools {
+            nvidia_smi: f.base.join("no-such-nvidia-smi"),
+            uv: f.uv.clone(),
+            ..tools
+        };
+        let mut ctx = Ctx::local("hybrid-test", &f.base.join("cpu"), 4);
+        chunk_steps(&mut ctx, &params, &tools, &f.table, json!({})).expect("runs");
+        let log = fs::read_to_string(&f.calls).expect("calls");
+        let train = log
+            .lines()
+            .find(|l| l.starts_with("python -m fortyone_nn.train"))
+            .expect("trained");
+        assert!(
+            train.contains("--train ")
+                && train.contains("t2-random-p2of2-s51102.npy")
+                && !train.contains("--watch-dir"),
+            "{train}"
+        );
+        assert_eq!(
+            log.lines()
+                .filter(|l| l.starts_with("search labels"))
+                .map(|l| l.split(" --out").next().unwrap_or(l))
+                .collect::<Vec<_>>()
+                .len(),
+            5
+        );
+        let _ = fs::remove_dir_all(&f.base);
+    }
+
     /// A train-only rung (`"check": false`, here at cut 2): labels, training, the network
     /// shared content-addressed, and no golden set and no hybrid check (no `search decisions`,
     /// `worlds` or `hybrid-check` call); the verdict says it was not checked. Without a remote

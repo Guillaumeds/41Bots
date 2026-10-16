@@ -5,6 +5,7 @@
         [--batch 512] [--lr 1e-3] [--patience 4] [--seed 1] [--threads 4] [--max-minutes M]
         [--device cpu|cuda|auto] [--feed auto|resident|staged] [--cuda-graph auto|off]
         [--profile-batches N] [--progress FILE]
+        [--watch-dir DIR --expect N [--partial-epochs K]]
 
 A plain MLP: the binary features through an embedding-bag sum (exactly a linear layer on the
 one-hot inputs), plus the dense features through a linear layer, ReLU clipped at 64 (as the
@@ -54,6 +55,39 @@ capture fails, the step is eager (as before) and the log, the progress file (``s
 the report (``device.train_step``) say why. ``off``, and the CPU: the eager step, exactly the
 former loop.
 
+Streamed shards (``--watch-dir DIR --expect N``, class ``Watcher``): the training shards are the
+``N`` files ``*.npy`` that appear in DIR while the labels are still being made, besides any
+``--train`` files (which count among the ``N`` and come first). The interface, for any program
+that feeds a trainer (the runner's label parts, later shards of the audit loop):
+
+- **Naming.** Any name ending in ``.npy`` that does not start with a dot; nothing else in DIR is
+  read (sidecars such as ``NAME.npy.json`` are ignored). Names are unique; when several shards
+  are ready together they join in name order. The validation shard (``--val``) is not in DIR.
+- **Complete.** A shard counts once it exists under its final name: write it under another name
+  (``search labels`` writes ``NAME.npy.part``) and rename it into place, which is atomic.
+- **Weight.** A shard's loss weight is the number in ``NAME.npy.weight`` (a text file), which
+  must be in place before the shard is renamed into DIR; without one the weight is 1. Each row
+  counts that many times in its batch's loss (the weighted mean, ``loss_of``); with every weight
+  1 nothing changes (the same network, byte for byte). ``--train`` files take weights the same
+  way. The report gives them (``data.train_weights``, ``stream.parts[].weight``).
+- **Start and joining.** The training starts once the validation shard and at least one training
+  shard exist, with every shard present then; each later shard is checked, converted and hashed
+  on a thread of its own while the current epoch trains, and joins between epochs. More than
+  ``N`` shards is an error; the trainer waits for all ``N``.
+
+Until all ``N`` are in, the epochs are "partial": nothing counts towards ``--epochs``, the
+patience, the plateau scheduler or the choice of the best network, which is always one trained
+on every shard; ``--max-minutes`` counts from the first epoch with every shard. ``--partial-epochs
+K`` (default 0: no limit) trains at most K partial epochs on each partial set of shards and then
+waits for the next. The report's ``stream`` says which epoch saw which shards (``parts[]``:
+name, rows, SHA-256, weight, seconds until ready, first epoch), the first full epoch and how many
+epochs trained on each shard. When every shard is there from the start the training is exactly
+the one of ``--train`` with those files in name order (tested). Partial epochs warm-start the
+full training, which can cost accuracy: a network first fitted to part of the data can end up
+generalising worse than one trained on all of it from the start (Ash & Adams, "On warm-starting
+neural network training", 2020; measured in docs/m3-hybrid/overlap.md); the validation loss of
+the best (full-data) epoch is what tells.
+
 ``--progress FILE`` is rewritten (atomically) at each step and about every 20 s within an
 epoch: ``step`` (load, train, quantise, int-eval, done), epoch, batches done, the last epoch's
 losses, minutes, device, the training step's mode (``step_mode``: ``cuda-graph``, or ``eager``
@@ -79,6 +113,7 @@ import copy
 import json
 import math
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -247,12 +282,14 @@ def load_compact(shards, block=LOAD_BLOCK, threads=1):
     return out
 
 
-def expand(act, dense, tgt, lab, mask, vecs):
+def expand(act, dense, tgt, lab, mask, vecs, weight=None):
     """Rows of the compact columns (tensors, on any device) -> exactly ``columns`` of those rows:
-    the active indices as int64 with the padding (-1) -> N_BINARY, the labels as int64."""
+    the active indices as int64 with the padding (-1) -> N_BINARY, the labels as int64; and the
+    rows' loss weights when the data has them (``shard_weight``)."""
     idx = act.to(torch.int64)
     idx.masked_fill_(idx < 0, N_BINARY)
-    return [idx, dense, tgt, lab.to(torch.int64), mask, vecs]
+    out = [idx, dense, tgt, lab.to(torch.int64), mask, vecs]
+    return out if weight is None else out + [weight]
 
 
 # GPU memory kept free beside resident training columns (this, or a tenth of the GPU if more):
@@ -464,12 +501,22 @@ def outcome_terms(z, mask, vecs):
     return logp, mix
 
 
-def loss_of(head, z, tgt, lab, mask, vecs, mix_weight):
+def loss_of(head, z, tgt, lab, mask, vecs, mix_weight, weight=None):
+    """The batch's loss: the mean over its rows, or with ``weight`` (the rows' loss weights,
+    ``shard_weight``) the weighted mean, sum(w * loss) / sum(w)."""
+    if weight is None:
+        if head == "money4":
+            return -(tgt * torch.log_softmax(z, dim=1)).sum(dim=1).mean()
+        logp, mix = outcome_terms(z, mask, vecs)
+        ce = -logp.gather(1, lab[:, None]).mean()
+        soft = -(tgt * torch.log(mix.clamp_min(1e-12))).sum(dim=1).mean()
+        return ce + mix_weight * soft
+    total = weight.sum()
     if head == "money4":
-        return -(tgt * torch.log_softmax(z, dim=1)).sum(dim=1).mean()
+        return -(weight * (tgt * torch.log_softmax(z, dim=1)).sum(dim=1)).sum() / total
     logp, mix = outcome_terms(z, mask, vecs)
-    ce = -logp.gather(1, lab[:, None]).mean()
-    soft = -(tgt * torch.log(mix.clamp_min(1e-12))).sum(dim=1).mean()
+    ce = -(weight * logp.gather(1, lab[:, None])[:, 0]).sum() / total
+    soft = -(weight * (tgt * torch.log(mix.clamp_min(1e-12))).sum(dim=1)).sum() / total
     return ce + mix_weight * soft
 
 
@@ -594,9 +641,9 @@ class Step:
         here.wait_stream(self.side)
 
     def _eager(self, b):
-        idx, dense, tgt, lab, mask, vecs = self.feed(b)
+        idx, dense, tgt, lab, mask, vecs, *w = self.feed(b)
         z = self.model(idx, dense)
-        loss = loss_of(self.head, z, tgt, lab, mask, vecs, self.mix_weight)
+        loss = loss_of(self.head, z, tgt, lab, mask, vecs, self.mix_weight, *w)
         self.opt.zero_grad()
         loss.backward()
         self.opt.step()
@@ -608,9 +655,9 @@ class Step:
         """The step on the batch in the input buffers, as captured. The gradients are made by the
         captured backward in the graph's memory and rewritten (not added to) by every replay."""
         self.opt.zero_grad(set_to_none=True)
-        idx, dense, tgt, lab, mask, vecs = self.feed.read(self.bufs)
+        idx, dense, tgt, lab, mask, vecs, *w = self.feed.read(self.bufs)
         z = self.model(idx, dense)
-        loss = loss_of(self.head, z, tgt, lab, mask, vecs, self.mix_weight)
+        loss = loss_of(self.head, z, tgt, lab, mask, vecs, self.mix_weight, *w)
         loss.backward()
         self.opt.step()
         self.total += loss.detach().double() * self.batch
@@ -673,6 +720,133 @@ def graph_trial(model, head, mix_weight, feed, batch, lr, graph_class=CudaGraph,
     return None, facts
 
 
+def shard_weight(path):
+    """A training shard's loss weight: the number in ``<shard>.weight`` (a text file beside it,
+    written before the shard itself), else 1. Every row of the shard counts that many times in
+    the loss (``loss_of``: the weighted mean of each batch)."""
+    p = path + ".weight"
+    if not os.path.exists(p):
+        return 1.0
+    with open(p) as f:
+        text = f.read().strip()
+    try:
+        w = float(text)
+    except ValueError:
+        raise SystemExit(f"{p}: {text!r} is not a number") from None
+    if not (math.isfinite(w) and w > 0):
+        raise SystemExit(f"{p}: the weight {w} must be a positive number")
+    return w
+
+
+def with_weights(comp, sizes):
+    """The compact columns for the feed: ``comp``, plus the rows' loss weights (float32) when a
+    shard's weight is not 1; ``sizes`` is [(rows, weight)] of the shards in order."""
+    if all(w == 1.0 for _, w in sizes):
+        return comp
+    return comp + [np.concatenate([np.full(n, w, dtype=np.float32) for n, w in sizes])]
+
+
+def load_part(path, threads):
+    """One training shard for the streamed data: checked (``check_shards``), converted
+    (``load_compact``) and hashed, on ``threads`` threads."""
+    sh = load_shard(path)
+    tricks = check_shards([sh], threads=threads)
+    comp = load_compact([sh], threads=threads)
+    return {"path": path, "name": os.path.basename(path), "rows": int(len(sh)), "tricks": tricks,
+            "comp": comp, "sha256": sha256_file(path), "weight": shard_weight(path)}
+
+
+class Watcher:
+    """The training shards of a streamed run (``--watch-dir``): the ``given`` files first, then
+    the ``*.npy`` files that appear in ``directory`` (in name order when several are new), each
+    loaded (``load_part``) on a thread of its own as soon as it is there, until ``expect`` shards
+    are loaded. ``take()`` hands over the loaded shards not yet taken (raising the loading's error,
+    if any); ``all_in()``: every expected shard taken."""
+
+    def __init__(self, directory, expect, given=(), threads=1, poll=1.0):
+        if expect < 1:
+            raise ValueError("--expect must be at least 1")
+        self.dir, self.expect, self.threads, self.poll = directory, expect, threads, poll
+        self.given = list(given)
+        self.cond = threading.Condition()
+        self.ready, self.seen, self.loaded, self.taken, self.error = [], set(), 0, 0, None
+        self.t0 = time.time()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def candidates(self):
+        names = sorted(n for n in os.listdir(self.dir) if n.endswith(".npy") and not n.startswith("."))
+        return self.given + [os.path.join(self.dir, n) for n in names]
+
+    def _run(self):
+        try:
+            while True:
+                with self.cond:
+                    if self.loaded >= self.expect:
+                        return
+                new = [p for p in self.candidates() if p not in self.seen]
+                if not new:
+                    time.sleep(self.poll)
+                    continue
+                for p in new:
+                    self.seen.add(p)
+                    with self.cond:
+                        if self.loaded >= self.expect:
+                            raise ValueError(f"more training shards than --expect {self.expect}: {p}")
+                    part = load_part(p, self.threads)
+                    part["ready_s"] = round(time.time() - self.t0, 3)
+                    with self.cond:
+                        self.ready.append(part)
+                        self.loaded += 1
+                        self.cond.notify_all()
+        except Exception as e:  # noqa: BLE001 (raised in the training thread by ``take``)
+            with self.cond:
+                self.error = e
+                self.cond.notify_all()
+
+    def take(self):
+        with self.cond:
+            if self.error is not None:
+                raise self.error
+            out, self.ready = self.ready, []
+            self.taken += len(out)
+            return out
+
+    def wait(self):
+        """Blocks until a loaded shard is ready to take (or the loading failed)."""
+        with self.cond:
+            while not self.ready and self.error is None:
+                self.cond.wait(timeout=self.poll)
+
+    def wait_present(self):
+        """Blocks until at least one shard exists and every shard present now is loaded (or the
+        loading failed): the start of the training takes every shard already there."""
+        while True:
+            present = self.candidates()
+            if present:
+                break
+            time.sleep(self.poll)
+        with self.cond:
+            while self.error is None and self.loaded < min(len(present), self.expect):
+                self.cond.wait(timeout=self.poll)
+
+    def all_in(self):
+        with self.cond:
+            return self.taken >= self.expect
+
+    def extra(self):
+        """``*.npy`` files in the directory beyond the expected ones (a wrong ``--expect``)."""
+        return [p for p in self.candidates() if p not in self.seen]
+
+
+def join_parts(comp, parts):
+    """The compact columns ``comp`` (or None) with the parts' rows appended, in order."""
+    cols = [p["comp"] for p in parts]
+    if comp is not None:
+        cols = [comp] + cols
+    return [np.concatenate([c[i] for c in cols]) if len(cols) > 1 else cols[0][i] for i in range(len(cols[0]))]
+
+
 def error_stats(pred, target):
     """Errors of every team's money chance (fractions; team 0 is the leader's): bias per team,
     and over all teams the SD, mean and 99.9th percentile of the absolute error, and the max."""
@@ -728,7 +902,7 @@ def evaluate(model, head, data, mix_weight, batch=8192, device=None):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--train", nargs="+", required=True)
+    ap.add_argument("--train", nargs="+", default=[])
     ap.add_argument("--val", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--head", choices=["outcome", "money4"], default="outcome")
@@ -754,7 +928,16 @@ def main(argv=None):
     ap.add_argument("--cuda-graph", choices=["auto", "off"], default="auto",
                     help="the training step on a GPU (class Step): auto (captured as a CUDA graph and replayed, "
                          "eager if a trial or a capture fails, with the reason), off (eager); eager on the CPU")
+    ap.add_argument("--watch-dir", help="streamed shards: also train on the *.npy files that appear here (class Watcher)")
+    ap.add_argument("--expect", type=int, default=0, help="with --watch-dir: the training shards in all (--train ones included)")
+    ap.add_argument("--partial-epochs", type=int, default=0,
+                    help="with --watch-dir: at most this many epochs on each partial set of shards, then wait (0: no limit)")
+    ap.add_argument("--watch-poll", type=float, default=1.0, help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
+    if args.watch_dir is None and not args.train:
+        ap.error("--train (or --watch-dir with --expect) is required")
+    if args.watch_dir is not None and args.expect < max(1, len(args.train)):
+        ap.error("--watch-dir needs --expect: the training shards in all, at least 1 and the --train ones")
     # Before anything else (no data loaded, no GPU probed, no output made): a layer wider than the
     # integer inference allows (formats.MAX_WIDTH, Rust's nn::MAX_WIDTH) would train for nothing.
     try:
@@ -788,35 +971,77 @@ def main(argv=None):
     progress(step="load")
 
     load_threads = args.load_threads if args.load_threads > 0 else load_threads_default()
-    shards = [load_shard(p) for p in args.train]
-    val = np.asarray(load_shard(args.val))
-    # The files' SHA-256 (for the report and the network's metadata), each on a thread of its own
-    # while the rows are checked and converted (hashlib lets other threads run as it hashes).
-    hashing = ThreadPoolExecutor(len(args.train) + 1)
-    train_sha = [hashing.submit(sha256_file, p) for p in args.train]
-    val_sha = hashing.submit(sha256_file, args.val)
-    tricks = check_shards(shards + [val], threads=load_threads)
-    if len(tricks) != 1:
-        raise SystemExit(f"shards hold tricks {sorted(tricks)}: one frontier trick per network")
-    trick = tricks.pop()
-    v = shards[0].dtype["outcomes"].shape[0]
+    watcher, stream = None, None
+    if args.watch_dir is None:
+        shards = [load_shard(p) for p in args.train]
+        val = np.asarray(load_shard(args.val))
+        # The files' SHA-256 (for the report and the network's metadata), each on a thread of its own
+        # while the rows are checked and converted (hashlib lets other threads run as it hashes).
+        hashing = ThreadPoolExecutor(len(args.train) + 1)
+        train_sha = [hashing.submit(sha256_file, p) for p in args.train]
+        val_sha = hashing.submit(sha256_file, args.val)
+        tricks = check_shards(shards + [val], threads=load_threads)
+        if len(tricks) != 1:
+            raise SystemExit(f"shards hold tricks {sorted(tricks)}: one frontier trick per network")
+        trick = tricks.pop()
+        v = shards[0].dtype["outcomes"].shape[0]
+    else:
+        # Streamed shards: wait for the validation shard and a first training shard.
+        watcher = Watcher(args.watch_dir, args.expect, args.train, load_threads, args.watch_poll)
+        progress(step="wait", shards_in=0, shards=args.expect)
+        while not os.path.exists(args.val):
+            time.sleep(args.watch_poll)
+        watcher.wait_present()
+        parts = watcher.take()
+        val = np.asarray(load_shard(args.val))
+        tricks = check_shards([val], threads=load_threads)
+        if len(tricks) != 1:
+            raise SystemExit(f"the validation shard holds tricks {sorted(tricks)}: one frontier trick per network")
+        trick = tricks.pop()
+        v = val.dtype["outcomes"].shape[0]
+        stream = {"watch_dir": args.watch_dir, "expect": args.expect, "partial_epochs_cap": args.partial_epochs,
+                  "parts": [], "waited_s": round(time.time() - t0, 3)}
     n_out = v if args.head == "outcome" else 4
     head_name = "outcome-v1" if args.head == "outcome" else "money4"
-    n = sum(len(sh) for sh in shards)
+
+    def add_parts(comp, new, epoch):
+        """The streamed shards ``new`` joined to the compact columns ``comp`` (their tricks
+        checked), recorded as first trained in ``epoch``."""
+        for p in new:
+            if p["tricks"] != {trick}:
+                raise SystemExit(f"{p['path']} holds tricks {sorted(p['tricks'])}, the validation shard {trick}")
+            stream["parts"].append({"name": p["name"], "rows": p["rows"], "sha256": p["sha256"],
+                                    "weight": p["weight"], "ready_s": p["ready_s"], "first_epoch": epoch})
+            hashes["train"].append(p["sha256"])
+            sizes.append((p["rows"], p["weight"]))
+        return join_parts(comp, new)
+
+    if watcher is None:
+        n = sum(len(sh) for sh in shards)
+        sizes = [(len(sh), shard_weight(p)) for sh, p in zip(shards, args.train)]
+    else:
+        sizes = []
+        hashes = {"train": [], "val": sha256_file(args.val)}
+        comp = add_parts(None, parts, 0)
+        n = len(comp[0])
     print(
         f"train {n} rows, val {len(val)} rows, trick {trick}, head {head_name} "
-        f"({n_out} outputs), widths {widths}, device {device.type}",
+        f"({n_out} outputs), widths {widths}, device {device.type}"
+        + (f"; streamed: {len(stream['parts'])} of {args.expect} shards in" if stream else ""),
         flush=True,
     )
 
-    comp = load_compact(shards, threads=load_threads)
-    del shards
-    hashes = {"train": [f.result() for f in train_sha], "val": val_sha.result()}
-    hashing.shutdown()
+    if watcher is None:
+        comp = load_compact(shards, threads=load_threads)
+        del shards
+        hashes = {"train": [f.result() for f in train_sha], "val": val_sha.result()}
+        hashing.shutdown()
     va = tensors(val)
     val_classes = race_classes(val)
-    feed = Feed(comp, device, args.batch, args.feed)
-    del comp
+    feed = Feed(with_weights(comp, sizes), device, args.batch, args.feed)
+    if watcher is None:
+        del comp
+    weights = [w for _, w in sizes]
     facts["feed"] = feed.facts
     print(f"training rows {feed.facts['mode']} ({feed.facts['bytes'] / 2**20:.0f} MiB compact)"
           + (f", GPU free {feed.facts['gpu_free_bytes'] / 2**20:.0f} MiB" if device.type == "cuda" else ""),
@@ -862,7 +1087,40 @@ def main(argv=None):
         step.reason = why
     print(f"training step: {step.describe()}" + (f"; trial {json.dumps(trial)}" if trial else ""), flush=True)
     progress(step="train", epoch=0, epochs=args.epochs, batches_done=0, batches=steps, step_mode=step.describe())
-    for epoch in range(args.epochs):
+    # Streamed shards: epochs before every shard is in are partial (not counted; no patience,
+    # no plateau scheduler, no best network); ``full_from`` is the first epoch with every shard.
+    full_from = 0 if watcher is None or watcher.all_in() else None
+    t_full = t0 if watcher is None else time.time()
+    past_counts = {}
+    on_this_set = 0
+    epoch = 0
+    while True:
+        if full_from is None:
+            new = watcher.take()
+            if not new and args.partial_epochs and on_this_set >= args.partial_epochs:
+                progress(step="wait", epoch=epoch, shards_in=len(stream["parts"]), shards=args.expect)
+                watcher.wait()
+                new = watcher.take()
+            if new:
+                comp = add_parts(comp, new, epoch)
+                n = len(comp[0])
+                steps = (n + args.batch - 1) // args.batch
+                feed = Feed(with_weights(comp, sizes), device, args.batch, args.feed)
+                facts["feed"] = feed.facts
+                weights = [w for _, w in sizes]
+                for k, x in step.counts.items():
+                    past_counts[k] = past_counts.get(k, 0) + x
+                was = step
+                step = Step(model, opt, args.head, args.mix_weight, feed, args.batch, graphed=was.graphed,
+                            graph_class=GRAPH_CLASS, on_fail=fell_back)
+                step.reason = was.reason
+                on_this_set = 0
+                print(f"streamed: {len(stream['parts'])} of {args.expect} shards in, {n} rows, from epoch {epoch}",
+                      flush=True)
+            if watcher.all_in():
+                full_from, t_full = epoch, time.time()
+        if full_from is not None and epoch - full_from >= args.epochs:
+            break
         model.train()
         te = time.time()
         order = feed.order(torch.from_numpy(rng.permutation(n)))
@@ -894,26 +1152,43 @@ def main(argv=None):
                 if p:
                     print(f"{name}: {json.dumps({k: x for k, x in p.items() if not k.startswith('top')})}", flush=True)
         vloss, vv, acc = evaluate(model, args.head, va, args.mix_weight, device=device)
-        sched.step(vloss)
+        if full_from is not None:
+            sched.step(vloss)
         sd = float(((vv - val["value"].astype(np.float64)) / ONE).std())
         sd_race = [c["sd"] for c in error_by_race_class(vv, val["value"], val_classes)]
         history.append({"epoch": epoch, "train_loss": total / n, "val_loss": vloss, "val_acc": acc,
                         "val_sd": sd, "val_sd_by_race_class": sd_race, "lr": opt.param_groups[0]["lr"],
                         "minutes": (time.time() - t0) / 60})
+        if stream is not None:
+            history[-1].update(shards=len(stream["parts"]), rows=n, all_in=full_from is not None)
         print(json.dumps(history[-1]), flush=True)
+        improved = full_from is not None and vloss < best[0]
         progress(step="train", epoch=epoch, epochs=args.epochs, batches_done=steps, batches=steps,
-                 last=history[-1], best_epoch=best[2] if vloss >= best[0] else epoch, step_mode=step.describe())
-        if vloss < best[0]:
-            best = (vloss, {k: x.clone() for k, x in model.state_dict().items()}, epoch)
-        elif epoch - best[2] >= args.patience:
+                 last=history[-1], best_epoch=epoch if improved else best[2], step_mode=step.describe())
+        epoch += 1
+        if full_from is None:
+            on_this_set += 1
+            continue
+        if improved:
+            best = (vloss, {k: x.clone() for k, x in model.state_dict().items()}, epoch - 1)
+        elif epoch - 1 - best[2] >= args.patience:
             break
-        if args.max_minutes and (time.time() - t0) / 60 > args.max_minutes:
+        if args.max_minutes and (time.time() - t_full) / 60 > args.max_minutes:
             print("time limit reached", flush=True)
             break
+    if watcher is not None and watcher.extra():
+        raise SystemExit(f"more training shards than --expect {args.expect}: {watcher.extra()}")
     model.load_state_dict(best[1])
+    for k, x in past_counts.items():
+        step.counts[k] += x
     step_facts.update(step.counts)
     if graphed and not step.graphed:  # a capture failed during the training: eager from then on
         step_facts.update(mode="eager", reason=step.reason)
+    if stream is not None:
+        stream["first_full_epoch"] = full_from
+        stream["partial_epochs"] = full_from
+        stream["epochs_trained_on"] = {
+            p["name"]: sum(1 for h in history if h["epoch"] >= p["first_epoch"]) for p in stream["parts"]}
     vloss, pf, acc = evaluate(model, args.head, va, args.mix_weight, device=device)
     progress(step="quantise", best_epoch=best[2])
 
@@ -929,6 +1204,8 @@ def main(argv=None):
         "mix_weight": repr(args.mix_weight),
         "torch": torch.__version__,
     }
+    if any(w != 1.0 for w in weights):
+        meta["train_weights"] = json.dumps(weights)
     ft = {}
     for k, (w, b) in enumerate(layers):
         ft[f"w{k}"] = w.astype(np.float32)
@@ -952,7 +1229,7 @@ def main(argv=None):
         "trick": trick,
         "head": head_name,
         "outcomes": v,
-        "data": hashes,
+        "data": dict(hashes, **({"train_weights": weights} if any(w != 1.0 for w in weights) else {})),
         "history": history,
         "best_epoch": best[2],
         "float": {"val_loss": vloss, "outcome_accuracy": acc, "error": error_stats(pf, val["value"]),
@@ -969,6 +1246,8 @@ def main(argv=None):
         "seconds": seconds,
         "device": facts,
     }
+    if stream is not None:
+        report["stream"] = stream
     with open(os.path.join(args.out, "report.json"), "w") as f:
         json.dump(report, f, indent=1)
     progress(step="done", best_epoch=best[2], int_sha256=report["int"]["sha256"])

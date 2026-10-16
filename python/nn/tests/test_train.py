@@ -36,6 +36,8 @@ import io
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -469,6 +471,227 @@ class GraphStepTest(StepCase):
             self.assertIn("capturing the step failed", why)
         for k, x in self.net.state_dict().items():
             self.assertTrue(torch.equal(before[k], x), "the trial works on copies")
+
+
+def drop(src, dst_dir):
+    """Puts a copy of the shard ``src`` in ``dst_dir`` as ``search labels`` does: written under
+    another name, then renamed."""
+    dst = os.path.join(dst_dir, os.path.basename(src))
+    with open(src, "rb") as f, open(dst + ".part", "wb") as g:
+        g.write(f.read())
+    os.replace(dst + ".part", dst)
+
+
+class StreamTest(unittest.TestCase):
+    """Streamed shards (``--watch-dir``, class ``Watcher``): with every shard there from the start,
+    exactly the ``--train`` training; with shards appearing over time (here one after each partial
+    epoch, ``--partial-epochs 1``), each joins between epochs, the partial epochs count for nothing
+    (no patience, scheduler or best network), and the report says which epoch saw which shards."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.TemporaryDirectory()
+        d = cls.dir.name
+        cls.src = os.path.join(d, "src")
+        os.makedirs(cls.src)
+        cls.shards = [synthetic_shard(os.path.join(cls.src, n), r, s)
+                      for n, r, s in (("a.npy", 700, 1), ("b.npy", 300, 2), ("c.npy", 500, 4))]
+        cls.val = synthetic_shard(os.path.join(d, "v.npy"), 200, 3)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.dir.cleanup()
+
+    def run_train(self, name, *args):
+        out = os.path.join(self.dir.name, name)
+        prog = out + ".progress.json"
+        with contextlib.redirect_stdout(io.StringIO()):
+            train.main(["--val", self.val, "--out", out, "--widths", "32,16", "--batch", "64", "--seed", "5",
+                        "--threads", "1", "--device", "cpu", "--progress", prog, "--watch-poll", "0.05", *args])
+        with open(os.path.join(out, "report.json")) as f:
+            return sha256_file(os.path.join(out, "int.safetensors")), json.load(f)
+
+    def test_every_shard_there_from_the_start_is_the_plain_training(self):
+        w = os.path.join(self.dir.name, "all")
+        os.makedirs(w)
+        for p in self.shards:
+            drop(p, w)
+        a, rep = self.run_train("plain", "--train", *self.shards, "--epochs", "3")
+        b, srep = self.run_train("streamed-all", "--watch-dir", w, "--expect", "3", "--epochs", "3")
+        self.assertEqual(a, b)
+        st = srep["stream"]
+        self.assertEqual((st["first_full_epoch"], st["partial_epochs"]), (0, 0))
+        self.assertEqual([p["first_epoch"] for p in st["parts"]], [0, 0, 0])
+        self.assertEqual(srep["data"]["train"], rep["data"]["train"])
+        self.assertTrue(all(h["all_in"] for h in srep["history"]))
+        self.assertNotIn("stream", rep)
+
+    def streamed(self, name):
+        """A streamed run where shard k + 1 appears once the trainer waits after its partial
+        epoch on the first k."""
+        w = os.path.join(self.dir.name, name + "-in")
+        os.makedirs(w)
+        drop(self.shards[0], w)
+        prog = os.path.join(self.dir.name, name + ".progress.json")
+
+        def feeder():
+            for k in (1, 2):
+                while True:
+                    try:
+                        with open(prog) as f:
+                            p = json.load(f)
+                        if p.get("step") == "wait" and p.get("shards_in") == k:
+                            break
+                    except (OSError, ValueError):
+                        pass
+                    time.sleep(0.02)
+                drop(self.shards[k], w)
+
+        t = threading.Thread(target=feeder, daemon=True)
+        t.start()
+        out = self.run_train(name, "--watch-dir", w, "--expect", "3", "--partial-epochs", "1", "--epochs", "2",
+                             "--lr", "0.01")
+        t.join(timeout=5)
+        return out
+
+    def test_shards_join_between_epochs(self):
+        a, rep = self.streamed("s1")
+        b, _ = self.streamed("s2")
+        self.assertEqual(a, b, "the same arrivals train the same network")
+        h = rep["history"]
+        self.assertEqual([(x["shards"], x["rows"], x["all_in"]) for x in h],
+                         [(1, 700, False), (2, 1000, False), (3, 1500, True), (3, 1500, True)])
+        self.assertEqual({x["lr"] for x in h}, {0.01}, "no scheduler step on partial epochs")
+        st = rep["stream"]
+        self.assertEqual([(p["name"], p["first_epoch"]) for p in st["parts"]], [("a.npy", 0), ("b.npy", 1), ("c.npy", 2)])
+        self.assertEqual([p["weight"] for p in st["parts"]], [1.0, 1.0, 1.0])
+        self.assertEqual((st["first_full_epoch"], st["partial_epochs"]), (2, 2))
+        self.assertEqual(st["epochs_trained_on"], {"a.npy": 4, "b.npy": 3, "c.npy": 2})
+        self.assertGreaterEqual(rep["best_epoch"], 2, "the best network has seen every shard")
+        self.assertEqual(rep["data"]["train"], [sha256_file(p) for p in self.shards])
+        self.assertEqual(len(rep["seconds"]["epochs"]), 4)
+
+    def test_wrong_shards_are_refused(self):
+        w = os.path.join(self.dir.name, "two")
+        os.makedirs(w)
+        for p in self.shards[:2]:
+            drop(p, w)
+        with self.assertRaises((SystemExit, ValueError)):
+            self.run_train("too-many", "--watch-dir", w, "--expect", "1", "--epochs", "1")
+        t5 = os.path.join(self.dir.name, "t5")
+        os.makedirs(t5)
+        synthetic_shard(os.path.join(t5, "x.npy"), 100, 9, trick=5)
+        with self.assertRaises(SystemExit):
+            self.run_train("other-trick", "--watch-dir", t5, "--expect", "1", "--epochs", "1")
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            self.run_train("no-expect", "--watch-dir", t5, "--epochs", "1")
+
+
+class WeightTest(unittest.TestCase):
+    """Shard weights (``NAME.npy.weight``): the weighted mean of each batch's loss; a weight of 1
+    everywhere is the unweighted training, byte for byte; a bad weight is refused."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.TemporaryDirectory()
+        d = cls.dir.name
+        cls.shards = [synthetic_shard(os.path.join(d, n), r, s) for n, r, s in (("a.npy", 300, 1), ("b.npy", 200, 2))]
+        cls.val = synthetic_shard(os.path.join(d, "v.npy"), 100, 3)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.dir.cleanup()
+
+    def run_train(self, name, *args):
+        out = os.path.join(self.dir.name, name)
+        with contextlib.redirect_stdout(io.StringIO()):
+            train.main(["--train", *self.shards, "--val", self.val, "--out", out, "--widths", "16,8", "--epochs", "2",
+                        "--batch", "64", "--seed", "5", "--threads", "1", "--device", "cpu", *args])
+        with open(os.path.join(out, "report.json")) as f:
+            return sha256_file(os.path.join(out, "int.safetensors")), json.load(f)
+
+    def set_weight(self, shard, text):
+        p = shard + ".weight"
+        if text is None:
+            if os.path.exists(p):
+                os.remove(p)
+        else:
+            with open(p, "w") as f:
+                f.write(text)
+
+    def test_weighted_loss(self):
+        z = torch.randn(6, VOCAB[4])
+        data = train.tensors(np.asarray(load_shard(self.shards[0]))[:6])
+        _, _, tgt, lab, mask, vecs = data
+        for head in ("outcome", "money4"):
+            zz = z if head == "outcome" else z[:, :4]
+            plain = train.loss_of(head, zz, tgt, lab, mask, vecs, 0.5)
+            ones = train.loss_of(head, zz, tgt, lab, mask, vecs, 0.5, torch.ones(6))
+            self.assertAlmostEqual(float(plain), float(ones), places=5)
+            # Weight 2 on the first row is the mean over the rows with the first one twice.
+            w = torch.tensor([2.0, 1, 1, 1, 1, 1])
+            rows = [0, 0, 1, 2, 3, 4, 5]
+            twice = train.loss_of(head, zz[rows], tgt[rows], lab[rows], mask[rows], vecs[rows], 0.5)
+            self.assertAlmostEqual(float(train.loss_of(head, zz, tgt, lab, mask, vecs, 0.5, w)), float(twice), places=5)
+
+    def test_shard_weights_in_training(self):
+        plain, rep = self.run_train("plain")
+        self.assertNotIn("train_weights", rep["data"])
+        for s in self.shards:
+            self.set_weight(s, "1\n")
+        ones, rep1 = self.run_train("ones")
+        self.assertEqual(ones, plain, "weights of 1 are the unweighted training")
+        self.assertNotIn("train_weights", rep1["data"])
+        self.set_weight(self.shards[1], "2")
+        two, rep2 = self.run_train("two")
+        self.assertNotEqual(two, plain)
+        self.assertEqual(rep2["data"]["train_weights"], [1.0, 2.0])
+        # The CUDA-graph step's way (without a GPU: ``Replayed``) reads the weights too.
+        self.set_weight(self.shards[1], "2")
+        with mock.patch.object(train, "GRAPH_DEVICES", ("cpu",)), mock.patch.object(train, "GRAPH_CLASS", train.Replayed):
+            _, repg = self.run_train("two-graph")
+        self.assertEqual(repg["device"]["train_step"]["mode"], "cuda-graph")
+        for a, b in zip(rep2["history"], repg["history"]):
+            self.assertAlmostEqual(a["val_loss"], b["val_loss"], delta=1e-4 * max(1.0, abs(a["val_loss"])))
+        for bad in ("x", "0", "-1", "nan"):
+            self.set_weight(self.shards[1], bad)
+            with self.assertRaises(SystemExit):
+                self.run_train("bad")
+        for s in self.shards:
+            self.set_weight(s, None)
+
+    def test_a_weighted_shard_joins_a_streamed_training(self):
+        w = os.path.join(self.dir.name, "watch")
+        os.makedirs(w)
+        drop(self.shards[0], w)
+        with open(os.path.join(w, "b.npy.weight"), "w") as f:
+            f.write("3")
+        prog = os.path.join(self.dir.name, "w.progress.json")
+
+        def feeder():
+            while True:
+                try:
+                    with open(prog) as f:
+                        if json.load(f).get("step") == "wait":
+                            break
+                except (OSError, ValueError):
+                    pass
+                time.sleep(0.02)
+            drop(self.shards[1], w)
+
+        t = threading.Thread(target=feeder, daemon=True)
+        t.start()
+        out = os.path.join(self.dir.name, "streamed-weighted")
+        with contextlib.redirect_stdout(io.StringIO()):
+            train.main(["--watch-dir", w, "--expect", "2", "--partial-epochs", "1", "--val", self.val, "--out", out,
+                        "--widths", "16,8", "--epochs", "2", "--batch", "64", "--seed", "5", "--threads", "1",
+                        "--device", "cpu", "--progress", prog, "--watch-poll", "0.05"])
+        t.join(timeout=5)
+        with open(os.path.join(out, "report.json")) as f:
+            rep = json.load(f)
+        self.assertEqual([(p["name"], p["weight"]) for p in rep["stream"]["parts"]], [("a.npy", 1.0), ("b.npy", 3.0)])
+        self.assertEqual(rep["data"]["train_weights"], [1.0, 3.0])
+        self.assertEqual(len(rep["history"]), 3)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "no GPU here")
