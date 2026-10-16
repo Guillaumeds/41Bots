@@ -2328,15 +2328,19 @@ impl Rung<'_> {
             &side,
         )?;
         st.train.push(path);
-        st.train_rows += rows;
-        Ok(
-            json!({ "file": file, "rows": rows, "seed": seed, "weight": st.s.weight,
+        // A harvest stopped by its bound on decisions writes fewer rows than asked
+        // (`search labels --max-decisions`): count the rows written.
+        let written = side["rows"].as_u64().unwrap_or(rows);
+        st.train_rows += written;
+        Ok(json!({ "file": file, "rows": written, "rows_asked": rows,
+                   "bounded": side["bounded"].as_bool().unwrap_or(false),
+                   "decisions_played": side["decisions_played"].clone(),
+                   "seed": seed, "weight": st.s.weight,
                    "keep_cap": st.s.keep_cap, "shard_sha256": side["shard_sha256"],
                    "groups": side["harvest"]["keep"]["groups"].clone(),
                    "rows_in_any_group": side["harvest"]["keep"]["rows_in_any_group"].clone(),
                    "driver": driver.as_ref().map_or("exact".to_string(), |d| d.display().to_string()),
-                   "joined": if watch.is_some() { "the next round's training, while it runs (watched directory)" } else { "the next round's training" } }),
-        )
+                   "joined": if watch.is_some() { "the next round's training, while it runs (watched directory)" } else { "the next round's training" } }))
     }
 
     /// Writes round `p.r`'s report (`round-<r>.json` and `.txt`), shares it and the round's

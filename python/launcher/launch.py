@@ -1548,7 +1548,7 @@ def manifest_inputs(manifest: dict) -> dict[str, str]:
 # hybrid_rung settings that name a stored input by its key (crates/runner/src/hybrid.rs): the
 # chunk fetches them itself from inputs/sha256/<hex>, so they are checked here with the
 # manifest's `inputs`, before anything is rented.
-HYBRID_INPUT_PARAMS = ("harvest_net", "golden_decisions_input", "golden_worlds_input")
+HYBRID_INPUT_PARAMS = ("harvest_net", "golden_decisions_input", "golden_worlds_input", "audit_predicates_input")
 
 
 def param_inputs(manifest: dict) -> dict[str, str]:

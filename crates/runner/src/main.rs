@@ -756,10 +756,34 @@ impl Ctx {
     /// the child killed (an error) if it runs longer than `limit`.
     fn run_child_io(
         &mut self,
+        cmd: Command,
+        log: &str,
+        stdout: Option<&Path>,
+        limit: Option<Duration>,
+        poll: &mut dyn FnMut(&mut Ctx),
+    ) -> Result<(), String> {
+        self.run_child_full(cmd, log, stdout, limit, None, poll)
+    }
+
+    /// [`Ctx::run_child_with`] with the child watched through its progress file ([`Stall`]: killed
+    /// only when that stops changing while the child is not waiting) instead of a time limit.
+    fn run_child_stall(
+        &mut self,
+        cmd: Command,
+        log: &str,
+        stall: Stall,
+        poll: &mut dyn FnMut(&mut Ctx),
+    ) -> Result<(), String> {
+        self.run_child_full(cmd, log, None, None, Some(stall), poll)
+    }
+
+    fn run_child_full(
+        &mut self,
         mut cmd: Command,
         log: &str,
         stdout: Option<&Path>,
         limit: Option<Duration>,
+        mut stall: Option<Stall>,
         poll: &mut dyn FnMut(&mut Ctx),
     ) -> Result<(), String> {
         if let Some(why) = stop::requested() {
@@ -793,7 +817,7 @@ impl Ctx {
         if self.bg.is_empty() {
             self.cpu.prime_tree(child.id());
         }
-        let outcome = self.wait_child(&mut child, &cmd, log, limit, poll);
+        let outcome = self.wait_child(&mut child, &cmd, log, limit, &mut stall, poll);
         self.child = None;
         outcome
     }
@@ -804,6 +828,7 @@ impl Ctx {
         cmd: &Command,
         log: &str,
         limit: Option<Duration>,
+        stall: &mut Option<Stall>,
         poll: &mut dyn FnMut(&mut Ctx),
     ) -> Result<(), String> {
         let started = Instant::now();
@@ -822,6 +847,11 @@ impl Ctx {
                     "{log}: still running after its time limit of {:.0} min; killed",
                     l.as_secs_f64() / 60.0
                 ));
+            }
+            if let Some(why) = stall.as_mut().and_then(|s| s.check(None)) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{log}: {why}"));
             }
             if let Some(why) = stop::requested() {
                 // Whatever the child finished is already in its files (they are written as each
@@ -897,6 +927,7 @@ impl Ctx {
             what: what.to_string(),
             log: log.to_string(),
             limit,
+            stall: None,
             since: now,
             started: now,
             ended: None,
@@ -904,11 +935,22 @@ impl Ctx {
         Ok(())
     }
 
+    /// Watches the child `what` beside the steps through its progress file ([`Stall`]), as well
+    /// as by its limit, if any.
+    fn watch_bg(&mut self, what: &str, stall: Stall) {
+        if let Some(b) = self.bg.iter_mut().find(|b| b.what == what) {
+            b.stall = Some(stall);
+        }
+    }
+
     /// The limit of the child `what` beside the steps counts from now (e.g. once the data it
-    /// waits for is made).
+    /// waits for is made), and so does its stall watch's quiet time.
     fn bg_limit_from_now(&mut self, what: &str) {
         if let Some(b) = self.bg.iter_mut().find(|b| b.what == what) {
             b.since = Instant::now();
+            if let Some(s) = b.stall.as_mut() {
+                s.restart();
+            }
         }
     }
 
@@ -934,6 +976,10 @@ impl Ctx {
                             b.what,
                             l.as_secs_f64() / 60.0
                         ));
+                        break;
+                    }
+                    if let Some(why) = b.stall.as_mut().and_then(|s| s.check(None)) {
+                        failed = Some(format!("step {}: {why}", b.what));
                         break;
                     }
                 }
@@ -965,6 +1011,8 @@ impl Ctx {
         what: &str,
         poll: &mut dyn FnMut(&mut Ctx),
     ) -> Result<Option<(Instant, Instant)>, String> {
+        // Since when the child `what` is all that runs (no other child that could make its data).
+        let mut alone_since: Option<Instant> = None;
         loop {
             poll(self);
             self.poll_bg()?;
@@ -974,7 +1022,17 @@ impl Ctx {
                     let b = self.bg.remove(i);
                     return Ok(Some((b.started, b.ended.expect("ended"))));
                 }
-                Some(_) => {}
+                Some(i) => {
+                    // Waiting for data while nothing else runs: nobody is making it.
+                    let alone = self.bg.iter().all(|o| o.what == what || o.ended.is_some());
+                    alone_since = alone.then(|| alone_since.unwrap_or_else(Instant::now));
+                    if let Some(why) = alone_since
+                        .and_then(|a| self.bg[i].stall.as_mut().and_then(|s| s.check(Some(a))))
+                    {
+                        self.kill_bg();
+                        return Err(format!("step {what}: {why}"));
+                    }
+                }
             }
             if let Some(why) = stop::requested() {
                 self.kill_bg();
@@ -995,12 +1053,123 @@ impl Ctx {
     }
 }
 
+/// A watch on a child's JSON progress file, in place of a time limit (the trainer, whose own
+/// `max_minutes` ends its training between epochs, while its epochs can be long and it can wait
+/// for data the run is still making). The child counts as stalled, and is killed, only when the
+/// file has not changed for longer than its allowance: the larger of `floor` and `factor` times
+/// the longest epoch seen (the time between two changes of the file's `epoch` field). While the
+/// file's `step` is `wait` (the child waits for data) it never stalls, except when the run itself
+/// only waits for it and nothing else runs that could make the data ([`Ctx::wait_bg`]), for
+/// longer than the allowance. Until the file is first written, its quiet time counts from the
+/// watch's start (or [`Ctx::bg_limit_from_now`]).
+pub(crate) struct Stall {
+    path: PathBuf,
+    floor: Duration,
+    factor: u32,
+    read_every: Duration,
+    read_at: Option<Instant>,
+    seen: Option<String>,
+    changed: Instant,
+    epoch: Option<(i64, Instant)>,
+    longest: Duration,
+    waiting_since: Option<Instant>,
+}
+
+impl Stall {
+    pub(crate) fn new(path: PathBuf, floor: Duration, factor: u32) -> Stall {
+        Stall {
+            path,
+            floor,
+            factor,
+            read_every: (floor / 8).min(Duration::from_secs(2)),
+            read_at: None,
+            seen: None,
+            changed: Instant::now(),
+            epoch: None,
+            longest: Duration::ZERO,
+            waiting_since: None,
+        }
+    }
+
+    /// How long the file may stay unchanged.
+    pub(crate) fn allowance(&self) -> Duration {
+        self.floor.max(self.longest * self.factor)
+    }
+
+    /// The quiet time counts from now.
+    fn restart(&mut self) {
+        self.changed = Instant::now();
+    }
+
+    /// Reads the file (at most every `read_every`) and says why the child counts as stalled, if
+    /// it does. `alone_since`: the run only waits for this child, and has since then; a child
+    /// waiting for data longer than the allowance from then on stalls too.
+    fn check(&mut self, alone_since: Option<Instant>) -> Option<String> {
+        let now = Instant::now();
+        if self.read_at.is_none_or(|t| now - t >= self.read_every) {
+            self.read_at = Some(now);
+            if let Ok(text) = fs::read_to_string(&self.path)
+                && self.seen.as_deref() != Some(text.as_str())
+            {
+                self.changed = now;
+                let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+                if v["step"] == "wait" {
+                    self.waiting_since.get_or_insert(now);
+                } else {
+                    self.waiting_since = None;
+                }
+                if let Some(e) = v["epoch"].as_i64() {
+                    match self.epoch {
+                        Some((e0, t0)) if e0 != e => {
+                            self.longest = self.longest.max(now - t0);
+                            self.epoch = Some((e, now));
+                        }
+                        None => self.epoch = Some((e, now)),
+                        Some(_) => {}
+                    }
+                }
+                self.seen = Some(text);
+            }
+        }
+        let allowance = self.allowance();
+        let minutes = |d: Duration| d.as_secs_f64() / 60.0;
+        let how = format!(
+            "{:.1} min (the larger of {:.1} min and {} times its longest epoch, {:.1} min)",
+            minutes(allowance),
+            minutes(self.floor),
+            self.factor,
+            minutes(self.longest)
+        );
+        if let Some(w) = self.waiting_since {
+            self.changed = now;
+            let since = alone_since.map(|a| now - a.max(w))?;
+            return (since > allowance).then(|| {
+                format!(
+                    "waited {:.1} min for data while no other step ran to make it (allowance \
+                     {how}); killed",
+                    minutes(since)
+                )
+            });
+        }
+        let quiet = now - self.changed;
+        (quiet > allowance).then(|| {
+            format!(
+                "no progress in {} for {:.1} min (allowance {how}); killed",
+                self.path.display(),
+                minutes(quiet)
+            )
+        })
+    }
+}
+
 /// A child process running beside the chunk's steps ([`Ctx::spawn_bg`]).
 struct Bg {
     child: std::process::Child,
     what: String,
     log: String,
     limit: Option<Duration>,
+    /// Its progress-file watch, if any ([`Ctx::watch_bg`]).
+    stall: Option<Stall>,
     /// Where `limit` counts from.
     since: Instant,
     started: Instant,
@@ -1891,6 +2060,101 @@ mod tests {
         )
         .expect("within its limit");
         assert_eq!(fs::read_to_string(&out).expect("stdout file"), "report\n");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Writes the progress file `$1` (atomically, as the trainer does) from a shell script.
+    #[cfg(unix)]
+    fn progress_script(body: &str, prog: &Path) -> Command {
+        let mut c = Command::new("sh");
+        c.args([
+            "-c",
+            &format!(
+                "p=\"$1\"; w() {{ printf '%s' \"$1\" > \"$p.tmp\" && mv \"$p.tmp\" \"$p\"; }}; {body}"
+            ),
+            "sh",
+        ])
+        .arg(prog);
+        c
+    }
+
+    /// The trainer's stall watch ([`Stall`], floor 1 s here): a child whose progress file keeps
+    /// changing runs on; once an epoch has taken 0.8 s, a quiet spell of 1.7 s (over the floor,
+    /// under 3 epochs) is allowed; a child that waits for data is never stopped while the run is
+    /// busy (in the foreground, or beside another child that makes the data); a quiet child is
+    /// killed after its allowance; a child waiting while nothing else runs is killed too.
+    #[cfg(unix)]
+    #[test]
+    fn stall_watch_kills_only_a_quiet_child() {
+        let root = std::env::temp_dir().join(format!("runner-stall-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("root");
+        let mut ctx = Ctx::local("stall", &root, 1);
+        let floor = Duration::from_secs(1);
+        let prog = root.join("p.json");
+        let watch = |p: &Path| Stall::new(p.to_path_buf(), floor, 3);
+
+        // Notes every 0.4 s through a 0.8 s epoch, then 1.7 s quiet (the epoch's evaluation).
+        let c = progress_script(
+            "w '{\"step\":\"train\",\"epoch\":0,\"b\":0}'; sleep 0.4; \
+             w '{\"step\":\"train\",\"epoch\":0,\"b\":1}'; sleep 0.4; \
+             w '{\"step\":\"train\",\"epoch\":1,\"b\":0}'; sleep 1.7; \
+             w '{\"step\":\"done\",\"epoch\":1}'",
+            &prog,
+        );
+        ctx.run_child_stall(c, "epochs.log", watch(&prog), &mut |_| {})
+            .expect("a long epoch's allowance");
+
+        // Waiting 2.5 s for data in the foreground: never a stall.
+        let c = progress_script(
+            "w '{\"step\":\"wait\"}'; sleep 2.5; w '{\"step\":\"train\",\"epoch\":0}'",
+            &prog,
+        );
+        ctx.run_child_stall(c, "wait.log", watch(&prog), &mut |_| {})
+            .expect("waiting is no stall");
+
+        // Quiet in training: killed after about the floor.
+        let t0 = Instant::now();
+        let c = progress_script("w '{\"step\":\"train\",\"epoch\":0}'; sleep 30", &prog);
+        let e = ctx
+            .run_child_stall(c, "quiet.log", watch(&prog), &mut |_| {})
+            .expect_err("killed");
+        assert!(e.contains("quiet.log: no progress in"), "{e}");
+        assert!(t0.elapsed() < Duration::from_secs(10), "{:?}", t0.elapsed());
+
+        // Beside the steps: waiting while another child makes the data (2.5 s), then training.
+        let done = root.join("done");
+        let prog2 = root.join("p2.json");
+        let c = progress_script(
+            &format!(
+                "w '{{\"step\":\"wait\"}}'; while [ ! -f '{}' ]; do sleep 0.1; done; \
+                 w '{{\"step\":\"train\",\"epoch\":0}}'",
+                done.display()
+            ),
+            &prog2,
+        );
+        ctx.spawn_bg(c, "bgtrain.log", "train", None)
+            .expect("spawn");
+        ctx.watch_bg("train", watch(&prog2));
+        let mut m = Command::new("sh");
+        m.args(["-c", &format!("sleep 2.5; touch '{}'", done.display())]);
+        ctx.spawn_bg(m, "maker.log", "maker", None).expect("spawn");
+        ctx.wait_bg("train", &mut |_| {})
+            .expect("the data came")
+            .expect("ran");
+        ctx.wait_bg("maker", &mut |_| {})
+            .expect("maker")
+            .expect("ran");
+
+        // Waiting while nothing else runs: nobody makes the data, killed.
+        let t0 = Instant::now();
+        let prog3 = root.join("p3.json");
+        let c = progress_script("w '{\"step\":\"wait\"}'; sleep 30", &prog3);
+        ctx.spawn_bg(c, "stuck.log", "train", None).expect("spawn");
+        ctx.watch_bg("train", watch(&prog3));
+        let e = ctx.wait_bg("train", &mut |_| {}).expect_err("killed");
+        assert!(e.contains("for data while no other step ran"), "{e}");
+        assert!(t0.elapsed() < Duration::from_secs(10), "{:?}", t0.elapsed());
         let _ = fs::remove_dir_all(&root);
     }
 

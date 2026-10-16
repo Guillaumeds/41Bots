@@ -772,6 +772,20 @@ class LauncherTest(unittest.TestCase):
         # Other kinds' params are not read.
         other = {"format": 2, "streams": [{"name": "x", "kind": "search_measure", "params": {"harvest_net": "x"}}]}
         self.assertEqual(launch.param_inputs(other), {})
+        # The audit loop's stand-in predicate file (audit_predicates_input) is a stored input too.
+        pred = "d4" * 32
+        params["audit_predicates_input"] = f"inputs/sha256/{pred}"
+        self.assertEqual(launch.param_inputs(m)["rung.audit_predicates_input"], pred)
+        w = World([offer(1, 11, 1.0)], ["done:1"])
+        for h in (dec, net, wor):
+            w.store["inputs/sha256/" + h] = b"x"
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, m)
+        self.assertIn(f"rung.audit_predicates_input (inputs/sha256/{pred})", str(e.exception))
+        self.assertEqual(w.created_on, [])
+        w.store["inputs/sha256/" + pred] = b"p"
+        code, _ = self.run_launch(w, m)
+        self.assertEqual((code, w.created_on), (0, [1]))
 
     def test_bin_sha_mismatch_refused(self):
         w = World([offer(1, 11, 1.0)], ["done:1"])
