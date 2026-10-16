@@ -584,3 +584,180 @@ fn root_at_or_after_the_frontier_is_exact() {
         }
     }
 }
+
+/// A frontier that values like [`hash_frontier`], logs every request the solver makes (the
+/// canonical form, in order) and every batch it is handed ([`Frontier::prefetch`]), and asks
+/// for batches from `depth` plays before the frontier.
+struct Batching {
+    depth: u8,
+    trick: u8,
+    asked: std::sync::Mutex<Vec<CanonPos>>,
+    handed: std::sync::Mutex<Vec<Vec<CanonPos>>>,
+}
+
+impl Batching {
+    fn new(depth: u8, trick: u8) -> Self {
+        Batching {
+            depth,
+            trick,
+            asked: std::sync::Mutex::new(Vec::new()),
+            handed: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl Frontier for Batching {
+    fn value(&self, pos: &CanonPos, ctx: &MatchCtx) -> MoneyChance {
+        hash_frontier(pos, ctx)
+    }
+
+    fn value_at(&self, _pos: &Position, canon: &CanonPos, ctx: &MatchCtx) -> MoneyChance {
+        self.asked.lock().expect("no panics").push(*canon);
+        hash_frontier(canon, ctx)
+    }
+
+    fn prefetch_depth(&self) -> u8 {
+        self.depth
+    }
+
+    fn prefetch(&self, pos: &[CanonPos], _ctx: &MatchCtx) {
+        assert!(
+            pos.iter().all(|c| c.tricks_done + 1 == self.trick),
+            "a batch holds frontier positions only"
+        );
+        self.handed.lock().expect("no panics").push(pos.to_vec());
+    }
+}
+
+/// The frontier batch (docs/ENGINEERING-2026-10-17.md, item B) changes nothing: for every depth
+/// 1..=7, switch combination and tie order, the optimised solver's answer and every counter, and
+/// the sequence of positions it asks the evaluator for, are exactly those of the solve without
+/// batches; batches hold only frontier positions; and from depth 1 to 3 every position asked
+/// for was handed over in a batch first (the gathering follows the search's own cards). The
+/// parallel solver's answers are unchanged too.
+#[test]
+fn frontier_batches_change_nothing_and_cover_the_requests() {
+    let mut asked_total = 0;
+    let mut batches = 0;
+    for seed in 0..10 {
+        for (k, extra, cut) in [(4, 0, 5u8), (3, 2, 4), (3, 5, 4), (3, 7, 4), (2, 3, 3)] {
+            let m = position_mid(seed, k, extra);
+            let (pos, ctx, pending) = from_match(&m).expect("position");
+            assert!(pending.is_none());
+            for order in [TieOrder::Ascending, TieOrder::Descending] {
+                for bits in [15u8, 0, 4, 11, 14] {
+                    let opts = FastOptions {
+                        order,
+                        ..FastOptions::default()
+                    }
+                    .combo(bits);
+                    let plain = Batching::new(0, cut);
+                    let want = solve_fast_cut(
+                        &pos,
+                        ctx,
+                        &leaf(),
+                        opts,
+                        Some(FrontierCut::new(cut, &plain)),
+                        &mut SolveMem::new(),
+                        None,
+                    );
+                    let want_asked = plain.asked.into_inner().expect("no panics");
+                    assert!(plain.handed.into_inner().expect("no panics").is_empty());
+                    asked_total += want_asked.len();
+                    for depth in 1..=7u8 {
+                        let what = format!(
+                            "seed {seed} trick {k}+{extra} cut {cut} {order:?} combo {bits} depth {depth}"
+                        );
+                        let f = Batching::new(depth, cut);
+                        let got = solve_fast_cut(
+                            &pos,
+                            ctx,
+                            &leaf(),
+                            opts,
+                            Some(FrontierCut::new(cut, &f)),
+                            &mut SolveMem::new(),
+                            None,
+                        );
+                        same(&want, &got, &what);
+                        assert_eq!(want.stats, got.stats, "{what}: counters");
+                        let asked = f.asked.into_inner().expect("no panics");
+                        assert_eq!(asked, want_asked, "{what}: requests");
+                        let handed = f.handed.into_inner().expect("no panics");
+                        batches += handed.len();
+                        if depth <= 3 {
+                            let all: std::collections::BTreeSet<CanonPos> =
+                                handed.into_iter().flatten().collect();
+                            assert!(
+                                asked.iter().all(|c| all.contains(c)),
+                                "{what}: a request not handed over first"
+                            );
+                        }
+                        if depth == 2 && bits == 15 {
+                            let f = Batching::new(depth, cut);
+                            let p = solve_fast_par_cut(
+                                &pos,
+                                ctx,
+                                &leaf(),
+                                opts,
+                                3,
+                                None,
+                                &mut SolveMem::new(),
+                                Some(FrontierCut::new(cut, &f)),
+                            );
+                            same(&want, &p, &format!("{what} parallel"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Trick-1 roots with a rob still to be made (burn nodes above the frontier).
+    let mut checked = 0;
+    for seed in 0..400u64 {
+        let Some((pos, ctx)) = trick1_with_rob(seed) else {
+            continue;
+        };
+        let opts = FastOptions::default();
+        let plain = Batching::new(0, 2);
+        let want = solve_fast_cut(
+            &pos,
+            ctx,
+            &leaf(),
+            opts,
+            Some(FrontierCut::new(2, &plain)),
+            &mut SolveMem::new(),
+            None,
+        );
+        let want_asked = plain.asked.into_inner().expect("no panics");
+        for depth in 1..=7u8 {
+            let f = Batching::new(depth, 2);
+            let got = solve_fast_cut(
+                &pos,
+                ctx,
+                &leaf(),
+                opts,
+                Some(FrontierCut::new(2, &f)),
+                &mut SolveMem::new(),
+                None,
+            );
+            let what = format!("seed {seed} trick 1 rob depth {depth}");
+            same(&want, &got, &what);
+            assert_eq!(want.stats, got.stats, "{what}: counters");
+            assert_eq!(
+                f.asked.into_inner().expect("no panics"),
+                want_asked,
+                "{what}: requests"
+            );
+        }
+        checked += 1;
+        if checked == 6 {
+            break;
+        }
+    }
+    assert_eq!(checked, 6, "enough trick-1 rob roots");
+    assert!(
+        asked_total > 5_000,
+        "the frontier is reached: {asked_total}"
+    );
+    assert!(batches > 1_000, "batches are made: {batches}");
+}

@@ -78,6 +78,64 @@ fn check_net(net: &IntMlp, fs: &[Features], what: &str) -> usize {
             );
             n += 1;
         }
+        // In batches: in order (neighbours alike, as the solver gathers them), then shuffled,
+        // one past the largest batch.
+        let inorder: Vec<usize> = (0..fs.len()).collect();
+        n += check_batches(
+            &fast,
+            fs,
+            &want,
+            &inorder,
+            8,
+            &mut s,
+            &format!("{what} level {l:?}"),
+        );
+        n += check_batches(
+            &fast,
+            fs,
+            &want,
+            &order,
+            nn::kernel::MAX_BATCH + 1,
+            &mut s,
+            &format!("{what} level {l:?} shuffled"),
+        );
+    }
+    n
+}
+
+/// [`FastMlp::forward_batch`] equals the one-at-a-time logits `want` on `fs`, in batches of `b`
+/// rows taken in the given order (every batch order at every level is checked against plain
+/// sums by the kernel tests); returns how many comparisons were made.
+fn check_batches(
+    fast: &FastMlp,
+    fs: &[Features],
+    want: &[[i64; nn::outcome::MAX_OUT]],
+    order: &[usize],
+    b: usize,
+    s: &mut Scratch,
+    what: &str,
+) -> usize {
+    let mut n = 0;
+    for chunk in order.chunks(b) {
+        let bases: Vec<Vec<i64>> = chunk
+            .iter()
+            .map(|&i| {
+                let mut v = vec![0; fast.base_len()];
+                fast.base(&fs[i].dense, s, &mut v);
+                v
+            })
+            .collect();
+        let items: Vec<(&[u16], &[i64])> = chunk
+            .iter()
+            .zip(&bases)
+            .map(|(&i, v)| (fs[i].active(), v.as_slice()))
+            .collect();
+        let mut got = vec![[7i64; nn::outcome::MAX_OUT]; chunk.len()];
+        fast.forward_batch(&items, s, &mut got);
+        for (k, &i) in chunk.iter().enumerate() {
+            assert_eq!(got[k], want[i], "{what} batch {b} row {i}");
+            n += 1;
+        }
     }
     n
 }
@@ -356,4 +414,153 @@ fn oracle_eval_equals_the_plain_evaluation() {
         });
     }
     assert!(n > 20_000, "{n}");
+}
+
+/// [`Oracle::eval_batch`] equals [`Oracle::eval_reference`] position by position, for both
+/// heads and a first layer that needs `i64` sums, in batches of several sizes (one past the
+/// largest batch included), with positions repeated inside a batch and batches asked for again
+/// (the memo answers), and with the memo off.
+#[test]
+fn oracle_batches_equal_the_plain_evaluation() {
+    let mut n = 0;
+    for trick in [2u8, 3, 4] {
+        let pos = positions(trick, 700);
+        // One match context per batch: group the positions by it, in order.
+        let mut groups: BTreeMap<([u8; 4], u8), Vec<CanonPos>> = BTreeMap::new();
+        for (c, x) in &pos {
+            groups.entry((x.games, x.dealer_team)).or_default().push(*c);
+        }
+        let nets = [
+            (random_net(21, &[128, 64], vocab(trick), 100), true),
+            (random_net(22, &[96, 32], 4, 100), false),
+            (random_net(23, &[64, 32], vocab(trick), 1500), true),
+        ];
+        assert!(
+            !FastMlp::new(nets[2].0.clone()).bin_i32(),
+            "a wide first layer"
+        );
+        for (k, (net, outcome_head)) in nets.iter().enumerate() {
+            let o = oracle(net, trick, *outcome_head);
+            let mut nomemo = oracle(net, trick, *outcome_head);
+            nomemo.set_memo(false);
+            for (&(games, dealer_team), cs) in &groups {
+                let x = MatchCtx { games, dealer_team };
+                let want: Vec<_> = cs.iter().map(|c| o.eval_reference(c, &x)).collect();
+                for b in [1usize, 4, 64, 65] {
+                    for (chunk, w) in cs.chunks(b).zip(want.chunks(b)) {
+                        // Each position twice in a row, then the batch again.
+                        let twice: Vec<CanonPos> = chunk.iter().flat_map(|c| [*c, *c]).collect();
+                        let mut got = vec![equity::MoneyChance::certain(0); twice.len()];
+                        for o in [&o, &nomemo] {
+                            o.eval_batch(&twice, &x, &mut got);
+                            for (i, v) in got.iter().enumerate() {
+                                assert_eq!(*v, w[i / 2], "trick {trick} net {k} batch {b}");
+                                n += 1;
+                            }
+                            o.eval_batch(chunk, &x, &mut got);
+                            assert_eq!(&got[..chunk.len()], w, "trick {trick} net {k} again");
+                        }
+                    }
+                }
+            }
+            let st = o.thread_stats();
+            assert!(st.batched > 0 && st.batch_hits > st.batched / 2, "{st:?}");
+        }
+    }
+    assert!(n > 20_000, "{n}");
+}
+
+/// The hybrid's search with the frontier batches (docs/ENGINEERING-2026-10-17.md, item B) is the
+/// search without them: on trick-3 roots (frontier at trick 4) and trick-2 roots (frontier at
+/// trick 3), at every place in the trick, the solve's answer and every counter, and the
+/// sequence of frontier positions it asks the oracle for with their values, are the same for
+/// batches gathered 1, 2, 3 or 5 plays before the frontier as with none; and every value is the
+/// plain evaluation's.
+#[test]
+fn hybrid_with_batches_equals_the_hybrid_without() {
+    use std::sync::Mutex;
+
+    use solver::frontier::Frontier;
+    use solver::{FastOptions, FrontierCut, Position, SolveMem, solve_fast_cut};
+
+    /// The oracle, logging what the solver asks for, batching from `depth` plays.
+    struct Logged {
+        o: Oracle,
+        depth: u8,
+        log: Mutex<Vec<(CanonPos, equity::MoneyChance)>>,
+    }
+    impl Frontier for Logged {
+        fn value(&self, pos: &CanonPos, ctx: &MatchCtx) -> equity::MoneyChance {
+            self.o.eval(pos, ctx)
+        }
+        fn value_at(
+            &self,
+            _pos: &Position,
+            canon: &CanonPos,
+            ctx: &MatchCtx,
+        ) -> equity::MoneyChance {
+            let v = self.o.eval(canon, ctx);
+            self.log.lock().expect("no panics").push((*canon, v));
+            v
+        }
+        fn prefetch_depth(&self) -> u8 {
+            self.depth
+        }
+        fn prefetch(&self, pos: &[CanonPos], ctx: &MatchCtx) {
+            self.o.prefetch(pos, ctx);
+        }
+    }
+
+    let mut asked = 0;
+    let mut batched = 0;
+    for (k, cut, worlds) in [(3u8, 4u8, 16u64), (2, 3, 3)] {
+        let net = random_net(31, &[256, 128, 32], vocab(cut), 100);
+        for w in 0..worlds {
+            let (pos, ctx, _) = solver::worlds::sample_world(77, k, w, (w % 8) as u8);
+            let mut want = None;
+            for depth in [0u8, 1, 2, 3, 5] {
+                let f = Logged {
+                    o: oracle(&net, cut, true),
+                    depth,
+                    log: Mutex::new(Vec::new()),
+                };
+                let sol = solve_fast_cut(
+                    &pos,
+                    ctx,
+                    &SyntheticLeaf,
+                    FastOptions::default(),
+                    Some(FrontierCut::new(cut, &f)),
+                    &mut SolveMem::new(),
+                    None,
+                );
+                let st = f.o.thread_stats();
+                let log = f.log.into_inner().expect("no panics");
+                if depth > 0 {
+                    batched += st.batched;
+                }
+                match &want {
+                    None => {
+                        for (i, (c, v)) in log.iter().enumerate() {
+                            if i % 5 == 0 {
+                                assert_eq!(f.o.eval_reference(c, &ctx), *v, "world {w}");
+                            }
+                        }
+                        asked += log.len();
+                        want = Some((sol, log));
+                    }
+                    Some((s0, l0)) => {
+                        let what = format!("trick {k} world {w} depth {depth}");
+                        assert_eq!(s0.value, sol.value, "{what}");
+                        assert_eq!(s0.best, sol.best, "{what}");
+                        assert_eq!(s0.children, sol.children, "{what}");
+                        assert_eq!(s0.root_tied, sol.root_tied, "{what}");
+                        assert_eq!(s0.stats, sol.stats, "{what}: counters");
+                        assert_eq!(*l0, log, "{what}: requests and values");
+                    }
+                }
+            }
+        }
+    }
+    assert!(asked > 3_000, "{asked}");
+    assert!(batched > 3_000, "{batched}");
 }

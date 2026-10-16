@@ -121,7 +121,54 @@ fn check_net(net: &IntMlp, fs: &[Features], what: &str) {
                 "{what} level {l:?} row {i} shuffled"
             );
         }
+        // In batches, shuffled, one past the largest batch.
+        check_batches(
+            &fast,
+            fs,
+            &want,
+            &order,
+            nn::kernel::MAX_BATCH + 1,
+            &mut s,
+            &format!("{what} level {l:?} shuffled"),
+        );
     }
+}
+
+/// [`FastMlp::forward_batch`] equals the one-at-a-time logits `want` on `fs`, in batches of `b`
+/// rows taken in the given order (every batch order at every level is checked against plain
+/// sums by the kernel tests); returns how many comparisons were made.
+fn check_batches(
+    fast: &FastMlp,
+    fs: &[Features],
+    want: &[[i64; nn::outcome::MAX_OUT]],
+    order: &[usize],
+    b: usize,
+    s: &mut Scratch,
+    what: &str,
+) -> usize {
+    let mut n = 0;
+    for chunk in order.chunks(b) {
+        let bases: Vec<Vec<i64>> = chunk
+            .iter()
+            .map(|&i| {
+                let mut v = vec![0; fast.base_len()];
+                fast.base(&fs[i].dense, s, &mut v);
+                v
+            })
+            .collect();
+        let items: Vec<(&[u16], &[i64])> = chunk
+            .iter()
+            .zip(&bases)
+            .map(|(&i, v)| (fs[i].active(), v.as_slice()))
+            .collect();
+        let mut got = vec![[7i64; nn::outcome::MAX_OUT]; chunk.len()];
+        fast.forward_batch(&items, s, &mut got);
+        for (k, &i) in chunk.iter().enumerate() {
+            assert_eq!(got[k], want[i], "{what} batch {b} row {i}");
+            n += 1;
+        }
+    }
+    n
 }
 
 /// Widths 1024, 2048 and 4096: first layers that wide, and fan-ins that wide into the next
@@ -265,4 +312,38 @@ fn wide_golden_outputs() {
         let net = random_net(77, &widths, vocab(3), 100);
         assert_eq!(both_hash(&net, &fs), h, "{widths:?}");
     }
+}
+
+/// Which networks the solver batches by default (`nn::oracle::default_prefetch`): those with a
+/// hidden layer of at least 2048 × 1024 weights.
+#[test]
+fn wide_networks_batch_by_default() {
+    use nn::oracle::{WIDE_PREFETCH, default_prefetch};
+    let zero = |widths: &[usize]| -> IntMlp {
+        let mut dims = vec![N_FEATURES];
+        dims.extend_from_slice(widths);
+        dims.push(4);
+        IntMlp::new(
+            dims.windows(2)
+                .map(|d| Layer {
+                    n_in: d[0],
+                    n_out: d[1],
+                    w: vec![0; d[0] * d[1]],
+                    b: vec![0; d[1]],
+                    shift: 0,
+                })
+                .collect(),
+        )
+        .expect("valid")
+    };
+    assert_eq!(default_prefetch(&zero(&[512, 256, 64])), 0);
+    assert_eq!(default_prefetch(&zero(&[1024, 512, 128])), 0);
+    assert_eq!(default_prefetch(&zero(&[1024, 1024, 256])), 0);
+    assert_eq!(default_prefetch(&zero(&[2048, 1024, 256])), WIDE_PREFETCH);
+    assert_eq!(
+        default_prefetch(&zero(&[2048, 2048, 1024, 256])),
+        WIDE_PREFETCH
+    );
+    assert_eq!(default_prefetch(&zero(&[1024, 2048, 256])), WIDE_PREFETCH);
+    assert_eq!(WIDE_PREFETCH, 3);
 }

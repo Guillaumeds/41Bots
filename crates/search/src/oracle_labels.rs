@@ -970,6 +970,21 @@ impl Frontier for Recorder<'_> {
         });
         value
     }
+
+    fn prefetch_depth(&self) -> u8 {
+        match self.driver {
+            Driver::Exact => 0,
+            Driver::Net(net) => net.prefetch_depth(),
+        }
+    }
+
+    /// Passed on to the network; nothing is recorded (the search records what it reaches
+    /// through `value_at`, as without the batch).
+    fn prefetch(&self, pos: &[CanonPos], ctx: &MatchCtx) {
+        if let Driver::Net(net) = self.driver {
+            net.prefetch(pos, ctx);
+        }
+    }
 }
 
 /// One harvest decision's facts (the sidecar's counts).

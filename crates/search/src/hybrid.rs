@@ -138,6 +138,18 @@ impl Frontier for Timed<'_> {
         self.n.fetch_add(1, Ordering::Relaxed);
         v
     }
+
+    fn prefetch_depth(&self) -> u8 {
+        self.inner.prefetch_depth()
+    }
+
+    /// The batch's time counts as evaluation time; the positions are counted when asked for.
+    fn prefetch(&self, pos: &[CanonPos], ctx: &MatchCtx) {
+        let t = Instant::now();
+        self.inner.prefetch(pos, ctx);
+        self.ns
+            .fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
 }
 
 /// One world to check: its number, the decision seed it is drawn from
