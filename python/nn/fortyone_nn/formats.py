@@ -25,10 +25,11 @@ INPUT_SHIFT = 24  # a binary feature that is on, and a dense value of 1, are 2^2
 # (crates/nn/src/encode.rs).
 OFF_GAMES = 801
 
-# The widest layer of the integer inference (crates/nn/src/mlp.rs `MAX_WIDTH`, audited). A network with
-# a wider layer cannot be loaded by Rust, so training one only wastes the time: the trainer refuses it
-# at once (``parse_widths``). Tested against Rust: the source line and ``nn-tool limits``.
-MAX_WIDTH = 1024
+# The widest layer of the integer inference (crates/nn/src/mlp.rs `MAX_WIDTH`, audited; raised from
+# 1024 to 4096 on 2026-10-16, the proof in that module's notes). A network with a wider layer cannot be
+# loaded by Rust, so training one only wastes the time: the trainer refuses it at once
+# (``parse_widths``). Tested against Rust: the source line and ``nn-tool limits``.
+MAX_WIDTH = 4096
 
 
 def width_error(k, n):

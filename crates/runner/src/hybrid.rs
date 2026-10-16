@@ -795,7 +795,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         })?;
     // The integer inference cannot load a layer wider than nn::MAX_WIDTH, so a network with one is
     // refused here, before the machine installs or trains anything (a trick-3 run once trained
-    // 2048-1024-256 for 27 minutes and then failed at the check).
+    // 2048-1024-256 for 27 minutes and then failed at the check, when the limit was 1024).
     let hidden: Vec<usize> = widths.iter().map(|&w| w as usize).collect();
     nn::mlp::check_hidden_widths(&hidden)
         .map_err(|e| format!("hybrid_rung: widths {widths_text:?}: {e}"))?;
@@ -2714,16 +2714,20 @@ mod tests {
         bad(json!({ "widths": "1024,,128" }), "widths");
         bad(json!({ "widths": "" }), "widths");
         bad(json!({ "widths": 1024 }), "widths must be a string");
-        // A layer over the integer inference's limit (nn::MAX_WIDTH, 1024) is refused with the layer and the limit.
+        // A layer over the integer inference's limit (nn::MAX_WIDTH, 4096) is refused with the layer and the limit.
         bad(
-            json!({ "widths": "2048,1024,256" }),
-            "widths \"2048,1024,256\": layer 0: 2048 units, wider than 1024",
+            json!({ "widths": "8192,1024,256" }),
+            "widths \"8192,1024,256\": layer 0: 8192 units, wider than 4096",
         );
         bad(
-            json!({ "widths": "512, 4096" }),
-            "layer 1: 4096 units, wider than 1024",
+            json!({ "widths": "512, 4097" }),
+            "layer 1: 4097 units, wider than 4096",
         );
-        bad(json!({ "widths": "1025" }), "MAX_WIDTH");
+        bad(json!({ "widths": "4097" }), "MAX_WIDTH");
+        // 2048 and 4096 wide are within it.
+        for w in ["2048,1024,256", "2048,2048,1024,256", "4096,2048,256"] {
+            assert!(parse(&json!({ "widths": w })).is_ok(), "{w}");
+        }
         bad(json!({ "head": "values" }), "head \"values\"");
         bad(json!({ "device": "gpu" }), "device \"gpu\"");
         bad(json!({ "epochs": 0 }), "epochs and batch");
