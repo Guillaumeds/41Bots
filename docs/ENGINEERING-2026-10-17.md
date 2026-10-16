@@ -170,6 +170,10 @@ which other jobs disturb less.
   `equity-v0.npy`, before (`b96a167`) and after, on 1 and 4 threads (batch depths 0 to 4 tried
   too, all identical); the same decisions × 16 and × 8 worlds with random 2048-1024-256 and
   2048-2048-1024-256 networks (batched by default), two runs each.
+- **The network-driven harvest** (`search labels --trick 4 --count 600 --seed 7 --source harvest
+  --harvest-net …`, 2 threads; the `Recorder` with a network driver): the label shards are
+  byte-identical (SHA-256) before and after with the trained O_4 and with a 2048-1024-256 network
+  (batched), and the sidecars differ only in the seconds and the binary's hash.
 - **wasm32**: `cargo check -p nn --target wasm32-unknown-unknown` passes (the plain loops).
 
 ### Before and after
