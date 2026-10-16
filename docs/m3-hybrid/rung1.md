@@ -188,6 +188,9 @@ then the full trick-3 check.
 
 ## Full rung-1 run (off this VM; nothing rented)
 
+(2026-10-16, later: the same run on one rented machine with a GPU, as the runner's `hybrid_rung`
+chunk: `docs/m3-hybrid/vast.md` and `docs/vast/m3-hybrid-rung1b.manifest.json`.)
+
 A ready-to-run GitHub Actions job is in `.github/workflows/hybrid-rung1.yml` (manual trigger
 only; not run). One standard CPU runner (4 vCPU, 16 GB): equity table, 1.05M labels (~2 min),
 the trick-3 golden set (~2–3 min), training capped at 200 minutes (1024-512-128, outcome head),
