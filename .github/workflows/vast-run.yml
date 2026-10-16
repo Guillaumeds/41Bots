@@ -13,6 +13,8 @@ name: vast-run
 # vast-cleanup.yml watches it every 15 minutes; runs/<run_id>/closed.json records how it ended.
 # No time limit by default (owner, 2026-10-16): a run ends when it finishes, at its dollar cap
 # (max_dollars, $20 by default), or when a person stops it.
+# Verified hosts are preferred (owner, 2026-10-16): when no verified offer fits, unverified or
+# deverified hosts are searched too; verified_only keeps the strict behaviour.
 
 on:
   workflow_dispatch:
@@ -52,6 +54,10 @@ on:
       cpu_match:
         description: "Regex the offer's CPU name must match, e.g. EPYC (blank = any)"
         default: ""
+      verified_only:
+        description: "Rent only from vast.ai-verified hosts. Off (the default): verified hosts are preferred, and when no verified offer fits, unverified or deverified hosts are searched too (owner rule 2026-10-16)"
+        type: boolean
+        default: false
       bin_sha:
         description: "Commit whose release binaries to run (default: this commit)"
         default: ""
@@ -67,7 +73,7 @@ on:
         type: boolean
         default: true
       offer_id:
-        description: "Rent exactly this vast.ai offer number (blank = normal search): one search by its id checks it (verified host, reliability >= 0.90, whole machine, on-demand); an offer failing a check is not rented. With dry_run: prints the offer, rents nothing."
+        description: "Rent exactly this vast.ai offer number (blank = normal search): one search by its id checks it (reliability >= 0.90, whole machine, on-demand; an unverified or deverified host is accepted unless verified_only is on); an offer failing a check is not rented. With dry_run: prints the offer, rents nothing."
         default: ""
       offer_dph:
         description: "With offer_id (optional): the price per hour you saw on vast.ai; a warning if vast reports another"
@@ -137,7 +143,7 @@ jobs:
           fi
           if [ "$DRY_RUN" = "true" ]; then
             # Prints the offer that would be rented (the named one with offer_id, else the search's choice); rents nothing.
-            python3 python/launcher/launch.py plan --min-cores "$MIN_CORES" --min-ram-gb "${MIN_RAM_GB:-32}" --min-reliability "${MIN_RELIABILITY:-0.90}" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} ${{ inputs.cheapest && '--cheapest' || '' }} $OFFER_ARGS
+            python3 python/launcher/launch.py plan --min-cores "$MIN_CORES" --min-ram-gb "${MIN_RAM_GB:-32}" --min-reliability "${MIN_RELIABILITY:-0.90}" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} ${{ inputs.cheapest && '--cheapest' || '' }} ${{ inputs.verified_only && '--verified-only' || '' }} $OFFER_ARGS
             exit 0
           fi
           # A blank run_id gets a timestamp from the launcher; resume_from goes into the manifest unless it has one.
@@ -158,7 +164,7 @@ jobs:
           )
           python3 python/launcher/launch.py run --manifest "$MANIFEST" --min-cores "$MIN_CORES" --min-ram-gb "${MIN_RAM_GB:-32}" --min-reliability "${MIN_RELIABILITY:-0.90}" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} \
             --max-minutes "${MAX_MINUTES:-0}" --low-cpu-pct "$LOW_CPU_PCT" --low-cpu-s "${LOW_CPU_S:-300}" --poll-s "${POLL_S:-60}" --max-dollars "${MAX_DOLLARS:-20}" \
-            --image "$IMAGE" --bin-sha "$BIN_SHA" --state-file instance-id.txt ${{ inputs.cheapest && '--cheapest' || '' }} --handover-min 330 \
+            --image "$IMAGE" --bin-sha "$BIN_SHA" --state-file instance-id.txt ${{ inputs.cheapest && '--cheapest' || '' }} ${{ inputs.verified_only && '--verified-only' || '' }} --handover-min 330 \
             $OFFER_ARGS
       - name: Cancelled - ask the run to stop and wait (at most 5 minutes) for it to upload what it finished
         if: cancelled() && hashFiles('instance-id.txt.run-id') != ''

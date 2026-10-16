@@ -147,7 +147,11 @@ class World:
                 raise AssertionError("a search was made")
             if self.search_fails:
                 raise RuntimeError("vastai search offers failed: 429 Too Many Requests")
-            return [dict(o) for o in self.offers]
+            rows = [dict(o) for o in self.offers]
+            if "verified=true" in args[2].split():
+                # vast's search then returns only verified hosts; `verified=any` lifts that.
+                rows = [o for o in rows if o.get("verification", "verified") == "verified"]
+            return rows
         if cmd == ("create", "instance"):
             oid = int(args[2])
             how = self.create_fail.get(oid)
@@ -309,7 +313,7 @@ class LauncherTest(unittest.TestCase):
         finally:
             for n, v in saved.items():
                 setattr(launch, n, v)
-        self.log = out.getvalue()
+            self.log = out.getvalue()
         report = json.loads(world.store.get(f"runs/{RUN}/report.json", b"{}"))
         return code, report
 
@@ -344,15 +348,19 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(w.searches, 0)
 
     def test_offer_chosen_by_id_must_pass_the_same_checks(self):
-        # Unverified, shared, unreliable or interruptible: refused by name. Not on offer, or a
-        # lookup that fails: refused too (the checks are never skipped). Nothing is rented.
-        cases = [({"verification": "unverified"}, "host not verified"), ({"gpu_frac": 0.5}, "shared machine"),
-                 ({"reliability2": 0.85}, "reliability 0.850 below 0.9"), ({"is_bid": True}, "interruptible")]
-        for kw, word in cases:
+        # Shared, unreliable or interruptible (and unverified with --verified-only): refused by
+        # name. Not on offer, or a lookup that fails: refused too (the checks are never skipped).
+        # Nothing is rented.
+        cases = [({"verification": "unverified"}, "host not verified", ["--verified-only"]),
+                 ({"verification": "deverified"}, "host not verified", ["--verified-only"]),
+                 ({"gpu_frac": 0.5}, "shared machine", []),
+                 ({"reliability2": 0.85}, "reliability 0.850 below 0.9", []), ({"is_bid": True}, "interruptible", [])]
+        for kw, word, extra in cases:
             w = World([offer(500, 50, 1.0, **kw)], ["done:1"])
             w.forbid_search = True
             with self.assertRaises(SystemExit) as e:
-                self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}}, "--offer-id", "500")
+                self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}}, "--offer-id", "500",
+                                *extra)
             self.assertIn("fails the launcher's checks", str(e.exception), kw)
             self.assertIn(word, str(e.exception), kw)
             self.assertEqual(w.created_on, [], kw)
@@ -367,6 +375,113 @@ class LauncherTest(unittest.TestCase):
         self.assertIn("could not be checked", str(e.exception))
         self.assertEqual(w.created_on, [])
         self.assertEqual(launch.offer_check_failures(offer(7, 7, 1.0)), [])
+
+    # ---- verified hosts are preferred, not required (owner, 2026-10-16)
+
+    MANIFEST = {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}}
+
+    def test_a_verified_offer_is_chosen_and_there_is_no_fallback_search(self):
+        # The unverified offer is cheaper, but a verified offer fits: it is rented, in one search.
+        w = World([offer(1, 11, 0.5, verification="unverified"), offer(2, 12, 2.0)], ["done:1"])
+        code, report = self.run_launch(w, self.MANIFEST)
+        self.assertEqual((code, w.created_on, w.searches), (0, [2], 1))
+        self.assertIn("verified=true", w.queries[0].split())
+        self.assertNotIn("no verified offer matches", self.log)
+        self.assertIn("host verified", self.log)
+        self.assertNotIn("NOT verified", self.log)
+
+    def test_no_verified_offer_falls_back_to_unverified_offers_and_says_so(self):
+        # The only verified offer is refused by --cpu-match, so nothing verified fits: the search is
+        # repeated without the verified filter, and the best unverified/deverified offer is taken.
+        w = World([offer(3, 13, 0.4, cpu_name="Xeon E5"),
+                   offer(1, 11, 1.0, verification="unverified"), offer(2, 12, 0.5, verification="deverified")],
+                  ["done:1"])
+        code, report = self.run_launch(w, self.MANIFEST, "--cpu-match", "EPYC")
+        self.assertEqual((code, w.created_on, w.searches), (0, [2], 2))
+        self.assertIn("verified=true", w.queries[0].split())
+        self.assertIn("verified=any", w.queries[1].split())
+        self.assertNotIn("verified=true", w.queries[1].split())
+        self.assertIn("no verified offer matches; using unverified/deverified offers (owner rule 2026-10-16)", self.log)
+        self.assertIn("host NOT verified (deverified)", self.log)
+        # Every other filter is unchanged in the second search, the Blackwell cut-off included.
+        first, second = w.queries
+        self.assertEqual(first.replace("verified=true", "verified=any"), second)
+        self.assertIn("compute_cap<1000", second.split())
+        self.assertIn("reliability>0.9", second.split())
+
+    def test_fallback_search_with_nothing_either_stops_the_run(self):
+        w = World([], ["done:1"])
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, self.MANIFEST)
+        self.assertIn("no offer matches the filters", str(e.exception))
+        self.assertEqual(w.searches, 2)
+        self.assertIn("no offer matches even with unverified/deverified hosts allowed", self.log)
+
+    def test_verified_only_keeps_the_strict_search(self):
+        w = World([offer(1, 11, 1.0, verification="unverified")], ["done:1"])
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, self.MANIFEST, "--verified-only")
+        self.assertIn("no offer matches the filters", str(e.exception))
+        self.assertEqual((w.searches, w.created_on), (1, []))
+        self.assertIn("--verified-only", self.log)
+        self.assertNotIn("verified=any", " ".join(w.queries))
+        # With a verified offer on the market, --verified-only still rents it.
+        w = World([offer(1, 11, 1.0, verification="unverified"), offer(2, 12, 2.0)], ["done:1"])
+        code, _ = self.run_launch(w, self.MANIFEST, "--verified-only")
+        self.assertEqual((code, w.created_on, w.searches), (0, [2], 1))
+
+    def test_offer_chosen_by_id_on_an_unverified_host_is_accepted_and_logged(self):
+        for word in ("unverified", "deverified"):
+            w = World([offer(500, 50, 1.013, cpu_cores_effective=384, verification=word)], ["done:2"])
+            w.forbid_search = True
+            code, report = self.run_launch(w, self.MANIFEST, "--offer-id", "500")
+            self.assertEqual((code, w.created_on, w.searches, w.id_lookups), (0, [500], 0, 1), word)
+            self.assertIn(f"offer 500 is on a host that is {word}, not verified: accepted", self.log)
+            self.assertIn(f"host NOT verified ({word})", self.log)
+        # Every other check still applies to it.
+        w = World([offer(500, 50, 1.0, verification="unverified", reliability2=0.85)], ["done:1"])
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, self.MANIFEST, "--offer-id", "500")
+        self.assertIn("reliability 0.850 below 0.9", str(e.exception))
+        self.assertNotIn("host not verified", str(e.exception))
+        self.assertEqual(w.created_on, [])
+
+    def test_a_replacement_machine_follows_the_same_rule(self):
+        # Format 2: the first machine (found by the fallback) dies. The replacement starts from the
+        # verified search again, finds nothing verified, and falls back again, on another machine.
+        w = World([offer(1, 11, 1.0, verification="unverified"), offer(2, 12, 1.5, verification="deverified")],
+                  ["die:2", "done:1"])
+        code, report = self.run_launch(w, {"format": 2, "run_id": RUN, "run_seed": 1, "streams": []})
+        self.assertEqual((code, report["replacements"], w.created_on), (0, 1, [1, 2]))
+        self.assertEqual(["verified=true" in q.split() for q in w.queries], [True, False, True, False])
+        self.assertEqual(self.log.count("no verified offer matches; using unverified/deverified offers"), 2)
+        # A verified machine that turns up before the replacement is preferred to the fallback.
+        w = World([offer(1, 11, 1.0, verification="unverified")], ["die:2", "done:1"])
+        orig = w.vast
+
+        def vast_with_a_new_verified_offer(*args, **kw):
+            if args[:2] == ("search", "offers") and not args[2].startswith("id=") and w.created_on:
+                w.offers.append(offer(9, 19, 3.0))
+            return orig(*args, **kw)
+
+        w.vast = vast_with_a_new_verified_offer
+        code, report = self.run_launch(w, {"format": 2, "run_id": RUN, "run_seed": 1, "streams": []})
+        self.assertEqual((code, report["replacements"], w.created_on), (0, 1, [1, 9]))
+
+    def test_plan_prints_the_host_status_of_the_offers(self):
+        w = World([offer(1, 11, 1.0, verification="unverified")], [])
+        saved = {n: getattr(launch, n) for n in ("vast", "r2_get", "r2_list", "time")}
+        launch.vast, launch.r2_get, launch.r2_list, launch.time = w.vast, w.r2_get, w.r2_list, w
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                code = launch.main(["plan", "--min-cores", "16"])
+        finally:
+            for n, v in saved.items():
+                setattr(launch, n, v)
+        self.assertEqual(code, 0)
+        self.assertIn("host NOT verified (unverified)", out.getvalue())
+        self.assertIn("if no verified offer matches", out.getvalue())
 
     def test_reliability_floor_is_90_percent(self):
         # Owner, 2026-10-16: hosts with reliability of at least 90% are accepted, for every rental.
