@@ -63,9 +63,13 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
-use engine::cards::{Bits, Card, bit};
-use engine::rules::{EffSuit, beats, effective_suit, plain_rank, trump_rank};
-use engine::team_of;
+use engine::cards::{Bits, Card, Suit, bit, has};
+use engine::game::{BONUS_FIRST, BONUS_LATER, Match, Phase, TRICK_POINTS};
+use engine::rules::{
+    EffSuit, ace_of_trumps, beats, effective_suit, five_of, plain_rank, trump_rank,
+};
+use engine::{SEATS, team_of};
+use equity::hand::InHand;
 use equity::{MatchState, MoneyChance, ONE};
 
 use crate::equiv::Classes;
@@ -162,21 +166,36 @@ enum Tt<'a> {
 }
 
 /// Memory kept between exact solves, normally one per thread for a whole run: the
-/// transposition tables of [`solve_fast_with`] and [`solve_fast_par_with`].
+/// transposition tables of [`solve_fast_with`] and [`solve_fast_par_with`], and the sequential
+/// solve's leaf values ([`LeafCache`]).
 ///
 /// Why: a solve's table grows to as much as `tt_mb` megabytes. Allocating it for every solve
 /// (and the operating system zeroing each new page on first touch, then unmapping it on free)
 /// is cheap with a few threads, but with hundreds of threads and short solves the threads queue
 /// on the process's memory map and sit idle. With a `SolveMem` each table is allocated once per
-/// thread and emptied in O(1) between solves (see the `tt` module).
+/// thread and emptied in O(1) between solves (see the `tt` module); the leaf memo likewise.
 ///
 /// Reuse never changes a result: every solve starts from an empty table of the same starting
 /// size, grown by the same rule, with slot-for-slot the contents a new table would have, so the
 /// answer and every counter equal those of [`solve_fast`] / [`solve_fast_par`] (tested).
+///
+/// **Sharing across a family of roots** ([`SolveMem::share`]): the exception, asked for
+/// explicitly. While a [`SolveFamily`] is set, consecutive sequential solves without a frontier
+/// whose roots the family admits keep the table and the leaf memo of the previous such solve
+/// instead of emptying them. The values are exactly those of solves from empty tables (proof at
+/// [`SolveFamily`]); the counters are those of the shared-table solve (fewer nodes when the
+/// roots share futures). Any other solve on this memory empties both first, as always.
 #[derive(Default)]
 pub struct SolveMem {
     own: Option<Table>,
     shared: Option<SharedTable>,
+    leaves: LeafCache,
+    /// The family whose roots may share the sequential table ([`SolveMem::share`]).
+    family: Option<SolveFamily>,
+    /// What the sequential table and the leaf memo hold now, when every entry in them comes
+    /// from solves without a frontier of roots `family` admits: their tie order and the table's
+    /// cap (megabytes). `None` otherwise (the next solve empties them).
+    kept: Option<(TieOrder, usize)>,
 }
 
 impl SolveMem {
@@ -185,11 +204,47 @@ impl SolveMem {
         SolveMem::default()
     }
 
-    /// The sequential solve's table, emptied, capped at `mb` megabytes.
-    fn own(&mut self, mb: usize) -> &mut Table {
-        let t = self.own.get_or_insert_with(|| Table::new(mb));
-        t.reset(mb << 20);
-        t
+    /// From now on, keep the sequential table and leaf values from one solve to the next while
+    /// the roots belong to `family` (see [`SolveMem`] and [`SolveFamily`]): for the many
+    /// positions of one decision's world, which share most of their futures. Every solve in the
+    /// family must use the same leaf evaluator (the solver cannot check that; everything else it
+    /// checks per root, and a root the family does not admit is solved from empty tables).
+    pub fn share(&mut self, family: SolveFamily) {
+        self.family = Some(family);
+        self.kept = None;
+    }
+
+    /// Stop sharing: every later solve starts from empty tables again.
+    pub fn unshare(&mut self) {
+        self.family = None;
+        self.kept = None;
+    }
+
+    /// The sequential solve's table and leaf memo for a solve of `pos` (frontier or not as
+    /// `frontier` says): emptied, the table capped at `mb` megabytes, unless the solve continues
+    /// the family's shared ones ([`SolveMem::share`]). `tt` is whether the table is used.
+    fn begin(
+        &mut self,
+        pos: &Position,
+        ctx: MatchCtx,
+        opts: FastOptions,
+        frontier: bool,
+    ) -> (Option<&mut Table>, &mut LeafCache) {
+        let mb = opts.tt_mb;
+        let admitted =
+            !frontier && opts.tt && self.family.as_ref().is_some_and(|f| f.admits(pos, ctx));
+        let keep = admitted && self.kept == Some((opts.order, mb)) && self.own.is_some();
+        if !keep {
+            self.leaves.reset();
+            if opts.tt {
+                self.own
+                    .get_or_insert_with(|| Table::new(mb))
+                    .reset(mb << 20);
+            }
+        }
+        self.kept = admitted.then_some((opts.order, mb));
+        let t = if opts.tt { self.own.as_mut() } else { None };
+        (t, &mut self.leaves)
     }
 
     /// The parallel solve's shared table, emptied, of `mb` megabytes for `threads` threads.
@@ -199,6 +254,156 @@ impl SolveMem {
             .get_or_insert_with(|| SharedTable::new(mb, threads));
         t.reset(mb, threads);
         t
+    }
+}
+
+/// The roots that may share one sequential table ([`SolveMem::share`]): the positions of one
+/// fully known hand that descend from one *ancestor* (normally a decision in one world), with
+/// the match around the hand fixed.
+///
+/// It holds the trump suit, the match context, the cards each seat may hold in any descendant
+/// (the ancestor's hands, the turned card with the seat that must rob it; one set per seat,
+/// disjoint) and the ancestor's scoring state ([`InHand`]: scores, flags, tricks per team,
+/// whether the 5 of trumps is in a completed trick, tricks done). [`SolveFamily::admits`] a root
+/// `R` when: the trump suit and the context are the family's; no rob is pending; every seat's
+/// cards are within its set; the cards in hands and in the current trick number
+/// `8 × (5 − tricks done)` (the hand's invariant); each team's tricks are at least the
+/// ancestor's and the tricks done are the ancestor's plus the tricks won since; and `R`'s scores
+/// and flags are exactly what those tricks give from the ancestor's: 5 a trick to its winner,
+/// plus, if the 5 of trumps has been played since (in a completed trick), its bonus (6, or 5
+/// when that team's flag was already set at the ancestor) to the team of the best trump and that
+/// team's flag (if it was played before the ancestor, it is played at `R` too).
+///
+/// **Why the shared table stays exact.** A table key (`tt` module) holds the cards still in
+/// hands, the leader, the tricks per team, whether the 5 is played, the best trump and its team
+/// and the flags; within one solve the rest of the position follows from the key and the root.
+/// Take positions `Q1` (in the solve of an admitted root `R1`) and `Q2` (of an admitted `R2`)
+/// with equal keys. (1) Hands: a card only ever leaves a hand, so each hand of `Q_i` is within
+/// the same seat's set; the sets are disjoint, so the key's card set splits into the eight hands
+/// one way only, and both positions have those hands. (2) Tricks done: playing keeps the
+/// invariant, so both have `5 − cards / 8`. (3) Scores and flags: from `R_i` on, a trick adds 5
+/// to its winner, and the trick with the 5 of trumps (always won by the team that played it,
+/// the best trump from then on) adds its bonus by that team's flag, which is still the
+/// ancestor's (flags change only through that bonus before the hand ends). Since `R_i`'s scores
+/// and flags are the ancestor's plus exactly the same rule's, `Q_i`'s are the ancestor's plus
+/// the rule applied to the key's tricks, 5-played flag and best-trump team: equal for `Q1` and
+/// `Q2`. (4) Trump suit, match context, an empty trick, no pending rob: the same. So `Q1` and
+/// `Q2` are the same position, the table holds only exact values (never a value cut short by
+/// pruning, and no frontier: a solve with one never shares), and a position's exact value
+/// depends only on the position, the context, the leaf evaluator and the tie order (the tie
+/// order is checked; the evaluator is the caller's promise). The leaf memo's entries depend only
+/// on the context and the evaluator. So a probe returns the value a solve from empty tables
+/// would compute, and every answer is unchanged (tested against solves from empty tables).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SolveFamily {
+    trump: Suit,
+    ctx: MatchCtx,
+    hands: [Bits; SEATS],
+    base: InHand,
+}
+
+impl SolveFamily {
+    /// The family of the positions that descend from `anc` (a position of a fully known hand; a
+    /// pending rob's turned card counts as the robber's) in the match `ctx`. `None` if `anc`'s
+    /// hands overlap.
+    pub fn of_position(anc: &Position, ctx: MatchCtx) -> Option<SolveFamily> {
+        let mut hands = anc.hands;
+        if let Some(r) = anc.rob {
+            hands[usize::from(r.seat)] |= bit(r.card);
+        }
+        SolveFamily::checked(anc.trump, ctx, hands, anc.hand)
+    }
+
+    /// The family of the positions that descend from the match's current position, whatever is
+    /// awaited (a play or a burn): its hands as dealt and robbed so far, and the turned card
+    /// still on the table with the seat holding the ace of trumps (the only seat that can take
+    /// it). `None` when the match is over, trumps are unknown, or the hands overlap.
+    pub fn of_match(m: &Match) -> Option<SolveFamily> {
+        if m.phase() == Phase::MatchOver {
+            return None;
+        }
+        let p = m.public();
+        let trump = p.trump?;
+        let mut hands = m.truth().hands;
+        if let Some(tc) = p.table_card
+            && let Some(s) = hands.iter().position(|&h| has(h, ace_of_trumps(trump)))
+        {
+            hands[s] |= bit(tc);
+        }
+        // As `crate::from_match`: the 5 counts as played once its trick is complete.
+        let mut hand = InHand::start_with_flags(p.scores, p.bonus_taken);
+        hand.tricks = p.tricks_won;
+        hand.five_played =
+            p.five_played && !p.trick_cards.iter().any(|&(_, c)| c == five_of(trump));
+        hand.tricks_done = p.trick_winners.len() as u8;
+        let ctx = MatchCtx {
+            games: p.games_won,
+            dealer_team: p.dealer % 4,
+        };
+        SolveFamily::checked(trump, ctx, hands, hand)
+    }
+
+    fn checked(
+        trump: Suit,
+        ctx: MatchCtx,
+        hands: [Bits; SEATS],
+        base: InHand,
+    ) -> Option<SolveFamily> {
+        let all = hands.iter().fold(0, |a, &h| a | h);
+        let n: u32 = hands.iter().map(|h| h.count_ones()).sum();
+        (all.count_ones() == n).then_some(SolveFamily {
+            trump,
+            ctx,
+            hands,
+            base,
+        })
+    }
+
+    /// Does the family admit `r` (in the match `ctx`) as a root that may share the table? (The
+    /// conditions are listed at [`SolveFamily`].)
+    pub fn admits(&self, r: &Position, ctx: MatchCtx) -> bool {
+        if r.trump != self.trump || ctx != self.ctx || r.rob.is_some() {
+            return false;
+        }
+        let mut cards = u32::from(r.n_played);
+        for (h, f) in r.hands.iter().zip(&self.hands) {
+            if h & !f != 0 {
+                return false;
+            }
+            cards += h.count_ones();
+        }
+        let (h, b) = (&r.hand, &self.base);
+        if h.tricks_done > engine::game::TRICKS_PER_HAND
+            || cards != 8 * u32::from(engine::game::TRICKS_PER_HAND - h.tricks_done)
+        {
+            return false;
+        }
+        let mut scores = [0u16; 4];
+        let mut since = 0u16;
+        for (t, s) in scores.iter_mut().enumerate() {
+            let Some(d) = h.tricks[t].checked_sub(b.tricks[t]) else {
+                return false;
+            };
+            since += u16::from(d);
+            *s = u16::from(b.scores[t]) + u16::from(TRICK_POINTS) * u16::from(d);
+        }
+        if h.tricks_done.checked_sub(b.tricks_done).map(u16::from) != Some(since) {
+            return false;
+        }
+        let mut flags = b.flags;
+        if b.five_played {
+            if !h.five_played {
+                return false;
+            }
+        } else if h.five_played {
+            let Some((_, w)) = r.best else {
+                return false;
+            };
+            let w = usize::from(w);
+            scores[w] += u16::from(if b.flags[w] { BONUS_LATER } else { BONUS_FIRST });
+            flags[w] = true;
+        }
+        flags == h.flags && scores == h.scores.map(u16::from)
     }
 }
 
@@ -274,19 +479,50 @@ impl Drop for Active<'_> {
 /// scores (bounded: 40 KB, allocated on the first hand-end leaf; a slot holding other scores is
 /// overwritten), and the whole key is compared on every read, so a hit is exactly the
 /// evaluator's value for those scores.
+///
+/// A memo is kept between solves (in [`SolveMem`]) and emptied in O(1) by moving to a new
+/// stamp: every entry carries the stamp it was stored under (in the hand-end key's upper
+/// half), and only entries of the current stamp are read, so after [`LeafCache::reset`] it
+/// answers exactly as a new memo (the hand-end memo is not allocated again for every solve).
 struct LeafCache {
-    game: [Option<MoneyChance>; 4],
+    /// The game-won values by winning team, with the stamp each was stored under.
+    game: [(u32, MoneyChance); 4],
     hand: Option<Box<[(u64, MoneyChance)]>>,
+    /// The current stamp (≥ 1; 0 marks an empty entry).
+    stamp: u32,
 }
 
 /// Hand-end memo entries (a power of two).
 const LEAF_SLOTS: usize = 1024;
 
+impl Default for LeafCache {
+    fn default() -> Self {
+        LeafCache::new()
+    }
+}
+
 impl LeafCache {
     fn new() -> LeafCache {
         LeafCache {
-            game: [None; 4],
+            game: [(0, MoneyChance::certain(0)); 4],
             hand: None,
+            stamp: 1,
+        }
+    }
+
+    /// Empty the memo (O(1), except when the stamp wraps around, every 2^32 − 1 resets, when
+    /// every entry is marked empty).
+    fn reset(&mut self) {
+        if self.stamp == u32::MAX {
+            *self = LeafCache {
+                hand: self.hand.take().map(|mut h| {
+                    h.fill((0, MoneyChance::certain(0)));
+                    h
+                }),
+                ..LeafCache::new()
+            };
+        } else {
+            self.stamp += 1;
         }
     }
 }
@@ -298,7 +534,7 @@ struct Search<'a, L: Leaf> {
     /// The hybrid frontier, if any (`crate::frontier`).
     cut: Option<FrontierCut<'a>>,
     classes: &'static Classes,
-    leaves: LeafCache,
+    leaves: &'a mut LeafCache,
     tt: Tt<'a>,
     stats: Stats,
     start: Instant,
@@ -341,7 +577,10 @@ fn order_key(c: Card, p: &Position, winner: Option<(Card, u8, EffSuit)>, team: u
 impl<L: Leaf> Search<'_, L> {
     fn game_won(&mut self, team: u8) -> MoneyChance {
         self.stats.leaves += 1;
-        if let Some(v) = self.leaves.game[usize::from(team)] {
+        let stamp = self.leaves.stamp;
+        if let (s, v) = self.leaves.game[usize::from(team)]
+            && s == stamp
+        {
             return v;
         }
         let mut games = self.ctx.games;
@@ -355,15 +594,16 @@ impl<L: Leaf> Search<'_, L> {
                 dealer_team: (self.ctx.dealer_team + 1) % 4,
             })
         };
-        self.leaves.game[usize::from(team)] = Some(v);
+        self.leaves.game[usize::from(team)] = (stamp, v);
         v
     }
 
     fn hand_over(&mut self, scores: [u8; 4]) -> MoneyChance {
         self.stats.leaves += 1;
-        // The key: the four scores, with a bit above them so that no key is zero (an empty
-        // slot); the slot from a fixed mixing of the key.
-        let key = u64::from(u32::from_le_bytes(scores)) | 1 << 32;
+        // The key: the four scores, with the memo's stamp (at least 1) above them so that no
+        // key is zero (an empty slot) and entries of earlier stamps never match; the slot from
+        // a fixed mixing of the scores.
+        let key = u64::from(u32::from_le_bytes(scores)) | u64::from(self.leaves.stamp) << 32;
         let slot = ((key as u32).wrapping_mul(0x9E37_79B1) >> 22) as usize % LEAF_SLOTS;
         let memo = self.leaves.hand.get_or_insert_with(|| {
             vec![(0, MoneyChance::certain(0)); LEAF_SLOTS].into_boxed_slice()
@@ -718,18 +958,17 @@ pub fn solve_fast_cut<L: Leaf>(
     progress: Option<&ParProgress>,
 ) -> Solution {
     let _active = Active::enter(progress);
+    let (table, leaves) = mem.begin(pos, ctx, opts, cut.is_some());
+    // Overwrites counted from here: a table shared with earlier solves of a family has some.
+    let replaced0 = table.as_ref().map_or(0, |t| t.replaced);
     let mut s = Search {
         ctx,
         leaf,
         opts,
         cut,
         classes: Classes::shared(pos.trump),
-        leaves: LeafCache::new(),
-        tt: if opts.tt {
-            Tt::Own(mem.own(opts.tt_mb))
-        } else {
-            Tt::Off
-        },
+        leaves,
+        tt: table.map_or(Tt::Off, Tt::Own),
         stats: Stats::default(),
         start: Instant::now(),
         aborted: false,
@@ -761,7 +1000,7 @@ pub fn solve_fast_cut<L: Leaf>(
     }
     if let Tt::Own(t) = &s.tt {
         s.stats.tt_entries = t.entries;
-        s.stats.tt_replaced = t.replaced;
+        s.stats.tt_replaced = t.replaced - replaced0;
         s.stats.tt_bytes = t.bytes() as u64;
     }
     finish(values, team_of(pos.to_act()), opts.order, s.stats)
@@ -1005,13 +1244,14 @@ fn par_solve<L: Leaf + Sync>(
     let splitter = Active::enter(Some(pr));
     let start = Instant::now();
     let shared = mem.shared(if opts.tt { opts.tt_mb } else { 1 }, threads);
+    let mut exp_leaves = LeafCache::new();
     let mut exp = Search {
         ctx,
         leaf,
         opts,
         cut,
         classes: Classes::shared(pos.trump),
-        leaves: LeafCache::new(),
+        leaves: &mut exp_leaves,
         tt: Tt::Off,
         stats: Stats::default(),
         start,
@@ -1078,13 +1318,14 @@ fn par_solve<L: Leaf + Sync>(
                 let (tasks, next, results) = (&tasks, &next, &results);
                 sc.spawn(move || {
                     let _active = Active::enter(Some(pr));
+                    let mut leaves = LeafCache::new();
                     let mut s = Search {
                         ctx,
                         leaf,
                         opts,
                         cut,
                         classes: Classes::shared(pos.trump),
-                        leaves: LeafCache::new(),
+                        leaves: &mut leaves,
                         tt: if opts.tt { Tt::Shared(shared) } else { Tt::Off },
                         stats: Stats::default(),
                         start,

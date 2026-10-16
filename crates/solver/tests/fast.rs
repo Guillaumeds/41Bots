@@ -177,6 +177,154 @@ fn reused_solve_memory_gives_identical_solutions_and_counters() {
     );
 }
 
+/// Roots that descend from `anc` by random play: positions at the start of trick `k` (and some
+/// mid-trick), each with its context; lines that leave the hand are skipped.
+fn descendants(anc: &Match, k: u8, n: usize, seed: u64) -> Vec<(Position, solver::MatchCtx)> {
+    let mut rng = Rng::derive(seed, &[0x5A4E]);
+    let mut out = Vec::new();
+    for line in 0..n * 4 {
+        if out.len() == n {
+            break;
+        }
+        let mut m = anc.clone();
+        let h = m.hand_index();
+        let extra = if line % 3 == 2 { rng.bounded(4) } else { 0 };
+        let mut ok = false;
+        loop {
+            if m.phase() == Phase::MatchOver || m.hand_index() != h {
+                break;
+            }
+            let p = m.public();
+            if p.trick_no == k && p.trick_cards.len() as u64 == extra {
+                ok = matches!(m.phase(), Phase::AwaitPlay(_));
+                break;
+            }
+            let acts = m.legal_actions();
+            m.apply(acts[rng.bounded(acts.len() as u64) as usize])
+                .expect("legal");
+        }
+        if !ok {
+            continue;
+        }
+        if let Ok((pos, ctx, None)) = from_match(&m) {
+            out.push((pos, ctx));
+        }
+    }
+    out
+}
+
+/// The shared table of a family (`SolveMem::share`): the positions that descend from one
+/// ancestor, solved one after another on one table (never emptied between them), get exactly the
+/// values of solves from empty tables (value, chosen card and every root card's value), with
+/// ancestors in trick 1 (robs pending or made), 2 and 3, mid-trick and at boundaries, roots one
+/// and two tricks on, a one-bucket table (replacement on every full bucket) and a large one, both
+/// tie orders and switch combinations; roots of other worlds solved on the same memory in
+/// between (not admitted: solved from empty tables) change nothing either.
+#[test]
+fn a_family_shares_one_table_without_changing_a_value() {
+    let l = leaf();
+    let (mut admitted, mut hits) = (0u32, 0u64);
+    let mut mem = SolveMem::new();
+    for seed in 0..6u64 {
+        for (k0, extra) in [(1, 0), (1, 3), (2, 0), (2, 5), (3, 2)] {
+            let anc = position_mid(seed, k0, extra);
+            let Some(fam) = solver::SolveFamily::of_match(&anc) else {
+                panic!("seed {seed}: an ancestor in play has a family");
+            };
+            // Roots at trick 3 at the earliest (a trick-2 root is seconds a solve).
+            let k1 = (k0 + 1).max(3);
+            let other = position_mid(seed + 100, k1 + 1, 0);
+            let (op, octx, _) = from_match(&other).expect("position");
+            for (k, n, tt_mb, order, bits) in [
+                (k1, 4, 64, TieOrder::Ascending, 15),
+                (k1 + 1, 10, 0, TieOrder::Descending, 11),
+                (k1 + 1, 10, 1, TieOrder::Ascending, 15),
+            ] {
+                let opts = FastOptions {
+                    order,
+                    tt_mb,
+                    ..FastOptions::default()
+                }
+                .combo(bits);
+                mem.share(fam);
+                for (i, (pos, ctx)) in descendants(&anc, k, n, seed * 7 + u64::from(k))
+                    .iter()
+                    .enumerate()
+                {
+                    let what = format!("seed {seed} anc {k0}+{extra} root trick {k} #{i}");
+                    assert!(fam.admits(pos, *ctx), "{what}: a descendant is admitted");
+                    admitted += 1;
+                    let fresh = solve_fast(pos, *ctx, &l, opts);
+                    let shared = solve_fast_with(pos, *ctx, &l, opts, &mut mem);
+                    same(&fresh, &shared, &what);
+                    hits += shared.stats.tt_hits;
+                    if i == 2 {
+                        // Another world's root in between: not admitted, solved as new.
+                        let o = solve_fast_with(&op, octx, &l, opts, &mut mem);
+                        same(
+                            &solve_fast(&op, octx, &l, opts),
+                            &o,
+                            &format!("{what} other"),
+                        );
+                        if op.trump == pos.trump && fam.admits(&op, octx) {
+                            panic!("{what}: another world's root is admitted");
+                        }
+                    }
+                }
+                mem.unshare();
+            }
+        }
+    }
+    assert!(
+        admitted > 500 && hits > 0,
+        "{admitted} admitted, {hits} hits"
+    );
+}
+
+/// [`solver::SolveFamily::admits`] refuses roots that are not the ancestor's descendants: another
+/// world's, other scores or flags, another context, a pending rob, cards moved between seats.
+#[test]
+fn a_family_admits_only_its_descendants() {
+    for seed in 0..20u64 {
+        let anc = position_mid(seed, 2, (seed % 4) as u8);
+        let fam = solver::SolveFamily::of_match(&anc).expect("a family");
+        let roots = descendants(&anc, 4, 3, seed);
+        for (pos, ctx) in &roots {
+            assert!(fam.admits(pos, *ctx));
+            let mut p = *pos;
+            p.hand.scores[0] += 5;
+            assert!(!fam.admits(&p, *ctx), "seed {seed}: scores");
+            let mut p = *pos;
+            p.hand.flags[1] = !p.hand.flags[1];
+            assert!(!fam.admits(&p, *ctx), "seed {seed}: flags");
+            let mut c = *ctx;
+            c.dealer_team = (c.dealer_team + 1) % 4;
+            assert!(!fam.admits(pos, c), "seed {seed}: context");
+            let mut p = *pos;
+            p.rob = Some(solver::Rob { seat: 0, card: 0 });
+            assert!(!fam.admits(&p, *ctx), "seed {seed}: pending rob");
+            // A card given to another seat.
+            let (a, b) = (
+                (0..8).find(|&s| p.hands[s] != 0).expect("cards"),
+                (0..8).rev().find(|&s| p.hands[s] != 0).expect("cards"),
+            );
+            if a != b {
+                let mut p = *pos;
+                let c = p.hands[a] & p.hands[a].wrapping_neg();
+                p.hands[a] &= !c;
+                p.hands[b] |= c;
+                assert!(!fam.admits(&p, *ctx), "seed {seed}: a card moved");
+            }
+            let mut p = *pos;
+            p.hand.tricks[2] += 1;
+            assert!(!fam.admits(&p, *ctx), "seed {seed}: tricks");
+        }
+        let other = position_mid(seed + 1000, 4, 0);
+        let (op, octx, _) = from_match(&other).expect("position");
+        assert!(!fam.admits(&op, octx), "seed {seed}: another world");
+    }
+}
+
 // ---------- (a) engine parity on random play-outs ----------
 
 fn same_position(a: &Position, b: &Position) -> bool {

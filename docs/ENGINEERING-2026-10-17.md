@@ -44,6 +44,114 @@ Gates (each before merge):
   noise.
 - D: PLAN M4-M6 as written, with the hybrid H_k as the teacher; promotion by SPRT.
 
+## Item A, done (branch `eng-labels`)
+
+**Outcome.** Every label shard of the gate is byte-identical to the binary before (SHA-256, 1 and 4
+threads). Exact labels cost 8-17% less at tricks 2-3 for the `random` and `rules` sources; a
+harvest's labels cost 24-79% less at tricks 3-4 (trick 3: 24% with the network driver, 58% for the
+race harvest, 4.6 times less with the exact driver); at trick 2 the harvests gain little (within the
+noise of a shared VM). Only the sidecar's `solver_nodes` of a harvest changes (see lever 1).
+
+### The profile (before; this VM, one thread, release build for x86-64-v3)
+
+`perf` is not installed here, so the profile is the solver's own counters with a timer per solve
+(`crates/search/examples/label_profile.rs`, the label solves exactly as `search labels` makes them)
+and callgrind [an instruction-level simulator] for where the instructions and cache misses go.
+
+| trick, source | ms a solve | nodes a solve | ns a node | table probes a solve | table hit rate | leaf-memo hit rate |
+|---|---|---|---|---|---|---|
+| 4 random | 0.028 | 131 | 218 | 58 | 0% | 96% |
+| 4 rules | 0.029 | 137 | 208 | 59 | 0% | 97% |
+| 4 harvest (every reached position, exact driver) | 0.020 | 112 | 180 | 49 | 0% | 95% |
+| 3 random | 8.9 | 81,100 | 110 | 36,900 | 86.7% | 99.9% |
+| 3 rules | 8.3 | 72,300 | 115 | 32,800 | 86.7% | 99.9% |
+| 3 harvest (sampled positions, network driver) | 6.1 | 54,600 | 111 | 24,400 | 84.0% | 99.9% |
+| 2 random | 3,920 | 36.2 M | 108 | 14.9 M | 96.6% | 100% |
+| 2 rules | 4,720 | 43.3 M | 109 | 19.5 M | 97.6% | 100% |
+
+Where a trick-3 solve's instructions went (callgrind, 40 `random` solves): node bookkeeping 32%,
+playing a card and scoring a trick 16%, the trick's winner 15%, the groups of equivalent cards 14%,
+the table 7% (but 80% of the first-level data-cache misses: a probe is a random memory access),
+legal moves 4%, the leaf values under 1% (the per-solve leaf memo already answers 96-100%).
+Shallow pruning stops 106 nodes of a trick-3 solve's 81,000, so move ordering (history or any
+other) has almost nothing to prune faster: not taken. At trick 4 the table never hits within one
+solve (a trick has no transpositions); at tricks 2-3 most probes are the last trick's boundaries.
+
+### The levers taken (each gives the same answers; the reasons are in the code)
+
+1. **One table for a decision's positions** (`solver::SolveFamily`, `SolveMem::share`;
+   `oracle_labels::harvest_decision`). The exact solves of one harvest decision (every reached
+   position with the exact driver, the sampled ones with a network; the race and targeted
+   harvests too) run on one table and leaf memo that is no longer emptied between them. The table
+   key leaves out the hands and scores because one root fixes them; across roots this holds when
+   all roots descend from one ancestor in one world: the family records the ancestor's hands
+   (disjoint, the turned card with the seat that must rob it), scoring state and match, and admits
+   a root only if its hands lie within those, its tricks follow the ancestor's and its scores and
+   flags are exactly the ancestor's plus 5 a trick won since and the 5 of trumps' bonus if played
+   since. Then equal keys mean equal positions (proof at `SolveFamily`), the table holds only exact
+   values, and no solve with a frontier ever shares. A root that is not admitted is solved from
+   empty tables as before. **The sidecar's `solver_nodes` of a harvest becomes the nodes of the
+   shared-table solves** (fewer: 8.5 M instead of 22.3 M for the gate's trick-3 harvest with the
+   exact driver, 44.7 M instead of 93.0 M for its trick-3 race harvest); the per-label count from
+   an empty table is not kept (it would cost the very solve the sharing saves).
+   Rows are labelled in their original order (reach order); reordering the solves for more
+   sharing was not needed.
+2. **The leaf memo kept between solves** (`SolveMem`): emptied by a stamp instead of a new 40 KB
+   allocation and fill per solve; it answers exactly as a new memo.
+3. **The card orders as tables** (`solver::ranks`): the trick's winner and a trump's rank read from
+   per-trump tables of the engine's own `trump_rank`, `plain_rank` and `effective_suit` (tested
+   equal to `engine::rules::trick_winner` on every lead and card for every trump, and on 200,000
+   random tricks); whether the 5 of trumps is in a trick is whether it won it. 15% fewer
+   instructions per trick-3 solve.
+4. **Groups of equivalent cards only when they matter** (`Classes::representatives`): when the
+   legal cards hold at most one trump and one card of each plain suit, every legal card is its own
+   representative, so the groups are not built (tested against the groups on random hands and
+   legal sets). 10% fewer instructions per trick-3 solve.
+
+Not taken: move ordering (above); prefetching the table (needs an `unsafe` intrinsic, and the table
+is 7% of the instructions); a larger starting table (about 3%, and it would change which positions
+the harvest's own search reaches, so it would have to apply to label solves only); huge pages
+(already switchable with `RUNNER_HUGEPAGES=1` in `deploy/docker/boot.sh`: no difference measurable
+here, 3.82 against 3.81 s and 4.04 against 3.87 s a trick-2 label, where the 128-256 MB table fits
+this VM's 260 MB third-level cache; worth an A/B on one rented run, where the cache is smaller).
+
+### The gate
+
+GATE_TABLE
+
+How it was run: `search labels` of the binary before (`b96a167`) and after, release builds for
+x86-64-v3, the same seeds, start states and equity table (`64740dab…`), each shard at `--threads 1`
+and `--threads 4` with both binaries: every SHA-256 above is the one hash of all four runs (the
+sidecars' `shard_sha256` agree). The harvests with a network use the trained trick-3 network
+`o3-small` (`/home/user/t3work/o3-small/int.safetensors`) and, at trick 2, a random network of
+`nn-tool random --trick 2 --widths 512,256,64 --seed 17`; the race harvests keep classes 2 and 4
+(at trick 2 with caps 8 and 4, to fit the 5-minute limit). Cost: one thread, seconds per 1,000
+labels (a harvest's searches and labelling in thread-seconds, from its log; the others the run's
+time a row). Trick 4's times are coarse (the run's clock steps by 0.2 s, 3,000 rows taking under
+a second); the solver profile gives the trick-4 harvest's label solves at 0.020 ms before and
+0.012 ms after. The VM was shared with other jobs (load 2 at trick 3-4, 9 to 25 during the trick-2
+runs), so the trick-2 times carry a few percent of noise; the instruction counts are exact: a
+trick-3 `random` solve takes 24% fewer instructions (callgrind, the same 40 solves: 2.21 G before,
+1.88 G with levers 2 and 3, 1.69 G with lever 4 too).
+
+At trick 2 the harvests gain little: a trick-1 decision reaches about two thousand trick-2
+positions and the 16 sampled ones (8 + 4 in the small race run) share few futures (nodes 4% and
+3% fewer), and the per-node levers gain less there than at trick 3 (the 128-256 MB table's memory
+accesses weigh more).
+
+Solver identity (`solver-identity`, release, the production equity table unless said):
+trick 4, 5,400 worlds, all 16 switch combinations, both tie orders: 0 mismatches; trick 3, 340
+worlds, the lean 9 combinations (and 40 with the tie-heavy leaf, the 8 table combinations): 0
+mismatches; the parallel solve on 4 threads against the sequential one, trick 3, 200 worlds: 0
+mismatches. `cargo test --workspace` passes, with the new tests: the family's shared table against
+solves from empty tables (`a_family_shares_one_table_without_changing_a_value`), what a family
+admits (`a_family_admits_only_its_descendants`), the rank tables against the engine
+(`ranks::tests`), and the representatives' shortcut against the groups
+(`representatives_match_the_groups`).
+
+Not done here: the cost on one rented run (no rentals in this session); the next trick-3 run
+measures it.
+
 ## 3. Readiness
 
 The trick-4 audit-loop test runs first (from about 02:00 Mauritius). A and B are merged and released
