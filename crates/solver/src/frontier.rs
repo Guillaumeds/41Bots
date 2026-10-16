@@ -223,6 +223,36 @@ pub trait Frontier: Sync {
         let _ = pos;
         self.value(canon, ctx)
     }
+
+    /// Several frontier positions valued at once, into `out` in order: each exactly
+    /// [`Frontier::value`]. The default asks [`Frontier::value`] for each; an evaluator that
+    /// values a batch faster (the oracle network, `nn::Oracle`) overrides it.
+    fn value_batch(&self, pos: &[CanonPos], ctx: &MatchCtx, out: &mut [MoneyChance]) {
+        for (p, o) in pos.iter().zip(out) {
+            *o = self.value(p, ctx);
+        }
+    }
+
+    /// How many plays before the frontier the solvers gather the positions ahead for
+    /// [`Frontier::prefetch`] (0, the default: never).
+    fn prefetch_depth(&self) -> u8 {
+        0
+    }
+
+    /// The frontier positions a search is about to reach, in the order it will reach them,
+    /// handed over before it reaches them (by the optimised solvers, when
+    /// [`Frontier::prefetch_depth`] is not 0): every frontier position reachable within the
+    /// current trick from a node `prefetch_depth` plays before the frontier. The search may
+    /// reach fewer (it can stop early, or find a position in its table). An evaluator may value
+    /// them now, as one batch, and keep the values for the requests to come. It must change
+    /// nothing else: **the solver still asks for every position it reaches through
+    /// [`Frontier::value_at`], at the same point of the search and in the same order as without
+    /// this call**, so a recording evaluator records in `value_at` exactly what it recorded
+    /// before, and the values the search sees and the order it sees them in are unchanged. The
+    /// default does nothing.
+    fn prefetch(&self, pos: &[CanonPos], ctx: &MatchCtx) {
+        let _ = (pos, ctx);
+    }
 }
 
 /// A closure as a frontier evaluator (tests and synthetic evaluators).
@@ -270,5 +300,16 @@ impl<'a> FrontierCut<'a> {
     /// The evaluator's value of a frontier position.
     pub fn value(&self, p: &Position, ctx: &MatchCtx) -> MoneyChance {
         self.eval.value_at(p, &canonical(p), ctx)
+    }
+
+    /// The evaluator's [`Frontier::prefetch_depth`].
+    #[inline]
+    pub fn prefetch_depth(&self) -> u8 {
+        self.eval.prefetch_depth()
+    }
+
+    /// Hand the evaluator the frontier positions ahead ([`Frontier::prefetch`]).
+    pub fn prefetch(&self, pos: &[CanonPos], ctx: &MatchCtx) {
+        self.eval.prefetch(pos, ctx);
     }
 }

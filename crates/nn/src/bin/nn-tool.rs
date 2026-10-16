@@ -9,6 +9,9 @@
 //! nn-tool random  --trick K --widths 512,256,64 --out FILE.safetensors [--seed 17] [--head outcome-v1|money4]
 //! nn-tool bench   --equity TABLE --trick K [--worlds 4] [--max 20000] [--seed 5]
 //!                 [--widths 512,256,64 --widths 1024,512,128 …] [--net WEIGHTS …] [--reps 3]
+//! nn-tool bench-batch --equity TABLE --trick K [--worlds 40] [--max 1000] [--reps 2]
+//!                 [--widths 1024,512,128 …] [--net WEIGHTS …] [--batches 1,4,8,16]
+//!                 [--orders auto,each,128] [--levels v3,v4]
 //! nn-tool limits                      (prints `max_width=N`: the audited width limit, `nn::MAX_WIDTH`)
 //! nn-tool row-weights --shard FILE.npy [--weight W --rows ROWS.npy]
 //! ```
@@ -35,6 +38,12 @@
 //!   `--max`), with the production equity table, for random outcome-head networks of the given
 //!   hidden widths (`nn::synthetic::random_net`) and any trained weights files. Prints
 //!   microseconds per evaluation (best of `--reps` passes).
+//! - `bench-batch`: the batched forward pass (`FastMlp::forward_batch`) against one position at a
+//!   time on the same reached positions (`bench`'s), in batches of consecutive positions (the
+//!   solver's order, so neighbours are siblings): microseconds per position by batch size, batch
+//!   order (`auto`: the kernel's own choice; `each`, `blocked`, or streamed chunks of N KiB) and
+//!   level, after checking every logit equals
+//!   one-at-a-time evaluation; and the one-at-a-time pass split by layer.
 //! - `row-weights`: a shard's per-row loss weights (`nn::rowweights`, the sidecar
 //!   `FILE.npy.rowweights` the trainer reads). With `--weight W --rows ROWS.npy` it writes the
 //!   sidecar (replacing any): the rows listed in `ROWS.npy` (a 1-D `<u8` array of row indices, as
@@ -92,6 +101,7 @@ fn main() -> ExitCode {
         Some("groups") => groups(&a),
         Some("golden") => golden(&a),
         Some("bench") => bench(&a),
+        Some("bench-batch") => bench_batch(&a),
         Some("random") => random(&a),
         Some("limits") => {
             println!("max_width={}", nn::MAX_WIDTH);
@@ -545,6 +555,166 @@ fn bench(a: &Args) -> Result<(), String> {
             );
         }
         nn::kernel::set_cap(None);
+    }
+    Ok(())
+}
+
+fn bench_batch(a: &Args) -> Result<(), String> {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use nn::encode::{DenseKey, binary_features, dense_features};
+    use nn::fast::{FastMlp, Scratch};
+    use nn::kernel::{BatchOrder, Level, detected, set_batch_order};
+    use nn::synthetic::{random_net, reached_frontier};
+
+    let trick = a.num("--trick", 4)? as u8;
+    if !(2..=5).contains(&trick) {
+        return Err("--trick is 2..=5".into());
+    }
+    let epath = a.req("--equity")?;
+    let table =
+        equity::EquityTable::from_npy(&std::fs::read(epath).map_err(|e| format!("{epath}: {e}"))?)
+            .map_err(|e| format!("{epath}: {e}"))?;
+    let leaf: Arc<equity::EquityTable> = Arc::new(table);
+    let reps = a.num("--reps", 2)?;
+    let pos = reached_frontier(
+        a.num("--seed", 5)?,
+        trick,
+        a.num("--worlds", 40)?,
+        a.num("--max", 1000)? as usize,
+        &*leaf,
+    );
+    let n = pos.len();
+    let parse_list = |k: &str, d: &str| -> Vec<String> {
+        a.get(k)
+            .unwrap_or(d)
+            .split(',')
+            .map(str::to_string)
+            .collect()
+    };
+    let batches: Vec<usize> = parse_list("--batches", "1,4,8,16")
+        .iter()
+        .map(|x| x.parse().map_err(|_| format!("--batches {x}")))
+        .collect::<Result<_, _>>()?;
+    let orders: Vec<Option<BatchOrder>> = parse_list("--orders", "auto,each,128")
+        .iter()
+        .map(|x| match x.as_str() {
+            "auto" => Ok(None),
+            "blocked" => Ok(Some(BatchOrder::Blocked)),
+            "each" => Ok(Some(BatchOrder::Each)),
+            k => k
+                .parse::<usize>()
+                .map(|k| Some(BatchOrder::Streamed(k << 10)))
+                .map_err(|_| format!("--orders {k}")),
+        })
+        .collect::<Result<_, _>>()?;
+    let levels: Vec<Level> = parse_list("--levels", "v3,v4")
+        .iter()
+        .map(|x| match x.as_str() {
+            "base" => Ok(Level::Base),
+            "v2" => Ok(Level::V2),
+            "v3" => Ok(Level::V3),
+            "v4" => Ok(Level::V4),
+            l => Err(format!("--levels {l}")),
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|&l| l <= detected())
+        .collect();
+    let mut nets: Vec<(String, nn::IntMlp)> = Vec::new();
+    for w in a.all("--widths") {
+        let ws: Vec<usize> = w
+            .split(',')
+            .map(|x| x.parse().map_err(|_| format!("--widths {w}")))
+            .collect::<Result<_, _>>()?;
+        nets.push((
+            format!("random {w}"),
+            random_net(17, &ws, vocab(trick), 100),
+        ));
+    }
+    for p in a.all("--net") {
+        let f = nn::safetensors::read(&std::fs::read(p).map_err(|e| format!("{p}: {e}"))?)?;
+        nets.push((p.to_string(), parse_net(&f)?));
+    }
+    println!(
+        "trick {trick}: {n} reached frontier positions; levels up to {}",
+        detected().name()
+    );
+    for (name, net) in nets {
+        let fast = FastMlp::new(net);
+        let mut s = Scratch::new();
+        let mut bases: BTreeMap<DenseKey, Vec<i64>> = BTreeMap::new();
+        let mut items: Vec<(Vec<u16>, DenseKey)> = Vec::with_capacity(n);
+        for (c, x) in &pos {
+            let k = DenseKey::of(c, x);
+            bases.entry(k).or_insert_with(|| {
+                let mut b = vec![0; fast.base_len()];
+                fast.base(&dense_features(&k, &*leaf), &mut s, &mut b);
+                b
+            });
+            items.push((binary_features(c, x).active().to_vec(), k));
+        }
+        let refs: Vec<(&[u16], &[i64])> = items
+            .iter()
+            .map(|(act, k)| (act.as_slice(), bases[k].as_slice()))
+            .collect();
+        let want: Vec<_> = refs
+            .iter()
+            .map(|(act, b)| fast.forward_base(act, b, &mut s))
+            .collect();
+        println!(
+            "{name} {:?}; first-layer sums in i32: {}",
+            fast.net().widths(),
+            fast.bin_i32()
+        );
+        for &l in &levels {
+            // One at a time, split by layer.
+            let mut s = Scratch::with_level(l);
+            let mut best = vec![u64::MAX; fast.net().layers().len()];
+            for _ in 0..reps.max(1) {
+                let mut ns = vec![0u64; best.len()];
+                for (i, (act, b)) in refs.iter().enumerate() {
+                    assert_eq!(fast.forward_timed(act, b, &mut s, &mut ns), want[i]);
+                }
+                for (b, x) in best.iter_mut().zip(ns) {
+                    *b = (*b).min(x);
+                }
+            }
+            let parts: Vec<String> = best
+                .iter()
+                .map(|&x| format!("{:.2}", x as f64 / 1e3 / n as f64))
+                .collect();
+            let (one, _) = time_us(reps, n, |_| {
+                refs.iter()
+                    .map(|(act, b)| fast.forward_base(act, b, &mut s)[0] as u64)
+                    .sum()
+            });
+            println!(
+                "  {}: one at a time {one:.2} µs per position; by layer (first, hidden 1, …): {} µs",
+                l.name(),
+                parts.join(" + ")
+            );
+            for &o in &orders {
+                set_batch_order(o);
+                let mut line = Vec::new();
+                for &bsz in &batches {
+                    let mut out = vec![[0i64; nn::outcome::MAX_OUT]; n];
+                    let (t, _) = time_us(reps, n, |_| {
+                        for (it, o) in refs.chunks(bsz).zip(out.chunks_mut(bsz)) {
+                            fast.forward_batch(it, &mut s, o);
+                        }
+                        out[0][0] as u64
+                    });
+                    if out != want {
+                        return Err(format!("{name}: batch {bsz} {o:?} differs"));
+                    }
+                    line.push(format!("B{bsz} {t:.2}"));
+                }
+                println!("    {o:?}: {} µs per position (all equal)", line.join(", "));
+            }
+            set_batch_order(None);
+        }
     }
     Ok(())
 }

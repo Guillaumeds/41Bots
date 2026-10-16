@@ -144,6 +144,15 @@ impl Frontier for GroupRecorder<'_> {
         self.note(canon, ctx);
         self.inner.value_at(pos, canon, ctx)
     }
+
+    fn prefetch_depth(&self) -> u8 {
+        self.inner.prefetch_depth()
+    }
+
+    /// Passed on; nothing is recorded (the search records what it reaches through `value_at`).
+    fn prefetch(&self, pos: &[CanonPos], ctx: &MatchCtx) {
+        self.inner.prefetch(pos, ctx);
+    }
 }
 
 /// The reach of a decision's searches on its worlds `0..worlds` (drawn as the yardstick draws

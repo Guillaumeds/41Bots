@@ -23,8 +23,15 @@
 //!   values a repeated *position* once, but different positions with the same canonical form
 //!   (10–40% of the frontier requests of the solves we measured at tricks 2–4) were each evaluated.
 //!
+//! - **Batches** ([`Oracle::eval_batch`]; docs/ENGINEERING-2026-10-17.md, item B): positions
+//!   the memo does not hold go through the network together ([`FastMlp::forward_batch`]), and are
+//!   remembered like any evaluation. As a solver frontier the oracle asks for batches
+//!   ([`Frontier::prefetch_depth`], [`default_prefetch`]): the solver hands over the positions
+//!   ahead before it reaches them, they are valued as one batch into the memo, and the solver's
+//!   own requests, made exactly as without batches, are answered from there.
+//!
 //! Each cache holds a pure function of its key and compares the whole key, so what it holds
-//! (which depends on thread scheduling and eviction) never changes a value.
+//! (which depends on thread scheduling, eviction and batches) never changes a value.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -39,13 +46,15 @@ use solver::frontier::{CanonPos, Frontier};
 use solver::{Leaf, MatchCtx};
 
 use crate::encode::{
-    DenseKey, ENCODER, N_FEATURES, binary_features, dense_features, encode, rotation, unrotate,
+    DenseKey, ENCODER, Features, N_FEATURES, binary_features, dense_features, encode, rotation,
+    unrotate,
 };
 use crate::fast::{FastMlp, Scratch};
+use crate::kernel::MAX_BATCH;
 use crate::mlp::{IntMlp, Layer};
 use crate::money::money_from_logits;
 use crate::outcome::{
-    Outcomes, mix_outcomes, money_from_outcomes, outcomes, outcomes_of, top_team, vocab,
+    MAX_OUT, Outcomes, mix_outcomes, money_from_outcomes, outcomes, outcomes_of, top_team, vocab,
 };
 use crate::safetensors;
 
@@ -89,6 +98,9 @@ pub struct Oracle {
     id: u64,
     /// Whether [`Oracle::eval`] remembers recent positions' values.
     memo: bool,
+    /// Plays before the frontier from which the solver gathers the positions ahead for one batch
+    /// ([`Frontier::prefetch_depth`]; 0: never).
+    prefetch: u8,
     /// The output head.
     pub head: Head,
     /// The frontier trick the network was trained for.
@@ -190,12 +202,14 @@ impl Oracle {
                 net.n_out()
             ));
         }
+        let prefetch = default_prefetch(&net);
         Ok(Oracle {
             fast: FastMlp::new(net.clone()),
             net,
             leaf,
             id: NEXT_ORACLE.fetch_add(1, Ordering::Relaxed),
             memo: true,
+            prefetch,
             head,
             trick,
             sha256: sha256_hex(bytes),
@@ -214,9 +228,58 @@ impl Oracle {
     }
 
     /// Turn the memo of recent positions on or off (on by default; benchmarks turn it off to
-    /// time the network itself). Values never depend on it.
+    /// time the network itself). Values never depend on it. With the memo off the solver's
+    /// batches are not asked for ([`Frontier::prefetch_depth`] is 0): their values would have
+    /// nowhere to wait.
     pub fn set_memo(&mut self, on: bool) {
         self.memo = on;
+    }
+
+    /// From how many plays before the frontier the solver gathers the positions ahead and has
+    /// them valued as one batch ([`Frontier::prefetch`]; 0: never, each position is valued when
+    /// the search reaches it). Values never depend on it.
+    pub fn set_prefetch(&mut self, plays: u8) {
+        self.prefetch = plays;
+    }
+
+    /// Several positions' money chances at once, into `out` in order: each exactly
+    /// [`Oracle::eval`] (so exactly [`Oracle::eval_reference`]). Positions the memo knows (or
+    /// that appear earlier in the batch) are not evaluated again; the others go through the
+    /// network together ([`FastMlp::forward_batch`]: the hidden layers as one matrix product, the
+    /// weights read once per batch) and are remembered in the memo like any evaluation.
+    ///
+    /// # Panics
+    /// As [`Oracle::eval`], for any position; or if `out` is shorter than `cs`.
+    pub fn eval_batch(&self, cs: &[CanonPos], ctx: &MatchCtx, out: &mut [MoneyChance]) {
+        assert!(out.len() >= cs.len(), "a value per position");
+        if self.head == Head::Outcome {
+            for c in cs {
+                assert_eq!(
+                    c.tricks_done + 1,
+                    self.trick,
+                    "a position of the net's trick"
+                );
+            }
+        }
+        self.with_state(|st| st.eval_batch(self, cs, ctx, out));
+    }
+
+    /// This thread's caches for this oracle.
+    fn with_state<R>(&self, f: impl FnOnce(&mut EvalState) -> R) -> R {
+        STATES.with(|cell| {
+            let mut states = cell.borrow_mut();
+            let i = match states.iter().position(|s| s.oracle == self.id) {
+                Some(i) => i,
+                None => {
+                    if states.len() >= MAX_STATES {
+                        states.remove(0);
+                    }
+                    states.push(EvalState::new(self.id));
+                    states.len() - 1
+                }
+            };
+            f(&mut states[i])
+        })
     }
 
     /// The network's money chance of a canonical position (real team order): exactly
@@ -236,20 +299,7 @@ impl Oracle {
                 "a position of the net's trick"
             );
         }
-        STATES.with(|cell| {
-            let mut states = cell.borrow_mut();
-            let i = match states.iter().position(|s| s.oracle == self.id) {
-                Some(i) => i,
-                None => {
-                    if states.len() >= MAX_STATES {
-                        states.remove(0);
-                    }
-                    states.push(EvalState::new(self.id));
-                    states.len() - 1
-                }
-            };
-            states[i].eval(self, c, ctx)
-        })
+        self.with_state(|st| st.eval(self, c, ctx))
     }
 
     /// This thread's cache counters for this oracle (reports only).
@@ -296,6 +346,30 @@ const MEMO_SLOTS: usize = 1 << 14;
 const DENSE_CAP: usize = 256;
 /// Outcome tables kept per thread and oracle (the cache is emptied when full).
 const OUTCOME_CAP: usize = 4096;
+/// The batch depth of a wide network ([`default_prefetch`]).
+pub const WIDE_PREFETCH: u8 = 3;
+/// Hidden-layer weights from which a network counts as wide ([`default_prefetch`]): a
+/// 2048 × 1024 layer.
+pub const WIDE_WEIGHTS: usize = 2048 * 1024;
+
+/// The default of [`Oracle::set_prefetch`], chosen by measurement (docs/ENGINEERING-2026-10-17.md,
+/// "Item B, done"): batches from [`WIDE_PREFETCH`] plays before the frontier for a network with a
+/// hidden layer of at least [`WIDE_WEIGHTS`] weights, where reading the weights once per batch
+/// saves time (2048-1024-256 and 2048-2048-1024-256); none for narrower ones, whose hidden
+/// layers stay in a core's cache (1024-512-128: batches measured no faster on the build VM).
+/// Values never depend on it.
+pub fn default_prefetch(net: &IntMlp) -> u8 {
+    let widest = net.layers()[1..]
+        .iter()
+        .map(|l| l.n_in * l.n_out)
+        .max()
+        .unwrap_or(0);
+    if widest >= WIDE_WEIGHTS {
+        WIDE_PREFETCH
+    } else {
+        0
+    }
+}
 
 thread_local! {
     static STATES: RefCell<Vec<EvalState>> = const { RefCell::new(Vec::new()) };
@@ -314,6 +388,12 @@ pub struct EvalStats {
     pub dense_misses: u64,
     /// Outcome tables computed.
     pub outcome_misses: u64,
+    /// Positions asked for in batches ([`Oracle::eval_batch`]; not in `requests`).
+    pub batched: u64,
+    /// Of those, answered by the memo or by an equal position earlier in the batch.
+    pub batch_hits: u64,
+    /// Batches with at least one network pass.
+    pub batches: u64,
 }
 
 /// FxHash's multiply-rotate step: a fast hash for the caches' lookups (never iterated, so the
@@ -393,59 +473,32 @@ impl EvalState {
         }
     }
 
-    fn eval(&mut self, o: &Oracle, c: &CanonPos, ctx: &MatchCtx) -> MoneyChance {
-        self.stats.requests += 1;
-        let slot = if o.memo {
-            if self.memo.is_empty() {
-                self.memo = vec![None; MEMO_SLOTS];
-            }
-            let mut h = FxHasher::default();
-            std::hash::Hash::hash(c, &mut h);
-            h.write(&ctx.games);
-            h.write_u8(ctx.dealer_team);
-            let slot = (h.finish() >> 32) as usize & (MEMO_SLOTS - 1);
-            if let Some(e) = &self.memo[slot]
-                && e.c == *c
-                && e.games == ctx.games
-                && e.dealer == ctx.dealer_team
-            {
-                self.stats.memo_hits += 1;
-                return e.v;
-            }
-            Some(slot)
-        } else {
-            None
-        };
-        let r = rotation(c);
-        let key = DenseKey::of(c, ctx);
-        let f = binary_features(c, ctx);
-        if self.dense.len() >= DENSE_CAP && !self.dense.contains_key(&key) {
-            self.dense.clear();
+    /// The memo slot of a position (`None` with the memo off), the memo allocated on first use.
+    fn slot(&mut self, o: &Oracle, c: &CanonPos, ctx: &MatchCtx) -> Option<usize> {
+        if !o.memo {
+            return None;
         }
-        let base = self.dense.entry(key).or_insert_with(|| {
-            self.stats.dense_misses += 1;
-            let d = dense_features(&key, &*o.leaf);
-            let mut base = vec![0i64; o.fast.base_len()];
-            o.fast.base(&d, &mut self.scratch, &mut base);
-            base.into_boxed_slice()
-        });
-        let z = o.fast.forward_base(f.active(), base, &mut self.scratch);
-        self.stats.forwards += 1;
-        let m = match o.head {
-            Head::Money4 => money_from_logits(&z),
-            Head::Outcome => {
-                let top = top_team(c);
-                if self.outs.len() >= OUTCOME_CAP && !self.outs.contains_key(&(key, top)) {
-                    self.outs.clear();
-                }
-                let t = self.outs.entry((key, top)).or_insert_with(|| {
-                    self.stats.outcome_misses += 1;
-                    outcomes_of(&key, top, &*o.leaf)
-                });
-                mix_outcomes(&z, t.n, t.mask, &t.vecs)
+        if self.memo.is_empty() {
+            self.memo = vec![None; MEMO_SLOTS];
+        }
+        let mut h = FxHasher::default();
+        std::hash::Hash::hash(c, &mut h);
+        h.write(&ctx.games);
+        h.write_u8(ctx.dealer_team);
+        Some((h.finish() >> 32) as usize & (MEMO_SLOTS - 1))
+    }
+
+    /// The memo's value of a position, if the slot holds it (the whole key compared).
+    fn recall(&self, slot: Option<usize>, c: &CanonPos, ctx: &MatchCtx) -> Option<MoneyChance> {
+        match &self.memo[slot?] {
+            Some(e) if e.c == *c && e.games == ctx.games && e.dealer == ctx.dealer_team => {
+                Some(e.v)
             }
-        };
-        let v = unrotate(m, r);
+            _ => None,
+        }
+    }
+
+    fn remember(&mut self, slot: Option<usize>, c: &CanonPos, ctx: &MatchCtx, v: MoneyChance) {
         if let Some(slot) = slot {
             self.memo[slot] = Some(MemoEntry {
                 c: *c,
@@ -454,12 +507,160 @@ impl EvalState {
                 v,
             });
         }
+    }
+
+    /// Make sure the first layer's dense part of `key` is cached (the cache is emptied first
+    /// when it is full).
+    fn ensure_dense(&mut self, o: &Oracle, key: &DenseKey) {
+        if self.dense.contains_key(key) {
+            return;
+        }
+        if self.dense.len() >= DENSE_CAP {
+            self.dense.clear();
+        }
+        self.stats.dense_misses += 1;
+        let d = dense_features(key, &*o.leaf);
+        let mut base = vec![0i64; o.fast.base_len()];
+        o.fast.base(&d, &mut self.scratch, &mut base);
+        self.dense.insert(*key, base.into_boxed_slice());
+    }
+
+    /// The money chance (real team order) of a position from its logits.
+    fn money(
+        &mut self,
+        o: &Oracle,
+        c: &CanonPos,
+        key: &DenseKey,
+        z: &[i64; MAX_OUT],
+    ) -> MoneyChance {
+        let m = match o.head {
+            Head::Money4 => money_from_logits(z),
+            Head::Outcome => {
+                let top = top_team(c);
+                if self.outs.len() >= OUTCOME_CAP && !self.outs.contains_key(&(*key, top)) {
+                    self.outs.clear();
+                }
+                let t = self.outs.entry((*key, top)).or_insert_with(|| {
+                    self.stats.outcome_misses += 1;
+                    outcomes_of(key, top, &*o.leaf)
+                });
+                mix_outcomes(z, t.n, t.mask, &t.vecs)
+            }
+        };
+        unrotate(m, rotation(c))
+    }
+
+    fn eval(&mut self, o: &Oracle, c: &CanonPos, ctx: &MatchCtx) -> MoneyChance {
+        self.stats.requests += 1;
+        let slot = self.slot(o, c, ctx);
+        if let Some(v) = self.recall(slot, c, ctx) {
+            self.stats.memo_hits += 1;
+            return v;
+        }
+        let key = DenseKey::of(c, ctx);
+        let f = binary_features(c, ctx);
+        self.ensure_dense(o, &key);
+        let z = o
+            .fast
+            .forward_base(f.active(), &self.dense[&key], &mut self.scratch);
+        self.stats.forwards += 1;
+        let v = self.money(o, c, &key, &z);
+        self.remember(slot, c, ctx, v);
         v
+    }
+
+    /// [`EvalState::eval`] of each position, the network's passes for the positions the memo
+    /// does not hold made as batches of up to [`MAX_BATCH`].
+    fn eval_batch(&mut self, o: &Oracle, cs: &[CanonPos], ctx: &MatchCtx, out: &mut [MoneyChance]) {
+        for (cs, out) in cs.chunks(MAX_BATCH).zip(out.chunks_mut(MAX_BATCH)) {
+            self.eval_chunk(o, cs, ctx, out);
+        }
+    }
+
+    fn eval_chunk(&mut self, o: &Oracle, cs: &[CanonPos], ctx: &MatchCtx, out: &mut [MoneyChance]) {
+        // Which positions need the network: not in the memo, and not equal to one earlier in
+        // the chunk (its value is copied from that one's afterwards).
+        let mut todo: [usize; MAX_BATCH] = [0; MAX_BATCH];
+        let mut same: [usize; MAX_BATCH] = [usize::MAX; MAX_BATCH];
+        let mut slots: [Option<usize>; MAX_BATCH] = [None; MAX_BATCH];
+        let mut n = 0;
+        self.stats.batched += cs.len() as u64;
+        for (i, c) in cs.iter().enumerate() {
+            slots[i] = self.slot(o, c, ctx);
+            if let Some(v) = self.recall(slots[i], c, ctx) {
+                self.stats.batch_hits += 1;
+                out[i] = v;
+            } else if let Some(&j) = todo[..n].iter().find(|&&j| cs[j] == *c) {
+                self.stats.batch_hits += 1;
+                same[i] = j;
+            } else {
+                todo[n] = i;
+                n += 1;
+            }
+        }
+        if n == 0 {
+            return;
+        }
+        self.stats.batches += 1;
+        self.stats.forwards += n as u64;
+        let keys: Vec<DenseKey> = todo[..n]
+            .iter()
+            .map(|&i| DenseKey::of(&cs[i], ctx))
+            .collect();
+        // Room for every key of the chunk at once (so none is dropped while the others go in).
+        let missing = keys.iter().filter(|k| !self.dense.contains_key(k)).count();
+        if missing > 0 && self.dense.len() + missing > DENSE_CAP {
+            self.dense.clear();
+        }
+        for k in &keys {
+            self.ensure_dense(o, k);
+        }
+        let feats: Vec<Features> = todo[..n]
+            .iter()
+            .map(|&i| binary_features(&cs[i], ctx))
+            .collect();
+        let mut z = vec![[0i64; MAX_OUT]; n];
+        {
+            let items: Vec<(&[u16], &[i64])> = feats
+                .iter()
+                .zip(&keys)
+                .map(|(f, k)| (f.active(), &*self.dense[k]))
+                .collect();
+            o.fast.forward_batch(&items, &mut self.scratch, &mut z);
+        }
+        for (t, &i) in todo[..n].iter().enumerate() {
+            let v = self.money(o, &cs[i], &keys[t], &z[t]);
+            self.remember(slots[i], &cs[i], ctx, v);
+            out[i] = v;
+        }
+        for i in 0..cs.len() {
+            if same[i] != usize::MAX {
+                out[i] = out[same[i]];
+            }
+        }
     }
 }
 
 impl Frontier for Oracle {
     fn value(&self, pos: &CanonPos, ctx: &MatchCtx) -> MoneyChance {
         self.eval(pos, ctx)
+    }
+
+    fn value_batch(&self, pos: &[CanonPos], ctx: &MatchCtx, out: &mut [MoneyChance]) {
+        self.eval_batch(pos, ctx, out);
+    }
+
+    fn prefetch_depth(&self) -> u8 {
+        if self.memo { self.prefetch } else { 0 }
+    }
+
+    /// Values the positions ahead as batches into this thread's memo, where the solver's own
+    /// requests for them ([`Frontier::value_at`], made as without this call) find them.
+    fn prefetch(&self, pos: &[CanonPos], ctx: &MatchCtx) {
+        if !self.memo || pos.is_empty() {
+            return;
+        }
+        let mut out = vec![MoneyChance::certain(0); pos.len()];
+        self.eval_batch(pos, ctx, &mut out);
     }
 }

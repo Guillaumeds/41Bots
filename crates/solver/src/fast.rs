@@ -69,7 +69,7 @@ use engine::team_of;
 use equity::{MatchState, MoneyChance, ONE};
 
 use crate::equiv::Classes;
-use crate::frontier::FrontierCut;
+use crate::frontier::{CanonPos, FrontierCut, canonical};
 use crate::tt::{SLOT_BYTES, SharedTable, Table, TtKey};
 use crate::{Leaf, MatchCtx, Position, Solution, Stats, Step, TieOrder, ordered};
 
@@ -282,6 +282,12 @@ struct LeafCache {
 /// Hand-end memo entries (a power of two).
 const LEAF_SLOTS: usize = 1024;
 
+/// The most frontier positions one batch gathers ([`Search::gather`]).
+const GATHER_CAP: usize = 256;
+
+/// Seats at the table.
+const SEATS: usize = engine::SEATS;
+
 impl LeafCache {
     fn new() -> LeafCache {
         LeafCache {
@@ -488,6 +494,71 @@ impl<L: Leaf> Search<'_, L> {
         }
     }
 
+    /// The hybrid's batch (docs/ENGINEERING-2026-10-17.md, item B): at the first node of a line
+    /// within `d` plays of the frontier (`d` = the evaluator's [`FrontierCut::prefetch_depth`]),
+    /// hand the evaluator every frontier position reachable from it ([`Search::gather`]) so it
+    /// can value them as one batch. `arrival` is the position the line reached the node with,
+    /// `end` the node's position after its forced plays (the root: both the root). The node is the
+    /// first within `d` when `end` is within `d` plays and `arrival` is at least `d` away (the
+    /// parent's own position, one play before `arrival`, was then more than `d` away): exactly
+    /// one node of each line gathers, and its gathering covers every frontier position below it.
+    ///
+    /// It changes nothing the search does: no counter, no table entry, no order of visiting;
+    /// every frontier position the search reaches is still asked for through the evaluator, at
+    /// the same point and in the same order as without the batch (the evaluator answers from
+    /// what it kept), with the same value, the evaluator being a pure function of the canonical
+    /// form.
+    fn prefetch_ahead(&self, arrival: &Position, end: &Position, root: bool) {
+        let Some(cut) = self.cut else { return };
+        let d = i32::from(cut.prefetch_depth().min(SEATS as u8 - 1));
+        if d == 0 || arrival.rob.is_some() {
+            return;
+        }
+        // Plays from a position to the frontier (0 at the frontier).
+        let left = |p: &Position| {
+            SEATS as i32 * (i32::from(cut.trick()) - 1 - i32::from(p.hand.tricks_done))
+                - i32::from(p.n_played)
+        };
+        let (a, e) = (left(arrival), left(end));
+        if e > d || a < 1 || (a < d && !root) {
+            return;
+        }
+        let mut out = Vec::new();
+        self.gather(arrival, cut, &mut out);
+        if !out.is_empty() {
+            cut.prefetch(&out, &self.ctx);
+        }
+    }
+
+    /// The canonical forms of the frontier positions the search reaches from `p` (inside the
+    /// trick before the frontier's) when nothing stops it early: depth first through the same
+    /// cards the search plays (each group of equivalent cards through its first card, as
+    /// [`Search::candidates_of`]; forced cards included), at most [`GATHER_CAP`]. Counts nothing.
+    fn gather(&self, p: &Position, cut: FrontierCut, out: &mut Vec<CanonPos>) {
+        let legal = p.legal();
+        let set = if self.opts.equiv && legal.count_ones() >= 2 {
+            let hand = p.hands[usize::from(p.to_act())];
+            self.classes
+                .representatives(hand, legal, p.live(), self.opts.order)
+        } else {
+            legal
+        };
+        for c in ordered(set, self.opts.order) {
+            if out.len() >= GATHER_CAP {
+                return;
+            }
+            if let Step::Next(q) = p.play(c) {
+                if q.n_played == 0 {
+                    if cut.applies(&q) {
+                        out.push(canonical(&q));
+                    }
+                } else if q.burn_choice().is_none() {
+                    self.gather(&q, cut, out);
+                }
+            }
+        }
+    }
+
     fn node(&mut self, p: &Position, cut: Option<Cut>) -> Res {
         self.stats.nodes += 1;
         self.stats.nodes_by_trick[usize::from(p.hand.tricks_done.min(4))] += 1;
@@ -521,6 +592,7 @@ impl<L: Leaf> Search<'_, L> {
         }
         let mut legal = p.legal();
         let chained;
+        let arrival = p;
         let p = if p.n_played > 0 && legal.count_ones() == 1 {
             match self.forced(p, legal) {
                 Ok((q, l)) => {
@@ -536,6 +608,7 @@ impl<L: Leaf> Search<'_, L> {
         if p.burn_choice().is_some() {
             return self.burn_node(p);
         }
+        self.prefetch_ahead(arrival, p, false);
         let key = (self.tt.on() && p.n_played == 0 && p.rob.is_none()).then(|| TtKey::of(p));
         if let Some(k) = &key {
             self.stats.tt_probes += 1;
@@ -741,6 +814,7 @@ pub fn solve_fast_cut<L: Leaf>(
         "the root mover's own burn is decided outside the solve"
     );
     let mut values: Vec<(Card, MoneyChance)> = Vec::new();
+    s.prefetch_ahead(pos, pos, true);
     for l in root_groups(pos, s.classes, opts) {
         let rep = ordered(l, opts.order).next().expect("non-empty");
         match s.child(pos, rep, None) {
