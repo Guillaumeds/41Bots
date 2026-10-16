@@ -53,6 +53,16 @@ H_k on the *same* worlds (paired, so sampling noise cancels). Then report:
 A rung that fails gets more labels, a larger network or harvested frontier positions (§5), then is
 measured again on a fresh validation split; the golden set itself is never trained on.
 
+**Amendment, owner 2026-10-16 (21:00 Mauritius): every situation, found by the machine.** The
+position bands above are one grouping among thousands and are no longer the standard. A rung is
+proven only when the audit loop of `docs/m3-hybrid/audit-loop.md` ends "flat": on a fresh audit
+shard of exactly-labelled positions, no group of weight ≥ 0.1% definable from the encoder's
+features (found by the auditor, confirmed on a held-out half with false-discovery control) has a
+bias or spread over the calibrated thresholds; the golden set passes item 1 overall and in every
+slice the audit names; rare groups get mini golden sets of their own (never trained on). The loop
+(train → audit → targeted harvest → retrain) runs autonomously in one rental and reports each
+round; its stop reason is part of the rung's record. The bands stay in the reports as one view.
+
 Trick-1 checks for O_3 and O_2 (owner's order): first one known hard world (decision 0, world 3 of
 the trick-1 set count 32 seed 1: 79.3×10⁹ nodes, 13,057 s on one thread of an EPYC 7542, exact
 value saved), comparing time and every candidate's value; then all saved exact trick-1 worlds:
