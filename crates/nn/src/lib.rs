@@ -6,7 +6,10 @@
 //!   context into a list of active feature indices and a few dense values. Python never
 //!   re-implements it: it reads encoded features from the label shards.
 //! - [`mlp`]: integer-only MLP inference (fixed-point weights and activations, integer
-//!   accumulators, ReLU clipped at 64), four output logits.
+//!   accumulators, ReLU clipped at 64), four output logits: the plain reference.
+//! - [`fast`]: the same forward pass, bit for bit, with less work (sparse and incremental first
+//!   layer, vectorised kernels); [`kernel`]: its inner loops, compiled for x86-64-v2/v3/v4 with
+//!   runtime dispatch.
 //! - [`money`]: the fixed integer rule from four logits to a [`equity::MoneyChance`] summing to
 //!   exactly 2^32 (an integer exponential, then largest-remainder normalisation).
 //! - [`safetensors`]: a tiny reader and writer of safetensors files (the weights format).
@@ -20,6 +23,8 @@
 //! every machine, thread count and WASM; floats exist only in training (Python).
 
 pub mod encode;
+pub mod fast;
+pub mod kernel;
 pub mod mlp;
 pub mod money;
 pub mod oracle;

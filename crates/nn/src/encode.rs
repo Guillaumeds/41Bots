@@ -212,6 +212,60 @@ fn successor(
     })
 }
 
+/// Everything the dense features depend on, in the encoder's rotated team order (see
+/// [`DenseKey::of`]): equal keys give equal dense features ([`dense_features`] reads nothing
+/// else), so a caller may compute them once per key. The outcome head's money vectors depend on
+/// the same fields (`crate::outcome::outcomes_of`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DenseKey {
+    /// Each team's score.
+    pub scores: [u8; 4],
+    /// Each team's bonus flag.
+    pub flags: [bool; 4],
+    /// Each team's tricks this hand.
+    pub tricks: [u8; 4],
+    /// Each team's games won.
+    pub games: [u8; 4],
+    /// The dealer's team.
+    pub dealer: u8,
+    /// Whether the 5 of trumps has been played.
+    pub five_played: bool,
+    /// Tricks done this hand.
+    pub tricks_done: u8,
+    /// The team holding the live 5 of trumps, if it is live.
+    pub five: Option<u8>,
+    /// The end-of-hand bonus team of the canonical form.
+    pub end: Option<u8>,
+}
+
+impl DenseKey {
+    /// The key of a canonical position with its match context (teams rotated as [`encode`]
+    /// rotates them).
+    pub fn of(c: &CanonPos, ctx: &MatchCtx) -> DenseKey {
+        let r = rotation(c);
+        let rt = |t: u8| usize::from((t + r) % 4);
+        let mut k = DenseKey {
+            scores: [0; 4],
+            flags: [false; 4],
+            tricks: [0; 4],
+            games: [0; 4],
+            dealer: rt(ctx.dealer_team) as u8,
+            five_played: c.five_played,
+            tricks_done: c.tricks_done,
+            // The live 5's holder is slot 0's; its team in the rotated order.
+            five: c.slot(0).map(|(s, _)| (s + r) % 4),
+            end: c.end_bonus.map(|t| rt(t) as u8),
+        };
+        for t in 0..4u8 {
+            k.scores[rt(t)] = c.scores[usize::from(t)];
+            k.flags[rt(t)] = c.flags[usize::from(t)];
+            k.tricks[rt(t)] = c.tricks[usize::from(t)];
+            k.games[rt(t)] = ctx.games[usize::from(t)];
+        }
+        k
+    }
+}
+
 /// Encode a canonical position with its match context; `leaf` gives the dense equity features.
 /// Returns the features and the rotation `r` applied: the network's output for team `t` is the
 /// chance of the real team `(t + 4 − r mod 4) mod 4`, so `money.rotate((4 − r % 4) % 4)` turns
@@ -221,6 +275,17 @@ fn successor(
 /// If the position is not a trick-boundary position of a hand in progress (a score that cannot
 /// stand between tricks, five tricks done, a card's place beyond [`PLACES`]).
 pub fn encode(c: &CanonPos, ctx: &MatchCtx, leaf: &dyn Leaf) -> (Features, u8) {
+    let mut f = binary_features(c, ctx);
+    f.dense = dense_features(&DenseKey::of(c, ctx), leaf);
+    debug_assert!(f.dense.iter().all(|&d| (-(1 << 24)..=0).contains(&d)));
+    (f, rotation(c))
+}
+
+/// The binary features of [`encode`] (dense values left at 0).
+///
+/// # Panics
+/// As [`encode`].
+pub fn binary_features(c: &CanonPos, ctx: &MatchCtx) -> Features {
     let r = rotation(c);
     let rt = |t: u8| usize::from((t + r) % 4);
     let mut f = Features {
@@ -277,18 +342,25 @@ pub fn encode(c: &CanonPos, ctx: &MatchCtx, leaf: &dyn Leaf) -> (Features, u8) {
     }
     let dealer = rt(ctx.dealer_team) as u8;
     f.push(OFF_DEALER + usize::from(dealer));
-    let next = (dealer + 1) % 4;
-    let put = |f: &mut Features, at: usize, v: MoneyChance| {
+    f
+}
+
+/// The dense features of [`encode`]: a function of the [`DenseKey`] alone.
+pub fn dense_features(k: &DenseKey, leaf: &dyn Leaf) -> [i32; N_DENSE] {
+    let mut dense = [0i32; N_DENSE];
+    let games = k.games;
+    let next = (k.dealer + 1) % 4;
+    let put = |dense: &mut [i32; N_DENSE], at: usize, v: MoneyChance| {
         for (u, &x) in v.0.iter().enumerate() {
-            f.dense[at + u] = log2_feature(x);
+            dense[at + u] = log2_feature(x);
         }
     };
     let now = leaf.value(&MatchState {
-        scores,
+        scores: k.scores,
         games,
         dealer_team: next,
     });
-    put(&mut f, DENSE_NOW, now);
+    put(&mut dense, DENSE_NOW, now);
     for t in 0..4u8 {
         let mut g = games;
         g[usize::from(t)] += 1;
@@ -301,37 +373,33 @@ pub fn encode(c: &CanonPos, ctx: &MatchCtx, leaf: &dyn Leaf) -> (Features, u8) {
                 dealer_team: next,
             })
         };
-        put(&mut f, DENSE_GAME + 4 * usize::from(t), v);
+        put(&mut dense, DENSE_GAME + 4 * usize::from(t), v);
     }
     let h = InHand {
-        scores,
-        flags,
-        tricks,
-        five_played: c.five_played,
-        tricks_done: c.tricks_done,
+        scores: k.scores,
+        flags: k.flags,
+        tricks: k.tricks,
+        five_played: k.five_played,
+        tricks_done: k.tricks_done,
     };
-    // The live 5's holder is slot 0's; its team in the rotated order.
-    let five = c.slot(0).map(|(s, _)| (s + r) % 4);
-    let end = c.end_bonus.map(|t| rt(t) as u8);
-    let two = c.tricks_done + 2 <= engine::game::TRICKS_PER_HAND;
+    let two = k.tricks_done + 2 <= engine::game::TRICKS_PER_HAND;
     for a in 0..4u8 {
-        let v1 = successor(h, &[a], five, end, games, next, leaf);
-        put(&mut f, DENSE_NEXT1 + 4 * usize::from(a), v1);
+        let v1 = successor(h, &[a], k.five, k.end, games, next, leaf);
+        put(&mut dense, DENSE_NEXT1 + 4 * usize::from(a), v1);
         for b in 0..4u8 {
             let v2 = if two {
-                successor(h, &[a, b], five, end, games, next, leaf)
+                successor(h, &[a, b], k.five, k.end, games, next, leaf)
             } else {
                 v1
             };
             put(
-                &mut f,
+                &mut dense,
                 DENSE_NEXT2 + 16 * usize::from(a) + 4 * usize::from(b),
                 v2,
             );
         }
     }
-    debug_assert!(f.dense.iter().all(|&d| (-(1 << 24)..=0).contains(&d)));
-    (f, r)
+    dense
 }
 
 /// Turn the network's rotated money chance back to real team order (`r` from [`encode`]).

@@ -250,6 +250,10 @@ Total about 3–16 core-hours, nearly all of it training.
   plain 64-bit arithmetic; the plan's path (32-bit SIMD kernel with runtime dispatch, smaller first
   layer, incremental first layer) should give 10x or more. The outcome table (up to 39 equity
   lookups at trick 2) should be cached per score state.
+  **Done (branch `m3-hybrid-nnspeed`, `docs/m3-hybrid/nn-speed.md`):** byte-identical answers,
+  one evaluation 9–12 times faster for 512-256-64 (6.4–6.8 µs for the trained O_4), about 7 times
+  for 1024-512-128 with random weights; H_4 0.94 ms a world instead of 10.1 ms. More for
+  1024-wide networks needs a new integer format (a decision for the owner, see that note).
 - **Accuracy.** O_4 overfits 900k labels; labels are cheap (1M in about a minute here), so the next
   round should use several million, a larger network, and harvested frontier positions from H_4's
   own searches (`SOURCE_HARVEST` is reserved in the shard format).

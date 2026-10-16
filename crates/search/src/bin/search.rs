@@ -1476,7 +1476,7 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
     let evals: u64 = run.decisions.iter().map(|d| d.frontier).sum();
     let ns_eval = run.net.0 as f64 / run.net.1.max(1) as f64;
     println!(
-        "time: exact {:.3} ms a world ({:.0} nodes; {ne} worlds solved exactly here), hybrid {:.3} ms a world ({:.0} nodes, {:.0} network evaluations); {:.0} ns per network evaluation (encode + integer forward + softmax); {wall:.1} s wall on {} threads",
+        "time: exact {:.3} ms a world ({:.0} nodes; {ne} worlds solved exactly here), hybrid {:.3} ms a world ({:.0} nodes, {:.0} frontier evaluations); {:.0} ns per frontier evaluation (encode + integer forward + softmax, or the oracle's memo of recent positions); {wall:.1} s wall on {} threads",
         exact_us as f64 / 1000.0 / ne,
         exact_nodes as f64 / ne,
         hybrid_us as f64 / 1000.0 / nw,

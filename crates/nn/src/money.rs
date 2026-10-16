@@ -42,7 +42,30 @@ pub fn roots() -> &'static [u64; 25] {
 }
 
 /// `2^62 · e^(−d / 2^24)` by the integer rule above (`d ≥ 0` in units of 2^-24).
+///
+/// The running weight is held in a `u64` (it starts at `2^62` and each step multiplies it by a
+/// root below `2^62` and divides by `2^62`, so it never grows), and each step is one 64 × 64 →
+/// 128-bit multiply; the set bits of `f` are visited from the highest down, as in the rule. The
+/// same integers as [`exp_weight_reference`] (tested).
 pub fn exp_weight(d: u64) -> u64 {
+    let y = u128::from(d) * u128::from(LOG2E_Q32);
+    let n = y >> 56;
+    if n >= 63 {
+        return 0;
+    }
+    let mut f = ((y >> 32) & 0xFF_FFFF) as u32;
+    let r = roots();
+    let mut w: u64 = 1 << 62;
+    while f != 0 {
+        let m = 31 - f.leading_zeros();
+        f &= !(1 << m);
+        w = ((u128::from(w) * u128::from(r[24 - m as usize])) >> 62) as u64;
+    }
+    w >> n
+}
+
+/// [`exp_weight`] written as the rule reads (the plain reference for tests).
+pub fn exp_weight_reference(d: u64) -> u64 {
     let y = u128::from(d) * u128::from(LOG2E_Q32);
     let n = y >> 56;
     if n >= 63 {
@@ -107,6 +130,24 @@ mod tests {
             );
         }
         assert_eq!(exp_weight(u64::from(u32::MAX) << 24), 0);
+    }
+
+    #[test]
+    fn exp_weight_equals_the_reference() {
+        let mut sm = engine::rng::SplitMix64::new(3);
+        for k in 0..200_000u64 {
+            // Every scale: small differences, around the cut-off at n = 63, and huge ones.
+            let d = match k % 4 {
+                0 => sm.next_u64() % (1 << 24),
+                1 => sm.next_u64() % (64 << 24),
+                2 => sm.next_u64() >> (sm.next_u64() % 64),
+                _ => k,
+            };
+            assert_eq!(exp_weight(d), exp_weight_reference(d), "d {d}");
+        }
+        for d in [0, 1, u64::MAX, (43 << 24) + 7, 1 << 40] {
+            assert_eq!(exp_weight(d), exp_weight_reference(d), "d {d}");
+        }
     }
 
     #[test]
