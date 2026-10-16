@@ -5,10 +5,14 @@ only numpy is installed (the CI's parity job). On a machine with a usable GPU th
 trains on it and compares with the CPU.
 
 - the GPU check's architecture rule (``arch_supported``) and its CPU answer without a GPU;
-- the training columns built a block at a time from memory-mapped shards equal those of the
-  concatenated record array (the trainer's former way), for any block size;
-- training on the CPU is bit-for-bit repeatable, ``--device auto`` without a usable GPU gives the
-  same network as ``--device cpu``, and the progress file and the report record the device.
+- the compact training columns built a block at a time from memory-mapped shards, expanded,
+  equal the full-width columns of the concatenated record array (the trainer's former way), for
+  any block size, and an active index that is neither a feature nor the padding is refused;
+- the feed gives exactly the former batches (the same indices and tensors, in order, for a seed,
+  over two epochs), both resident and staged;
+- training on the CPU is bit-for-bit repeatable, ``--device auto`` without a usable GPU and
+  ``--feed staged`` with a batch profile give the same network as ``--device cpu``, and the
+  progress file and the report record the device, the feed and the profile.
 """
 
 import contextlib
@@ -91,15 +95,46 @@ class TrainTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.dir.cleanup()
 
-    def test_columns_by_blocks_equal_the_concatenation(self):
-        whole = train.tensors(np.concatenate([np.asarray(load_shard(p)) for p in self.train]))
+    def whole(self):
+        """The former training columns: ``columns`` of the concatenated shards, as tensors."""
+        return train.tensors(np.concatenate([np.asarray(load_shard(p)) for p in self.train]))
+
+    def test_compact_columns_by_blocks_expand_to_the_concatenation(self):
+        whole = self.whole()
         for block in (7, 300, 1 << 18):
-            got = train.load_columns([load_shard(p) for p in self.train], block=block)
+            comp = train.load_compact([load_shard(p) for p in self.train], block=block)
+            self.assertLess(sum(c.nbytes for c in comp), 0.6 * sum(x.numel() * x.element_size() for x in whole))
+            got = train.expand(*(torch.from_numpy(c) for c in comp))
             for x, y in zip(whole, got):
                 self.assertEqual((x.dtype, x.shape), (y.dtype, y.shape))
                 self.assertTrue(torch.equal(x, y), block)
         idx = whole[0]
         self.assertEqual(int(idx.max()), N_BINARY, "padding becomes the zero row")
+        bad = np.asarray(load_shard(self.train[0]))[:5].copy()
+        bad["active"][3, 0] = N_BINARY
+        with self.assertRaises(ValueError):
+            train.compact(bad)
+
+    def test_feed_gives_the_former_batches(self):
+        whole = self.whole()
+        n = len(whole[0])
+        cpu = torch.device("cpu")
+        for batch in (64, 100):
+            for mode in ("auto", "resident", "staged"):
+                feed = train.Feed(train.load_compact([load_shard(p) for p in self.train]), cpu, batch, mode)
+                self.assertEqual(feed.facts["mode"], "staged" if mode == "staged" else "resident")
+                rng = np.random.default_rng(5)
+                for _ in range(2):
+                    perm = torch.from_numpy(rng.permutation(n))
+                    order = feed.order(perm)
+                    for i in range(0, n, batch):
+                        b_old = perm[i : i + batch]  # the former loop's indices and batch
+                        old = [c[b_old] for c in whole]
+                        b = order[i : i + batch]
+                        self.assertTrue(torch.equal(b, b_old))
+                        for x, y in zip(old, feed(b)):
+                            self.assertEqual((x.dtype, x.shape), (y.dtype, y.shape))
+                            self.assertTrue(torch.equal(x, y), (batch, mode, i))
 
     def run_train(self, name, *extra):
         out = os.path.join(self.dir.name, name)
@@ -118,6 +153,17 @@ class TrainTest(unittest.TestCase):
         b, _, _ = self.run_train("cpu2", "--device", "cpu")
         self.assertEqual(a, b)
         self.assertEqual(rep["device"]["device"], "cpu")
+        self.assertEqual(rep["device"]["feed"]["mode"], "resident")
+        self.assertEqual(len(rep["seconds"]["epochs"]), 2)
+        self.assertNotIn("profile", rep["seconds"], "no batch profile on the CPU by default")
+        s, rep_s, _ = self.run_train("staged", "--device", "cpu", "--feed", "staged", "--profile-batches", "3")
+        self.assertEqual(s, a, "the staged feed, and profiling batches, train exactly the same network")
+        self.assertEqual(rep_s["device"]["feed"]["mode"], "staged")
+        p = rep_s["seconds"]["profile"]
+        self.assertNotIn("error", p)
+        self.assertEqual((p["batches"], p["first_batch"]), (3, 8))
+        self.assertGreater(p["host_ms_per_batch"], 0)
+        self.assertTrue(any("embedding_bag" in r["op"] for r in p["top_host_ms_per_batch"]))
         self.assertEqual(rep["int"]["sha256"], a)
         self.assertEqual((prog["step"], prog["device"], prog["int_sha256"]), ("done", "cpu", a))
         self.assertEqual(len(rep["history"]), 2)

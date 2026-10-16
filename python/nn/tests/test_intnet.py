@@ -85,6 +85,37 @@ class Golden(unittest.TestCase):
         self.assertEqual(intnet.R[1], 3260954456333195553)
 
 
+class ExactProduct(unittest.TestCase):
+    """``exact_matmul`` (float64 BLAS on pieces of the weights) is numpy's int64 product."""
+
+    def test_pieces_give_the_int64_product(self):
+        rng = np.random.default_rng(11)
+        lo32, hi32 = -(1 << 31), (1 << 31) - 1
+        # (rows, inputs, outputs, input range): layer 0 (binary 2^24, dense -2^24..0), hidden
+        # layers (0..2^26), a wide layer, inputs too large for pieces (the int64 product, wrapping),
+        # inputs that wrap int64 in the pieces, empty shapes.
+        for n, k, m, lo, hi in ((64, N_FEATURES, 96, -(1 << 24), 1 << 24), (64, 1024, 64, 0, 1 << 26),
+                                (16, 4096, 8, 0, 1 << 26), (16, 64, 8, -(1 << 62), 1 << 62),
+                                (16, N_FEATURES, 8, -(1 << 34), 1 << 34), (0, 5, 3, 0, 1), (3, 4, 0, 0, 9)):
+            h = rng.integers(lo, hi, size=(n, k), endpoint=True, dtype=np.int64)
+            w = rng.integers(lo32, hi32, size=(k, m), endpoint=True, dtype=np.int64).astype(np.int32)
+            if n and m:
+                h[0, :] = hi  # the largest sums
+                w[:, 0] = lo32
+                w[:, -1] = hi32
+            got = intnet.exact_matmul(h, w)
+            self.assertEqual(got.dtype, np.int64)
+            np.testing.assert_array_equal(got, h @ w.astype(np.int64), err_msg=str((n, k, m)))
+
+    def test_logits_equal_the_int64_logits(self):
+        d = json.loads(GOLDEN.read_text())
+        active, dense = intnet.golden_features(d["seed"] + 1, d["count"])
+        x = intnet.inputs(active, dense)
+        for layers in (intnet.golden_net(d["seed"]), intnet.golden_net(d["seed"], 14),
+                       quantize(random_float_net(4, (256, 64, 32), 14))):
+            np.testing.assert_array_equal(intnet.logits(layers, x), intnet.logits_int64(layers, x))
+
+
 class Quantise(unittest.TestCase):
     def test_integer_network_follows_the_float_one(self):
         fl = random_float_net(3)

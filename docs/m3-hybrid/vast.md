@@ -158,8 +158,12 @@ first.
 - `crates/runner/src/hybrid.rs`: the `hybrid_rung` chunk kind (settings, steps, records; any
   unknown setting is refused, also when the runner reads the manifest).
 - `python/nn/fortyone_nn/device.py`: the GPU check; `train.py`: `--device cpu|cuda|auto` (default
-  `cpu`), `--progress FILE`, memory-mapped shards read a block at a time, pinned staging buffers
-  on the GPU.
+  `cpu`), `--progress FILE`, memory-mapped shards read a block at a time into compact columns
+  (847 bytes a row at trick 4), held in the GPU's memory when they fit with 1 GiB to spare
+  (`--feed auto|resident|staged`; else pinned staging buffers), the same batches as before; a
+  profile of 16 batches on a GPU and the seconds of loading, each epoch and the integer check in
+  `report.json` (`seconds`); the integer check through exact float64 products
+  (`intnet.exact_matmul`, the same integers, ~25-50x faster than numpy's int64 product).
 - `python/nn/pyproject.toml`, `uv.lock`: PyTorch in two dependency groups, `cpu` (the default:
   `uv sync`, this VM, the laptop, GitHub) and `cu126` (`uv sync --locked --no-default-groups
   --group cu126`), both pinned with hashes.

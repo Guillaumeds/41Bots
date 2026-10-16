@@ -77,8 +77,52 @@ def inputs(active, dense):
     return x
 
 
+F64_EXACT_BITS = 53  # every integer of magnitude up to 2^53 is exactly a float64
+
+
+def exact_matmul(h, w):
+    """``h @ w`` for integer ``h`` [n, k] and ``w`` [k, m]: exactly numpy's int64 product (the
+    same int64 values, wrap-around included), computed through float64 BLAS, about a hundred
+    times faster than numpy's integer product (which has no BLAS).
+
+    ``w`` is cut into pieces of ``bits`` bits (the low pieces unsigned, the top one signed), with
+    ``bits`` small enough that k * max|h| * 2^bits <= 2^53. Then every partial sum of ``h`` times
+    a piece, in whatever order BLAS adds, is an integer of magnitude below 2^53, which float64
+    holds exactly; the pieces' products are put back together in int64, each times 2^offset.
+    When ``h`` is too large for pieces of at least 8 bits, numpy's int64 product is used."""
+    h = np.asarray(h, dtype=np.int64)
+    w = np.asarray(w, dtype=np.int64)
+    hmax = max(-int(h.min()), int(h.max())) if h.size else 0
+    bits = F64_EXACT_BITS - (h.shape[1] * hmax).bit_length()
+    if bits < 8:
+        return h @ w
+    hf = h.astype(np.float64)
+    out = np.zeros((h.shape[0], w.shape[1]), dtype=np.int64)
+    rest, offset = w, 0
+    while True:
+        top = not rest.size or max(-int(rest.min()), int(rest.max())) < (1 << bits)
+        piece = rest if top else rest & ((1 << bits) - 1)
+        out += (hf @ piece.astype(np.float64)).astype(np.int64) * np.int64(1 << offset)
+        if top:
+            return out
+        rest = rest >> bits
+        offset += bits
+
+
 def logits(layers, x):
-    """Logits (int64, units of 2^-24) for an integer input matrix."""
+    """Logits (int64, units of 2^-24) for an integer input matrix (products by
+    ``exact_matmul``: the same integers as ``logits_int64``)."""
+    h = x
+    last = len(layers) - 1
+    for k, (w, b, shift) in enumerate(layers):
+        acc = exact_matmul(h, w) + b
+        y = round_shift(acc, shift)
+        h = y if k == last else np.clip(y, 0, CLIP)
+    return h
+
+
+def logits_int64(layers, x):
+    """``logits`` with numpy's plain int64 product: the reference ``logits`` is tested against."""
     h = x
     last = len(layers) - 1
     for k, (w, b, shift) in enumerate(layers):
