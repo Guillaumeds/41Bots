@@ -123,7 +123,7 @@ Questions for the app's author are in §6; answers go into this file.
 
 ## 6. Open questions for the app
 
-- Card naming: the engine's card index table is in `crates/engine/src/card.rs`; confirm the app's
+- Card naming: the engine's card index table is in `crates/engine/src/cards.rs`; confirm the app's
   `card` type (string or number) so the adapter maps it once.
 - `trickWinner`: per seat or per pair? (The engine can give either.)
 - `expectedPoints` at tricks 1–2: the network's expectation beyond the cut, or "unknown" (null)?
