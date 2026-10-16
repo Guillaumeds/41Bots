@@ -73,8 +73,8 @@ class FakeR2:
 
 def offer(i, cpu, threads, dph, ram=256.0):
     return {"id": i, "machine_id": 1000 + i, "cpu_name": cpu, "threads": threads, "ram_gb": ram, "dph_total": dph,
-            "gpu_frac": 1, "verification": "verified", "reliability2": 0.99, "geolocation": "X, FR", "inet_down_cost": 0,
-            "inet_up_cost": 0}
+            "gpu_frac": 1, "num_gpus": 1, "verification": "verified", "reliability2": 0.99, "geolocation": "X, FR",
+            "inet_down_cost": 0, "inet_up_cost": 0, "inet_down": 900.0}
 
 
 class RecordsTest(unittest.TestCase):
@@ -140,7 +140,8 @@ class RecordsTest(unittest.TestCase):
     def test_rank_uses_measured_speed_where_known(self):
         model = mc.M.Model(None, None)  # no speed files: estimates fall back to the default factor
         offers = [offer(1, TR, 192, 1.27), offer(2, EPYC, 256, 3.74), offer(3, "Some New Chip 9999", 128, 0.50),
-                  offer(4, TR, 32, 0.10), dict(offer(5, TR, 192, 0.50), verification="unverified")]
+                  offer(4, TR, 32, 0.10), dict(offer(5, TR, 192, 0.50), inet_down=100.0),
+                  dict(offer(6, TR, 192, 1.50), verification="unverified")]
         ranked = mc.rank_offers(offers, self.recs, model, min_threads=64)
         self.assertEqual(ranked[0]["id"], 1)                           # measured, cheapest first
         self.assertTrue(ranked[0]["measured"] and ranked[0]["source"].startswith("measured (3 run(s), plan)"))
@@ -153,9 +154,12 @@ class RecordsTest(unittest.TestCase):
         self.assertFalse(new["measured"])
         self.assertIn("estimate", new["source"])
         self.assertNotIn(4, [a["id"] for a in ranked])   # too few threads
-        self.assertNotIn(5, [a["id"] for a in ranked])   # the launcher cannot rent it
+        self.assertNotIn(5, [a["id"] for a in ranked])   # the launcher cannot rent it: its download link is 100 Mbps
+        six = next(a for a in ranked if a["id"] == 6)    # an unverified host is allowed (owner, 2026-10-16), and flagged
+        self.assertEqual(six["launcher_flag"], "unverified")
         rows = {r[0]: r for r in mc.rank_rows(ranked)}
         self.assertTrue(rows[1][5].startswith("0.") and rows[3][5].startswith("~"))
+        self.assertTrue(rows[6][7].endswith("; unverified host") and "unverified" not in rows[1][7])
 
     def test_record_speeds_writes_measured_tt_factors(self):
         speed = os.path.join(self.dir.name, "speed.json")

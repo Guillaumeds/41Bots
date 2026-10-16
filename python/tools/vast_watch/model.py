@@ -35,15 +35,21 @@ if TOOLS not in sys.path:
     sys.path.insert(0, TOOLS)
 import vast_market as vm  # noqa: E402  (speed factors and the model/quirk lookup)
 
+LAUNCHER = os.path.join(os.path.dirname(TOOLS), "launcher")
+if LAUNCHER not in sys.path:
+    sys.path.insert(0, LAUNCHER)
+import offer_rules as R  # noqa: E402  (the launcher's own thresholds and checks: one place, so labels cannot drift)
+
 CATEGORIES = ("cheapest", "fast_cheap", "balanced")
 LABELS = {"cheapest": "Cheapest (speed does not matter)",
           "fast_cheap": "Cheapest among the fast",
           "balanced": "Best balanced (cost x time)"}
 DEFAULT_MEASURED = os.path.join(REPO, "docs", "vast", "measured-speeds.json")
 DEFAULT_SPEED = os.path.join(REPO, "docs", "vast", "speed-factors.json")
-NET_CAP = 0.10
-# Host reliability floor, matching launch.py MIN_RELIABILITY (owner, 2026-10-16: 90%).
-MIN_RELIABILITY = 0.90
+# The launcher's thresholds, imported (never copied) from python/launcher/offer_rules.py.
+NET_CAP = R.MAX_NET_COST
+MIN_RELIABILITY = R.MIN_RELIABILITY
+MIN_INET_DOWN = R.MIN_INET_DOWN
 
 
 # ------------------------------------------------------------------ table-size penalty
@@ -85,7 +91,11 @@ def load_json(path: str | None):
 
 
 class Model:
-    def __init__(self, measured_path: str | None = DEFAULT_MEASURED, speed_path: str | None = DEFAULT_SPEED):
+    def __init__(self, measured_path: str | None = DEFAULT_MEASURED, speed_path: str | None = DEFAULT_SPEED,
+                 rules: dict | None = None):
+        # `rules`: this run's launcher settings for the "can the launcher rent it" label, as keyword arguments of
+        # offer_rules.search_failures (min_inet_down, floor, verified_only, gpus, cpu_only, ...); none = the defaults.
+        self.rules = dict(rules or {})
         m = load_json(measured_path) or {}
         self.usable_ratio = float(m.get("usable_thread_ratio", 0.958))
         self.k = float(m.get("default_k_nodes_per_s_per_speed_unit", 4.5e6))
@@ -135,17 +145,32 @@ class Model:
                 "model_name": e["name"] if e else None}
 
 
-def launcher_ok(o: dict) -> bool:
-    """Can python/launcher/launch.py rent it: whole machine, verified, reliable, cheap network."""
-    return ((o.get("gpu_frac") or 0) >= 1 and o.get("verification") == "verified"
-            and (o.get("reliability2") or 0) > MIN_RELIABILITY and (o.get("inet_down_cost") or 0) <= NET_CAP
-            and (o.get("inet_up_cost") or 0) <= NET_CAP)
+def launcher_failures(o: dict, **rules) -> list[str]:
+    """Why python/launcher/launch.py's search would not find this offer (empty = it can rent it). The rules are
+    the launcher's own, from offer_rules.py: reliability at least 0.90, the whole machine, a download link of at
+    least 500 Mbps (or `min_inet_down`), network cost at most $0.10/GB, at least one GPU (a GPU job: exactly
+    `gpus`, with the compute-capability and CUDA limits). Verified hosts are preferred, not required:
+    an unverified or deverified host passes and is flagged (`launcher_flag`)."""
+    return R.search_failures(o, **rules)
+
+
+def launcher_ok(o: dict, **rules) -> bool:
+    """Can python/launcher/launch.py rent it (see launcher_failures)."""
+    return not launcher_failures(o, **rules)
+
+
+def launcher_flag(o: dict) -> str:
+    """"" for a verified host, else "unverified" or "deverified" (or "unknown"): shown beside a "yes"."""
+    return R.host_flag(o)
 
 
 def annotate(model: Model, o: dict) -> dict:
     d = dict(o)
     d.update(model.estimate(o))
-    d["launcher_ok"] = launcher_ok(o)
+    why = launcher_failures(o, **model.rules)
+    d["launcher_ok"] = not why
+    d["launcher_flag"] = launcher_flag(o) if not why else ""
+    d["launcher_why"] = "; ".join(why)
     d["score"] = (d["cost"] / (d["nps"] / 1e9)) if d.get("cost") and d["nps"] > 0 else None  # cost x time index
     return d
 

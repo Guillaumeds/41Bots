@@ -46,8 +46,10 @@ QUERY = {
     "cpu_cores_effective": {"gte": MIN_THREADS_SEARCH},
     "order": [["dph_total", "asc"]], "limit": 3000, "allocated_storage": 20,
 }
+# inet_down (Mb/s) and the GPU fields are what the launcher's own search rules look at (offer_rules.py).
 KEEP = ["id", "machine_id", "cpu_name", "cpu_cores_effective", "dph_total", "reliability2", "verification",
-        "gpu_frac", "num_gpus", "gpu_name", "geolocation", "inet_down_cost", "inet_up_cost", "cpu_ghz"]
+        "gpu_frac", "num_gpus", "gpu_name", "geolocation", "inet_down_cost", "inet_up_cost", "cpu_ghz",
+        "inet_down", "gpu_ram", "compute_cap", "cuda_max_good"]
 
 
 def trim(o: dict) -> dict:
@@ -73,7 +75,8 @@ class Watcher:
 
     def __init__(self, a):
         self.a = a
-        self.model = M.Model(a.measured, a.speed_file)
+        self.model = M.Model(a.measured, a.speed_file,
+                             rules=None if a.min_inet_down is None else {"min_inet_down": a.min_inet_down})
         self.history = M.History(os.path.join(a.data_dir, "history.json") if a.data_dir else None)
         self.series_path = os.path.join(a.data_dir, "series.jsonl") if a.data_dir else None
         self.lock = threading.Lock()
@@ -133,7 +136,8 @@ class Watcher:
     @staticmethod
     def _row(o: dict) -> dict:
         keys = ["id", "machine_id", "cpu_name", "threads", "usable", "ram_gb", "dph_total", "gpu_name", "num_gpus", "gpu_frac",
-                "geolocation", "reliability2", "verification", "inet_down_cost", "inet_up_cost", "launcher_ok", "cost", "nps",
+                "geolocation", "reliability2", "verification", "inet_down", "inet_down_cost", "inet_up_cost", "launcher_ok",
+                "launcher_flag", "launcher_why", "cost", "nps",
                 "score", "source", "unc", "note", "tt_mb", "gb_per_thread", "listed_s"]
         r = {k: o.get(k) for k in keys}
         r["cost"] = round(r["cost"], 4) if r["cost"] is not None else None
@@ -240,6 +244,9 @@ def main(argv=None) -> int:
     ap.add_argument("--refresh-s", type=float, default=10.0, help="seconds between market searches (at least 3; each takes a few seconds)")
     ap.add_argument("--data-dir", default="vast-watch-data", help="where the all-time records are saved ('' = do not save)")
     ap.add_argument("--min-threads", type=float, default=64, help="smallest machine the three categories rank")
+    ap.add_argument("--min-inet-down", type=float, default=None,
+                    help="the launcher's minimum download speed in Mbps for the 'can rent' label (default 500, as in the "
+                         "launcher; 0 = no filter)")
     ap.add_argument("--fast-gn", type=float, default=1.0, help="billion nodes per second a machine needs to count as fast")
     ap.add_argument("--measured", default=M.DEFAULT_MEASURED, help="docs/vast/measured-speeds.json")
     ap.add_argument("--speed-file", default=M.DEFAULT_SPEED, help="docs/vast/speed-factors.json")

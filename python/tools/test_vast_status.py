@@ -18,7 +18,7 @@ import vast_status as V  # noqa: E402
 def offer(id, cpu, threads, ram, dph, **kw):
     o = {"id": id, "machine_id": id, "cpu_name": cpu, "threads": threads, "ram_gb": ram, "dph_total": dph, "reliability2": 0.995,
          "verification": "verified", "gpu_frac": 1.0, "num_gpus": 1, "gpu_name": "RTX 4090", "geolocation": "Norway, NO",
-         "inet_down_cost": 0.01, "inet_up_cost": 0.01}
+         "inet_down_cost": 0.01, "inet_up_cost": 0.01, "inet_down": 900.0}
     o.update(kw)
     return o
 
@@ -50,12 +50,28 @@ class Comparable(unittest.TestCase):
         self.assertEqual([o["id"] for o in ok], [7])
         self.assertEqual(closest, [])
 
-    def test_unverified_shared_and_slow_machines_never_count(self):
+    def test_shared_unreliable_slow_link_and_small_machines_never_count(self):
         cpu = "AMD Ryzen Threadripper PRO 9995WX 96-Cores"
-        market = [offer(1, cpu, 192, 251, 1.0, verification="deverified"), offer(2, cpu, 192, 251, 1.0, gpu_frac=0.5),
-                  offer(3, cpu, 192, 251, 1.0, reliability2=0.85), offer(4, cpu, 64, 80, 0.4)]   # 64 threads: too slow
+        market = [offer(1, cpu, 192, 251, 1.0, inet_down=300.0),   # verified, but its download link is too slow
+                  offer(2, cpu, 192, 251, 1.0, gpu_frac=0.5),
+                  offer(3, cpu, 192, 251, 1.0, reliability2=0.89),
+                  offer(4, cpu, 64, 80, 0.4)]   # 64 threads: too slow
         ok, _ = V.comparable(self.m, market, self.ref, 1.3, 0.7)
         self.assertEqual(ok, [])
+
+    def test_unverified_hosts_count_but_come_after_verified_ones_and_are_flagged(self):
+        # Owner, 2026-10-16: verified preferred, unverified or deverified allowed.
+        cpu = "AMD Ryzen Threadripper PRO 9995WX 96-Cores"
+        market = [offer(1, cpu, 192, 251, 0.90, verification="unverified"), offer(2, cpu, 192, 251, 1.20),
+                  offer(3, cpu, 192, 251, 1.0, verification="deverified", inet_down=100.0)]   # slow link: out
+        ok, _ = V.comparable(self.m, market, self.ref, 1.3, 0.7)
+        self.assertEqual([o["id"] for o in ok], [2, 1])
+        self.assertEqual([o["launcher_flag"] for o in ok], ["", "unverified"])
+        self.assertIn("UNVERIFIED host", V.words(ok[1]))
+        self.assertNotIn("UNVERIFIED", V.words(ok[0]))
+        # --min-inet-down: this run's setting reaches the label through the model.
+        slow_ok, _ = V.comparable(M.Model(rules={"min_inet_down": 50}), market, self.ref, 1.3, 0.7)
+        self.assertEqual({o["id"] for o in slow_ok}, {1, 2, 3})
 
     def test_measured_only_filter(self):
         market = [offer(5, "AMD EPYC 7J13 64-Core Processor", 128, 252, 0.3)]   # an absurdly cheap unbenchmarked machine
