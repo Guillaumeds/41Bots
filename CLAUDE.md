@@ -42,6 +42,7 @@ You are building the strongest possible bots for the 8-player card game **41** (
 - **Where compute runs (owner, 2026-10-14):** this VM is for building and testing. Any measurement or calculation expected to take more than about 5 minutes here runs on vast.ai (on-demand, through the runner), not locally.
 - **Parallel rentals (owner, 2026-10-14):** independent jobs may run on several vast.ai machines at once; each is monitored and destroyed when done.
 - **Host reliability (owner, 2026-10-16):** the launcher accepts vast.ai hosts with reliability of at least 90%.
+- **Verified hosts (owner, 2026-10-16):** prefer vast.ai-verified hosts; unverified or deverified hosts are accepted when no verified offer fits.
 - **Times for the owner:** give clock times in Mauritius time (UTC+4).
 - **Cloud sessions:**
   - The VM has 4 vCPU and 16 GB RAM, and commands time out after ≤10 min.

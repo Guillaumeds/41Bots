@@ -16,6 +16,14 @@ Credentials come only from the environment:
 
 Rules applied:
 - On-demand only (`--type on-demand`, never a bid price).
+- Verified hosts are preferred, not required (owner, 2026-10-16: "I am OK with using unverified or
+  deverified [vast.ai hosts], but prefer verified. The risk is small enough."). Every search asks
+  for verified hosts first (`verified=true`); only when no verified offer passes every other filter
+  (--cpu-match, GPU needs, price caps, exclusions, the reliability floor) is the search repeated
+  with the verified filter lifted (`verified=any`) and the best of those taken, with a log line
+  saying so. The same holds for each replacement machine. Each offer's line shows its host
+  status. `--verified-only` (workflow input `verified_only`) keeps the strict behaviour. The
+  GPU filter stays `compute_cap<1000`: no Blackwell cards (owner, 2026-10-16).
 - Rank by estimated dollars per unit of work: dph / (effective cores x measured matches per second
   per core for that CPU model, from R2 bench/; unknown models use the median of known ones, or 1).
 - Owner's rule: among offers within 20% (--premium) of the cheapest cost per unit of work, take
@@ -63,9 +71,10 @@ Rules applied:
   41bots-<run_id> means vast rented it after all and it is adopted (never a second rental); if
   the list cannot be read either, the run stops. Otherwise the next-best offer is tried, up to 5.
 - --offer-id (an offer the owner picked on vast's website): one search by that id checks the
-  same things as the normal search (a verified host, reliability at least 0.90, the whole
-  machine, on-demand, and the GPU needs below); an offer that fails any of them, or that cannot
-  be checked, is not rented.
+  same things as the normal search (reliability at least 0.90, the whole machine, on-demand,
+  the run's cores and RAM, and the GPU needs below); an offer that fails any of them, or that
+  cannot be checked, is not rented. An unverified or deverified host is accepted (and logged)
+  unless --verified-only.
 - GPU jobs (network training, docs/m3-hybrid/vast.md): --gpus N (exactly N GPUs on the machine),
   --min-gpu-ram-gb, --min-compute-cap (vast's units: 600 = compute capability 6.0, the lowest the
   PyTorch 2.14.1+cu126 build supports), always with compute_cap<1000 and cuda_vers>=12.6 (the
@@ -74,7 +83,8 @@ Rules applied:
   "min_compute_cap": 600, "min_cores": 128, "min_ram_gb": 64, "disk_gb": 80}; each minimum is
   the larger of the manifest's and the command line's, a GPU count given both ways must agree,
   a GPU need overrides --cpu-only, and any other key is refused before anything is rented. Every
-  other rule (verified host, reliability, whole machine, on-demand only, dollar cap) is unchanged.
+  other rule (the preference for verified hosts above, reliability, whole machine, on-demand only,
+  dollar cap) is unchanged.
 - Destroying is verified: "destroyed (verified)" only once a later status call shows the instance
   exited, offline or absent, in two readings 10 s apart (one reading, such as an empty instance
   list, is never enough); when that call fails 3 times the destroy is reported as unverified
@@ -220,7 +230,9 @@ def gpu_job(a) -> bool:
     return bool(getattr(a, "gpus", 0))
 
 
-def offer_query(a) -> str:
+def offer_query(a, verified: bool = True) -> str:
+    # `verified=any`, not simply leaving the token out: `vastai search offers` adds `verified=true`
+    # to every query by itself (its default query), and only `verified=any` removes that filter.
     gpus = int(getattr(a, "gpus", 0) or 0)
     if gpus:
         cc = max(MIN_COMPUTE_CAP, int(getattr(a, "min_compute_cap", MIN_COMPUTE_CAP) or MIN_COMPUTE_CAP))
@@ -231,7 +243,8 @@ def offer_query(a) -> str:
         gpu = ["num_gpus>=1"] + ([] if a.cpu_only else [f"compute_cap>={MIN_COMPUTE_CAP}",
                                                         f"compute_cap<{MAX_COMPUTE_CAP}", f"cuda_vers>={MIN_CUDA}"])
     return " ".join([
-        f"reliability>{a.min_reliability}", gpu[0], "gpu_frac=1", "rentable=true", "verified=true",
+        f"reliability>{a.min_reliability}", gpu[0], "gpu_frac=1", "rentable=true",
+        "verified=true" if verified else "verified=any",
         f"cpu_cores_effective>={a.min_cores}", f"cpu_ram>={a.min_ram_gb}",
     ] + gpu[1:] + [
         f"disk_space>={a.disk_gb}", f"inet_down_cost<={a.max_net_cost}", f"inet_up_cost<={a.max_net_cost}",
@@ -300,9 +313,9 @@ def apply_machine(a, manifest: dict) -> None:
         a.cpu_only = False
 
 
-def search_offers(a) -> list[dict]:
+def search_offers(a, verified: bool = True) -> list[dict]:
     # --type on-demand: fixed-price rental only. Interruptible (bid) machines are never used.
-    rows = vast("search", "offers", offer_query(a), "--type", "on-demand", "--order", "dph_total", "--limit", "200")
+    rows = vast("search", "offers", offer_query(a, verified), "--type", "on-demand", "--order", "dph_total", "--limit", "200")
     return [o for o in (rows or []) if not o.get("is_bid") and o.get("dph_total") and o.get("cpu_cores_effective")
             and (not a.max_dph or float(o["dph_total"]) <= a.max_dph)
             and (not a.cpu_match or re.search(a.cpu_match, o.get("cpu_name") or "", re.I))
@@ -416,23 +429,41 @@ def rank(offers: list[dict], bench: dict[str, float], premium: float) -> tuple[d
     return best, offers
 
 
+def is_verified(o: dict) -> bool:
+    """Whether vast.ai lists the offer's host as verified (the offer's `verified` flag, or its
+    `verification` word)."""
+    return o.get("verified") is True or (o.get("verification") or "") == "verified"
+
+
+def host_status(o: dict) -> str:
+    """The host's verification word for the logs: verified, unverified, deverified, or unknown."""
+    if is_verified(o):
+        return "verified"
+    word = o.get("verification")
+    if isinstance(word, str) and word:
+        return word
+    return "unverified" if o.get("verified") is False else "unknown"
+
+
 def describe(o: dict) -> str:
     unit = "matches/s/core measured" if o["_measured"] else "assumed rate"
+    host = "host verified" if is_verified(o) else f"host NOT verified ({host_status(o)})"
     return (f"offer {o['id']}: ${o['dph_total']:.3f}/h, {o['cpu_cores_effective']:.0f} eff. cores, "
             f"{o.get('cpu_name')}, {o.get('num_gpus')}x {o.get('gpu_name')}"
             + (f" ({o.get('gpu_ram')} MB, cc {o.get('compute_cap')}, CUDA {o.get('cuda_max_good')})"
                if o.get("gpu_ram") is not None else "")
-            + f", rel {o.get('reliability2', 0):.3f}, "
+            + f", {host}, rel {o.get('reliability2', 0):.3f}, "
             f"rate {o['_rate']:.2f} ({unit}), cost/work {o['_cost_per_work']:.5f}")
 
 
-def offer_check_failures(o: dict, floor: float = MIN_RELIABILITY) -> list[str]:
+def offer_check_failures(o: dict, floor: float = MIN_RELIABILITY, verified_only: bool = False) -> list[str]:
     """Why an offer fails the launcher's safety checks (what the search query filters on, applied
-    to one offer's record): a verified host, reliability at least 0.90, the whole machine (no
-    sharing), on-demand and rentable. Empty when it passes."""
+    to one offer's record): reliability at least 0.90, the whole machine (no sharing), on-demand
+    and rentable; with `verified_only` also a verified host (owner, 2026-10-16: unverified and
+    deverified hosts are otherwise accepted). Empty when it passes."""
     failed = []
-    if o.get("verified") is not True and (o.get("verification") or "") != "verified":
-        failed.append(f"host not verified ({o.get('verification') or o.get('verified')})")
+    if verified_only and not is_verified(o):
+        failed.append(f"host not verified ({o.get('verification') or o.get('verified')}), and --verified-only is set")
     try:
         rel = float(o.get("reliability2") if o.get("reliability2") is not None else o.get("reliability") or 0)
     except (TypeError, ValueError):
@@ -462,13 +493,14 @@ def lookup_offer(a) -> dict:
         rows = vast("search", "offers", f"id={oid}", "--type", "on-demand", "--limit", "5")
     except RuntimeError as e:
         sys.exit(f"launch: offer {oid} could not be checked (vast's search failed: {redact(str(e))[:200]}); the checks "
-                 f"(verified host, reliability >= {MIN_RELIABILITY}, whole machine) cannot be skipped, so nothing was rented")
+                 f"(reliability >= {MIN_RELIABILITY}, whole machine) cannot be skipped, so nothing was rented")
     if not isinstance(rows, list):
         sys.exit(f"launch: offer {oid} could not be checked (vast's search answered {LAST_VAST_OUTPUT!r}); nothing was rented")
     row = next((o for o in rows if isinstance(o, dict) and o.get("id") == oid), None)
     if row is None:
         sys.exit(f"launch: offer {oid} is not on offer (on-demand) any more; nothing was rented")
-    failed = offer_check_failures(row, float(a.min_reliability))
+    verified_only = bool(getattr(a, "verified_only", False))
+    failed = offer_check_failures(row, float(a.min_reliability), verified_only)
     # The run's own needs, as the normal search filters them (`offer_query`): vast's raw records
     # give cpu_ram in MB. Review E (2026-10-16): the named offer was never checked against
     # --min-ram-gb, so a table run needing 480 GB could be rented on a 251 GB machine.
@@ -487,6 +519,9 @@ def lookup_offer(a) -> dict:
     failed += gpu_check_failures(row, a)
     if failed:
         sys.exit(f"launch: offer {oid} fails the launcher's checks: {'; '.join(failed)}; nothing was rented")
+    if not is_verified(row):
+        log(f"offer {oid} is on a host that is {host_status(row)}, not verified: accepted, because the owner named it "
+            f"(owner rule 2026-10-16: unverified or deverified hosts are acceptable; every other check passed)")
     best = dict(row)
     best.setdefault("machine_id", a.offer_machine or oid)
     if best.get("reliability2") is None:
@@ -505,7 +540,7 @@ def lookup_offer(a) -> dict:
 def choose(a) -> dict | None:
     if getattr(a, "offer_id", None):
         # An offer the owner picked on vast's own website (2026-10-15): one search by its id checks it
-        # like any other (verified, reliability, whole machine), nothing else is searched. It is offered
+        # like any other (reliability, whole machine; a verified host only with --verified-only), nothing else is searched. It is offered
         # once; a failed create, or a replacement after the machine dies, finds nothing and the run stops
         # instead of falling back to a full search.
         if getattr(a, "_offer_given_used", False):
@@ -515,10 +550,25 @@ def choose(a) -> dict | None:
         best["_rate"], best["_measured"] = 1.0, False
         best["_work_per_hour"] = best["cpu_cores_effective"]
         best["_cost_per_work"] = best["dph_total"] / max(best["cpu_cores_effective"], 1e-9)
-        log(f"offer {best['id']} chosen by the owner and checked by id (verified host, reliability "
-            f"{float(best.get('reliability2') or 0):.3f}, whole machine): {describe(best)}")
+        log(f"offer {best['id']} chosen by the owner and checked by id (reliability "
+            f"{float(best.get('reliability2') or 0):.3f}, whole machine, on-demand): {describe(best)}")
         return best
     offers = search_offers(a)
+    if not offers:
+        # Owner, 2026-10-16: prefer verified hosts, accept unverified or deverified ones when no
+        # verified offer fits. Same filters, only `verified` lifted; a replacement machine
+        # (rent() calls choose() again) starts from the verified search again.
+        if getattr(a, "verified_only", False):
+            log("no verified offer matches (--verified-only: unverified and deverified hosts are not searched)")
+        else:
+            log("no verified offer matches; searching again with unverified/deverified hosts allowed (owner rule 2026-10-16)")
+            offers = search_offers(a, verified=False)
+            if offers:
+                n = sum(1 for o in offers if not is_verified(o))
+                log(f"no verified offer matches; using unverified/deverified offers (owner rule 2026-10-16): "
+                    f"{len(offers)} offers found, {n} on unverified or deverified hosts")
+            else:
+                log("no offer matches even with unverified/deverified hosts allowed")
     have_r2 = all(os.environ.get(n) for n in ("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET", "R2_S3_ENDPOINT"))
     bench = load_bench(have_r2)
     best, ranked = rank(offers, bench, a.premium)
@@ -1581,6 +1631,8 @@ def cmd_plan(a) -> int:
         text = a.manifest if a.manifest.lstrip().startswith("{") else open(a.manifest, encoding="utf-8").read()
         apply_machine(a, json.loads(text))
     log("query: " + offer_query(a) + " (type on-demand)")
+    if not getattr(a, "verified_only", False) and not getattr(a, "offer_id", None):
+        log("if no verified offer matches, the search is repeated with verified=any (owner rule 2026-10-16; --verified-only turns that off)")
     return 0 if choose(a) else 1
 
 
@@ -1648,9 +1700,14 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("--min-gpu-ram-gb", type=int, default=0, help="GPU job: memory per GPU, in GB")
         s.add_argument("--min-compute-cap", type=int, default=MIN_COMPUTE_CAP,
                        help="GPU job: lowest compute capability x 100 (default 600 = 6.0, Pascal; below 1000 always)")
+        s.add_argument("--verified-only", action="store_true",
+                       help="rent only from vast.ai-verified hosts (the strict behaviour). Without it, verified hosts are "
+                            "still preferred, but when no verified offer fits, unverified or deverified hosts are searched "
+                            "too (owner rule 2026-10-16); this also applies to --offer-id")
         s.add_argument("--offer-id", type=int, default=None,
-                       help="rent exactly this vast.ai offer: one search by its id checks it (verified host, reliability >= 0.90, "
-                            "whole machine, on-demand) and nothing else is searched; an offer failing a check is not rented")
+                       help="rent exactly this vast.ai offer: one search by its id checks it (reliability >= 0.90, whole "
+                            "machine, on-demand; an unverified or deverified host is accepted unless --verified-only) and "
+                            "nothing else is searched; an offer failing a check is not rented")
         s.add_argument("--offer-dph", type=float, default=None,
                        help="with --offer-id: the price per hour you saw (optional; a warning if vast reports another)")
         s.add_argument("--offer-cores", type=int, default=None,
