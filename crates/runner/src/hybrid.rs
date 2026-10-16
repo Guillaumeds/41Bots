@@ -53,6 +53,14 @@
 //! (0: no limit) caps the epochs on each partial set (`--partial-epochs`). One part is the former
 //! behaviour, step for step. Epochs on part of the data warm-start the full training, which can
 //! cost a little accuracy (docs/m3-hybrid/overlap.md); the validation loss says.
+//! The audit loop (docs/m3-hybrid/audit-loop.md §4; module [`audit`]): `audit_rounds` (0: none,
+//! the chunk exactly as before) above 0 replaces steps 6–7 by rounds of training, an audit shard,
+//! the auditor (`python -m fortyone_nn.audit`), the golden check with a slice per weak group and
+//! mini golden sets, and a targeted harvest that joins the next round's training, until the
+//! network is flat or `audit_rounds` is reached; with its settings `audit_rows`, `audit_seed`,
+//! `audit_keep_cap`, `audit_weight`, `audit_mini_decisions`, `audit_target_rows` and
+//! `audit_predicates_input` (refused without it). On a GPU with `overlap` each round's training
+//! runs beside the CPU steps that do not need it.
 //! Also: `mix_weight` (1.0), `start_hands` (20000, for the label roots and the golden
 //! decisions), `tt_mb` (64, the solver table per thread of the golden worlds
 //! and the check), `verify_pct` (1, the check's recomputed sample of stored exact worlds),
@@ -145,10 +153,20 @@ use crate::remote::{Remote, fetch_input, input_hex, input_key, put_input};
 use crate::spike::build_table_from;
 use crate::{Ctx, sibling};
 
+mod audit;
+
 /// The settings a `hybrid_rung` chunk takes; any other key is refused.
-pub(crate) const KEYS: [&str; 49] = [
+pub(crate) const KEYS: [&str; 57] = [
     "cut",
     "check",
+    "audit_rounds",
+    "audit_rows",
+    "audit_seed",
+    "audit_keep_cap",
+    "audit_weight",
+    "audit_mini_decisions",
+    "audit_target_rows",
+    "audit_predicates_input",
     "label_parts",
     "overlap",
     "partial_epochs",
@@ -314,6 +332,9 @@ pub(crate) struct Params {
     /// `partial_epochs` (0: no limit): with `label_parts` above 1, at most this many epochs on
     /// each partial set of shards (the trainer's `--partial-epochs`).
     pub partial_epochs: u64,
+    /// The audit loop's settings (`audit_rounds` above 0; [`audit`]); `None`: one training and
+    /// one check, as before.
+    pub audit: Option<audit::AuditSettings>,
 }
 
 /// One label shard to make: its set, and its part (`(k, of)`, 1-based) when the set is made in
@@ -383,6 +404,7 @@ impl Params {
             "compare_cpu": self.compare_cpu, "upload_shards": self.upload_shards,
             "label_parts": self.label_parts, "overlap": self.overlap,
             "partial_epochs": self.partial_epochs,
+            "audit": self.audit.as_ref().map(audit::AuditSettings::to_json),
         })
     }
 
@@ -810,6 +832,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
                 .into(),
         );
     }
+    let audit = audit::parse_settings(o, check, &seen.iter().map(|(s, _)| *s).collect::<Vec<_>>())?;
     Ok(Params {
         cut,
         check,
@@ -841,6 +864,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         label_parts,
         overlap,
         partial_epochs,
+        audit,
     })
 }
 
@@ -1112,6 +1136,7 @@ pub(crate) fn chunk_with(
         inputs: BTreeMap::new(),
         bg_train: None,
         beside: Vec::new(),
+        audit_hb: Map::new(),
     };
     r.rec.insert("params".into(), params.to_json());
     r.rec.insert("table".into(), table_rec);
@@ -1126,6 +1151,9 @@ pub(crate) fn chunk_with(
     let shards = r.labels(gpu && params.label_parts > 1)?;
     if params.upload_shards {
         r.upload_shards(&shards)?;
+    }
+    if params.audit.is_some() {
+        return r.audit_chunk(shards);
     }
     let generate = params.check && params.golden_inputs.is_none();
     let overlap = gpu && params.overlap && generate;
@@ -1241,6 +1269,9 @@ struct Rung<'a> {
     /// Steps running beside the current one ([`Rung::concurrent`], the background training):
     /// their thread shares and progress, for the heartbeat.
     beside: Vec<(String, String, Option<PathBuf>, u64)>,
+    /// The audit loop's heartbeat fields ([`audit`]: `round`, `groups_found`, …), in every
+    /// step's progress while the loop runs.
+    audit_hb: Map<String, Value>,
 }
 
 impl Rung<'_> {
@@ -1256,8 +1287,11 @@ impl Rung<'_> {
         if !self.device.is_empty() {
             v["device"] = json!(self.device);
         }
-        if let (Some(o), Value::Object(e)) = (v.as_object_mut(), extra) {
-            o.extend(e);
+        if let Some(o) = v.as_object_mut() {
+            o.extend(self.audit_hb.clone());
+            if let Value::Object(e) = extra {
+                o.extend(e);
+            }
         }
         v
     }
@@ -1307,6 +1341,14 @@ impl Rung<'_> {
             want.push(("golden_decisions", d.clone()));
             want.push(("golden_worlds", w.clone()));
         }
+        if let Some(h) = self
+            .p
+            .audit
+            .as_ref()
+            .and_then(|a| a.predicates_input.as_ref())
+        {
+            want.push(("audit_predicates", h.clone()));
+        }
         if want.is_empty() {
             return Ok(());
         }
@@ -1315,8 +1357,8 @@ impl Rung<'_> {
         self.ctx.set_phase("chunk", progress);
         let remote = self.tools.remote.clone().ok_or(
             "hybrid_rung: stored inputs (harvest_net, golden_decisions_input, \
-             golden_worlds_input) come from the remote store (R2, or RUNNER_REMOTE_DIR), and \
-             there is none",
+             golden_worlds_input, audit_predicates_input) come from the remote store (R2, or \
+             RUNNER_REMOTE_DIR), and there is none",
         )?;
         let dir = self.work.join("inputs");
         let mut recs = Map::new();
@@ -2024,11 +2066,24 @@ impl Rung<'_> {
         let dir = self.out.join("net");
         let prog = self.work.join("net.progress.json");
         let _ = fs::remove_file(&prog);
+        let threads = self.train_threads();
+        let c = self.train_cmd(feed, &dir, &self.device.clone(), threads, &prog);
+        self.start_train_with(c, dir, prog, "hybrid/net.log")
+    }
+
+    /// [`Rung::start_train`] with a trainer command already made (`train_cmd` and more
+    /// arguments: the audit loop's rounds), its network into `dir`, its progress to `prog`.
+    fn start_train_with(
+        &mut self,
+        c: Command,
+        dir: PathBuf,
+        prog: PathBuf,
+        log: &str,
+    ) -> Result<(), String> {
         let device = self.device.clone();
         let threads = self.train_threads();
-        let c = self.train_cmd(feed, &dir, &device, threads, &prog);
         let limit = self.train_limit();
-        self.ctx.spawn_bg(c, "hybrid/net.log", "train", limit)?;
+        self.ctx.spawn_bg(c, log, "train", limit)?;
         self.beside
             .push(("train".into(), "train".into(), Some(prog.clone()), threads));
         println!(
@@ -2047,12 +2102,17 @@ impl Rung<'_> {
     /// Waits for the background training ([`Rung::start_train`]) and records it as the step
     /// `train`. Returns when it ran.
     fn finish_train(&mut self) -> Result<(Instant, Instant), String> {
+        self.finish_train_as("net", "train")
+    }
+
+    /// [`Rung::finish_train`], recorded under `key` as the step `step`.
+    fn finish_train_as(&mut self, key: &str, step: &str) -> Result<(Instant, Instant), String> {
         let b = self
             .bg_train
             .take()
             .ok_or("hybrid_rung: no training is running")?;
         let base = self.progress(
-            "train",
+            step,
             json!({ "train_device": b.device, "train_threads": b.threads }),
         );
         self.ctx.set_phase("chunk", base.clone());
@@ -2064,7 +2124,7 @@ impl Rung<'_> {
         });
         self.beside.retain(|x| x.1 != "train");
         let ran = ran?.ok_or("hybrid_rung: the training was not running")?;
-        self.train_record(&b.dir, &b.device, b.threads, "net", "train", b.t)?;
+        self.train_record(&b.dir, &b.device, b.threads, key, step, b.t)?;
         Ok(ran)
     }
 
@@ -2092,7 +2152,7 @@ impl Rung<'_> {
         let int_sha = sha("int.safetensors")?;
         // The integer network is shared content-addressed (as the golden set), so a later run
         // names it as an input (`harvest_net`, a check's network); a failure is only a warning.
-        let int_key = if key == "net" {
+        let int_key = if key == "net" || key.starts_with("net_r") {
             self.share_net(&dir.join("int.safetensors"), &int_sha)
         } else {
             None
@@ -2973,6 +3033,7 @@ mod tests {
             inputs: BTreeMap::new(),
             bg_train: None,
             beside: Vec::new(),
+            audit_hb: Map::new(),
         }
     }
 
@@ -4247,6 +4308,674 @@ fi
             .filter_map(|s| s["step"].as_str())
             .collect();
         assert!(steps.contains(&"labels race (3 of 4)"), "{steps:?}");
+        let _ = fs::remove_dir_all(&f.base);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The audit loop (`audit`; docs/m3-hybrid/audit-loop.md §4).
+
+    /// The audit loop's settings: refused without `audit_rounds`, with `"check": false` or
+    /// `compare_cpu`, or when a round's seed meets another; defaults otherwise.
+    #[test]
+    fn audit_settings() {
+        assert_eq!(parse(&json!({})).expect("defaults").audit, None);
+        assert_eq!(
+            parse(&json!({ "audit_rounds": 0 })).expect("0 is off"),
+            parse(&json!({})).expect("defaults")
+        );
+        let p = parse(&json!({ "audit_rounds": 4 })).expect("audit");
+        let a = p.audit.as_ref().expect("on");
+        assert_eq!(
+            (
+                a.rounds,
+                a.rows,
+                a.seed,
+                a.keep_cap,
+                a.weight,
+                a.mini_decisions,
+                a.target_rows
+            ),
+            (4, 1_000_000, 301, 256, 2.0, 50, 0)
+        );
+        assert_eq!((a.audit_seed(1), a.target_seed(4)), (30101, 30154));
+        let j = p.to_json();
+        assert_eq!(
+            j["audit"]["audit_seeds"],
+            json!([30101, 30102, 30103, 30104])
+        );
+        assert_eq!(j["audit"]["predicates_input"], Value::Null);
+        let key = format!("inputs/sha256/{}", "c".repeat(64));
+        let p = parse(
+            &json!({ "audit_rounds": 2, "audit_rows": 5000, "audit_seed": 7,
+                               "audit_keep_cap": 64, "audit_weight": 1.5,
+                               "audit_mini_decisions": 60, "audit_target_rows": 9000,
+                               "audit_predicates_input": key }),
+        )
+        .expect("given");
+        let a = p.audit.expect("on");
+        assert_eq!(
+            (
+                a.rows,
+                a.seed,
+                a.keep_cap,
+                a.weight,
+                a.mini_decisions,
+                a.target_rows
+            ),
+            (5000, 7, 64, 1.5, 60, 9000)
+        );
+        assert_eq!(a.predicates_input, Some("c".repeat(64)));
+        let bad = |v: Value, says: &str| {
+            let e = parse(&v).expect_err(&v.to_string());
+            assert!(e.contains(says), "{v}: {e}");
+        };
+        bad(
+            json!({ "audit_rows": 10 }),
+            "audit_rows is set but audit_rounds is 0",
+        );
+        bad(
+            json!({ "audit_rounds": 0, "audit_weight": 2 }),
+            "audit_rounds is 0",
+        );
+        bad(json!({ "audit_rounds": 50 }), "at most 49");
+        bad(
+            json!({ "audit_rounds": 2, "check": false }),
+            "it needs \"check\": true",
+        );
+        bad(
+            json!({ "audit_rounds": 2, "compare_cpu": true }),
+            "compare_cpu",
+        );
+        bad(json!({ "audit_rounds": 2, "audit_rows": 0 }), "audit_rows");
+        bad(json!({ "audit_rounds": 2, "audit_seed": 0 }), "audit_seed");
+        bad(
+            json!({ "audit_rounds": 2, "audit_keep_cap": 0 }),
+            "audit_keep_cap",
+        );
+        bad(
+            json!({ "audit_rounds": 2, "audit_weight": 0 }),
+            "audit_weight",
+        );
+        bad(
+            json!({ "audit_rounds": 2, "audit_mini_decisions": 0 }),
+            "audit_mini_decisions",
+        );
+        bad(
+            json!({ "audit_rounds": 2, "audit_predicates_input": "p.json" }),
+            "must be a stored input's key",
+        );
+        // Round 1's audit shard would be 101·100 + 1 = 10101: label part 1 of seed 101.
+        bad(
+            json!({ "audit_rounds": 2, "audit_seed": 101, "label_parts": 2 }),
+            "round 1's audit shard would have seed 10101",
+        );
+        bad(
+            json!({ "audit_rounds": 1, "audit_seed": 1, "labels_random_seed": 111,
+                    "labels_harvest": 5, "labels_harvest_seed": 151 }),
+            "round 1's targeted harvest would have seed 151",
+        );
+    }
+
+    /// Fake programs for the audit loop on top of [`fakes`]: a `search` whose targeted harvest
+    /// writes its group counts, whose `decisions --keep` keeps two decisions, and whose
+    /// `hybrid-check` passes with one decision in each named slice; a `python` (on a GPU when
+    /// `gpu`) whose trainer waits, with `--watch-dir`, for its `--expect` shards and records the
+    /// ones it saw, and whose auditor confirms the groups of `audit-<n>.json` in the fakes'
+    /// directory at its `n`th call (none without the file), touching `stop` at the call that
+    /// `stop-at-<n>` names.
+    #[cfg(unix)]
+    fn audit_tools(f: &Fakes, gpu: bool, stop: Option<&Path>) -> Tools {
+        let arg = r#"arg() { n=$1; shift; while [ $# -gt 0 ]; do [ "$1" = "$n" ] && { echo "$2"; return; }; shift; done; }"#;
+        let base = f.base.display().to_string();
+        let calls = f.calls.display().to_string();
+        let search = fake_script(
+            &f.bin,
+            "search-audit",
+            &format!(
+                r#"{arg}
+case $1 in
+  labels)
+    '{search}' "$@" || exit 1
+    out=$(arg --out "$@")
+    if [ -n "$(arg --harvest-keep "$@")" ]; then
+      echo '{{"shard_sha256": "{sha}", "count": 7, "harvest": {{"keep": {{"groups": [{{"name": "g-one", "rows": 7}}], "rows_in_any_group": 7}}}}}}' > "$out.json"
+    fi;;
+  decisions)
+    echo "search $*" >> '{calls}'
+    out=$(arg --out "$@")
+    if [ -n "$(arg --keep "$@")" ]; then
+      printf '{{"id": 400, "trick": 3}}\n{{"id": 403, "trick": 3}}\n' > "$out"
+      echo '{{"kept": 2, "candidates_drawn": 9, "complete": true}}' > "$out.json"
+    else
+      printf '{{"id": 0, "trick": 3}}\n{{"id": 1, "trick": 3}}\n' > "$out"
+    fi;;
+  hybrid-check)
+    echo "search $*" >> '{calls}'
+    sl=$(arg --slices "$@"); s=""; i=0
+    if [ -n "$sl" ]; then
+      for n in $(grep -o '"name": "[^"]*"' "$sl" | sed 's/"name": //'); do
+        [ -n "$s" ] && s="$s, "
+        s="$s{{\"group\": $i, \"name\": $n, \"ids\": [0], \"summary\": {{\"loss_upper95\": 0.00004}}, \"pass\": true}}"
+        i=$((i+1))
+      done
+    fi
+    echo "{{\"pass\": true, \"pass_without_slices\": true, \"groups\": [{{\"group\": \"all\", \"summary\": {{\"decisions\": 2, \"mean_loss\": 0.00002, \"loss_upper95\": 0.00005, \"loss_pass\": true}}}}], \"net\": {{\"sha256\": \"abc\"}}, \"values\": {{}}, \"slices\": {{\"groups\": [$s]}}}}" > "$(arg --json "$@")"
+    echo "standard: PASS";;
+  *) exec '{search}' "$@";;
+esac
+"#,
+                search = f.search.display(),
+                sha = f.sha,
+            ),
+        );
+        let device = if gpu {
+            r#"{"device": "cuda", "gpu_name": "RTX A2000", "reason": "every GPU check passed"}"#
+        } else {
+            r#"{"device": "cpu", "reason": "nvidia-smi is missing or failed: no GPU in this container"}"#
+        };
+        let stop_line = stop.map_or(String::new(), |p| {
+            format!(
+                "if [ -f '{base}/stop-at-'$n ]; then touch '{}'; fi",
+                p.display()
+            )
+        });
+        let py = fake_script(
+            &f.bin,
+            "fake-python-audit",
+            &format!(
+                r#"{arg}
+echo "python $*" >> '{calls}'
+case "$2" in
+  fortyone_nn.device) echo '{device}' > "$(arg --json "$@")";;
+  fortyone_nn.train)
+    out=$(arg --out "$@"); mkdir -p "$out"
+    w=$(arg --watch-dir "$@")
+    if [ -n "$w" ]; then
+      want=$(arg --expect "$@"); ntrain=0; on=0
+      for a in "$@"; do case "$a" in --train) on=1;; --*) on=0;; *) [ $on = 1 ] && ntrain=$((ntrain+1));; esac; done
+      i=0
+      while [ $i -lt 300 ]; do
+        n=$(ls "$w" | grep -c '\.npy$'); [ $((n + ntrain)) -ge "$want" ] && break; sleep 0.1; i=$((i+1))
+      done
+      ls "$w" > "$out/seen.txt"
+    fi
+    echo "int $(arg --device "$@") $out" > "$out/int.safetensors"; echo float > "$out/float.safetensors"
+    echo '{{"history": [{{"val_loss": 1.5}}], "best_epoch": 0, "float": {{}}, "int": {{"error": {{"sd": 0.01}}}}, "minutes": 0.1, "device": {{}}}}' > "$out/report.json"
+    echo '{{"step": "done", "epoch": 1}}' > "$(arg --progress "$@")";;
+  fortyone_nn.audit)
+    out=$(arg --out "$@"); mkdir -p "$out"
+    n=$(cat '{base}/audit-count' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '{base}/audit-count'
+    if [ -f '{base}/audit-'$n'.json' ]; then cp '{base}/audit-'$n'.json' "$out/predicates.json"; else echo '[]' > "$out/predicates.json"; fi
+    echo '{{"audit": {{"candidates": 5, "confirmed": 1}}}}' > "$out/report.json"; echo "the audit" > "$out/report.txt"
+    {stop_line};;
+esac
+"#,
+            ),
+        );
+        let uv = fake_script(
+            &f.bin,
+            "uv-audit",
+            &format!(
+                r#"echo "uv $*" >> '{calls}'
+case $1 in
+  --version) echo "uv 0.13.0";;
+  sync) mkdir -p "$UV_PROJECT_ENVIRONMENT/bin"; cp '{py}' "$UV_PROJECT_ENVIRONMENT/bin/python";;
+esac
+"#,
+                py = py.display()
+            ),
+        );
+        Tools {
+            search,
+            uv,
+            python_dir: f.py.clone(),
+            nvidia_smi: if gpu {
+                f.gpu.clone()
+            } else {
+                f.base.join("no-such-nvidia-smi")
+            },
+            remote: Some(Arc::new(crate::remote::DirRemote {
+                root: f.base.join("remote"),
+            })),
+        }
+    }
+
+    /// One confirmed group, as the auditor writes it.
+    const GROUP_ONE: &str = r#"[{"name": "g-one", "conditions": [{"feature": 801, "op": "==", "value": 1}], "weight": 0.05, "bias": [0.004, -0.001, 0.0, -0.003], "sd": 0.03}]"#;
+
+    #[cfg(unix)]
+    fn audit_params(extra: Value) -> Params {
+        let mut v = json!({ "labels_random": 7, "labels_rules": 0, "labels_harvest": 9,
+                            "val_count": 3, "golden_count": 2, "golden_worlds": 4,
+                            "widths": "16,8", "epochs": 1, "audit_rows": 50,
+                            "audit_mini_decisions": 2 });
+        if let (Some(o), Value::Object(e)) = (v.as_object_mut(), extra) {
+            o.extend(e);
+        }
+        parse(&v).expect("params")
+    }
+
+    #[cfg(unix)]
+    fn steps_of(rung: &Value) -> Vec<String> {
+        rung["steps"]
+            .as_array()
+            .expect("steps")
+            .iter()
+            .filter_map(|s| s["step"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// A loop that goes flat in two rounds, on a (fake) GPU: round 1 confirms a group, round 2
+    /// none. Round 2's training starts beside round 1's CPU steps, watching the directory its
+    /// targeted shard (with its weight) lands in; round 1's golden slices name the group and its
+    /// mini golden set is made (its slice is too small) and checked with both networks; the
+    /// heartbeat carries the loop's fields; the reports, the summary and the stop reason are
+    /// written; the last network is the chunk's.
+    #[cfg(unix)]
+    #[test]
+    fn audit_loop_goes_flat_in_two_rounds() {
+        let f = fakes("auditflat");
+        fs::write(f.base.join("audit-1.json"), GROUP_ONE).expect("write");
+        let tools = audit_tools(&f, true, None);
+        let params = audit_params(json!({ "audit_rounds": 3 }));
+        let root = f.base.join("run");
+        let mut ctx = Ctx::local("hybrid-test", &root, 16);
+        let r = chunk_steps(&mut ctx, &params, &tools, &f.table, json!({})).expect("the loop runs");
+        assert_eq!(r["verdict"], "PASS", "{r}");
+        assert_eq!(r["audit"]["stop"], "flat after round 2");
+        assert_eq!(r["audit"]["rounds"], 2);
+        let out = root.join("out").join("hybrid");
+        let rung = read_json(&out.join("rung.json")).expect("rung.json");
+        let steps = steps_of(&rung);
+        let at = |s: &str| {
+            steps
+                .iter()
+                .position(|x| x == s)
+                .unwrap_or_else(|| panic!("no step {s:?} in {steps:?}"))
+        };
+        for (a, b) in [
+            ("golden worlds", "train (round 1)"),
+            ("audit shard (round 1)", "train (round 1)"),
+            ("train (round 1)", "audit (round 1)"),
+            ("audit (round 1)", "targeted harvest (round 1)"),
+            ("targeted harvest (round 1)", "golden slices (round 1)"),
+            (
+                "golden slices (round 1)",
+                "mini golden set m1 decisions (round 1)",
+            ),
+            (
+                "mini golden set m1 decisions (round 1)",
+                "mini golden set m1 worlds (round 1)",
+            ),
+            (
+                "mini golden set m1 worlds (round 1)",
+                "mini golden set m1 (round 1)",
+            ),
+            ("mini golden set m1 (round 1)", "audit shard (round 2)"),
+            ("audit shard (round 2)", "train (round 2)"),
+            ("train (round 2)", "audit (round 2)"),
+            ("audit (round 2)", "golden slices (round 2)"),
+            ("golden slices (round 2)", "mini golden set m1 (round 2)"),
+        ] {
+            assert!(at(a) < at(b), "{a} before {b}: {steps:?}");
+        }
+        assert!(!steps.iter().any(|s| s == "targeted harvest (round 2)"));
+        assert!(!steps.iter().any(|s| s.contains("round 3")));
+        let log = fs::read_to_string(&f.calls).expect("calls");
+        let line = |p: &str| -> Vec<&str> { log.lines().filter(|l| l.starts_with(p)).collect() };
+        // The audit shards: seeds 30101 and 30102, exact at trick 4, the harvest's settings.
+        let audits = line("search labels --trick 4 --count 50");
+        assert_eq!(audits.len(), 2, "{log}");
+        assert!(
+            audits[0].contains("--seed 30101 --source harvest")
+                && audits[1].contains("--seed 30102")
+        );
+        assert!(audits.iter().all(|l| {
+            l.contains("--harvest-cap 16 --harvest-positions 0.25,0.25,0.5")
+                && !l.contains("--harvest-net")
+        }));
+        // The targeted harvest: round 1's groups, in-group positions only, into round 2's
+        // watched directory, with its weight file; the computed rows: 2·0.05·16/(1−0.15) → 1000.
+        let target = line("search labels --trick 4 --count 1000 --seed 30151 --source harvest");
+        assert_eq!(target.len(), 1, "{log}");
+        let watch = std::path::absolute(root.join("hybrid-work/audit/train-r2")).expect("abs");
+        assert!(
+            target[0].contains(&format!(
+                "--out {}",
+                watch.join("t4-target-r1-s30151.npy").display()
+            )),
+            "{}",
+            target[0]
+        );
+        assert!(
+            target[0].contains("--harvest-cap 0 --harvest-positions 0.25,0.25,0.5 --harvest-keep")
+        );
+        assert!(target[0].ends_with("--keep-cap 256"));
+        assert_eq!(
+            fs::read_to_string(watch.join("t4-target-r1-s30151.npy.weight")).expect("weight"),
+            "2\n"
+        );
+        // Round 2's training: the base shards as files, the targeted one through the directory.
+        let trains = line("python -m fortyone_nn.train");
+        assert_eq!(trains.len(), 2, "{log}");
+        assert!(!trains[0].contains("--watch-dir"));
+        assert!(
+            trains[1].contains(&format!(
+                "--watch-dir {} --expect 3 --load-threads 8",
+                watch.display()
+            )),
+            "{}",
+            trains[1]
+        );
+        assert!(trains[1].contains("--device cuda"));
+        assert_eq!(
+            fs::read_to_string(out.join("audit/round-2/net/seen.txt")).expect("seen"),
+            "t4-target-r1-s30151.npy\nt4-target-r1-s30151.npy.json\nt4-target-r1-s30151.npy.weight\n"
+        );
+        // The auditor on each round's network and audit shard; the golden slices with the union.
+        let aud = line("python -m fortyone_nn.audit");
+        assert_eq!(aud.len(), 2);
+        assert!(
+            aud[0].contains("out/hybrid/net/int.safetensors --shard")
+                && aud[0].ends_with("--seed 30101"),
+            "{}",
+            aud[0]
+        );
+        assert!(aud[1].contains("audit/round-2/net/int.safetensors"));
+        let checks = line("search hybrid-check");
+        assert!(
+            checks[0].contains("--verify-pct 1 --slices")
+                && checks[0].contains("round-1/union.json --slice-share 0.5"),
+            "{}",
+            checks[0]
+        );
+        assert!(checks.iter().skip(1).all(|c| c.contains("--verify-pct 0")));
+        let keep = line("search decisions --keep");
+        assert_eq!(keep.len(), 1, "the mini set is made once");
+        assert!(keep[0].contains("--keep-share 0.5 --keep-worlds 8 --trick 3 --cut 4 --count 2 --seed 1 --first-candidate 2 --net"), "{}", keep[0]);
+        // Reports.
+        let audit = out.join("audit");
+        for x in [
+            "round-1.txt",
+            "round-1.json",
+            "round-2.txt",
+            "round-2.json",
+            "audit-summary.txt",
+            "round-1/predicates.json",
+            "round-1/union.json",
+            "round-1/auditor/report.txt",
+            "round-2/union.json",
+            "mini/m1/group.json",
+            "mini/m1/decisions.jsonl",
+            "mini/m1/exact-t3-n4.jsonl",
+            "round-1/mini-m1.json",
+            "round-2/mini-m1.json",
+            "round-1/t4-target-r1-s30151.npy.json",
+            "round-2/t4-audit-r2-s30102.npy.json",
+        ] {
+            assert!(audit.join(x).is_file(), "audit/{x} missing");
+        }
+        let summary = fs::read_to_string(audit.join("audit-summary.txt")).expect("summary");
+        let lines: Vec<&str> = summary.lines().collect();
+        assert!(lines[0].starts_with("round 1: 1 groups confirmed (5 found) -> 1 remaining; golden 95% upper 0.0050% (PASS)"), "{summary}");
+        assert!(
+            lines[1].starts_with("round 2: 0 groups confirmed (5 found) -> 0 remaining"),
+            "{summary}"
+        );
+        assert_eq!(lines[2], "stop: flat after round 2");
+        assert!(
+            lines[3].starts_with("final network: audit/round-2/net (sha256 "),
+            "{summary}"
+        );
+        let r1 = read_json(&audit.join("round-1.json")).expect("round 1");
+        assert_eq!(r1["groups_confirmed"][0]["name"], "g-one");
+        assert_eq!(r1["golden"]["slices"][0]["decisions"], 1);
+        assert_eq!(r1["mini_sets"][0]["decisions"], 2);
+        assert_eq!(r1["targeted"]["rows"], 1000);
+        assert_eq!(r1["targeted"]["weight"], 2.0);
+        assert!(
+            r1["shared"]["report_json"]
+                .as_str()
+                .is_some_and(|k| k.starts_with("inputs/sha256/"))
+        );
+        assert!(
+            r1["shared"]["predicates"]
+                .as_str()
+                .is_some_and(|k| k.starts_with("inputs/sha256/"))
+        );
+        let txt = fs::read_to_string(audit.join("round-1.txt")).expect("txt");
+        assert!(
+            txt.contains("g-one: weight 5.00%, bias +0.40%, SD 3.00%"),
+            "{txt}"
+        );
+        assert!(
+            txt.contains("Harvested for the next round: 1000 positions"),
+            "{txt}"
+        );
+        // The last network is the chunk's; every round's network is shared.
+        assert_eq!(rung["net"]["dir"], "audit/round-2/net");
+        assert!(
+            r["net_int_key"]
+                .as_str()
+                .is_some_and(|k| k.starts_with("inputs/sha256/"))
+        );
+        assert!(rung["net_r2"]["int_key"].as_str().is_some());
+        assert_eq!(rung["audit"]["stop"], "flat after round 2");
+        assert_eq!(rung["check"]["verdict"], "PASS");
+        assert!(out.join("hc-t3-o4.json").is_file());
+        // The heartbeat carries the loop's fields.
+        let hb = read_json(&root.join("heartbeat.json")).expect("heartbeat");
+        let p = &hb["progress"];
+        assert_eq!(p["round"], "2 of 3");
+        assert_eq!(
+            (
+                p["groups_found"].as_u64(),
+                p["groups_confirmed"].as_u64(),
+                p["groups_remaining"].as_u64()
+            ),
+            (Some(5), Some(0), Some(0))
+        );
+        assert_eq!(p["worst_group"], "none");
+        assert_eq!(p["slices_failing"], "0 of 1");
+        assert_eq!(
+            p["last_check"],
+            "round 2: mean loss 0.0020%, 95% upper 0.0050% (PASS)"
+        );
+        assert_eq!(p["audit_stop"], "flat after round 2");
+        let _ = fs::remove_dir_all(&f.base);
+    }
+
+    /// A loop stopped by its round limit, on the CPU: every round confirms the group, the
+    /// targeted shard of round 1 (with its weight) joins round 2's training as a file, round 2
+    /// harvests nothing (no round 3) but still checks its slices and mini set.
+    #[cfg(unix)]
+    #[test]
+    fn audit_loop_stops_at_the_round_limit() {
+        let f = fakes("auditlimit");
+        for n in 1..=2 {
+            fs::write(f.base.join(format!("audit-{n}.json")), GROUP_ONE).expect("write");
+        }
+        let tools = audit_tools(&f, false, None);
+        let params = audit_params(json!({ "audit_rounds": 2, "audit_target_rows": 4000,
+                                           "audit_weight": 3 }));
+        let root = f.base.join("run");
+        let mut ctx = Ctx::local("hybrid-test", &root, 4);
+        let r = chunk_steps(&mut ctx, &params, &tools, &f.table, json!({})).expect("the loop runs");
+        assert_eq!(r["verdict"], "FAIL");
+        assert_eq!(
+            r["audit"]["stop"],
+            "round limit (2 rounds; 1 groups remain: the next lever is network capacity)"
+        );
+        let log = fs::read_to_string(&f.calls).expect("calls");
+        let line = |p: &str| -> Vec<&str> { log.lines().filter(|l| l.starts_with(p)).collect() };
+        assert_eq!(
+            line("search labels --trick 4 --count 4000").len(),
+            1,
+            "{log}"
+        );
+        let trains = line("python -m fortyone_nn.train");
+        assert_eq!(trains.len(), 2);
+        let target =
+            std::path::absolute(root.join("hybrid-work/audit/targets/t4-target-r1-s30151.npy"))
+                .expect("abs");
+        assert!(
+            trains[1].contains(&format!("{} --val", target.display())),
+            "{}",
+            trains[1]
+        );
+        assert!(!trains[1].contains("--watch-dir") && trains[1].contains("--device cpu"));
+        assert_eq!(
+            fs::read_to_string(format!("{}.weight", target.display())).expect("weight"),
+            "3\n"
+        );
+        let rung = read_json(&root.join("out/hybrid/rung.json")).expect("rung.json");
+        let steps = steps_of(&rung);
+        let i = |s: &str| {
+            steps
+                .iter()
+                .position(|x| x == s)
+                .unwrap_or_else(|| panic!("{s} in {steps:?}"))
+        };
+        assert!(i("targeted harvest (round 1)") < i("train (round 2)"));
+        assert!(i("audit (round 2)") < i("golden slices (round 2)"));
+        assert!(i("golden slices (round 2)") < i("mini golden set m1 (round 2)"));
+        assert!(!steps.iter().any(|s| s == "targeted harvest (round 2)"));
+        let summary =
+            fs::read_to_string(root.join("out/hybrid/audit/audit-summary.txt")).expect("summary");
+        assert!(
+            summary.contains("round 2: 1 groups confirmed (5 found) -> 1 remaining"),
+            "{summary}"
+        );
+        assert!(summary.contains("stop: round limit"), "{summary}");
+        let hb = read_json(&root.join("heartbeat.json")).expect("heartbeat");
+        assert_eq!(hb["progress"]["round"], "2 of 2");
+        assert_eq!(hb["progress"]["groups_remaining"], 1);
+        assert!(
+            hb["progress"]["worst_group"]
+                .as_str()
+                .is_some_and(|w| w.starts_with("g-one: weight 5.00%"))
+        );
+        let _ = fs::remove_dir_all(&f.base);
+    }
+
+    /// A stop file that appears during round 2's audit: the step that follows is not started,
+    /// the chunk fails with the stop, and the summary (round 1's line, then the stop reason) and
+    /// `rung.json` are written first. Run in a child process: a stop request is process-wide.
+    #[cfg(unix)]
+    #[test]
+    fn audit_loop_stops_on_the_stop_file() {
+        if std::env::var_os("HYBRID_AUDIT_STOP_CHILD").is_none() {
+            let out = Command::new(std::env::current_exe().expect("exe"))
+                .args([
+                    "--exact",
+                    "hybrid::tests::audit_loop_stops_on_the_stop_file",
+                    "--nocapture",
+                ])
+                .env("HYBRID_AUDIT_STOP_CHILD", "1")
+                .output()
+                .expect("runs");
+            assert!(
+                out.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(String::from_utf8_lossy(&out.stdout).contains("1 passed"));
+            return;
+        }
+        let f = fakes("auditstop");
+        for n in 1..=3 {
+            fs::write(f.base.join(format!("audit-{n}.json")), GROUP_ONE).expect("write");
+        }
+        fs::write(f.base.join("stop-at-2"), "").expect("write");
+        let root = f.base.join("run");
+        let tools = audit_tools(&f, false, Some(&root.join("STOP")));
+        let params = audit_params(json!({ "audit_rounds": 3 }));
+        let mut ctx = Ctx::local("hybrid-test", &root, 4);
+        let e = chunk_steps(&mut ctx, &params, &tools, &f.table, json!({})).expect_err("stopped");
+        assert!(e.contains("stopped"), "{e}");
+        let log = fs::read_to_string(&f.calls).expect("calls");
+        assert_eq!(
+            log.lines()
+                .filter(|l| l.starts_with("python -m fortyone_nn.audit"))
+                .count(),
+            2
+        );
+        assert!(
+            !log.contains("--seed 30152"),
+            "round 2's targeted harvest never started:\n{log}"
+        );
+        let out = root.join("out").join("hybrid");
+        let summary = fs::read_to_string(out.join("audit/audit-summary.txt")).expect("summary");
+        let lines: Vec<&str> = summary.lines().collect();
+        assert!(
+            lines[0].starts_with("round 1: 1 groups confirmed"),
+            "{summary}"
+        );
+        assert!(
+            lines[1].starts_with("stop: stopped (STOP file"),
+            "{summary}"
+        );
+        let rung = read_json(&out.join("rung.json")).expect("rung.json");
+        assert!(
+            rung["audit"]["stop"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("stopped"))
+        );
+        assert_eq!(rung["audit"]["rounds"].as_array().map(Vec::len), Some(1));
+        let _ = fs::remove_dir_all(&f.base);
+    }
+
+    /// Without the audit settings (or with `audit_rounds` 0) a chunk is exactly as before: the
+    /// same calls in the same order and the same steps.
+    #[cfg(unix)]
+    #[test]
+    fn no_audit_settings_is_the_former_chunk() {
+        let f = fakes("auditnone");
+        let tools = Tools {
+            search: f.search.clone(),
+            uv: f.uv.clone(),
+            python_dir: f.py.clone(),
+            nvidia_smi: f.base.join("no-such-nvidia-smi"),
+            remote: None,
+        };
+        let base = json!({ "labels_random": 7, "labels_rules": 5, "val_count": 3,
+                           "golden_count": 2, "golden_worlds": 4, "widths": "16,8", "epochs": 2 });
+        let mut zero = base.clone();
+        zero["audit_rounds"] = json!(0);
+        let mut runs = Vec::new();
+        for (k, v) in [("absent", base), ("zero", zero)] {
+            fs::write(&f.calls, "").expect("truncate");
+            let root = f.base.join(k);
+            let mut ctx = Ctx::local("hybrid-test", &root, 4);
+            let p = parse(&v).expect("params");
+            assert_eq!(p.audit, None);
+            let r = chunk_steps(&mut ctx, &p, &tools, &f.table, json!({})).expect("runs");
+            assert!(r.get("audit").is_none());
+            let rung = read_json(&root.join("out/hybrid/rung.json")).expect("rung.json");
+            assert!(rung.get("audit").is_none());
+            let calls = fs::read_to_string(&f.calls)
+                .expect("calls")
+                .replace(&root.display().to_string(), "ROOT");
+            runs.push((steps_of(&rung), calls));
+        }
+        assert_eq!(runs[0], runs[1]);
+        assert_eq!(
+            runs[0].0,
+            [
+                "python environment",
+                "GPU check",
+                "labels random (1 of 3)",
+                "labels rules (2 of 3)",
+                "labels val (3 of 3)",
+                "golden decisions",
+                "golden worlds",
+                "share golden set",
+                "train",
+                "hybrid check"
+            ]
+        );
+        assert!(!runs[0].1.contains("fortyone_nn.audit") && !runs[0].1.contains("--slices"));
         let _ = fs::remove_dir_all(&f.base);
     }
 }
