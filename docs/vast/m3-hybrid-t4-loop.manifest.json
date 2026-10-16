@@ -1,12 +1,12 @@
 {
   "format": 2,
-  "run_id": "m3-hybrid-t4-loop-2",
+  "run_id": "m3-hybrid-t4-loop-3",
   "run_seed": 1,
   "threads": null,
   "benchmark_seconds": 0,
   "upload_every_s": 300,
   "heartbeat_every_s": 30,
-  "note": "Trick-4 audit loop, overnight 2026-10-16/17 (owner): groups down to 0.01% of positions, standard 0.01% then push 0.005%; start shape from the lead-5c/6a/6b comparison (docs/m3-hybrid/rung1.md). Golden set generated at 4,000 decisions x 320 exact worlds (10x the stored 400: a group's golden slice then holds enough decisions to prove 0.01% at 95%; about a minute to make, about 3 minutes a round to check). Audit shards of 10M positions (groups of 0.01% hold 1,000 of them): the second mechanism test measured the auditor at 2.2 minutes for 4M rows on 122 threads. Run 2 (2026-10-17 00:30 Irish): at most 60 new mini golden sets a round, the groups with the largest weight x SD^2 first. Run 1 confirmed 1,551 groups in round 1 (10M rows, gamma 0.0001); at about 20 s a set, 400 a round left about three training rounds for the night.",
+  "note": "Trick-4 audit loop, overnight 2026-10-16/17 (owner): groups down to 0.01% of positions, standard 0.01% then push 0.005%; start shape from the lead-5c/6a/6b comparison (docs/m3-hybrid/rung1.md). Golden set generated at 4,000 decisions x 320 exact worlds (10x the stored 400: a group's golden slice then holds enough decisions to prove 0.01% at 95%; about a minute to make, about 3 minutes a round to check). Audit shards of 10M positions (groups of 0.01% hold 1,000 of them): the second mechanism test measured the auditor at 2.2 minutes for 4M rows on 122 threads. Run 2 (2026-10-17 00:30 Irish): at most 60 new mini golden sets a round, the groups with the largest weight x SD^2 first. Run 1 confirmed 1,551 groups in round 1 (10M rows, gamma 0.0001); at about 20 s a set, 400 a round left about three training rounds for the night. Run 3: a patient price ladder ($1.40, $1.70, $2.00, ten searches a minute apart at each step; the owner asked for about 20 minutes of searching before a higher price): run 2 climbed to a $1.97/h machine in ten minutes while the $1.34/h one was still held by run 1.",
   "machine": {
     "gpus": 1,
     "min_gpu_ram_gb": 20,
@@ -27,7 +27,13 @@
       "H100 NVL",
       "H200",
       "H200 NVL"
-    ]
+    ],
+    "price_steps": [
+      1.4,
+      1.7,
+      2.0
+    ],
+    "tries_per_step": 10
   },
   "streams": [
     {
