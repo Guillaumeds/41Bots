@@ -3,9 +3,23 @@ positions where an integer oracle network is weak, without being told what to lo
 
     uv run python -m fortyone_nn.audit --net int.safetensors --shard AUDIT.npy [--shard ...]
         --out DIR [--gamma 0.001] [--alpha-bias 0.0025] [--alpha-sd 0.01] [--max-depth 6]
-        [--max-conj 3] [--fdr 0.05] [--screen 0.01] [--seed 1] [--chunk 2048]
+        [--max-conj 3] [--fdr 0.05] [--screen 0.01] [--seed 1] [--chunk 0] [--workers 0]
+        [--work DIR] [--keep-work]
 
 numpy only (no PyTorch), so it runs wherever the label shards are.
+
+**At scale** (docs/m3-hybrid/audit-loop.md, decisions of 2026-10-16 night: gamma 0.0001, so
+audit shards of 10-20M rows): every pass runs on ``--workers`` processes (default: one per CPU
+this process may use; forkserver start, one BLAS thread each) over tasks of a fixed size (row
+blocks of 65,536, histogram tasks of 2^18 rows, triple tasks of 2^19 rows of one item) that do
+not depend on the number of workers; the shard is memory-mapped and read block by block; shared
+arrays are ``.npy`` work files (``--work``, default ``OUT/work``, removed after unless
+``--keep-work``): the error columns, the race classes, half A's active lists, dense values and
+bins, its rows' items and each item's rows as a packed bitset, and the confirmed groups' members
+as packed bitsets. Memory is bounded by the task sizes (no per-group full-length mask is kept;
+groups are confirmed 512 at a time per block). Every sum is a whole number (float64 products
+and bincounts over at most 2^16 rows of values below 2^34 are exact, then added as int64), so
+every output is byte-identical for any number of workers (tested: 1 and 4).
 
 **Errors.** Every row's error is the integer network's money chance (``intnet``'s scheme, the one
 Rust runs, computed here by a faster exact path that is checked against ``intnet.money_rows`` on
@@ -42,12 +56,13 @@ bit of the ``i``-th output of SplitMix64 seeded with ``--seed`` is 0, else in ha
   team's game, its best-trump bonus, the 5 of trumps played; for the one-hot blocks "off" is the
   union of the block's other values; an item on in every row defines no group and is not
   extended). Pruned by support (Apriori: a conjunction is counted only when every
-  sub-conjunction is frequent) and, as SliceFinder does, a candidate is not extended (a group
-  inside it is reported through it). The sums are matrix products: single items exactly (float64
-  on whole numbers whose partial sums stay below 2^53), pairs and triples in float32 with a
-  rigorous bound on every sum's error, the candidate rule applied at both ends of each sum's
-  range, and a conjunction the bound leaves undecided summed again exactly; so the candidates are
-  exactly those of whole-number arithmetic on any machine and thread count (``Enumeration``).
+  sub-conjunction is frequent), as SliceFinder does a candidate is not extended (a group inside
+  it is reported through it), and by a valid bound on what any extension can reach
+  (``Screen.extendable``: the optimistic estimate of exhaustive subgroup discovery; it never
+  changes the candidates). The sums are sparse and exact: pairs from every row's list of items
+  (a row of half A holds about 46 of them), triples per item over that item's rows; so the
+  candidates are exactly those of whole-number arithmetic on any machine and worker count
+  (``Enumeration``).
 
 **Candidates.** A group whose half-A statistics exceed a threshold (``|bias| > alpha_bias`` for
 some team, or ``sd > alpha_sd``) and whose one-sided test on half A gives p <= ``--screen`` (the
@@ -679,7 +694,7 @@ def benjamini_hochberg(p, fdr):
 
 
 class Screen:
-    """The half-A candidate rule, vectorised over many groups' screening sums (columns
+    """The half-A candidate rule, vectorised over many groups' exact screening sums (columns
     ``SCREEN_COLS``: n, e0, e1, e2, q, qq; the fourth team's sum is minus the others')."""
 
     def __init__(self, alpha_bias, alpha_sd, minsup, screen):
@@ -703,7 +718,7 @@ class Screen:
 
     def __call__(self, s):
         """Exact sums int64 [k, 6] -> (candidate, sd flag, bias flag), bool [k] each."""
-        s = np.asarray(s, dtype=np.float64)
+        s = np.asarray(s, dtype=np.float64).reshape(-1, 6)
         n = s[:, 0]
         nn = np.maximum(n, 2.0)
         e = s[:, 1:4]
@@ -713,48 +728,458 @@ class Screen:
         sd, bi = self._decide(n, ab, msq, var_q, msq)
         return sd | bi, sd, bi
 
-    def bounded(self, n, s, gamma):
-        """The rule on approximate sums ``s`` (float64 [k, 6], column 0 exact) each within
-        ``gamma`` times the sum of the absolute values summed (float32 products): (decided,
-        candidate, sd flag, bias flag); where not decided, the exact sums must be used. The
-        decision is taken at both ends of every sum's range (the flags grow with the mean square
-        and the largest |bias|, and fall with the variance and, for the bias, the mean square)."""
-        nn = np.maximum(n, 2.0)
-        sq, sqq = s[:, 4], s[:, 5]
-        dq = gamma * np.abs(sq) / (1 - gamma)
-        dqq = gamma * np.abs(sqq) / (1 - gamma)
-        sq_hi, sq_lo = sq + dq, np.maximum(sq - dq, 0.0)
-        sqq_hi, sqq_lo = sqq + dqq, np.maximum(sqq - dqq, 0.0)
-        # Every team's squared error is below 3 * 2^32 * (q + 1) per row; Cauchy-Schwarz bounds
-        # the sum of |e_t| over the rows.
-        de = gamma * np.sqrt(nn * 3.0 * ONE * (sq_hi + nn)) / (1 - gamma)
-        e = s[:, 1:4]
-        e4 = np.column_stack([e, -e.sum(axis=1)])
-        d4 = np.column_stack([de, de, de, 3 * de])
-        ab_hi = (np.abs(e4) + d4).max(axis=1) / nn / ONE
-        ab_lo = np.maximum(np.abs(e4) - d4, 0.0).max(axis=1) / nn / ONE
-        m_hi, m_lo = sq_hi / nn / ONE, sq_lo / nn / ONE
-        v_hi = np.maximum(sqq_hi / nn / ONE - m_lo**2, 0.0) * nn / (nn - 1)
-        v_lo = np.maximum(sqq_lo / nn / ONE - m_hi**2, 0.0) * nn / (nn - 1)
-        sd_hi, bi_hi = self._decide(n, ab_hi, m_hi, v_lo, m_lo)
-        sd_lo, bi_lo = self._decide(n, ab_lo, m_lo, v_hi, m_hi)
-        decided = (sd_hi == sd_lo) & (bi_hi == bi_lo)
-        return decided, sd_lo | bi_lo, sd_lo, bi_lo
+    def extendable(self, sq, sm):
+        """bool [k]: whether a conjunction extending a group could still be a candidate, from the
+        group's exact sums ``sq`` of q and ``sm`` of m (the largest |e_t| of a row) over its rows.
+
+        The bound (the optimistic estimate of exhaustive subgroup discovery with a minimum support:
+        Grosskreutz, Rüping, Wrobel 2008; Lemmerich, Atzmueller, Puppe 2016): any subset C of the
+        group P with at least ``minsup`` rows has mean square sum_C q / n_C <= sum_P q / minsup
+        (q >= 0), and every team's |bias| = |sum_C e_t| / n_C <= sum_C m / n_C <= sum_P m / minsup.
+        The candidate rule needs mean square > alpha_sd^2 or |bias| > alpha_bias, so when both
+        bounds are at or below (with a relative margin of 1e-9, far above the float64 rounding of
+        the rule's own arithmetic) no extension can be a candidate and P is not extended. The
+        bound is valid, never a heuristic: the candidates are the same with and without it."""
+        sq = np.asarray(sq, dtype=np.float64)
+        sm = np.asarray(sm, dtype=np.float64)
+        keep = 1.0 - 1e-9
+        return (sq / self.minsup / ONE > self.alpha_sd**2 * keep) | (sm / self.minsup / ONE > self.alpha_bias * keep)
 
 
 # ---------------------------------------------------------------------------------------------
 # Half split.
 
 
-def half_b(seed, n):
-    """bool [n]: row i is in half B when the top bit of the i-th output of SplitMix64(seed) is 1."""
-    i = np.arange(1, n + 1, dtype=np.uint64)
+def half_b_range(seed, start, stop):
+    """bool [stop - start]: rows start..stop-1 of ``half_b``."""
+    i = np.arange(start + 1, stop + 1, dtype=np.uint64)
     with np.errstate(over="ignore"):
         z = np.uint64(seed & 0xFFFFFFFFFFFFFFFF) + i * np.uint64(0x9E3779B97F4A7C15)
         z = (z ^ (z >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
         z = (z ^ (z >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
         z = z ^ (z >> np.uint64(31))
     return (z >> np.uint64(63)).astype(bool)
+
+
+def half_b(seed, n):
+    """bool [n]: row i is in half B when the top bit of the i-th output of SplitMix64(seed) is 1."""
+    return half_b_range(seed, 0, n)
+
+
+# ---------------------------------------------------------------------------------------------
+# Whole-number columns of a row's error, as the passes store them.
+
+NCOL = 12  # 1, e (4), e2 (4), q, qq, m
+COL_M = 11  # m = max over the teams of |e_t|: the bound on every team's |bias| (``Screen.extendable``)
+# The enumeration's sums: count, e0, e1, e2, q, qq (``SCREEN_COLS``), then m.
+ENUM_W = (1, 2, 3, 9, 10, COL_M)
+
+
+def error_columns(e):
+    """int64 [n, NCOL] of the errors ``e`` (int64 [n, 4], |e| <= 2^32): ``Errors.columns`` and m."""
+    err = Errors.of(e)
+    return np.column_stack([err.columns(), np.abs(err.e).max(axis=1) if len(err) else np.zeros(0, np.int64)])
+
+
+# ---------------------------------------------------------------------------------------------
+# Parallel passes (the auditor at scale).
+#
+# Every pass splits the rows (or the work) into tasks of a fixed size that does not depend on the
+# number of workers; every sum a task returns is a whole number (float64 bincounts and products
+# are taken over at most 2^16 rows of values below 2^34, so every partial sum is below 2^50 and
+# exact; they are then added as int64), so the totals, and everything decided from them, are the
+# same for any number of workers. Shared arrays are ``.npy`` files in a work directory, opened
+# memory-mapped by each worker.
+
+BLOCK = 1 << 16  # rows of a block (a multiple of 8, so packed bitsets of blocks align)
+SUB = 1 << 14  # rows of one bincount or product
+KEYS = 1 << 22  # pair keys made at once
+L3_ROWS = 1 << 19  # rows of one triple task
+HIST_ROWS = 1 << 18  # rows of one histogram task
+P999_ROWS = 1 << 21  # p99.9 of a group's |error| over at most this many half-B rows (the first)
+KI = 96 + 9  # items per row at most: the active features, and the yes/no features' "off"
+_BLAS_ENV = ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "BLIS_NUM_THREADS")
+
+_CACHE = {}
+
+
+def _open(path, write=False):
+    """A work file, memory-mapped (cached per process)."""
+    key = (path, write)
+    a = _CACHE.get(key)
+    if a is None:
+        a = np.load(path, mmap_mode="r+" if write else "r", allow_pickle=False)
+        _CACHE[key] = a
+    return a
+
+
+def _json(path):
+    key = ("json", path)
+    a = _CACHE.get(key)
+    if a is None:
+        with open(path) as fh:
+            a = json.load(fh)
+        _CACHE[key] = a
+    return a
+
+
+def _new(path, shape, dtype, fill=None):
+    """A new work file of at least one element per axis."""
+    shape = tuple(max(int(x), 1) for x in shape)
+    a = np.lib.format.open_memmap(path, mode="w+", dtype=dtype, shape=shape)
+    if fill is not None:
+        a[...] = fill
+    a.flush()
+    del a
+    return path
+
+
+def _save(path, arr):
+    np.save(path, np.asarray(arr), allow_pickle=False)
+    return path
+
+
+def _call(job):
+    fn, i, task = job
+    return i, fn(task)
+
+
+class Workers:
+    """``workers`` processes (forkserver start, one BLAS thread each), or this process for 1.
+    ``map`` returns the results in task order whatever order they finish in."""
+
+    def __init__(self, workers):
+        self.n = max(1, int(workers))
+        self.pool = None
+        if self.n > 1:
+            import multiprocessing as mp
+
+            ctx = mp.get_context("forkserver" if "forkserver" in mp.get_all_start_methods() else "spawn")
+            old = {k: os.environ.get(k) for k in _BLAS_ENV}
+            os.environ.update({k: "1" for k in _BLAS_ENV})
+            try:
+                self.pool = ctx.Pool(self.n)
+            finally:
+                for k, v in old.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+
+    def map(self, fn, tasks, cost=None):
+        """``fn`` of every task, in task order; ``cost``: run the dearest first (balance only)."""
+        tasks = list(tasks)
+        if self.pool is None or len(tasks) <= 1:
+            return [fn(t) for t in tasks]
+        order = range(len(tasks)) if cost is None else sorted(range(len(tasks)), key=lambda i: (-cost[i], i))
+        out = [None] * len(tasks)
+        for i, r in self.pool.imap_unordered(_call, [(fn, i, tasks[i]) for i in order]):
+            out[i] = r
+        return out
+
+    def close(self):
+        if self.pool is not None:
+            self.pool.close()
+            self.pool.join()
+            self.pool = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        if self.pool is not None:
+            self.pool.terminate()
+            self.pool.join()
+            self.pool = None
+
+
+def _blocks(n, size=BLOCK):
+    return [(s, min(s + size, n)) for s in range(0, n, size)]
+
+
+def _bool_matrix(active):
+    """bool [n, N_BINARY] from active lists (any width, PAD-padded)."""
+    active = np.asarray(active)
+    out = np.zeros((len(active), N_BINARY), dtype=bool)
+    r, c = np.nonzero(active != PAD)
+    out[r, active[r, c].astype(np.int64)] = True
+    return out
+
+
+_NETS = {}
+
+
+def _exact_net(path):
+    if path not in _NETS:
+        layers, meta = intnet.load(path)
+        _NETS[path] = (ExactNet(layers), meta.get("head", "money4"))
+    return _NETS[path]
+
+
+def _records(ctx, s, t):
+    """Rows s..t-1 of the shards, one after another."""
+    parts = []
+    for path, lo, hi in ctx["shards"]:
+        a, b = max(s, lo), min(t, hi)
+        if a < b:
+            parts.append(np.asarray(load_shard(path)[a - lo : b - lo]))
+    return parts[0] if len(parts) == 1 else np.concatenate(parts)
+
+
+def _feats(ctx, s, t):
+    """(active lists, dense values) of rows s..t-1: from the shards, or the work copies."""
+    if ctx.get("shards"):
+        r = _records(ctx, s, t)
+        return np.asarray(r["active"]), np.asarray(r["dense"])
+    return np.asarray(_open(ctx["act"])[s:t]), np.asarray(_open(ctx["dense"])[s:t])
+
+
+def _write_block(ctx, s, t, a0, cols, races, active, dense):
+    """Stores a block's columns, and its half-A rows' features; returns its sums."""
+    _open(ctx["cols"], True)[s:t] = cols
+    _open(ctx["races"], True)[s:t] = races
+    isb = np.asarray(_open(ctx["isb"])[s:t])
+    a = ~isb
+    na = int(a.sum())
+    act = np.asarray(active)[a]
+    if na:
+        _open(ctx["actA"], True)[a0 : a0 + na, : act.shape[1]] = act
+        _open(ctx["colsA"], True)[a0 : a0 + na] = cols[a]
+        _open(ctx["denseA"], True)[:, a0 : a0 + na] = np.asarray(dense)[a].T
+    flat = act[act != PAD].astype(np.int64)
+    race_sums = np.zeros((len(RACE_CLASS_NAMES), NCOL), dtype=np.int64)
+    for k in range(len(RACE_CLASS_NAMES)):
+        race_sums[k] = cols[races == k].sum(axis=0)
+    return {"on": np.bincount(flat, minlength=N_BINARY), "race_sums": race_sums, "rows_a": na}
+
+
+def _task_prep(args):
+    """A block of the shards: checks, the integer network, the error columns, race classes."""
+    ctx, s, t, a0 = args
+    r = _records(ctx, s, t)
+    tricks = sorted(int(x) for x in np.unique(r["trick"]))
+    fault = value_fault(r)
+    if fault is not None:
+        return {"fault": fault, "tricks": tricks}
+    net, head = _exact_net(ctx["net"])
+    pred = []
+    for i in range(0, len(r), ctx["chunk"]):
+        b = r[i : i + ctx["chunk"]]
+        z = net.logits(b["active"], b["dense"])
+        pred.append(money4(z) if head == "money4" else money_outcomes(z, b["mask"], b["outcomes"]))
+    e = np.concatenate(pred).astype(np.int64) - np.asarray(r["value"]).astype(np.int64)
+    out = _write_block(ctx, s, t, a0, error_columns(e), race_classes(r).astype(np.int8), r["active"], r["dense"])
+    out.update({"fault": None, "tricks": tricks})
+    return out
+
+
+def column_thresholds(x):
+    """``dense_thresholds`` of one column."""
+    x = np.sort(np.asarray(x, dtype=np.int64))
+    if not len(x):
+        return np.zeros(0, dtype=np.int64)
+    idx = (np.arange(1, N_BINS) * len(x)) // N_BINS
+    t = np.unique(x[np.minimum(idx, len(x) - 1)])
+    return t[t < x[-1]]
+
+
+def _task_thresholds(args):
+    ctx, j = args
+    return column_thresholds(_open(ctx["denseA"])[j, : ctx["n_a"]])
+
+
+def _task_items(args):
+    """A block of half A: the dense bins, the rows' items (sorted, ``F`` after the last), the
+    items' packed bitsets and their exact sums (count, then ``ENUM_W``)."""
+    ctx, s, t = args
+    thr, lens = _open(ctx["thr"]), _open(ctx["thr_len"])
+    dT = _open(ctx["denseA"])
+    bins = np.empty((t - s, N_DENSE), dtype=np.uint8)
+    for j in range(N_DENSE):
+        bins[:, j] = np.searchsorted(thr[j, : lens[j]], np.asarray(dT[j, s:t], dtype=np.int64), side="left")
+    _open(ctx["binsA"], True)[s:t] = bins
+    feat, on = _open(ctx["item_feature"]), _open(ctx["item_on"])
+    f = int(ctx["n_items"])
+    xb = _bool_matrix(_open(ctx["actA"])[s:t])
+    x = xb[:, feat[:f]] == on[:f][None, :] if f else np.zeros((t - s, 0), dtype=bool)
+    if f:
+        _open(ctx["ibits"], True)[:f, s // 8 : s // 8 + (t - s + 7) // 8] = np.packbits(x, axis=0).T
+    r, c = np.nonzero(x)
+    pos = np.arange(len(r)) - np.searchsorted(r, r, side="left")
+    if len(pos) and int(pos.max()) >= KI:
+        raise ValueError(f"a row with more than {KI} items")
+    items = np.full((t - s, KI), f, dtype=np.int16)
+    items[r, pos] = c
+    _open(ctx["itemsA"], True)[s:t] = items
+    w = np.asarray(_open(ctx["colsA"])[s:t])[:, ENUM_W]
+    out = np.zeros((max(f, 1), 7), dtype=np.int64)
+    for i in range(0, t - s, SUB):
+        xs = x[i : i + SUB].astype(np.float64)
+        out[:f, 0] += np.rint(xs.sum(axis=0)).astype(np.int64)
+        out[:f, 1:] += np.rint(xs.T @ w[i : i + SUB].astype(np.float64)).astype(np.int64)
+    return out[:f]
+
+
+def _task_pairs(args):
+    """A range of half-A rows: exact sums (count, then ``ENUM_W``) of every pair of grow items
+    (positions a < b, key a * G + b) over the rows holding both."""
+    ctx, s, t = args
+    g = int(ctx["n_grow"])
+    lut = _open(ctx["pos_lut"])
+    items, colsA = _open(ctx["itemsA"]), _open(ctx["colsA"])
+    acc = np.zeros((7, g * g), dtype=np.int64)
+    for i in range(s, t, SUB):
+        j = min(i + SUB, t)
+        gp = lut[np.asarray(items[i:j]).astype(np.int64)]
+        gp.sort(axis=1)
+        k = int((gp < g).sum(axis=1).max()) if len(gp) else 0
+        if k < 2:
+            continue
+        gp = gp[:, :k].astype(np.int64)
+        w = np.asarray(colsA[i:j])[:, ENUM_W].astype(np.float64)
+        iu, ju = np.triu_indices(k, 1)
+        step = max(1, KEYS // len(iu))
+        for r0 in range(0, len(gp), step):
+            blk = gp[r0 : r0 + step]
+            hi = blk[:, ju]
+            ri, pi = np.nonzero(hi < g)
+            key = blk[ri, iu[pi]] * g + hi[ri, pi]
+            acc[0] += np.bincount(key, minlength=g * g)
+            ww = w[r0 + ri]
+            for c in range(6):
+                acc[1 + c] += np.rint(np.bincount(key, weights=ww[:, c], minlength=g * g)).astype(np.int64)
+    return acc
+
+
+def _task_triples(args):
+    """Rows lo..hi-1 of grow item ``a``'s rows (half A): exact sums (count, e0, e1, e2, q, qq) of
+    every triple (a, b, c), b < c among the items extending ``a`` whose pair is extendable too, in
+    the order of ``np.flatnonzero`` of that pair table."""
+    ctx, a, lo, hi = args
+    g = int(ctx["n_grow"])
+    grow2 = _open(ctx["grow2"])
+    ba = np.asarray(grow2[a, :g]).copy()
+    ba[: a + 1] = False
+    nb = int(ba.sum())
+    sub = np.asarray(grow2[:g, :g])[np.ix_(ba, ba)]
+    want = np.flatnonzero(np.triu(sub, 1).reshape(-1))
+    if nb < 2 or not len(want):
+        return np.zeros((6, 0), dtype=np.int64)
+    rank = np.full(g + 1, nb, dtype=np.int64)
+    rank[np.flatnonzero(ba)] = np.arange(nb)
+    lut = _open(ctx["pos_lut"])
+    item = int(_open(ctx["item_of_pos"])[a])
+    rows = np.flatnonzero(np.unpackbits(np.asarray(_open(ctx["ibits"])[item]), count=int(ctx["n_a"])))[lo:hi]
+    items, colsA = _open(ctx["itemsA"]), _open(ctx["colsA"])
+    acc = np.zeros((6, nb * nb), dtype=np.int64)
+    for i in range(0, len(rows), SUB):
+        r = rows[i : i + SUB]
+        loc = rank[lut[np.asarray(items[r]).astype(np.int64)]]
+        loc.sort(axis=1)
+        k = int((loc < nb).sum(axis=1).max()) if len(loc) else 0
+        if k < 2:
+            continue
+        loc = loc[:, :k]
+        w = np.asarray(colsA[r])[:, ENUM_W[:5]].astype(np.float64)
+        iu, ju = np.triu_indices(k, 1)
+        step = max(1, KEYS // len(iu))
+        for r0 in range(0, len(loc), step):
+            blk = loc[r0 : r0 + step]
+            hi_ = blk[:, ju]
+            ri, pi = np.nonzero(hi_ < nb)
+            b, c = blk[ri, iu[pi]], hi_[ri, pi]
+            ok = sub[b, c]
+            ri, b, c = ri[ok], b[ok], c[ok]
+            key = b * nb + c
+            acc[0] += np.bincount(key, minlength=nb * nb)
+            ww = w[r0 + ri]
+            for col in range(5):
+                acc[1 + col] += np.rint(np.bincount(key, weights=ww[:, col], minlength=nb * nb)).astype(np.int64)
+    return acc[:, want]
+
+
+def _task_hist(args):
+    """A node's rows (half-A positions): exact histograms of the tree's targets (``kind``
+    "signed": the four teams' errors; "abs": the sum of their absolute values) per binary
+    feature and per dense feature and bin, the targets' totals and the screening sums."""
+    ctx, rows, kind = args
+    act, bins, colsA = _open(ctx["actA"]), _open(ctx["binsA"]), _open(ctx["colsA"])
+    d = 4 if kind == "signed" else 1
+    nb = N_BINS
+    n_on = np.zeros(N_BINARY, dtype=np.int64)
+    s_on = np.zeros((N_BINARY, d), dtype=np.int64)
+    cnt = np.zeros(N_DENSE * nb, dtype=np.int64)
+    sums = np.zeros((N_DENSE * nb, d), dtype=np.int64)
+    total = np.zeros(d, dtype=np.int64)
+    scr = np.zeros(len(SCREEN_COLS), dtype=np.int64)
+    for i in range(0, len(rows), SUB):
+        r = rows[i : i + SUB]
+        a = np.asarray(act[r])
+        c = np.asarray(colsA[r])
+        y = c[:, 1:5] if d == 4 else np.abs(c[:, 1:5]).sum(axis=1, keepdims=True)
+        ri, ci = np.nonzero(a != PAD)
+        flat = a[ri, ci].astype(np.int64)
+        n_on += np.bincount(flat, minlength=N_BINARY)
+        b = (np.arange(N_DENSE)[None, :] * nb + np.asarray(bins[r]).astype(np.int64)).reshape(-1)
+        cnt += np.bincount(b, minlength=N_DENSE * nb)
+        for k in range(d):
+            yk = y[:, k].astype(np.float64)
+            s_on[:, k] += np.rint(np.bincount(flat, weights=yk[ri], minlength=N_BINARY)).astype(np.int64)
+            sums[:, k] += np.rint(np.bincount(b, weights=np.repeat(yk, N_DENSE), minlength=N_DENSE * nb)).astype(np.int64)
+        total += y.sum(axis=0)
+        scr += c[:, list(SCREEN_COLS)].sum(axis=0)
+    return [n_on, s_on, cnt.reshape(N_DENSE, nb), sums.reshape(N_DENSE, nb, d), total, len(rows), scr]
+
+
+CAND_CHUNK = 512  # groups whose members are held at once in a confirmation block
+
+
+def _task_confirm(args):
+    """A block of all rows: each group's exact column sums over its rows in half A and in half B;
+    with ``bits`` (a work file), its members are written there as packed bits instead. Groups are
+    taken ``CAND_CHUNK`` at a time, so a worker's memory does not grow with their number."""
+    ctx, s, t, groups_path, bits = args
+    groups = _json(groups_path)
+    active, dense = _feats(ctx, s, t)
+    xb = _bool_matrix(active)
+    dense = np.asarray(dense, dtype=np.int64)
+    cols = np.asarray(_open(ctx["cols"])[s:t]).astype(np.float64)
+    isb = np.asarray(_open(ctx["isb"])[s:t])
+    k = len(groups)
+    out = np.zeros((k, 2, NCOL), dtype=np.int64)
+    halves = [(i, sel) for i in range(0, t - s, SUB) for sel in (~isb[i : i + SUB], isb[i : i + SUB])]
+    for g0 in range(0, k, CAND_CHUNK):
+        g1 = min(k, g0 + CAND_CHUNK)
+        m = np.empty((t - s, g1 - g0), dtype=bool)
+        for g in range(g0, g1):
+            m[:, g - g0] = members(groups[g], xb, dense)
+        if bits is not None:
+            _open(bits, True)[g0:g1, s // 8 : s // 8 + (t - s + 7) // 8] = np.packbits(m, axis=0).T
+            continue
+        for h, (i, sel) in enumerate(halves):
+            if sel.any():
+                mi = m[i : i + SUB][sel].T.astype(np.float64)
+                out[g0:g1, h % 2] += np.rint(mi @ cols[i : i + SUB][sel]).astype(np.int64)
+    return None if bits is not None else out
+
+
+def _task_detail(args):
+    """A confirmed group (row ``g`` of the bits file): its race-class mix, its example row (the
+    half-B row of largest mean square, the first such) and the 99.9th percentile of |error| over
+    its half-B rows (the first ``P999_ROWS`` of them in row order)."""
+    ctx, bits, g = args
+    n = int(ctx["n"])
+    rows = np.flatnonzero(np.unpackbits(np.asarray(_open(bits)[g]), count=n))
+    races = np.bincount(np.asarray(_open(ctx["races"])[rows]).astype(np.int64), minlength=len(RACE_CLASS_NAMES))
+    rows_b = rows[np.asarray(_open(ctx["isb"])[rows])]
+    out = {"races": [int(x) for x in races], "example_row": None, "p999": None}
+    if len(rows_b):
+        cols = _open(ctx["cols"])
+        q = np.asarray(cols[rows_b, 9])
+        out["example_row"] = int(rows_b[int(np.argmax(q))])
+        eb = np.abs(np.asarray(cols[rows_b[:P999_ROWS], 1:5])).astype(np.float64) / ONE
+        out["p999"] = float(np.quantile(eb, 0.999))
+    return out
 
 
 # ---------------------------------------------------------------------------------------------
@@ -766,16 +1191,7 @@ N_BINS = 64  # a dense feature splits at up to N_BINS - 1 thresholds
 def dense_thresholds(dense):
     """Per dense feature: the sorted distinct values of its quantiles k / N_BINS (k = 1..63) on
     the given rows, each a value of the data; a split is "x <= threshold"."""
-    out = []
-    for j in range(dense.shape[1]):
-        x = np.sort(np.asarray(dense[:, j], dtype=np.int64))
-        if not len(x):
-            out.append(np.zeros(0, dtype=np.int64))
-            continue
-        idx = (np.arange(1, N_BINS) * len(x)) // N_BINS
-        t = np.unique(x[np.minimum(idx, len(x) - 1)])
-        out.append(t[t < x[-1]])  # a threshold at the maximum splits nothing off
-    return out
+    return [column_thresholds(np.asarray(dense)[:, j]) for j in range(np.asarray(dense).shape[1])]
 
 
 def dense_bins(dense, thresholds):
@@ -787,60 +1203,51 @@ def dense_bins(dense, thresholds):
     return out
 
 
-def _histograms(act, bins, y, rows):
-    """A node's sums: per binary feature, rows on and target sums; per dense feature and bin, rows
-    and target sums; the node's target total and rows."""
-    k, d = len(rows), y.shape[1]
+def fit_tree(d, pool, kind, min_leaf, max_depth):
+    """A CART regression tree on half A (squared-error impurity summed over the targets: the
+    four teams' errors for ``kind`` "signed", the sum of their absolute values for "abs"); every
+    histogram exact (``_task_hist``, in tasks of ``HIST_ROWS`` rows), so the splits are the same
+    for any number of workers. A binary feature splits on/off, a dense feature at one of up to 63
+    thresholds (quantiles of half A); the best split by squared-error reduction, ties to the lower
+    feature and threshold. Returns the nodes below the root: (path conditions, half-A positions,
+    depth, screening sums). A node's histograms are counted for the smaller child of each split
+    and taken from the parent for the other (histogram subtraction, exact here)."""
+    ctx, thresholds = d.ctx, d.thresholds
     nb = N_BINS
-    yr = y[rows]
-    a = act[rows]
-    valid = a != PAD
-    flat = a[valid]
-    rpos = np.broadcast_to(np.arange(k)[:, None], a.shape)[valid]
-    n_on = np.bincount(flat, minlength=N_BINARY).astype(np.float64)
-    s_on = np.stack([np.bincount(flat, weights=yr[rpos, t], minlength=N_BINARY) for t in range(d)], axis=1)
-    bflat = (np.arange(N_DENSE)[None, :] * nb + bins[rows].astype(np.int64)).reshape(-1)
-    cnt = np.bincount(bflat, minlength=N_DENSE * nb).reshape(N_DENSE, nb).astype(np.float64)
-    sums = np.stack([np.bincount(bflat, weights=np.repeat(yr[:, t], N_DENSE), minlength=N_DENSE * nb)
-                     .reshape(N_DENSE, nb) for t in range(d)], axis=2)
-    return [n_on, s_on, cnt, sums, yr.sum(axis=0), float(k)]
 
+    def hist(rows):
+        parts = pool.map(_task_hist, [(ctx, rows[i : i + HIST_ROWS], kind) for i in range(0, len(rows), HIST_ROWS)])
+        if not parts:
+            parts = [_task_hist((ctx, rows, kind))]
+        return [sum(p[k] for p in parts) for k in range(7)]
 
-def fit_tree(active, bins, thresholds, y, min_leaf, max_depth):
-    """A CART regression tree on the rows given (``active`` [m, 96] the shard's active lists,
-    ``bins`` from ``dense_bins``, ``y`` [m, d] float64 targets, squared-error impurity summed over
-    the d targets). Returns its nodes below the root: (path conditions, row indices, depth). A
-    node's sums are counted for the smaller child of each split and taken from the parent for the
-    other (the histogram subtraction of gradient-boosting libraries; the same splits up to
-    rounding)."""
-    m, d = y.shape
-    act = np.asarray(active).astype(np.int64)
-    nb = N_BINS
     exists = np.arange(nb - 1)[None, :] < np.array([len(t) for t in thresholds])[:, None]
+    bits_of = {f: i for i, (f, v) in enumerate(d.items) if v == 1}
     out = []
-    queue = [([], np.arange(m), 0, None)]
+    queue = [([], np.arange(d.n_a, dtype=np.int64), 0, None)]
     while queue:
-        conds, rows, depth, hist = queue.pop(0)
+        conds, rows, depth, h = queue.pop(0)
+        if h is None:
+            h = hist(rows)
+        n_on, s_on, cnt, sums, total, k, scr = h
         if depth > 0:
-            out.append((conds, rows, depth))
-        if depth >= max_depth or len(rows) < 2 * min_leaf:
+            out.append((conds, rows, depth, scr))
+        if depth >= max_depth or k < 2 * min_leaf:
             continue
-        if hist is None:
-            hist = _histograms(act, bins, y, rows)
-        n_on, s_on, cnt, sums, total, k = hist
-        base = float((total**2).sum()) / k
-        # Binary features: left = on.
-        n_off = k - n_on
-        s_off = total[None, :] - s_on
-        okb = (n_on >= min_leaf) & (n_off >= min_leaf)
+        totf = total.astype(np.float64)
+        base = float((totf**2).sum()) / k
+        n_onf = n_on.astype(np.float64)
+        s_onf = s_on.astype(np.float64)
+        n_off = k - n_onf
+        s_off = totf[None, :] - s_onf
+        okb = (n_onf >= min_leaf) & (n_off >= min_leaf)
         with np.errstate(divide="ignore", invalid="ignore"):
-            gb = (s_on**2).sum(axis=1) / n_on + (s_off**2).sum(axis=1) / n_off - base
+            gb = (s_onf**2).sum(axis=1) / n_onf + (s_off**2).sum(axis=1) / n_off - base
         gb = np.where(okb, gb, -np.inf)
-        # Dense features: left = bin <= b (x <= thresholds[j][b]).
-        n_le = np.cumsum(cnt, axis=1)[:, : nb - 1]
-        s_le = np.cumsum(sums, axis=1)[:, : nb - 1, :]
+        n_le = np.cumsum(cnt, axis=1)[:, : nb - 1].astype(np.float64)
+        s_le = np.cumsum(sums, axis=1)[:, : nb - 1, :].astype(np.float64)
         n_gt = k - n_le
-        s_gt = total[None, None, :] - s_le
+        s_gt = totf[None, None, :] - s_le
         okd = exists & (n_le >= min_leaf) & (n_gt >= min_leaf)
         with np.errstate(divide="ignore", invalid="ignore"):
             gd = (s_le**2).sum(axis=2) / n_le + (s_gt**2).sum(axis=2) / n_gt - base
@@ -851,20 +1258,21 @@ def fit_tree(active, bins, thresholds, y, min_leaf, max_depth):
             continue
         if best < N_BINARY:
             f = best
-            left_mask = (act[rows] == f).any(axis=1)
+            on = np.unpackbits(np.asarray(_open(ctx["ibits"])[bits_of[f]]), count=d.n_a).astype(bool)
+            left_mask = on[rows]
             cl = [{"feature": f, "op": "==", "value": 1}]
             cr = [{"feature": f, "op": "==", "value": 0}]
         else:
             j, b = divmod(best - N_BINARY, nb - 1)
             t = int(thresholds[j][b])
-            left_mask = bins[rows, j] <= b
+            left_mask = np.asarray(_open(ctx["binsA"])[rows, j]) <= b
             cl = [{"feature": N_BINARY + j, "op": "<=", "value": t}]
             cr = [{"feature": N_BINARY + j, "op": ">", "value": t}]
         lrows, rrows = rows[left_mask], rows[~left_mask]
         if depth + 1 < max_depth:
             small_left = len(lrows) <= len(rrows)
-            hs = _histograms(act, bins, y, lrows if small_left else rrows)
-            hl = [p - c for p, c in zip(hist, hs)]
+            hs = hist(lrows if small_left else rrows)
+            hl = [p - c for p, c in zip(h, hs)]
             hleft, hright = (hs, hl) if small_left else (hl, hs)
         else:
             hleft = hright = None
@@ -876,222 +1284,246 @@ def fit_tree(active, bins, thresholds, y, min_leaf, max_depth):
 # ---------------------------------------------------------------------------------------------
 # The conjunction enumeration.
 
-EXACT_ROWS = 1 << 17  # rows per float64 product: |sum| < 2^17 * 2^33 = 2^50, exact
-FLOAT_ROWS = 1 << 14  # rows per float32 product (the error bound grows with it)
-U32 = 2.0**-24
-# The bound on a float32 dot product of FLOAT_ROWS terms (Higham, Accuracy and Stability of
-# Numerical Algorithms, 2002, §3.1: |error| <= gamma_n * sum |x_i y_i| for any order of the
-# additions), with one more rounding for the inputs' conversion to float32 and a margin for the
-# float64 sums of the blocks' results.
-GAMMA32 = (FLOAT_ROWS + 1) * U32 / (1 - (FLOAT_ROWS + 1) * U32) + 1e-9
 
-
-def _exact_tdot(a, b, rows=EXACT_ROWS):
-    """``a.T @ b`` for 0/1 or whole-number float64 matrices whose entries are below 2^33 in size,
-    exactly (int64), in blocks of at most ``EXACT_ROWS`` rows."""
-    out = None
-    for i in range(0, max(len(a), 1), rows):
-        x = np.rint(a[i : i + rows].T @ b[i : i + rows]).astype(np.int64)
-        out = x if out is None else out + x
-    return out
-
-
-class Workspace:
-    """Buffers reused by every ``cross32`` call (fresh arrays of this size each call cost more in
-    page faults than the products)."""
-
-    def __init__(self, items, columns, rows=FLOAT_ROWS):
-        self.x = np.empty((rows, max(items, 1)), dtype=np.float32)
-        self.st = np.empty((rows, columns * max(items, 1)), dtype=np.float32)
-
-
-def cross32(xbool, w, cols, ws=None):
-    """float64 [c, m, m]: for every weight column c, the sum over the rows of
-    ``w[r, c] * x[r, j] * x[r, k]`` (j, k in ``cols``) by float32 products of blocks of
-    ``FLOAT_ROWS`` rows (one stacked product a block): each within ``GAMMA32`` times the sum of
-    ``|w[r, c]|`` over the same rows; column 0 must be the 0/1 count, which is exact."""
-    c = w.shape[1]
-    m = len(cols)
-    ws = ws or Workspace(m, c)
-    out = np.zeros((c * m, m), dtype=np.float64)
-    for i in range(0, len(xbool), FLOAT_ROWS):
-        blk = xbool[i : i + FLOAT_ROWS]
-        k = len(blk)
-        xa = ws.x[:k, :m]
-        xa[...] = blk if m == blk.shape[1] and np.array_equal(cols, np.arange(m)) else blk[:, cols]
-        st = ws.st[:k, : c * m]
-        np.multiply(xa[:, None, :], w[i : i + k].astype(np.float32)[:, :, None], out=st.reshape(k, c, m))
-        out += st.T @ xa
-    return out.reshape(c, m, m)
-
-
-def exact_pairs(xbool, w, ja, jb):
-    """int64 [len(ja), c]: the exact sums of ``w`` over the rows where items ``ja[p]`` and
-    ``jb[p]`` are both on."""
-    out = np.zeros((len(ja), w.shape[1]), dtype=np.int64)
-    wf = w.astype(np.float64)
-    step = 256
-    for p in range(0, len(ja), step):
-        both = (xbool[:, ja[p : p + step]] & xbool[:, jb[p : p + step]]).astype(np.float64)
-        out[p : p + step] = _exact_tdot(both, wf)
-    return out
+def enumeration_items(on, n_rows, minsup):
+    """The items: (feature, 1) for every binary feature on in at least ``minsup`` of ``n_rows``
+    rows (``on``: per feature, the rows it is on in), (feature, 0) for the yes/no features off in
+    at least ``minsup`` rows; in feature order, "on" before "off"."""
+    items = []
+    for f in range(N_BINARY):
+        if on[f] >= minsup:
+            items.append((f, 1))
+        if f in YES_NO and n_rows - on[f] >= minsup:
+            items.append((f, 0))
+    return items
 
 
 class Enumeration:
-    """Every conjunction of up to ``max_conj`` items with support >= ``minsup`` on the rows
-    given, with its candidate decision; candidates are not extended (see the module notes).
-    Level 1 sums are exact float64 products. Levels 2 and 3 are float32 products with a rigorous
-    error bound (``cross32``, ``Screen.bounded``); a conjunction the bound leaves undecided is
-    summed again exactly (``exact_pairs``), so the candidates are exactly those of whole-number
-    arithmetic, on any machine. A triple (i, j, k) is summed over item i's rows, among the items
-    j, k whose pairs with i, and with each other, are frequent and not candidates."""
+    """Every conjunction of up to ``max_conj`` items with support >= ``minsup`` on half A, with
+    its candidate decision; candidates are not extended (see the module notes), nor are items on
+    in every row, nor groups whose sums rule out every extension (``Screen.extendable``, a valid
+    bound). Every sum is exact: single items and pairs by row blocks (``_task_items``,
+    ``_task_pairs``), triples per item over its rows (``_task_triples``, an item's rows split into
+    tasks of ``L3_ROWS``). A triple (i, j, k), positions in increasing support (ties by item
+    index), is summed over item i's rows, among the items j, k whose pairs with i, and with each
+    other, are extendable. ``sums1``: the items' exact sums (count, then ``ENUM_W``)."""
 
-    def __init__(self, items, xbool, cols, screen, max_conj):
+    def __init__(self, d, pool, screen, max_conj, sums1):
         if not 1 <= max_conj <= 3:
             raise ValueError("--max-conj is 1, 2 or 3")
-        self.items, self.screen = items, screen
+        self.screen = screen
         self.counted = [0, 0, 0]
         self.frequent = [0, 0, 0]
-        self.rechecked = [0, 0, 0]
+        self.pruned = [0, 0]  # groups not extended because the bound rules out every extension
         self.found = []  # (item tuple, sd flag, bias flag)
-        f = len(items)
-        w = cols.astype(np.int64)
-        s1 = np.zeros((f, w.shape[1]), dtype=np.int64)
-        for r in range(0, len(xbool), FLOAT_ROWS):
-            xr = xbool[r : r + FLOAT_ROWS].T.astype(np.float64)
-            s1 += np.rint(xr @ w[r : r + FLOAT_ROWS].astype(np.float64)).astype(np.int64)
-        cand, sdf, bif = screen(s1)
+        f = len(d.items)
+        s1 = np.asarray(sums1, dtype=np.int64).reshape(f, 7)
+        cand, sdf, bif = screen(s1[:, :6])
         freq1 = s1[:, 0] >= screen.minsup
         self.counted[0], self.frequent[0] = f, int(freq1.sum())
         self._keep(np.arange(f)[:, None], cand, sdf, bif)
-        # Extended: frequent items that are not candidates and not on in every row (those define
-        # no group of their own), in increasing support (ties by index), so that a triple is
-        # summed over the rows of its rarest item.
-        grow = np.flatnonzero(freq1 & ~cand & (s1[:, 0] < len(xbool)))
+        ext = screen.extendable(s1[:, 4], s1[:, 6])
+        grow = np.flatnonzero(freq1 & ~cand & (s1[:, 0] < d.n_a) & ext)
+        self.pruned[0] = int((freq1 & ~cand & (s1[:, 0] < d.n_a) & ~ext).sum())
         idx = grow[np.lexsort((grow, s1[grow, 0]))]
-        if max_conj < 2 or len(idx) < 2:
+        g = len(idx)
+        if max_conj < 2 or g < 2:
             return
-        # Pairs (a, b) of positions in ``idx`` with a < b.
-        ws = Workspace(len(idx), w.shape[1])
-        iu, ju = np.triu_indices(len(idx), 1)
-        s2 = cross32(xbool, w, idx, ws)[:, iu, ju].T
-        c2, fr2 = self._level(1, s2, xbool, w, idx[iu], idx[ju])
-        self._keep(np.column_stack([idx[iu], idx[ju]]), *c2)
-        grow2 = np.zeros((len(idx), len(idx)), dtype=bool)
-        grow2[iu, ju] = fr2 & ~c2[0]
+        ctx = dict(d.ctx, n_grow=g)
+        pos_lut = np.full(f + 1, g, dtype=np.int16)
+        pos_lut[idx] = np.arange(g)
+        ctx["pos_lut"] = _save(os.path.join(d.work, "pos_lut.npy"), pos_lut)
+        ctx["item_of_pos"] = _save(os.path.join(d.work, "item_of_pos.npy"), idx)
+        tasks = [(ctx, s, t) for s, t in _blocks(d.n_a, max(BLOCK, -(-d.n_a // (4 * pool.n))))]
+        s2 = sum(pool.map(_task_pairs, tasks)).reshape(7, g, g)
+        iu, ju = np.triu_indices(g, 1)
+        p2 = s2[:, iu, ju].T
+        fr2 = p2[:, 0] >= screen.minsup
+        c2, d2, b2 = screen(p2[:, :6])
+        c2, d2, b2 = c2 & fr2, d2 & fr2, b2 & fr2
+        self.counted[1] += len(p2)
+        self.frequent[1] += int(fr2.sum())
+        self._keep(np.column_stack([idx[iu], idx[ju]]), c2, d2, b2)
+        ext2 = screen.extendable(p2[:, 4], p2[:, 6])
+        self.pruned[1] = int((fr2 & ~c2 & ~ext2).sum())
+        grow2 = np.zeros((g, g), dtype=bool)
+        grow2[iu, ju] = fr2 & ~c2 & ext2
         if max_conj < 3:
             return
-        for a in range(len(idx)):
-            bs = np.flatnonzero(grow2[a])
-            if len(bs) < 2:
+        ctx["grow2"] = _save(os.path.join(d.work, "grow2.npy"), grow2)
+        support = s1[idx, 0]
+        jobs, cost = [], []
+        for a in range(g):
+            ba = grow2[a].copy()
+            nb = int(ba.sum())
+            if nb < 2 or not np.triu(grow2[np.ix_(ba, ba)], 1).any():
                 continue
-            iu, ju = np.triu_indices(len(bs), 1)
-            ok = grow2[bs[iu], bs[ju]]
-            if not ok.any():
-                continue
-            iu, ju = iu[ok], ju[ok]
-            js = idx[bs]
-            r = np.flatnonzero(xbool[:, idx[a]])
-            xr, wr = xbool[np.ix_(r, js)], w[r]
-            local = np.arange(len(js))
-            s3 = cross32(xr, wr, local, ws)[:, iu, ju].T
-            c3, _ = self._level(2, s3, xr, wr, iu, ju)
-            self._keep(np.column_stack([np.full(len(iu), idx[a]), js[iu], js[ju]]), *c3)
-
-    def _level(self, k, s, xbool, w, ja, jb):
-        """Decisions for one level's approximate sums; the undecided ones summed exactly."""
-        n = np.rint(s[:, 0])
-        decided, cand, sdf, bif = self.screen.bounded(n, s, GAMMA32)
-        fr = n >= self.screen.minsup
-        und = np.flatnonzero(~decided & fr)
-        if len(und):
-            ex = exact_pairs(xbool, w, ja[und], jb[und])
-            c, d, b = self.screen(ex)
-            cand[und], sdf[und], bif[und] = c, d, b
-        self.counted[k] += len(s)
-        self.frequent[k] += int(fr.sum())
-        self.rechecked[k] += len(und)
-        return (cand & fr, sdf & fr, bif & fr), fr
+            for lo in range(0, int(support[a]), L3_ROWS):
+                jobs.append((ctx, a, lo, min(lo + L3_ROWS, int(support[a]))))
+                cost.append(min(L3_ROWS, int(support[a]) - lo) * nb)
+        res = pool.map(_task_triples, jobs, cost=cost)
+        per_a = {}
+        for (_, a, _, _), r in zip(jobs, res):
+            per_a[a] = per_a[a] + r if a in per_a else r
+        for a in sorted(per_a):
+            ba = grow2[a].copy()
+            js = np.flatnonzero(ba)
+            sub = np.triu(grow2[np.ix_(ba, ba)], 1)
+            bi, ci = np.nonzero(sub)
+            s3 = per_a[a].T
+            fr3 = s3[:, 0] >= screen.minsup
+            c3, d3, b3 = screen(s3)
+            self.counted[2] += len(s3)
+            self.frequent[2] += int(fr3.sum())
+            tup = np.column_stack([np.full(len(bi), idx[a]), idx[js[bi]], idx[js[ci]]])
+            self._keep(tup, c3 & fr3, d3 & fr3, b3 & fr3)
 
     def _keep(self, tuples, cand, sdf, bif):
         for k in np.flatnonzero(cand):
             self.found.append((tuple(int(v) for v in tuples[k]), bool(sdf[k]), bool(bif[k])))
 
 
-def enumeration_items(binary_a, minsup):
-    """The items: (feature, 1) for every binary feature on in at least ``minsup`` rows, (feature,
-    0) for the yes/no features off in at least ``minsup`` rows; and their bool columns."""
-    on = binary_a.sum(axis=0)
-    items, cols = [], []
-    for f in range(N_BINARY):
-        if on[f] >= minsup:
-            items.append((f, 1))
-            cols.append(binary_a[:, f])
-        if f in YES_NO and len(binary_a) - on[f] >= minsup:
-            items.append((f, 0))
-            cols.append(~binary_a[:, f])
-    x = np.column_stack(cols) if cols else np.zeros((len(binary_a), 0), dtype=bool)
-    return items, x
-
-
 # ---------------------------------------------------------------------------------------------
 # The audit.
 
 
-def _group_record(conds, source, members_all, is_b, err, cols, races, total_rows):
-    """Statistics of a group over the whole shard and each half."""
-    rows = np.flatnonzero(members_all)
-    rows_a = rows[~is_b[rows]]
-    rows_b = rows[is_b[rows]]
-    sa, sb, sw = Stats(sums_of(cols, rows_a)), Stats(sums_of(cols, rows_b)), Stats(sums_of(cols, rows))
-    rec = {"name": group_name(conds), "conditions": conds, "source": source}
-    rec["whole"] = sw.as_dict(total_rows)
-    rec["half_a"] = sa.as_dict(int((~is_b).sum()))
-    rec["half_b"] = sb.as_dict(int(is_b.sum()))
-    if len(rows_b):
-        eb = np.abs(err.e[rows_b]).astype(np.float64) / ONE
-        rec["half_b"]["p999"] = float(np.quantile(eb, 0.999))
-        worst = rows_b[int(np.argmax(err.q[rows_b]))]
-        rec["example_row"] = int(worst)
-    rec["race_classes"] = [int(x) for x in np.bincount(races[rows], minlength=len(RACE_CLASS_NAMES))]
-    return rec, sa, sb
+class AuditData:
+    """The work files of one audit (in ``work``) and what the parent keeps: rows, half-A rows,
+    the half split, per-feature supports on half A, race-class sums, the items, the thresholds."""
+
+    def __init__(self, work, n, n_a, ctx):
+        self.work, self.n, self.n_a, self.ctx = work, n, n_a, ctx
+        self.on = np.zeros(N_BINARY, dtype=np.int64)
+        self.race_sums = np.zeros((len(RACE_CLASS_NAMES), NCOL), dtype=np.int64)
+        self.items = []
+        self.thresholds = []
+
+    @classmethod
+    def create(cls, work, is_b, k_active, shards=None, net=None, chunk=None):
+        os.makedirs(work, exist_ok=True)
+        n = len(is_b)
+        n_a = int((~is_b).sum())
+        p = lambda name: os.path.join(work, name)  # noqa: E731
+        ctx = {"n": n, "n_a": n_a, "work": work}
+        ctx["isb"] = _save(p("isb.npy"), is_b)
+        ctx["cols"] = _new(p("cols.npy"), (n, NCOL), np.int64)
+        ctx["races"] = _new(p("races.npy"), (n,), np.int8)
+        ctx["actA"] = _new(p("actA.npy"), (n_a, k_active), np.uint16)
+        ctx["colsA"] = _new(p("colsA.npy"), (n_a, NCOL), np.int64)
+        ctx["denseA"] = _new(p("denseA.npy"), (N_DENSE, n_a), np.int32)
+        if shards:
+            ctx["shards"] = shards
+            ctx["net"] = net
+            ctx["chunk"] = chunk
+        return cls(work, n, n_a, ctx)
+
+    def add(self, r):
+        self.on += r["on"]
+        self.race_sums += r["race_sums"]
+
+    def a_offsets(self, blocks):
+        isb = _open(self.ctx["isb"])
+        out, a0 = [], 0
+        for s, t in blocks:
+            out.append(a0)
+            a0 += int((~np.asarray(isb[s:t])).sum())
+        return out
 
 
-def audit(err, binary, dense, is_b, races, gamma=0.001, alpha_bias=0.0025, alpha_sd=0.01, max_depth=6,
-          max_conj=3, fdr=0.05, screen=0.01, log=print):
-    """The discovery (half A) and confirmation (half B) of weak groups. ``err``: ``Errors`` of all
-    rows; ``binary``: ``binary_matrix`` of their active lists; ``dense``: their dense values;
-    ``is_b``: ``half_b``; ``races``: their race classes (a diagnostic only). Returns a dict (the
-    report's body; ``confirmed`` and ``predicates``)."""
+def prepare_memory(work, err, active, dense, is_b, races):
+    """The work files of an audit of rows held in memory (``err``: ``Errors``; ``active``: active
+    lists [n, K] PAD-padded, or a bool matrix [n, N_BINARY]; ``dense`` [n, N_DENSE])."""
+    active = np.asarray(active)
+    if active.dtype == bool:
+        r, c = np.nonzero(active)
+        k = int(np.bincount(r, minlength=len(active)).max()) if len(r) else 1
+        lists = np.full((len(active), max(k, 1)), PAD, dtype=np.uint16)
+        lists[r, np.arange(len(r)) - np.searchsorted(r, r, side="left")] = c
+        active = lists
+    d = AuditData.create(work, np.asarray(is_b, dtype=bool), active.shape[1])
+    d.ctx["act"] = _save(os.path.join(work, "act.npy"), active)
+    d.ctx["dense"] = _new(os.path.join(work, "dense.npy"), (d.n, N_DENSE), np.int32)
+    dn = _open(d.ctx["dense"], True)
+    races = np.asarray(races).astype(np.int8)
+    blocks = _blocks(d.n)
+    for (s, t), a0 in zip(blocks, d.a_offsets(blocks)):
+        dn[s:t] = np.asarray(dense[s:t])
+        cols = error_columns(err.e[s:t])
+        d.add(_write_block(d.ctx, s, t, a0, cols, races[s:t], active[s:t], dense[s:t]))
+    return d
+
+
+def prepare_shards(work, paths, shards, net, seed, pool, chunk, log=print):
+    """The work files of an audit of label shards (the network's errors computed in the pass);
+    returns (data, frontier trick)."""
+    n = sum(len(s) for s in shards)
+    spans, lo = [], 0
+    for p, s in zip(paths, shards):
+        spans.append((p, lo, lo + len(s)))
+        lo += len(s)
+    d = AuditData.create(work, half_b(seed, n), MAX_ACTIVE, shards=spans, net=net, chunk=chunk)
+    blocks = _blocks(n)
+    res = pool.map(_task_prep, [(d.ctx, s, t, a0) for (s, t), a0 in zip(blocks, d.a_offsets(blocks))])
+    tricks = set()
+    for (s, _), r in zip(blocks, res):
+        tricks |= set(r["tricks"])
+        if r["fault"] is not None:
+            p = next(p for p, a, b in spans if a <= s < b)
+            raise SystemExit(f"{p}: {VALUE_FAULTS[r['fault']]}")
+        d.add(r)
+    if len(tricks) != 1:
+        raise SystemExit(f"the shards hold tricks {sorted(tricks)}: one frontier trick per audit")
+    return d, tricks.pop()
+
+
+def prepare_items(d, pool, minsup):
+    """The items of half A (``enumeration_items``), the dense thresholds and bins, the rows'
+    items, the items' bitsets; returns the items' exact sums (count, then ``ENUM_W``)."""
+    n_a, ctx, work = d.n_a, d.ctx, d.work
+    d.items = enumeration_items(d.on, n_a, minsup)
+    f = len(d.items)
+    ctx["n_items"] = f
+    ctx["item_feature"] = _save(os.path.join(work, "item_feature.npy"), [x for x, _ in d.items] or [0])
+    ctx["item_on"] = _save(os.path.join(work, "item_on.npy"), [v == 1 for _, v in d.items] or [True])
+    ctx["ibits"] = _new(os.path.join(work, "ibits.npy"), (f, (n_a + 7) // 8), np.uint8)
+    ctx["itemsA"] = _new(os.path.join(work, "itemsA.npy"), (n_a, KI), np.int16)
+    ctx["binsA"] = _new(os.path.join(work, "binsA.npy"), (n_a, N_DENSE), np.uint8)
+    d.thresholds = pool.map(_task_thresholds, [(ctx, j) for j in range(N_DENSE)])
+    thr = np.zeros((N_DENSE, N_BINS - 1), dtype=np.int64)
+    for j, t in enumerate(d.thresholds):
+        thr[j, : len(t)] = t
+    ctx["thr"] = _save(os.path.join(work, "thr.npy"), thr)
+    ctx["thr_len"] = _save(os.path.join(work, "thr_len.npy"), [len(t) for t in d.thresholds])
+    sums1 = pool.map(_task_items, [(ctx, s, t) for s, t in _blocks(n_a)])
+    return sum(sums1) if sums1 else np.zeros((f, 7), dtype=np.int64)
+
+
+def _stats_dict(s, total):
+    return Stats(s[:11]).as_dict(total)
+
+
+def audit_data(d, pool, gamma=0.001, alpha_bias=0.0025, alpha_sd=0.01, max_depth=6, max_conj=3, fdr=0.05,
+               screen=0.01, log=print):
+    """The discovery (half A) and confirmation (half B) of weak groups on prepared work files
+    (``prepare_memory``, ``prepare_shards``). Returns a dict (the report's body; ``confirmed``
+    and ``predicates``)."""
     t0 = time.time()
     timing = {}
-    n = len(err)
-    a_rows = np.flatnonzero(~is_b)
-    n_a = len(a_rows)
+    n, n_a, ctx, work = d.n, d.n_a, d.ctx, d.work
     minsup = max(2, math.ceil(gamma * n_a))
-    cols = err.columns()
-    screen_cols = cols[:, list(SCREEN_COLS)]
     scr = Screen(alpha_bias, alpha_sd, minsup, screen)
+    sums1 = prepare_items(d, pool, minsup)
+    f = len(d.items)
+    timing["items"] = round(time.time() - t0, 3)
 
     # Trees on half A.
-    act_a = np.full((n_a, MAX_ACTIVE), PAD, dtype=np.int64)
-    bin_a = binary[a_rows]
-    # Rebuild the active lists from the binary matrix (ascending), the tree's input.
-    r_idx, f_idx = np.nonzero(bin_a)
-    pos = np.arange(len(r_idx)) - np.searchsorted(r_idx, r_idx, side="left")
-    act_a[r_idx, pos] = f_idx
-    dense_a = np.asarray(dense)[a_rows]
-    thr = dense_thresholds(dense_a)
-    bins_a = dense_bins(dense_a, thr)
-    ef = err.e[a_rows].astype(np.float64) / ONE
-    trees = {"tree-signed": ef, "tree-abs": np.abs(ef).mean(axis=1, keepdims=True)}
     candidates = {}  # condition key -> {conditions, sources, flags}
     tree_nodes = {}
-    for name, y in trees.items():
-        nodes = fit_tree(act_a, bins_a, thr, y, minsup, max_depth)
+    for name, kind in (("tree-signed", "signed"), ("tree-abs", "abs")):
+        nodes = fit_tree(d, pool, kind, minsup, max_depth) if n_a else []
         tree_nodes[name] = len(nodes)
         if nodes:
-            sums = np.array([sums_of(screen_cols, a_rows[rows]) for _, rows, _ in nodes], dtype=np.int64)
+            sums = np.array([s for _, _, _, s in nodes], dtype=np.int64)
             cand, sdf, bif = scr(sums)
             for k in np.flatnonzero(cand):
                 conds = canonical(nodes[k][0])
@@ -1100,67 +1532,93 @@ def audit(err, binary, dense, is_b, races, gamma=0.001, alpha_bias=0.0025, alpha
                 c["sources"].append(name)
                 c["sd"] |= bool(sdf[k])
                 c["bias"] |= bool(bif[k])
-    timing["trees"] = round(time.time() - t0, 3)
+    timing["trees"] = round(time.time() - t0 - timing["items"], 3)
     log(f"audit: trees on half A ({n_a} rows): {tree_nodes} nodes, {len(candidates)} candidates so far "
         f"({timing['trees']:.1f} s)")
 
     # The enumeration on half A.
     t1 = time.time()
-    items, x_a = enumeration_items(bin_a, minsup)
-    en = Enumeration(items, x_a, screen_cols[a_rows], scr, max_conj)
+    en = Enumeration(d, pool, scr, max_conj, sums1)
     for tup, sdf, bif in en.found:
-        conds = canonical([{"feature": items[i][0], "op": "==", "value": items[i][1]} for i in tup])
+        conds = canonical([{"feature": d.items[i][0], "op": "==", "value": d.items[i][1]} for i in tup])
         key = cond_key(conds)
         c = candidates.setdefault(key, {"conditions": conds, "sources": [], "sd": False, "bias": False})
         c["sources"].append(f"conj-{len(tup)}")
         c["sd"] |= sdf
         c["bias"] |= bif
     timing["enumeration"] = round(time.time() - t1, 3)
-    log(f"audit: enumeration: {len(items)} items, conjunctions counted by size {en.counted}, frequent "
-        f"{en.frequent}, summed again exactly {en.rechecked}, {len(en.found)} candidates "
+    log(f"audit: enumeration: {f} items, conjunctions counted by size {en.counted}, frequent "
+        f"{en.frequent}, not extended by the bound {en.pruned}, {len(en.found)} candidates "
         f"({timing['enumeration']:.1f} s)")
 
     # Confirmation on half B.
     t2 = time.time()
     keys = sorted(candidates)
+    gpath = os.path.join(work, "candidates.json")
+    with open(gpath, "w") as fh:
+        json.dump([candidates[k]["conditions"] for k in keys], fh)
+    sums = np.zeros((len(keys), 2, NCOL), dtype=np.int64)
+    if keys:
+        for r in pool.map(_task_confirm, [(ctx, s, t, gpath, None) for s, t in _blocks(n)]):
+            sums += r
     hyp = []  # (candidate index, criterion, team, sign, p)
-    mem = {}
     for ci, key in enumerate(keys):
         c = candidates[key]
-        m = members(c["conditions"], binary, dense)
-        mem[key] = m
-        sa = Stats(sums_of(cols, m & ~is_b))
-        sb = Stats(sums_of(cols, m & is_b))
+        sa, sb = Stats(sums[ci, 0, :11]), Stats(sums[ci, 1, :11])
         if c["sd"]:
             hyp.append((ci, "sd", None, None, sb.p_sd(alpha_sd)))
         if c["bias"]:
             team, sign = sa.worst_team()
             hyp.append((ci, "bias", team, sign, sb.p_bias(team, sign, alpha_bias)))
     rejected = benjamini_hochberg([h[4] for h in hyp], fdr)
-    timing["confirmation"] = round(time.time() - t2, 3)
-
     confirmed = {}
     for h, rej in zip(hyp, rejected):
         ci, crit, team, sign, p = h
         if rej:
             confirmed.setdefault(ci, []).append({"criterion": crit, "team": team, "sign": sign, "p": p})
+    conf = sorted(confirmed)
+    details = []
+    bits = None
+    if conf:
+        cpath = os.path.join(work, "confirmed.json")
+        with open(cpath, "w") as fh:
+            json.dump([candidates[keys[ci]]["conditions"] for ci in conf], fh)
+        bits = _new(os.path.join(work, "members.npy"), (len(conf), (n + 7) // 8), np.uint8)
+        pool.map(_task_confirm, [(ctx, s, t, cpath, bits) for s, t in _blocks(n)])
+        details = pool.map(_task_detail, [(ctx, bits, g) for g in range(len(conf))])
+    timing["confirmation"] = round(time.time() - t2, 3)
+
     # Minimality: a confirmed group inside a more general confirmed group is covered by it.
-    conf_keys = {keys[ci] for ci in confirmed}
+    conf_keys = {keys[ci] for ci in conf}
+    n_b = n - n_a
     records = []
-    for ci in sorted(confirmed):
+    for g, ci in enumerate(conf):
         key = keys[ci]
         c = candidates[key]
-        rec, _, sb = _group_record(c["conditions"], c["sources"], mem[key], is_b, err, cols, races, n)
+        sa, sb = sums[ci, 0], sums[ci, 1]
+        rec = {"name": group_name(c["conditions"]), "conditions": c["conditions"], "source": c["sources"]}
+        rec["whole"] = _stats_dict(sa + sb, n)
+        rec["half_a"] = _stats_dict(sa, n_a)
+        rec["half_b"] = _stats_dict(sb, n_b)
+        det = details[g]
+        if det["p999"] is not None:
+            rec["half_b"]["p999"] = det["p999"]
+            rec["example_row"] = det["example_row"]
+        rec["race_classes"] = det["races"]
         rec["confirmed_by"] = confirmed[ci]
         rec["p_values"] = {h[1]: h[4] for h in hyp if h[0] == ci}
         covered = next((h for h in sorted(conf_keys) if h != key and implies(key, h)), None)
         rec["covered_by"] = None if covered is None else group_name(
-            [{"feature": f, "op": op, "value": v} for f, op, v in covered])
-        rec["severity"] = max(sb.sd / alpha_sd, max(abs(b) for b in sb.bias) / alpha_bias)
+            [{"feature": f_, "op": op, "value": v} for f_, op, v in covered])
+        sbs = Stats(sb[:11])
+        rec["severity"] = max(sbs.sd / alpha_sd, max(abs(b) for b in sbs.bias) / alpha_bias)
+        rec["_bits_row"] = g
         records.append(rec)
     records.sort(key=lambda r: (-r["severity"], -r["whole"]["rows"], r["name"]))
     predicates = []
+    inside = np.zeros((n + 7) // 8, dtype=np.uint8)
     for r in records:
+        g = r.pop("_bits_row")
         if r["covered_by"] is None:
             predicates.append({
                 "name": r["name"], "conditions": r["conditions"], "weight": r["whole"]["weight"],
@@ -1168,27 +1626,28 @@ def audit(err, binary, dense, is_b, races, gamma=0.001, alpha_bias=0.0025, alpha
                 "rows": r["whole"]["rows"], "example_row": r.get("example_row"),
                 "criteria": [x["criterion"] for x in r["confirmed_by"]], "source": r["source"],
             })
-    inside = np.zeros(n, dtype=bool)
-    for p in predicates:
-        inside |= mem[cond_key(p["conditions"])]
+            inside |= np.asarray(_open(bits)[g])
+    in_rows = np.unpackbits(inside, count=n).astype(bool)
+    races = np.asarray(_open(ctx["races"]))[:n].astype(np.int64)
     coverage = []
-    for k, name in enumerate(RACE_CLASS_NAMES):
-        sel = races == k
-        coverage.append({"class": k, "rows": int(sel.sum()),
-                         "share_inside_groups": float(inside[sel].mean()) if sel.any() else None})
+    rows_by_class = np.bincount(races, minlength=len(RACE_CLASS_NAMES))
+    in_by_class = np.bincount(races[in_rows], minlength=len(RACE_CLASS_NAMES))
+    for k in range(len(RACE_CLASS_NAMES)):
+        coverage.append({"class": k, "rows": int(rows_by_class[k]),
+                         "share_inside_groups": float(in_by_class[k] / rows_by_class[k]) if rows_by_class[k] else None})
     timing["total"] = round(time.time() - t0, 3)
     n_tree = sum(1 for c in candidates.values() if any(s.startswith("tree") for s in c["sources"]))
     n_conj = sum(1 for c in candidates.values() if any(s.startswith("conj") for s in c["sources"]))
     return {
         "rows": n,
         "half_a_rows": int(n_a),
-        "half_b_rows": int(n - n_a),
+        "half_b_rows": int(n_b),
         "min_group_rows": int(minsup),
         "tree_nodes": tree_nodes,
-        "items": len(items),
+        "items": f,
         "conjunctions_counted": en.counted,
         "conjunctions_frequent": en.frequent,
-        "conjunctions_rechecked_exactly": en.rechecked,
+        "not_extended_by_bound": en.pruned,
         "candidates": len(candidates),
         "candidates_from_trees": n_tree,
         "candidates_from_conjunctions": n_conj,
@@ -1196,25 +1655,59 @@ def audit(err, binary, dense, is_b, races, gamma=0.001, alpha_bias=0.0025, alpha
         "confirmed": len(records),
         "confirmed_general": len(predicates),
         "groups": records,
-        "rows_inside_groups": int(inside.sum()),
+        "rows_inside_groups": int(in_rows.sum()),
         "race_class_coverage": coverage,
         "predicates": predicates,
         "seconds": timing,
     }
 
 
-def overall(err, idx, races):
-    e = err.e[idx].astype(np.float64) / ONE
-    s = Stats(sums_of(err.columns(), idx))
-    out = {"rows": int(len(idx)), "bias": s.bias, "sd": s.sd,
-           "p999": float(np.quantile(np.abs(e), 0.999)) if len(e) else None}
+def overall(d):
+    """The whole shard's numbers: SD, bias, p99.9 of |error|, and the same by race class."""
+    tot = d.race_sums.sum(axis=0)
+    s = Stats(tot[:11])
+    cols = _open(d.ctx["cols"])
+    e = np.abs(np.asarray(cols[: d.n, 1:5])).astype(np.float64) / ONE
+    out = {"rows": int(d.n), "bias": s.bias, "sd": s.sd, "p999": float(np.quantile(e, 0.999)) if d.n else None}
     out["by_race_class"] = []
     for k, name in enumerate(RACE_CLASS_NAMES):
-        sel = idx[races[idx] == k]
-        sk = Stats(sums_of(err.columns(), sel))
-        out["by_race_class"].append({"class": k, "name": name, "rows": int(len(sel)),
-                                     "bias": sk.bias if len(sel) else None, "sd": sk.sd if len(sel) else None})
+        rk = d.race_sums[k]
+        sk = Stats(rk[:11])
+        out["by_race_class"].append({"class": k, "name": name, "rows": int(rk[0]),
+                                     "bias": sk.bias if rk[0] else None, "sd": sk.sd if rk[0] else None})
     return out
+
+
+def _cleanup(work, keep):
+    for k in [k for k in _CACHE if (k[0] == "json" and str(k[1]).startswith(work)) or str(k[0]).startswith(work)]:
+        _CACHE.pop(k, None)
+    if not keep:
+        import shutil
+
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def audit(err, binary, dense, is_b, races, gamma=0.001, alpha_bias=0.0025, alpha_sd=0.01, max_depth=6,
+          max_conj=3, fdr=0.05, screen=0.01, workers=1, work=None, log=print):
+    """``audit_data`` of rows held in memory (``err``: ``Errors`` of all rows; ``binary``: their
+    active lists [n, K] PAD-padded, or the bool matrix of ``binary_matrix``; ``dense``: their
+    dense values; ``is_b``: ``half_b``; ``races``: their race classes, a diagnostic only), on
+    ``workers`` processes, with the work files in ``work`` (a new temporary directory, removed
+    after, by default)."""
+    import tempfile
+
+    own = work is None
+    work = tempfile.mkdtemp(prefix="audit-") if own else work
+    try:
+        d = prepare_memory(work, err, binary, dense, is_b, races)
+        with Workers(workers) as pool:
+            body = audit_data(d, pool, gamma=gamma, alpha_bias=alpha_bias, alpha_sd=alpha_sd, max_depth=max_depth,
+                              max_conj=max_conj, fdr=fdr, screen=screen, log=log)
+            pool.close()
+        body["overall"] = overall(d)
+        return body
+    finally:
+        _cleanup(work, keep=not own)
 
 
 def _fmt_bias(b):
@@ -1249,7 +1742,8 @@ def text_report(rep):
         f"candidates screened on half A at p <= {th['screen']:g}; Benjamini-Hochberg at {100 * th['fdr']:g}% "
         "on half B.",
         f"Searched on half A: tree nodes {body['tree_nodes']}; {body['items']} items, conjunctions counted by size "
-        f"{body['conjunctions_counted']} (frequent {body['conjunctions_frequent']}).",
+        f"{body['conjunctions_counted']} (frequent {body['conjunctions_frequent']}; items and pairs not extended "
+        f"because their sums rule out every extension: {body['not_extended_by_bound']}).",
         f"Candidates found on half A: {body['candidates']} ({body['candidates_from_trees']} from the trees, "
         f"{body['candidates_from_conjunctions']} from the conjunctions); hypotheses tested on half B: "
         f"{body['hypotheses']}.",
@@ -1275,14 +1769,20 @@ def text_report(rep):
             by = ", ".join(f"{x['criterion']} (p {x['p']:.1e})" for x in g["confirmed_by"])
             lines.append(
                 f" {i:2d}. {g['name']}\n"
-                f"     weight {100 * g['whole']['weight']:.2f}% ({g['whole']['rows']:,} rows); on half B: SD "
-                f"{100 * b['sd']:.3f}%, bias {_fmt_bias(b['bias'])}, p99.9 |error| {100 * b.get('p999', 0):.2f}%; "
+                f"     weight {100 * g['whole']['weight']:.4f}% ({g['whole']['rows']:,} rows); on half B: SD "
+                f"{100 * b['sd']:.3f}%, bias {_fmt_bias(b['bias'])}, p99.9 |error| {100 * (b.get('p999') or 0):.2f}%; "
                 f"confirmed by {by}; "
                 f"found by {', '.join(sorted(set(g['source'])))}; example row {g.get('example_row')}; "
                 f"race classes 0-4: {', '.join(f'{100 * x / tot:.0f}%' for x in mix)}")
     lines.append("")
     lines.append(f"Time: {rep['seconds']}")
     return "\n".join(lines) + "\n"
+
+
+def default_chunk(layers):
+    """Rows per network batch: about 2^23 values of the widest layer (memory per worker)."""
+    widest = max(w.shape[1] for w, _, _ in layers)
+    return int(max(256, min(8192, (1 << 23) // max(widest, 1))))
 
 
 def main(argv=None):
@@ -1299,53 +1799,50 @@ def main(argv=None):
     ap.add_argument("--screen", type=float, default=0.01,
                     help="half-A significance a candidate needs (1: every group over a threshold)")
     ap.add_argument("--seed", type=int, default=1, help="the half split's seed")
-    ap.add_argument("--chunk", type=int, default=2048, help="rows per batch of the network")
+    ap.add_argument("--chunk", type=int, default=0, help="rows per batch of the network (0: by its width)")
+    ap.add_argument("--workers", type=int, default=0,
+                    help="worker processes (0: one per CPU this process may use); never changes a result")
+    ap.add_argument("--work", default=None, help="the work files' directory (default OUT/work, removed after)")
+    ap.add_argument("--keep-work", action="store_true", help="keep the work files")
     ap.add_argument("--parity-rows", type=int, default=512,
                     help="rows checked against the reference integer path (intnet.money_rows)")
     args = ap.parse_args(argv)
     t0 = time.time()
     seconds = {}
     os.makedirs(args.out, exist_ok=True)
+    workers = args.workers or (len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count())
+    work = args.work or os.path.join(args.out, "work")
     layers, meta = intnet.load(args.net)
     head = meta.get("head", "money4")
     shards = [load_shard(p) for p in args.shard]
-    tricks, vocab = set(), set()
-    for p, s in zip(args.shard, shards):
-        for i in range(0, len(s), 1 << 16):
-            blk = s[i : i + (1 << 16)]
-            f = value_fault(blk)
-            if f is not None:
-                raise SystemExit(f"{p}: {VALUE_FAULTS[f]}")
-            tricks |= set(np.unique(blk["trick"]).tolist())
-        vocab.add(s.dtype["outcomes"].shape[0])
-    if len(tricks) != 1 or len(vocab) != 1:
-        raise SystemExit(f"the shards hold tricks {sorted(tricks)}: one frontier trick per audit")
-    trick = tricks.pop()
-    if "trick" in meta and int(meta["trick"]) != trick:
-        raise SystemExit(f"{args.net} is a trick-{meta['trick']} network; the shards are trick {trick}")
-    seconds["load"] = round(time.time() - t0, 3)
-
-    t = time.time()
-    pred = network_values(layers, head, shards, args.chunk)
-    seconds["network"] = round(time.time() - t, 3)
+    if len({s.dtype["outcomes"].shape[0] for s in shards}) != 1:
+        raise SystemExit("the shards hold different outcome vocabularies: one frontier trick per audit")
     first = np.asarray(shards[0][: args.parity_rows])
     ref = reference_values(layers, head, first)
-    if not np.array_equal(ref, pred[: len(first)]):
+    if not np.array_equal(ref, network_values(layers, head, [first], 512)):
         raise SystemExit("the fast integer path differs from intnet.money_rows: a bug, stopping")
-    value = np.concatenate([np.asarray(s["value"]) for s in shards])
-    active = np.concatenate([np.asarray(s["active"]) for s in shards])
-    dense = np.concatenate([np.asarray(s["dense"]) for s in shards])  # int32: predicates' values fit it
-    races = np.concatenate([race_classes(s) for s in shards])
-    err = Errors(pred, value)
-    binary = binary_matrix(active)
-    del active
-    is_b = half_b(args.seed, len(err))
-    print(f"audit: {len(err)} rows, trick {trick}, network {head} in {seconds['network']:.1f} s", flush=True)
-    body = audit(err, binary, dense, is_b, races, gamma=args.gamma, alpha_bias=args.alpha_bias, alpha_sd=args.alpha_sd,
-                 max_depth=args.max_depth, max_conj=args.max_conj, fdr=args.fdr, screen=args.screen,
-                 log=lambda s: print(s, flush=True))
+    seconds["load"] = round(time.time() - t0, 3)
+    chunk = args.chunk or default_chunk(layers)
+    try:
+        with Workers(workers) as pool:
+            t = time.time()
+            d, trick = prepare_shards(work, [os.path.abspath(p) for p in args.shard], shards, os.path.abspath(args.net),
+                                      args.seed, pool, chunk)
+            if "trick" in meta and int(meta["trick"]) != trick:
+                raise SystemExit(f"{args.net} is a trick-{meta['trick']} network; the shards are trick {trick}")
+            seconds["network"] = round(time.time() - t, 3)
+            print(f"audit: {d.n} rows, trick {trick}, network {head} and error columns in {seconds['network']:.1f} s "
+                  f"on {pool.n} worker(s)", flush=True)
+            body = audit_data(d, pool, gamma=args.gamma, alpha_bias=args.alpha_bias, alpha_sd=args.alpha_sd,
+                              max_depth=args.max_depth, max_conj=args.max_conj, fdr=args.fdr, screen=args.screen,
+                              log=lambda s: print(s, flush=True))
+            pool.close()
+        ov = overall(d)
+    finally:
+        _cleanup(work, keep=args.keep_work)
     seconds["audit"] = body["seconds"]
     seconds["total"] = round(time.time() - t0, 3)
+    seconds["workers"] = workers
     rep = {
         "format": FORMAT,
         "encoder": "oracle-v2",
@@ -1358,7 +1855,7 @@ def main(argv=None):
                        "max_depth": args.max_depth, "max_conj": args.max_conj, "fdr": args.fdr, "screen": args.screen},
         "teams": list(TEAMS),
         "parity_rows": int(len(first)),
-        "overall": overall(err, np.arange(len(err)), races),
+        "overall": ov,
         "audit": {k: v for k, v in body.items() if k != "predicates"},
         "seconds": seconds,
     }

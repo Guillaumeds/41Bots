@@ -58,6 +58,8 @@
 //! the auditor (`python -m fortyone_nn.audit`), the golden check with a slice per weak group and
 //! mini golden sets, and a targeted harvest that joins the next round's training, until the
 //! network is flat or `audit_rounds` is reached; with its settings `audit_rows`, `audit_seed`,
+//! `audit_gamma`, `audit_standard`, `audit_push_standard`, `audit_mini_candidates`,
+//! `audit_mini_min`,
 //! `audit_keep_cap`, `audit_weight`, `audit_mini_decisions`, `audit_mini_sets`,
 //! `audit_shapes`, `audit_min_gain`, `audit_target_rows` and `audit_predicates_input` (refused
 //! without it); the network grows up the `audit_shapes` ladder when a round's targeted harvest
@@ -158,11 +160,16 @@ use crate::{Ctx, sibling};
 mod audit;
 
 /// The settings a `hybrid_rung` chunk takes; any other key is refused.
-pub(crate) const KEYS: [&str; 60] = [
+pub(crate) const KEYS: [&str; 65] = [
     "cut",
     "check",
     "audit_rounds",
     "audit_rows",
+    "audit_gamma",
+    "audit_mini_candidates",
+    "audit_mini_min",
+    "audit_standard",
+    "audit_push_standard",
     "audit_seed",
     "audit_keep_cap",
     "audit_weight",
@@ -4416,6 +4423,87 @@ fi
             (5000, 7, 64, 1.5, 60, 9000)
         );
         assert_eq!(a.predicates_input, Some("c".repeat(64)));
+        // Gamma, the shard's size with it, the standards (decisions of 2026-10-16 night).
+        let a = parse(&json!({ "audit_rounds": 2 }))
+            .expect("defaults")
+            .audit
+            .expect("on");
+        assert_eq!(
+            (
+                a.gamma,
+                a.rows,
+                a.mini_candidates,
+                a.mini_min,
+                a.standard,
+                a.push_standard
+            ),
+            (0.001, 1_000_000, 10_000, 30, 0.01, None)
+        );
+        // `audit_mini_sets` has no upper limit (tonight's trick-4 loop measures every waiting
+        // group each round).
+        let a = parse(&json!({ "audit_rounds": 2, "audit_mini_sets": 400, "audit_mini_min": 40 }))
+            .expect("many mini sets")
+            .audit
+            .expect("on");
+        assert_eq!((a.mini_sets, a.mini_min), (400, 40));
+        for (cut, rows) in [(4, 20_000_000), (3, 10_000_000), (2, 1_000_000)] {
+            let a = parse(&json!({ "cut": cut, "audit_rounds": 2, "audit_gamma": 0.0001 }))
+                .expect("fine gamma")
+                .audit
+                .expect("on");
+            assert_eq!((a.gamma, a.rows), (0.0001, rows), "cut {cut}");
+        }
+        let a = parse(
+            &json!({ "audit_rounds": 2, "audit_gamma": 0.0001, "audit_rows": 7000,
+                               "audit_push_standard": 0.005, "audit_mini_candidates": 600 }),
+        )
+        .expect("given")
+        .audit
+        .expect("on");
+        assert_eq!(
+            (a.rows, a.push_standard, a.mini_candidates),
+            (7000, Some(0.005), 600)
+        );
+        let j = a.to_json();
+        assert_eq!(
+            (&j["gamma"], &j["standard_pct"], &j["push_standard_pct"]),
+            (&json!(0.0001), &json!(0.01), &json!(0.005))
+        );
+        // The default ladder holds only shapes larger than the rung's, each once.
+        for (w, want) in [
+            (
+                "2048,1024,256",
+                vec![
+                    vec![2048, 1024, 256],
+                    vec![2048, 2048, 1024, 256],
+                    vec![4096, 2048, 1024, 256],
+                ],
+            ),
+            (
+                "2048,2048,1024,256",
+                vec![vec![2048, 2048, 1024, 256], vec![4096, 2048, 1024, 256]],
+            ),
+            ("4096,4096,2048", vec![vec![4096, 4096, 2048]]),
+        ] {
+            let a = parse(&json!({ "audit_rounds": 2, "widths": w }))
+                .expect("ladder")
+                .audit
+                .expect("on");
+            assert_eq!(a.shapes, want, "{w}");
+        }
+        // The mini sets' keep share: a half from a weight of 0.1%, 500 times the weight below,
+        // at least 5%.
+        for (w, share) in [
+            (0.05, 500_000),
+            (0.001, 500_000),
+            (0.0005, 250_000),
+            (0.0001, 50_000),
+            (0.00002, 50_000),
+            (f64::NAN, 50_000),
+        ] {
+            assert_eq!(audit::keep_share(w), share, "{w}");
+        }
+        assert_eq!(audit::std_text(0.0075), "0.0075%");
         let bad = |v: Value, says: &str| {
             let e = parse(&v).expect_err(&v.to_string());
             assert!(e.contains(says), "{v}: {e}");
@@ -4468,9 +4556,52 @@ fi
             "is not a list of hidden widths",
         );
         bad(
-            json!({ "audit_rounds": 2, "widths": "16,8", "audit_shapes": "16,8;16,8" }),
+            json!({ "audit_rounds": 2, "widths": "16,8", "audit_shapes": "16,8;32,16;32,16" }),
             "given twice",
         );
+        // The ladder only grows: a shape not larger than the rung's is refused.
+        bad(
+            json!({ "audit_rounds": 2, "widths": "16,8", "audit_shapes": "16,8;8,8" }),
+            "is not larger than the rung's widths",
+        );
+        bad(
+            json!({ "audit_rounds": 2, "audit_gamma": 0 }),
+            "audit_gamma",
+        );
+        bad(
+            json!({ "audit_rounds": 2, "audit_gamma": 0.5 }),
+            "audit_gamma",
+        );
+        bad(
+            json!({ "audit_rounds": 2, "audit_mini_decisions": 50, "audit_mini_candidates": 49 }),
+            "audit_mini_candidates",
+        );
+        bad(
+            json!({ "audit_rounds": 2, "audit_mini_min": 0 }),
+            "audit_mini_min",
+        );
+        bad(
+            json!({ "audit_rounds": 2, "audit_mini_min": 51 }),
+            "audit_mini_min",
+        );
+        bad(
+            json!({ "audit_rounds": 2, "audit_standard": 0 }),
+            "audit_standard",
+        );
+        bad(
+            json!({ "audit_rounds": 2, "audit_standard": 2 }),
+            "audit_standard",
+        );
+        bad(
+            json!({ "audit_rounds": 2, "audit_push_standard": 0.01 }),
+            "audit_push_standard must be tighter",
+        );
+        bad(
+            json!({ "audit_rounds": 2, "audit_standard": 0.005, "audit_push_standard": 0.0075 }),
+            "audit_push_standard must be tighter",
+        );
+        bad(json!({ "audit_gamma": 0.0001 }), "audit_rounds is 0");
+        bad(json!({ "audit_push_standard": 0.005 }), "audit_rounds is 0");
         bad(
             json!({ "audit_rounds": 2, "audit_min_gain": 1 }),
             "audit_min_gain",
@@ -4518,7 +4649,10 @@ case $1 in
   decisions)
     echo "search $*" >> '{calls}'
     out=$(arg --out "$@")
-    if [ -n "$(arg --keep "$@")" ]; then
+    if [ -n "$(arg --keep "$@")" ] && [ -f '{base}/mini-unfilled' ]; then
+      printf '{{"id": 400, "trick": 3}}\n' > "$out"
+      echo '{{"kept": 1, "candidates_drawn": 30, "complete": false}}' > "$out.json"
+    elif [ -n "$(arg --keep "$@")" ]; then
       printf '{{"id": 400, "trick": 3}}\n{{"id": 403, "trick": 3}}\n' > "$out"
       echo '{{"kept": 2, "candidates_drawn": 9, "complete": true}}' > "$out.json"
     else
@@ -4534,18 +4668,23 @@ case $1 in
         i=$((i+1))
       done
     fi
-    # A mini golden set's check fails with `mini-fail-all`, or with round k's network (k 1:
-    # out/hybrid/net, else audit/round-k/net) while k is below the number in `mini-pass-from`;
-    # the golden check's overall row fails with `overall-fail`.
-    ok=true
+    # The bound of round k's network (k 1: out/hybrid/net, else audit/round-k/net), judged by
+    # `--standard` like the real check: a mini golden set's is 0.00004 (`mini-bounds`: the k-th
+    # number), 0.0002 with `mini-fail-all` or while k is below the number in `mini-pass-from`;
+    # the golden check's overall row's 0.00005 (`overall-bounds`: the k-th number), 0.0002 with
+    # `overall-fail`.
+    std=$(arg --standard "$@"); [ -z "$std" ] && std=0.01
+    net=$(arg --net "$@"); k=1
+    case "$net" in */audit/round-*) k=$(echo "$net" | sed 's|.*/audit/round-\([0-9]*\)/net/.*|\1|');; esac
     case "$sl" in */mini/*)
-      [ -f '{base}/mini-fail-all' ] && ok=false
-      net=$(arg --net "$@"); k=1
-      case "$net" in */audit/round-*) k=$(echo "$net" | sed 's|.*/audit/round-\([0-9]*\)/net/.*|\1|');; esac
-      if [ -f '{base}/mini-pass-from' ] && [ "$k" -lt "$(cat '{base}/mini-pass-from')" ]; then ok=false; fi;;
-      *) [ -f '{base}/overall-fail' ] && ok=false;;
+      up=0.00004; [ -f '{base}/mini-bounds' ] && up=$(cut -d' ' -f$k '{base}/mini-bounds')
+      [ -f '{base}/mini-fail-all' ] && up=0.0002
+      if [ -f '{base}/mini-pass-from' ] && [ "$k" -lt "$(cat '{base}/mini-pass-from')" ]; then up=0.0002; fi;;
+      *) up=0.00005; [ -f '{base}/overall-bounds' ] && up=$(cut -d' ' -f$k '{base}/overall-bounds')
+      [ -f '{base}/overall-fail' ] && up=0.0002;;
     esac
-    echo "{{\"pass\": $ok, \"pass_without_slices\": $ok, \"groups\": [{{\"group\": \"all\", \"summary\": {{\"decisions\": 2, \"mean_loss\": 0.00002, \"loss_upper95\": 0.00005, \"loss_pass\": $ok, \"bias_pass\": true}}}}], \"net\": {{\"sha256\": \"abc\"}}, \"values\": {{}}, \"slices\": {{\"groups\": [$s]}}}}" > "$(arg --json "$@")"
+    ok=$(awk -v u="$up" -v s="$std" 'BEGIN {{ print (u <= s / 100) ? "true" : "false" }}')
+    echo "{{\"pass\": $ok, \"pass_without_slices\": $ok, \"groups\": [{{\"group\": \"all\", \"summary\": {{\"decisions\": 2, \"mean_loss\": 0.00002, \"loss_upper95\": $up, \"loss_pass\": $ok, \"bias_pass\": true}}}}], \"net\": {{\"sha256\": \"abc\"}}, \"values\": {{}}, \"slices\": {{\"groups\": [$s]}}}}" > "$(arg --json "$@")"
     echo "standard: PASS";;
   *) exec '{search}' "$@";;
 esac
@@ -4787,14 +4926,15 @@ esac
         assert_eq!(aud.len(), 2);
         assert!(
             aud[0].contains("out/hybrid/net/int.safetensors --shard")
-                && aud[0].ends_with("--seed 30101"),
+                && aud[0].contains("--seed 30101 --gamma 0.001 --workers 16 --work ")
+                && aud[0].ends_with("hybrid-work/audit/auditor-r1"),
             "{}",
             aud[0]
         );
         assert!(aud[1].contains("audit/round-2/net/int.safetensors"));
         let checks = line("search hybrid-check");
         assert!(
-            checks[0].contains("--verify-pct 1 --slices")
+            checks[0].contains("--verify-pct 1 --standard 0.01 --slices")
                 && checks[0].contains("round-1/union.json --slice-share 0.5"),
             "{}",
             checks[0]
@@ -4802,7 +4942,16 @@ esac
         assert!(checks.iter().skip(1).all(|c| c.contains("--verify-pct 0")));
         let keep = line("search decisions --keep");
         assert_eq!(keep.len(), 1, "the mini set is made once");
-        assert!(keep[0].contains("--keep-share 0.5 --keep-worlds 8 --trick 3 --cut 4 --count 2 --seed 1 --first-candidate 2 --net"), "{}", keep[0]);
+        assert!(keep[0].contains("--keep-share 0.5 --max-candidates 400 --keep-worlds 8 --trick 3 --cut 4 --count 2 --seed 1 --first-candidate 2 --net"), "{}", keep[0]);
+        // Each audit shard is deleted once its auditor has run; its sidecar stays in round-<r>/.
+        for r in 1..=2 {
+            let shard = root.join(format!("hybrid-work/audit/t4-audit-r{r}-s3010{r}.npy"));
+            assert!(!shard.exists(), "{} kept", shard.display());
+            assert!(
+                out.join(format!("audit/round-{r}/t4-audit-r{r}-s3010{r}.npy.json"))
+                    .is_file()
+            );
+        }
         // Reports.
         let audit = out.join("audit");
         for x in [
@@ -4833,11 +4982,15 @@ esac
             "{summary}"
         );
         assert!(
-            lines[2].starts_with("stop: flat after round 2"),
+            lines[2].starts_with("best: round 2 (flat at 0.01%; golden 95% upper 0.0050%)"),
             "{summary}"
         );
         assert!(
-            lines[3].starts_with("final network: audit/round-2/net (sha256 "),
+            lines[3].starts_with("stop: flat after round 2"),
+            "{summary}"
+        );
+        assert!(
+            lines[4].starts_with("final network: audit/round-2/net (sha256 "),
             "{summary}"
         );
         let r1 = read_json(&audit.join("round-1.json")).expect("round 1");
@@ -5154,7 +5307,11 @@ esac
             "{summary}"
         );
         assert!(
-            lines[3].starts_with("stop: flat after round 3"),
+            lines[3].starts_with("best: round 3 (flat at 0.01%"),
+            "{summary}"
+        );
+        assert!(
+            lines[4].starts_with("stop: flat after round 3"),
             "{summary}"
         );
         let rung = read_json(&root.join("out/hybrid/rung.json")).expect("rung.json");
@@ -5216,7 +5373,7 @@ esac
         };
         for (tag, shapes, stop) in [
             ("auditshape", "16,8;32,16;64,32", "round limit"),
-            ("auditshape1", "<widths>", "capacity ladder exhausted"),
+            ("auditshape1", "<widths>", "diminishing returns"),
         ] {
             let f = fakes(tag);
             for (n, sd) in [(1, 0.03), (2, 0.029), (3, 0.02)] {
@@ -5273,12 +5430,242 @@ esac
                 let summary = fs::read_to_string(out.join("audit-summary.txt")).expect("summary");
                 assert!(summary.contains("shape 32,16"), "{summary}");
             } else {
-                assert_eq!(trains.len(), 2, "{log}");
-                assert!(!out.join("round-3.json").exists());
-                assert!(why.contains("on the largest shape, 16,8"), "{why}");
+                // One shape only: the SD's small fall changes nothing, and rounds 2 and 3 (both
+                // on the largest shape) lower neither decision-level bound: diminishing returns.
+                assert_eq!(trains.len(), 3, "{log}");
+                assert!(out.join("round-3.json").exists());
+                assert!(
+                    why.contains("rounds 2 and 3 on the largest shape, 16,8"),
+                    "{why}"
+                );
+                let summary = fs::read_to_string(out.join("audit-summary.txt")).expect("summary");
+                assert!(
+                    summary.contains("still limiting at round 3: g-one: weight 5.0000%, SD 2.00%"),
+                    "{summary}"
+                );
             }
             let _ = fs::remove_dir_all(&f.base);
         }
+    }
+
+    /// The push to a tighter standard (owner, 2026-10-16 night): round 1 is flat at 0.01% (its
+    /// group's mini set at 0.007%), so the same round is judged again by 0.005%, where the group
+    /// fails and is targeted; round 2's network brings it to 0.004%: flat at 0.005%. The
+    /// auditor gets `audit_gamma`; every check after the push runs with `--standard 0.005`.
+    #[cfg(unix)]
+    #[test]
+    fn audit_loop_pushes_to_the_tighter_standard() {
+        let f = fakes("auditpush");
+        fs::write(f.base.join("audit-1.json"), GROUP_ONE).expect("write");
+        fs::write(f.base.join("mini-bounds"), "0.00007 0.00004 0.00004").expect("write");
+        let tools = audit_tools(&f, false, None);
+        let params = audit_params(json!({ "audit_rounds": 3, "audit_push_standard": 0.005,
+                                           "audit_gamma": 0.0001 }));
+        let root = f.base.join("run");
+        let mut ctx = Ctx::local("hybrid-test", &root, 4);
+        let r = chunk_steps(&mut ctx, &params, &tools, &f.table, json!({})).expect("the loop runs");
+        assert_eq!(r["verdict"], "PASS", "{r}");
+        let stop = r["audit"]["stop"].as_str().expect("stop");
+        assert!(
+            stop.starts_with(
+                "flat at 0.005% after round 2 (flat at 0.01% after round 1, then pushed) (1 \
+                 groups confirmed by the auditor so far, every one within 0.005%"
+            ),
+            "{stop}"
+        );
+        let log = fs::read_to_string(&f.calls).expect("calls");
+        let line = |p: &str| -> Vec<&str> { log.lines().filter(|l| l.starts_with(p)).collect() };
+        assert!(
+            line("python -m fortyone_nn.audit")
+                .iter()
+                .all(|l| l.contains("--gamma 0.0001 ")),
+            "{log}"
+        );
+        let checks = line("search hybrid-check");
+        // Round 1 by 0.01% (golden, mini), again by 0.005% (golden, mini), round 2 by 0.005%.
+        assert_eq!(checks.len(), 6, "{log}");
+        assert!(checks[..2].iter().all(|c| c.contains("--standard 0.01 ")));
+        assert!(checks[2..].iter().all(|c| c.contains("--standard 0.005 ")));
+        let out = root.join("out/hybrid/audit");
+        for x in [
+            "round-1.json",
+            "round-1-push.json",
+            "round-1-push.txt",
+            "round-1/hc-t3-o4-push.json",
+            "round-2.json",
+        ] {
+            assert!(out.join(x).is_file(), "{x}");
+        }
+        let r1p = read_json(&out.join("round-1-push.json")).expect("push");
+        assert_eq!(r1p["standard_pct"], 0.005);
+        assert_eq!(r1p["decision_level"][0]["pass"], false);
+        assert_eq!(r1p["targeted"]["why"], "1 groups confirmed this round");
+        let summary = fs::read_to_string(out.join("audit-summary.txt")).expect("summary");
+        assert!(
+            summary.contains("\nflat at 0.01% after round 1; pushing to 0.005%\n"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("round 1 (judged again by the push standard): "),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("best: round 2 (flat at 0.005%"),
+            "{summary}"
+        );
+        let rung = read_json(&root.join("out/hybrid/rung.json")).expect("rung.json");
+        assert_eq!(rung["net"]["dir"], "audit/round-2/net");
+        assert_eq!(rung["audit"]["push"]["flat_at_push"], true);
+        assert_eq!(rung["audit"]["best_round"], 2);
+        let hb = read_json(&root.join("heartbeat.json")).expect("heartbeat");
+        assert_eq!(
+            hb["progress"]["standard"],
+            "0.005% (pushing: flat at 0.01% after round 1)"
+        );
+        let _ = fs::remove_dir_all(&f.base);
+    }
+
+    /// A mini golden set that cannot be filled (1 decision kept of 2 when the candidate cap is
+    /// reached) leaves its group unmeasured: never passed silently, it blocks "flat" even though
+    /// the golden set passes, and the reports say so.
+    #[cfg(unix)]
+    #[test]
+    fn audit_loop_unfilled_mini_set_stays_unmeasured() {
+        let f = fakes("auditunfilled");
+        fs::write(f.base.join("audit-1.json"), GROUP_ONE).expect("write");
+        fs::write(f.base.join("mini-unfilled"), "").expect("write");
+        let tools = audit_tools(&f, false, None);
+        let params = audit_params(json!({ "audit_rounds": 2, "audit_mini_candidates": 30 }));
+        let root = f.base.join("run");
+        let mut ctx = Ctx::local("hybrid-test", &root, 4);
+        let r = chunk_steps(&mut ctx, &params, &tools, &f.table, json!({})).expect("the loop runs");
+        assert_eq!(r["verdict"], "FAIL", "{r}");
+        let stop = r["audit"]["stop"].as_str().expect("stop");
+        assert!(
+            stop.contains("1 groups unmeasurable at the decision level: their mini golden sets kept fewer than 2 decisions"),
+            "{stop}"
+        );
+        let log = fs::read_to_string(&f.calls).expect("calls");
+        assert!(log.contains("--max-candidates 30 "), "{log}");
+        let out = root.join("out/hybrid/audit");
+        for r in ["round-1.json", "round-2.json"] {
+            let x = read_json(&out.join(r)).expect("round");
+            assert_eq!(
+                x["decision_level"][0]["basis"], "unmeasurable at the decision level",
+                "{r}"
+            );
+            assert_eq!(x["decision_level"][0]["pass"], Value::Null);
+            assert_eq!(x["flat"], false);
+        }
+        let r1 = read_json(&out.join("round-1.json")).expect("round 1");
+        let m = &r1["mini_sets"][0];
+        assert_eq!(
+            (m["unfilled"].as_bool(), m["pass"].is_null()),
+            (Some(true), true)
+        );
+        assert!(
+            m["fill"].as_str().is_some_and(|t| t.starts_with(
+                "1 decisions kept of 2 wanted after drawing 30 candidates (the cap: 30"
+            )),
+            "{m}"
+        );
+        let t = fs::read_to_string(out.join("round-1.txt")).expect("txt");
+        assert!(
+            t.contains("UNMEASURABLE at the decision level: 1 decisions kept of 2 wanted"),
+            "{t}"
+        );
+        assert!(
+            t.contains(
+                "1 not yet measured (1 of them unmeasurable: a mini golden set of too few decisions)"
+            ),
+            "{t}"
+        );
+        let _ = fs::remove_dir_all(&f.base);
+    }
+
+    /// Diminishing returns never stop the loop while the shape can still step up: round 2's SD
+    /// does not fall, so round 3 trains the larger (top) shape; rounds 3 and 4, both on it,
+    /// lower neither bound: the loop stops after round 4, before its round limit, naming the
+    /// groups still limiting it.
+    #[cfg(unix)]
+    #[test]
+    fn audit_loop_stops_on_diminishing_returns() {
+        let f = fakes("auditdim");
+        for n in 1..=5 {
+            fs::write(f.base.join(format!("audit-{n}.json")), GROUP_ONE).expect("write");
+        }
+        fs::write(f.base.join("mini-fail-all"), "").expect("write");
+        let tools = audit_tools(&f, false, None);
+        let params = audit_params(json!({ "audit_rounds": 5, "audit_shapes": "16,8;32,16" }));
+        let root = f.base.join("run");
+        let mut ctx = Ctx::local("hybrid-test", &root, 4);
+        let r = chunk_steps(&mut ctx, &params, &tools, &f.table, json!({})).expect("the loop runs");
+        let stop = r["audit"]["stop"].as_str().expect("stop");
+        assert!(
+            stop.starts_with("diminishing returns (rounds 3 and 4 on the largest shape, 32,16"),
+            "{stop}"
+        );
+        let log = fs::read_to_string(&f.calls).expect("calls");
+        let trains: Vec<&str> = log
+            .lines()
+            .filter(|l| l.starts_with("python -m fortyone_nn.train"))
+            .collect();
+        assert_eq!(trains.len(), 4, "{log}");
+        assert!(trains[2].contains("--widths 32,16 ") && trains[1].contains("--widths 16,8 "));
+        let summary =
+            fs::read_to_string(root.join("out/hybrid/audit/audit-summary.txt")).expect("summary");
+        assert!(
+            summary.contains("still limiting at round 4: g-one: weight 5.0000%, SD 3.00%"),
+            "{summary}"
+        );
+        let _ = fs::remove_dir_all(&f.base);
+    }
+
+    /// The chunk keeps the best round's network and check, not the last: by the golden set's
+    /// overall bound when no round is flat (0.006%, 0.004%, 0.005%: round 2).
+    #[cfg(unix)]
+    #[test]
+    fn audit_loop_keeps_the_best_round() {
+        let f = fakes("auditbest");
+        for n in 1..=3 {
+            fs::write(f.base.join(format!("audit-{n}.json")), GROUP_ONE).expect("write");
+        }
+        fs::write(f.base.join("mini-fail-all"), "").expect("write");
+        fs::write(f.base.join("overall-bounds"), "0.00006 0.00004 0.00005").expect("write");
+        let tools = audit_tools(&f, false, None);
+        let params = audit_params(json!({ "audit_rounds": 3 }));
+        let root = f.base.join("run");
+        let mut ctx = Ctx::local("hybrid-test", &root, 4);
+        let r = chunk_steps(&mut ctx, &params, &tools, &f.table, json!({})).expect("the loop runs");
+        assert_eq!(r["verdict"], "FAIL");
+        let rung = read_json(&root.join("out/hybrid/rung.json")).expect("rung.json");
+        assert_eq!(rung["net"]["dir"], "audit/round-2/net");
+        assert_eq!(rung["audit"]["best_round"], 2);
+        assert_eq!(rung["check"]["best_round"], 2);
+        let summary =
+            fs::read_to_string(root.join("out/hybrid/audit/audit-summary.txt")).expect("summary");
+        assert!(
+            summary.contains("best: round 2 (not flat; golden 95% upper 0.0040%)"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("final network: audit/round-2/net (sha256"),
+            "{summary}"
+        );
+        let _ = fs::remove_dir_all(&f.base);
+    }
+
+    /// A stop the launcher asks for over the dollar cap is reported as one.
+    #[test]
+    fn audit_stop_reason_names_the_dollar_cap() {
+        for why in [
+            "the launcher asked the run to stop (runs/x/STOP) dollar cap reached",
+            "the launcher asked the run to stop (runs/x/STOP) spent $1.71 of $1.70",
+            "the launcher asked the run to stop (runs/x/STOP) over budget",
+        ] {
+            assert!(audit::stop_reason(why).starts_with("dollar cap ("), "{why}");
+        }
+        assert!(audit::stop_reason("STOP file /x/STOP by hand").starts_with("stopped ("));
     }
 
     /// A stop file that appears during round 2's audit: the step that follows is not started,
@@ -5336,8 +5723,15 @@ esac
             lines[0].starts_with("round 1: 1 groups confirmed"),
             "{summary}"
         );
+        // A stop keeps the best round judged so far (round 1; round 2 was trained and audited
+        // but never judged).
+        assert!(lines[1].starts_with("best: round 1 (not flat"), "{summary}");
         assert!(
-            lines[1].starts_with("stop: stopped (STOP file"),
+            lines[2].starts_with("stop: stopped (STOP file"),
+            "{summary}"
+        );
+        assert!(
+            lines[3].starts_with("final network: net (sha256"),
             "{summary}"
         );
         let rung = read_json(&out.join("rung.json")).expect("rung.json");

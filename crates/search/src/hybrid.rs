@@ -65,8 +65,34 @@ use crate::pimc::{
 const VERIFY: u64 = 0x5E21;
 /// Seed label of the bootstrap.
 const BOOT: u64 = 0xB007;
-/// The standard: 0.01% money chance, in units of 2^-32.
+/// The standard: 0.01% money chance (a fraction), the default of `hybrid-check --standard`.
 pub const STANDARD: f64 = 1e-4;
+
+/// The standard of `--standard PCT`, a percentage of money chance ("0.01", "0.005"), as a
+/// fraction: the decimal text shifted two places and parsed once (correctly rounded), so
+/// "0.01" is exactly [`STANDARD`].
+pub fn parse_standard(pct: &str) -> Result<f64, String> {
+    let t = pct.trim();
+    let ok = !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit() || b == b'.');
+    let x: f64 = if ok {
+        format!("{t}e-2").parse().unwrap_or(f64::NAN)
+    } else {
+        f64::NAN
+    };
+    if x.is_finite() && x > 0.0 && x <= 0.01 {
+        Ok(x)
+    } else {
+        Err(format!(
+            "--standard {pct:?}: a percentage of money chance above 0 and at most 1, e.g. 0.01"
+        ))
+    }
+}
+
+/// Judges a summary by `standard` (a fraction): the decision-loss bound and every team's bias.
+pub fn judge(s: &mut Summary, standard: f64) {
+    s.loss_pass = s.loss_upper95 <= standard;
+    s.bias_pass = s.bias.iter().all(|b| b.abs() <= standard);
+}
 
 /// One check run.
 #[derive(Clone, Debug)]
@@ -704,7 +730,7 @@ pub struct Summary {
     pub decider_p999_abs: f64,
     /// Decision loss within the standard at the 95% upper bound.
     pub loss_pass: bool,
-    /// Every team's bias within ±0.01%.
+    /// Every team's bias within ±0.01% (or the check's `--standard`, [`judge`]).
     pub bias_pass: bool,
 }
 
@@ -883,6 +909,54 @@ pub fn slices(
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// `--standard`: percent text to the fraction ("0.01" is exactly `STANDARD`), refusals, and
+    /// the judgement of a summary by it (decision-loss bound and every team's bias).
+    #[test]
+    fn the_standard_is_a_setting() {
+        assert_eq!(parse_standard("0.01"), Ok(STANDARD));
+        assert_eq!(parse_standard("0.005"), Ok(5e-5));
+        assert_eq!(parse_standard(" 0.0075 "), Ok(7.5e-5));
+        assert_eq!(parse_standard("1"), Ok(0.01));
+        for bad in ["0", "", "-0.01", "1.5", "abc", "1e-2", "0.01%"] {
+            assert!(parse_standard(bad).is_err(), "{bad}");
+        }
+        let d = |loss: u64, e: i64| DecisionCheck {
+            id: 0,
+            position: 1,
+            stratum: 1,
+            team: 0,
+            cands: 2,
+            worlds: 1,
+            exact_choice: 0,
+            hybrid_choice: 1,
+            loss,
+            agree: loss == 0,
+            errors: vec![e, -e, 0, 0],
+            exact_worlds: 0,
+            exact_us: 0,
+            hybrid_us: 0,
+            exact_nodes: 0,
+            hybrid_nodes: 0,
+            frontier: 0,
+            reach: None,
+            world_checks: Vec::new(),
+        };
+        // Losses of about 0.006%, a bias of +-0.003%.
+        let ds: Vec<DecisionCheck> = (0..20).map(|i| d(250_000 + 1000 * i, 130_000)).collect();
+        let refs: Vec<&DecisionCheck> = ds.iter().collect();
+        let mut s = summarise(&refs, 200, 1, 0);
+        assert!(s.loss_pass && s.bias_pass, "{s:?}");
+        judge(&mut s, 5e-5);
+        assert!(!s.loss_pass && s.bias_pass, "{s:?}");
+        judge(&mut s, 2e-5);
+        assert!(!s.loss_pass && !s.bias_pass, "{s:?}");
+        let u = s.loss_upper95;
+        judge(&mut s, u);
+        assert!(s.loss_pass && s.bias_pass);
+        judge(&mut s, STANDARD);
+        assert!(s.loss_pass && s.bias_pass);
+    }
 
     use equity::MatchState;
     use solver::FnFrontier;

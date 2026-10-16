@@ -44,12 +44,13 @@
 //!                  [--boot 1000] [--boot-seed 1] [--json OUT] [--source belief|rejection]
 //!                  [--verify-solve-threads 1] [--verify-tt-mb (--tt-mb)]
 //!                  [--explain 143,335 [--explain-worlds 3] [--explain-json FILE]]
-//!                  [--slices PRED.json [--slice-share 0.5]]
+//!                  [--slices PRED.json [--slice-share 0.5]] [--standard 0.01]
 //! search hybrid-check --trick T --cut K --net WEIGHTS --equity TABLE --decisions FILE
 //!                  --saved RUN=FILE [--saved RUN=FILE …] [--only D:W,…] [--hard D:W,…]
 //!                  [--verify-pct 0] [--verify-rule all|rules-v1|searched]
 //!                  [--verify-solve-threads 1] [--verify-tt-mb M] [--threads T] [--tt-mb 64]
 //!                  [--boot 1000] [--boot-seed 1] [--json OUT] [--progress FILE] [--plan-only]
+//!                  [--standard 0.01]
 //! ```
 //! `labels` writes training labels for the oracle network O_K (docs/M3-HYBRID-SPEC.md §5,
 //! `search::oracle_labels`): a label shard (`nn::shard`, `.npy` records: encoded features, the exact
@@ -124,6 +125,10 @@
 //! it. The report adds the §3 table per group and for the decisions in no group (reported, not
 //! judged), and the standard then also asks every group's slice with decisions to pass the
 //! decision-loss bound (JSON: `slices`, `pass` with them, `pass_without_slices`).
+//! `--standard PCT` (default 0.01, a percentage of money chance; owner, 2026-10-16 night: the
+//! audit loop's push standards 0.005 at trick 4 and 0.0075 at trick 3) is the standard every
+//! verdict uses: the overall, band and position rows' decision-loss bound and bias, and every
+//! slice; the report prints it and the JSON records it (`standard_pct`, `standard`).
 //! `decisions` stratifies equally over the 4 strata and 8 positions, so `--count` must be a
 //! multiple of 32 (`--allow-uneven` overrides); it prints the position × stratum table it made.
 //! `decisions --keep PRED.json` draws a mini golden set by rejection (docs/m3-hybrid/
@@ -2034,6 +2039,9 @@ fn harvest_record(
 /// `search hybrid-check`: H_K against exact on the same worlds (docs/M3-HYBRID-SPEC.md §3).
 fn hybrid_check(a: &Args) -> Result<(), String> {
     use search::hybrid::{CheckJob, report};
+    let std_pct = a.get("--standard").unwrap_or("0.01").to_string();
+    let standard = search::hybrid::parse_standard(&std_pct)?;
+    let std_txt = format!("{}%", std_pct.trim());
     let trick = a.num("--trick", 3)? as u8;
     let cut = a.num("--cut", u64::from(trick) + 1)? as u8;
     if !(2..=5).contains(&cut) || trick == 0 || trick >= cut {
@@ -2202,7 +2210,10 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             run.verified.1, run.verified.0
         ));
     }
-    let groups = report(&run, boots, boot_seed);
+    let mut groups = report(&run, boots, boot_seed);
+    for (_, g) in &mut groups {
+        search::hybrid::judge(g, standard);
+    }
     println!(
         "H_{cut} vs exact, trick {trick}: {} decisions x {} worlds (seed {seed}, label {}, {} source); net {} {:?}; exact values {exact_from}{}",
         run.decisions.len(),
@@ -2217,16 +2228,23 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             String::new()
         }
     );
-    print_groups(&groups);
-    let sl = slice_preds
-        .as_ref()
-        .map(|(p, _)| search::hybrid::slices(&run, p, share, boots, boot_seed));
+    print_groups(&groups, &std_txt);
+    let sl = slice_preds.as_ref().map(|(p, _)| {
+        let mut sl = search::hybrid::slices(&run, p, share, boots, boot_seed);
+        for x in &mut sl {
+            search::hybrid::judge(&mut x.summary, standard);
+            if x.pass.is_some() {
+                x.pass = Some(x.summary.loss_pass);
+            }
+        }
+        sl
+    });
     if let Some(sl) = &sl {
-        print_slices(sl, share_text);
+        print_slices(sl, share_text, &std_txt);
     }
     let time = check_time(&run, job.threads, wall);
     print_time(&time);
-    let (bands_pass, line) = verdict(&groups);
+    let (bands_pass, line) = verdict(&groups, &std_txt);
     let (pass, line) = match &sl {
         None => (bands_pass, line),
         Some(sl) => {
@@ -2239,7 +2257,7 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
                 .collect();
             let pass = bands_pass && failing.is_empty();
             let line = format!(
-                "{}; every slice's decision loss 95% upper bound <= 0.01%: {}{}; with the slices: {}",
+                "{}; every slice's decision loss 95% upper bound <= {std_txt}: {}{}; with the slices: {}",
                 line.trim_end_matches("; PASS").trim_end_matches("; FAIL"),
                 if failing.is_empty() { "yes" } else { "no" },
                 if failing.is_empty() {
@@ -2276,6 +2294,8 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             },
             "equity_sha256": table_sha,
             "binary_sha256": binary_sha256(),
+            "standard_pct": std_pct,
+            "standard": standard,
             "boot": {"replicates": boots, "seed": boot_seed, "bound": "97.5th percentile of bootstrap means (upper end of the 95% interval)"},
             "groups": groups.iter().map(|(n, s)| serde_json::json!({"group": n, "summary": s})).collect::<Vec<_>>(),
             "pass": pass,
@@ -2303,14 +2323,22 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
 }
 
 /// The slices' table of `hybrid-check --slices` (`search::hybrid::slices`).
-fn print_slices(sl: &[search::hybrid::Slice], share: &str) {
+fn print_slices(sl: &[search::hybrid::Slice], share: &str, std: &str) {
     let spct = |x: f64| format!("{:+.4}%", 100.0 * x);
     println!(
         "slices (a decision is in a group when at least {share} of the distinct frontier positions its hybrid searches reach are in it):"
     );
     println!(
         "{:<28} {:>5} {:>9} {:>10} {:>10} {:>7} {:>7} {:>10} {:>9}  conditions",
-        "slice", "dec", "reached", "mean loss", "95% upper", "<=0.01%", "agree", "bias own", "SD"
+        "slice",
+        "dec",
+        "reached",
+        "mean loss",
+        "95% upper",
+        format!("<={std}"),
+        "agree",
+        "bias own",
+        "SD"
     );
     for x in sl {
         let s = &x.summary;
@@ -2371,7 +2399,7 @@ fn net_record(net_path: &str, oracle: &nn::Oracle) -> serde_json::Value {
 }
 
 /// The §3 table of `hybrid-check` (`search::hybrid::report`'s groups).
-fn print_groups(groups: &[(String, search::hybrid::Summary)]) {
+fn print_groups(groups: &[(String, search::hybrid::Summary)], std: &str) {
     let spct = |x: f64| format!("{:+.4}%", 100.0 * x);
     println!(
         "{:<9} {:>5} {:>10} {:>10} {:>7} {:>7} {:>8} {:>38} {:>9} {:>10} {:>9}",
@@ -2379,7 +2407,7 @@ fn print_groups(groups: &[(String, search::hybrid::Summary)]) {
         "dec",
         "mean loss",
         "95% upper",
-        "<=0.01%",
+        format!("<={std}"),
         "agree",
         "values",
         "bias: own / next / opposite / previous",
@@ -2413,7 +2441,7 @@ fn print_groups(groups: &[(String, search::hybrid::Summary)]) {
 }
 
 /// The standard of §3 on `groups`: whether it passes, and the line that says so.
-fn verdict(groups: &[(String, search::hybrid::Summary)]) -> (bool, String) {
+fn verdict(groups: &[(String, search::hybrid::Summary)], std: &str) -> (bool, String) {
     let loss_pass = groups.iter().take(4).all(|(_, s)| s.loss_pass);
     let bias_pass = groups.first().is_some_and(|(_, s)| s.bias_pass);
     let pass = loss_pass && bias_pass;
@@ -2421,7 +2449,7 @@ fn verdict(groups: &[(String, search::hybrid::Summary)]) -> (bool, String) {
         s.bias.iter().fold(0.0f64, |m, b| m.max(b.abs()))
     });
     let line = format!(
-        "standard: decision loss 95% upper bound <= 0.01% overall and in every band: {}; every team's |bias| <= 0.01%: {} (largest {}); {}",
+        "standard: decision loss 95% upper bound <= {std} overall and in every band: {}; every team's |bias| <= {std}: {} (largest {}); {}",
         if loss_pass { "yes" } else { "no" },
         if bias_pass { "yes" } else { "no" },
         pct(worst_bias),
@@ -2923,11 +2951,17 @@ fn hybrid_check_saved(a: &Args, r: SavedRun) -> Result<(), String> {
                 if d.agree { " (agree)" } else { "" }
             );
         }
-        let groups = report(&run, r.boots, r.boot_seed);
-        print_groups(&groups);
+        let mut groups = report(&run, r.boots, r.boot_seed);
+        let std_pct = a.get("--standard").unwrap_or("0.01");
+        let standard = search::hybrid::parse_standard(std_pct)?;
+        for (_, g) in &mut groups {
+            search::hybrid::judge(g, standard);
+        }
+        let std_txt = format!("{}%", std_pct.trim());
+        print_groups(&groups, &std_txt);
         let time = check_time(&run, sjob.threads, wall);
         print_time(&time);
-        let (pass, line) = verdict(&groups);
+        let (pass, line) = verdict(&groups, &std_txt);
         println!("{line}");
         let o = doc.as_object_mut().expect("an object");
         o.insert(
