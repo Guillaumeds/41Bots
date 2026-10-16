@@ -12,7 +12,7 @@ destroyed only when one of these holds:
 
 - its run wrote DONE or FAILED more than 10 minutes ago (the runner should have destroyed itself);
 - its run has heartbeated since the machine started, but not for 20 minutes, or it never
-  heartbeated and is older than 45 minutes; in both cases only when vast shows it idle (CPU below
+  heartbeated and is older than 60 minutes; in both cases only when vast shows it idle (CPU below
   50%, or below the run's own busy threshold from watch.json when lower, e.g. 1% for a run that
   keeps only a few cores busy) or not running. A silent machine that vast shows running and busy (CPU at least 50%, or no
   CPU reading) is treated as an upload or network problem (2026-10-15): it is asked to stop and
@@ -48,7 +48,11 @@ from email.utils import parsedate_to_datetime
 LABEL = "41bots-"
 MARKER_GRACE_S = 10 * 60
 SILENT_S = 20 * 60
-NO_HEARTBEAT_S = 45 * 60
+# A machine that has never heartbeated is given 60 minutes (was 45, until 2026-10-16). The launcher lets an image pull
+# that is still advancing run for up to 40 minutes from renting (launch.py PULL_CEILING_MIN) and then allows 15 more
+# minutes from the container's start to the first heartbeat, so a healthy but slow-starting machine needs up to 55;
+# 60 leaves a margin. test_cleanup.py checks this stays above the launcher's two numbers.
+NO_HEARTBEAT_S = 60 * 60
 STOP_GRACE_S = 15 * 60
 DEADLINE_GRACE_S = 30 * 60
 DEAD_STATES = ("exited", "offline")
