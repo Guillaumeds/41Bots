@@ -2843,6 +2843,7 @@ mod tests {
             ("m3-hybrid-rung1b", 4, 4_000_000, (3, 400, 320)),
             ("m3-hybrid-smoke", 4, 500_000, (3, 32, 32)),
             ("m3-hybrid-harvest", 4, 12_000_000, (3, 400, 320)),
+            ("m3-hybrid-t4-audit-mech", 4, 9_000_000, (3, 400, 320)),
         ] {
             let path = dir.join(format!("{name}.manifest.json"));
             let v: Value = serde_json::from_str(&fs::read_to_string(&path).expect("read"))
