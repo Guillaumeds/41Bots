@@ -7,8 +7,9 @@
 //! nn-tool golden  --out FILE.json [--seed 41] [--count 200]
 //! nn-tool random  --trick K --widths 512,256,64 --out FILE.safetensors [--seed 17] [--head outcome-v1|money4]
 //! nn-tool bench   --equity TABLE --trick K [--worlds 4] [--max 20000] [--seed 5]
-//! nn-tool limits                      (prints `max_width=N`: the audited width limit, `nn::MAX_WIDTH`)
 //!                 [--widths 512,256,64 --widths 1024,512,128 …] [--net WEIGHTS …] [--reps 3]
+//! nn-tool limits                      (prints `max_width=N`: the audited width limit, `nn::MAX_WIDTH`)
+//! nn-tool row-weights --shard FILE.npy [--weight W --rows ROWS.npy]
 //! ```
 //! - `fixture`: a label shard of random positions at the start of trick `K` (random deals and
 //!   random legal play, `solver::worlds::sample_world`), valued exactly with the synthetic leaf
@@ -29,6 +30,12 @@
 //!   `--max`), with the production equity table, for random outcome-head networks of the given
 //!   hidden widths (`nn::synthetic::random_net`) and any trained weights files. Prints
 //!   microseconds per evaluation (best of `--reps` passes).
+//! - `row-weights`: a shard's per-row loss weights (`nn::rowweights`, the sidecar
+//!   `FILE.npy.rowweights` the trainer reads). With `--weight W --rows ROWS.npy` it writes the
+//!   sidecar (replacing any): the rows listed in `ROWS.npy` (a 1-D `<u8` array of row indices, as
+//!   `numpy.save` writes it) weigh `W` (a multiple of 1/256, from 1/256 to 65535/256) and the
+//!   others weigh 1. Either way it prints the sidecar's summary as JSON (`rows`, `rows_not_1`,
+//!   `sum`, `min` and `max` in units of 1/256, `sha256`), or `"sidecar": null` without one.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -84,8 +91,10 @@ fn main() -> ExitCode {
             println!("max_width={}", nn::MAX_WIDTH);
             Ok(())
         }
+        Some("row-weights") => row_weights(&a),
         _ => Err(
-            "usage: nn-tool fixture|eval|classes|golden|random|bench|limits … (see the source docs)"
+            "usage: nn-tool fixture|eval|classes|golden|random|bench|limits|row-weights … \
+             (see the source docs)"
                 .into(),
         ),
     };
@@ -96,6 +105,52 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn row_weights(a: &Args) -> Result<(), String> {
+    use nn::rowweights;
+    let shard = Path::new(a.req("--shard")?);
+    let rows = rowweights::shard_rows(shard)?;
+    if let Some(w) = a.get("--weight") {
+        let weight = w
+            .parse::<f64>()
+            .ok()
+            .and_then(rowweights::fixed)
+            .ok_or_else(|| format!("--weight {w}: a multiple of 1/256 from 1/256 to 65535/256"))?;
+        let f = a.req("--rows")?;
+        let b = std::fs::read(f).map_err(|e| format!("{f}: {e}"))?;
+        let (shape, chosen) = equity::npy::from_npy_u64(&b).map_err(|e| format!("{f}: {e}"))?;
+        if shape.len() != 1 {
+            return Err(format!(
+                "{f}: row indices must be one-dimensional, not {shape:?}"
+            ));
+        }
+        let weights = rowweights::chosen_rows(rows, &chosen, weight)?;
+        rowweights::write(shard, &weights)?;
+    } else if a.get("--rows").is_some() {
+        return Err("--rows needs --weight".into());
+    }
+    let path = rowweights::path_for(shard);
+    let out = match rowweights::read(shard)? {
+        None => serde_json::json!({ "shard": shard, "rows": rows, "sidecar": null }),
+        Some(w) => {
+            if w.len() != rows {
+                return Err(format!(
+                    "{}: {} row weights for {rows} rows",
+                    path.display(),
+                    w.len()
+                ));
+            }
+            let s = rowweights::summary(&w);
+            let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            serde_json::json!({ "shard": shard, "rows": rows, "sidecar": path,
+                                "sha256": equity::sha256::sha256_hex(&bytes),
+                                "rows_not_1": s.rows_not_1, "sum": s.sum,
+                                "min": s.min, "max": s.max })
+        }
+    };
+    println!("{out}");
+    Ok(())
 }
 
 fn fixture(a: &Args) -> Result<(), String> {

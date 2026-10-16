@@ -70,6 +70,15 @@ that feeds a trainer (the runner's label parts, later shards of the audit loop):
   counts that many times in its batch's loss (the weighted mean, ``loss_of``); with every weight
   1 nothing changes (the same network, byte for byte). ``--train`` files take weights the same
   way. The report gives them (``data.train_weights``, ``stream.parts[].weight``).
+- **Row weights.** A row's own loss weight comes from the sidecar ``NAME.npy.rowweights``
+  (``formats.load_row_weights``, written by ``crates/nn/src/rowweights.rs`` or ``numpy.save``):
+  a ``.npy`` of one ``<u2`` per row, in units of 1/256 (256 is 1, 512 is 2; never 0), also in
+  place before the shard is renamed into DIR. A row weighs its shard's weight times its own; a
+  sidecar of all 256 trains the same network, byte for byte, as none. The report lists every
+  sidecar read (``data.train_row_weights``: file, SHA-256, rows, rows not 1, mean;
+  ``stream.parts[].row_weights_sha256``), and the network's metadata their SHA-256
+  (``train_row_weights_sha256``) when a row weighs other than 1. The validation loss stays the
+  plain mean: the validation shard's weights, if any, are not read.
 - **Start and joining.** The training starts once the validation shard and at least one training
   shard exist, with every shard present then; each later shard is checked, converted and hashed
   on a thread of its own while the current epoch trains, and joins between epochs. More than
@@ -128,7 +137,10 @@ from .formats import (
     ONE,
     PAD,
     RACE_CLASS_NAMES,
+    ROW_WEIGHT_ONE,
+    ROW_WEIGHTS_SUFFIX,
     VALUE_FAULTS,
+    load_row_weights,
     load_shard,
     mask_bits,
     parse_widths,
@@ -738,12 +750,46 @@ def shard_weight(path):
     return w
 
 
+def data_weights(path, rows):
+    """A training shard's loss weights: (its shard weight, its row weights as uint16 in units of
+    1/256 or None, the row weights' SHA-256 or None). See ``shard_weight`` and
+    ``formats.load_row_weights``."""
+    try:
+        rw = load_row_weights(path, rows)
+    except ValueError as e:
+        raise SystemExit(str(e)) from None
+    sha = sha256_file(path + ROW_WEIGHTS_SUFFIX) if rw is not None else None
+    return shard_weight(path), rw, sha
+
+
 def with_weights(comp, sizes):
-    """The compact columns for the feed: ``comp``, plus the rows' loss weights (float32) when a
-    shard's weight is not 1; ``sizes`` is [(rows, weight)] of the shards in order."""
-    if all(w == 1.0 for _, w in sizes):
+    """The compact columns for the feed: ``comp``, plus the rows' loss weights (float32) when one
+    is not 1; ``sizes`` is [(rows, shard weight, row weights or None)] of the shards in order. A
+    row's weight is its shard's weight times its own (row weight / 256, exact in float32)."""
+    if all(w == 1.0 and (rw is None or np.all(rw == ROW_WEIGHT_ONE)) for _, w, rw in sizes):
         return comp
-    return comp + [np.concatenate([np.full(n, w, dtype=np.float32) for n, w in sizes])]
+    col = []
+    for n, w, rw in sizes:
+        if rw is None:
+            col.append(np.full(n, w, dtype=np.float32))
+        else:
+            col.append((rw.astype(np.float32) / np.float32(ROW_WEIGHT_ONE)) * np.float32(w))
+    return comp + [np.concatenate(col)]
+
+
+def weights_record(names, sizes, shas):
+    """What the report and the network's metadata say of the loss weights (empty when every
+    weight is 1 and no shard has row weights)."""
+    rec = {}
+    if any(w != 1.0 for _, w, _ in sizes):
+        rec["train_weights"] = [w for _, w, _ in sizes]
+    if any(rw is not None for _, _, rw in sizes):
+        rec["train_row_weights"] = [
+            None if rw is None else {"file": name + ROW_WEIGHTS_SUFFIX, "sha256": sha, "rows": int(len(rw)),
+                                     "rows_not_1": int(np.count_nonzero(rw != ROW_WEIGHT_ONE)),
+                                     "mean": float(rw.astype(np.float64).mean() / ROW_WEIGHT_ONE)}
+            for name, (_, _, rw), sha in zip(names, sizes, shas)]
+    return rec
 
 
 def load_part(path, threads):
@@ -752,8 +798,10 @@ def load_part(path, threads):
     sh = load_shard(path)
     tricks = check_shards([sh], threads=threads)
     comp = load_compact([sh], threads=threads)
+    w, rw, rsha = data_weights(path, len(sh))
     return {"path": path, "name": os.path.basename(path), "rows": int(len(sh)), "tricks": tricks,
-            "comp": comp, "sha256": sha256_file(path), "weight": shard_weight(path)}
+            "comp": comp, "sha256": sha256_file(path), "weight": w, "row_weights": rw,
+            "row_weights_sha256": rsha}
 
 
 class Watcher:
@@ -1011,16 +1059,22 @@ def main(argv=None):
             if p["tricks"] != {trick}:
                 raise SystemExit(f"{p['path']} holds tricks {sorted(p['tricks'])}, the validation shard {trick}")
             stream["parts"].append({"name": p["name"], "rows": p["rows"], "sha256": p["sha256"],
-                                    "weight": p["weight"], "ready_s": p["ready_s"], "first_epoch": epoch})
+                                    "weight": p["weight"], "row_weights_sha256": p["row_weights_sha256"],
+                                    "ready_s": p["ready_s"], "first_epoch": epoch})
             hashes["train"].append(p["sha256"])
-            sizes.append((p["rows"], p["weight"]))
+            sizes.append((p["rows"], p["weight"], p["row_weights"]))
+            names.append(p["name"])
+            rw_shas.append(p["row_weights_sha256"])
         return join_parts(comp, new)
 
     if watcher is None:
         n = sum(len(sh) for sh in shards)
-        sizes = [(len(sh), shard_weight(p)) for sh, p in zip(shards, args.train)]
+        dw = [data_weights(p, len(sh)) for sh, p in zip(shards, args.train)]
+        sizes = [(len(sh), w, rw) for sh, (w, rw, _) in zip(shards, dw)]
+        names = [os.path.basename(p) for p in args.train]
+        rw_shas = [sha for _, _, sha in dw]
     else:
-        sizes = []
+        sizes, names, rw_shas = [], [], []
         hashes = {"train": [], "val": sha256_file(args.val)}
         comp = add_parts(None, parts, 0)
         n = len(comp[0])
@@ -1041,7 +1095,7 @@ def main(argv=None):
     feed = Feed(with_weights(comp, sizes), device, args.batch, args.feed)
     if watcher is None:
         del comp
-    weights = [w for _, w in sizes]
+    weighting = weights_record(names, sizes, rw_shas)
     facts["feed"] = feed.facts
     print(f"training rows {feed.facts['mode']} ({feed.facts['bytes'] / 2**20:.0f} MiB compact)"
           + (f", GPU free {feed.facts['gpu_free_bytes'] / 2**20:.0f} MiB" if device.type == "cuda" else ""),
@@ -1107,7 +1161,7 @@ def main(argv=None):
                 steps = (n + args.batch - 1) // args.batch
                 feed = Feed(with_weights(comp, sizes), device, args.batch, args.feed)
                 facts["feed"] = feed.facts
-                weights = [w for _, w in sizes]
+                weighting = weights_record(names, sizes, rw_shas)
                 for k, x in step.counts.items():
                     past_counts[k] = past_counts.get(k, 0) + x
                 was = step
@@ -1204,8 +1258,13 @@ def main(argv=None):
         "mix_weight": repr(args.mix_weight),
         "torch": torch.__version__,
     }
-    if any(w != 1.0 for w in weights):
-        meta["train_weights"] = json.dumps(weights)
+    if "train_weights" in weighting:
+        meta["train_weights"] = json.dumps(weighting["train_weights"])
+    # Only when a row weighs other than 1: a sidecar of all 1 trains the same network, which then
+    # stays the same file.
+    if any(r is not None and r["rows_not_1"] for r in weighting.get("train_row_weights", [])):
+        meta["train_row_weights_sha256"] = json.dumps(
+            [None if r is None else r["sha256"] for r in weighting["train_row_weights"]])
     ft = {}
     for k, (w, b) in enumerate(layers):
         ft[f"w{k}"] = w.astype(np.float32)
@@ -1229,7 +1288,7 @@ def main(argv=None):
         "trick": trick,
         "head": head_name,
         "outcomes": v,
-        "data": dict(hashes, **({"train_weights": weights} if any(w != 1.0 for w in weights) else {})),
+        "data": dict(hashes, **weighting),
         "history": history,
         "best_epoch": best[2],
         "float": {"val_loss": vloss, "outcome_accuracy": acc, "error": error_stats(pf, val["value"]),

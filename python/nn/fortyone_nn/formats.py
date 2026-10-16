@@ -1,7 +1,8 @@
 """File formats shared with Rust (PLAN section 12.7).
 
-Label shards are ``.npy`` record arrays written by ``crates/nn/src/shard.rs``; weights are
-safetensors files (a little-endian u64 header length, a JSON header, raw little-endian data).
+Label shards are ``.npy`` record arrays written by ``crates/nn/src/shard.rs``, with optional
+per-row loss weights beside them (``load_row_weights``, ``crates/nn/src/rowweights.rs``); weights
+are safetensors files (a little-endian u64 header length, a JSON header, raw little-endian data).
 Only numpy is needed here, so the parity check runs without PyTorch.
 """
 
@@ -101,6 +102,34 @@ def load_shard(path, mmap=True):
     names = a.dtype.names or ()
     if "outcomes" not in names or a.dtype != shard_dtype(a.dtype["outcomes"].shape[0]):
         raise ValueError(f"{path}: record type {a.dtype} is not a label shard")
+    return a
+
+
+# Per-row loss weights (crates/nn/src/rowweights.rs): the sidecar ``NAME.npy.rowweights`` of a
+# shard ``NAME.npy`` is a ``.npy`` file of one ``<u2`` per row, in row order, each the row's
+# weight in units of 1/ROW_WEIGHT_ONE (256 is a weight of 1, 512 of 2, 384 of 1.5; 1 to 65535,
+# never 0). Fixed point, so a weight has one encoding and is exact in float32; Rust's writer and
+# ``numpy.save`` write the same bytes (from Python, save through an open file: given a name,
+# numpy adds ".npy" to it). It must be in place before the shard appears under its final name (a
+# watching trainer reads it then).
+ROW_WEIGHT_ONE = 256
+ROW_WEIGHTS_SUFFIX = ".rowweights"
+
+
+def load_row_weights(shard_path, rows):
+    """The row weights of the shard at ``shard_path`` as a uint16 array (units of 1/256), or
+    None without a sidecar. Refused: another type or shape, another length than ``rows``, a 0."""
+    p = shard_path + ROW_WEIGHTS_SUFFIX
+    try:
+        a = np.load(p, allow_pickle=False)
+    except FileNotFoundError:
+        return None
+    if a.dtype != np.dtype("<u2") or a.ndim != 1:
+        raise ValueError(f"{p}: row weights must be a 1-D '<u2' array, not {a.dtype} {a.shape}")
+    if len(a) != rows:
+        raise ValueError(f"{p}: {len(a)} row weights for {rows} rows")
+    if np.any(a == 0):
+        raise ValueError(f"{p}: row {int(np.argmax(a == 0))} has a weight of 0")
     return a
 
 

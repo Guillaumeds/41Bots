@@ -138,14 +138,18 @@ pub fn to_npy(rows: &[Row], v: usize) -> Vec<u8> {
     out
 }
 
-/// Read a shard written by [`to_npy`] (or by NumPy with the same record type).
-pub fn from_npy(bytes: &[u8]) -> Result<Vec<Row>, String> {
+/// A shard's header, from the start of its file (the whole header; the records may follow or
+/// not): its number of records, its number of outcomes and where its records begin.
+///
+/// # Errors
+/// If the bytes do not start a label shard's `.npy` file.
+pub fn parse_header(bytes: &[u8]) -> Result<(usize, usize, usize), String> {
     if bytes.len() < 10 || &bytes[..6] != MAGIC {
         return Err("not a .npy file".into());
     }
     let (hlen, start) = match bytes[6] {
         1 => (usize::from(u16::from_le_bytes([bytes[8], bytes[9]])), 10),
-        2 | 3 => (
+        2 | 3 if bytes.len() >= 12 => (
             u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize,
             12,
         ),
@@ -173,8 +177,14 @@ pub fn from_npy(bytes: &[u8]) -> Result<Vec<Row>, String> {
         .trim_end_matches(',')
         .parse()
         .map_err(|_| format!("bad shape {shape}"))?;
+    Ok((n, v, start + hlen))
+}
+
+/// Read a shard written by [`to_npy`] (or by NumPy with the same record type).
+pub fn from_npy(bytes: &[u8]) -> Result<Vec<Row>, String> {
+    let (n, v, data) = parse_header(bytes)?;
     let rb = row_bytes_for(v);
-    let body = &bytes[start + hlen..];
+    let body = &bytes[data..];
     if body.len() != n * rb {
         return Err(format!("{} data bytes for {n} records of {rb}", body.len()));
     }

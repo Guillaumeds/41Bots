@@ -29,6 +29,7 @@ pub mod mlp;
 pub mod money;
 pub mod oracle;
 pub mod outcome;
+pub mod rowweights;
 pub mod safetensors;
 pub mod shard;
 pub mod synthetic;

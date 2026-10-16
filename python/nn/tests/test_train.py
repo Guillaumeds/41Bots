@@ -50,7 +50,8 @@ except ImportError:  # the numpy-only CI job
 
 from fortyone_nn import device, train
 from fortyone_nn.formats import (
-    MAX_ACTIVE, N_BINARY, N_DENSE, ONE, PAD, VOCAB, check_values, load_shard, shard_dtype, sha256_file,
+    MAX_ACTIVE, N_BINARY, N_DENSE, ONE, PAD, ROW_WEIGHTS_SUFFIX, VOCAB, check_values, load_shard, read_safetensors,
+    shard_dtype, sha256_file,
 )
 
 
@@ -691,6 +692,156 @@ class WeightTest(unittest.TestCase):
             rep = json.load(f)
         self.assertEqual([(p["name"], p["weight"]) for p in rep["stream"]["parts"]], [("a.npy", 1.0), ("b.npy", 3.0)])
         self.assertEqual(rep["data"]["train_weights"], [1.0, 3.0])
+        self.assertEqual(len(rep["history"]), 3)
+
+
+def set_row_weights(shard, w):
+    """Writes (or with None removes) the shard's row-weights sidecar, as a writer does: whole,
+    under another name, then renamed (through a file object: given a name, numpy.save adds .npy)."""
+    p = shard + ROW_WEIGHTS_SUFFIX
+    if w is None:
+        if os.path.exists(p):
+            os.remove(p)
+        return
+    with open(p + ".part", "wb") as f:
+        np.save(f, np.asarray(w))
+    os.replace(p + ".part", p)
+
+
+class RowWeightTest(unittest.TestCase):
+    """Row weights (``NAME.npy.rowweights``): each row's weight times its shard's, the weighted mean
+    of each batch's loss on the eager and the CUDA-graph step; all 256 is the unweighted network,
+    byte for byte; all 512 is a shard weight of 2; recorded in the report and the network's
+    metadata; a streamed shard brings its own; bad sidecars are refused."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.TemporaryDirectory()
+        d = cls.dir.name
+        cls.shards = [synthetic_shard(os.path.join(d, n), r, s) for n, r, s in (("a.npy", 300, 1), ("b.npy", 200, 2))]
+        cls.val = synthetic_shard(os.path.join(d, "v.npy"), 100, 3)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.dir.cleanup()
+
+    def tearDown(self):
+        for s in self.shards:
+            set_row_weights(s, None)
+            if os.path.exists(s + ".weight"):
+                os.remove(s + ".weight")
+
+    def run_train(self, name, *args):
+        out = os.path.join(self.dir.name, name)
+        with contextlib.redirect_stdout(io.StringIO()):
+            train.main(["--train", *self.shards, "--val", self.val, "--out", out, "--widths", "16,8", "--epochs", "2",
+                        "--batch", "64", "--seed", "5", "--threads", "1", "--device", "cpu", *args])
+        with open(os.path.join(out, "report.json")) as f:
+            rep = json.load(f)
+        return sha256_file(os.path.join(out, "int.safetensors")), rep, out
+
+    def test_the_weight_column(self):
+        comp = [np.zeros(5)]
+        self.assertIs(train.with_weights(comp, [(3, 1.0, None), (2, 1.0, np.full(2, 256, dtype="<u2"))]), comp)
+        cols = train.with_weights(comp, [(3, 1.0, None), (2, 2.0, np.array([256, 640], dtype="<u2"))])
+        self.assertEqual(cols[-1].dtype, np.float32)
+        self.assertEqual(cols[-1].tolist(), [1.0, 1.0, 1.0, 2.0, 5.0], "the shard's weight times the row's")
+        cols = train.with_weights(comp, [(3, 1.5, None), (2, 1.0, np.array([1, 65535], dtype="<u2"))])
+        self.assertEqual(cols[-1].tolist(), [1.5, 1.5, 1.5, 1 / 256, 65535 / 256], "exact in float32")
+
+    def test_row_weights_in_training(self):
+        plain, rep, _ = self.run_train("plain")
+        self.assertNotIn("train_row_weights", rep["data"])
+        for s in self.shards:
+            set_row_weights(s, np.full(300 if s.endswith("a.npy") else 200, 256, dtype="<u2"))
+        ones, rep1, _ = self.run_train("ones")
+        self.assertEqual(ones, plain, "row weights of 1 are the unweighted training, byte for byte")
+        self.assertEqual([r["rows_not_1"] for r in rep1["data"]["train_row_weights"]], [0, 0])
+        # All 512 on b is b's shard weight of 2: the same column, so the same network.
+        set_row_weights(self.shards[0], None)
+        set_row_weights(self.shards[1], np.full(200, 512, dtype="<u2"))
+        sha_512 = sha256_file(self.shards[1] + ROW_WEIGHTS_SUFFIX)
+        _, rep_rw, out_rw = self.run_train("rows-512")
+        set_row_weights(self.shards[1], None)
+        with open(self.shards[1] + ".weight", "w") as f:
+            f.write("2")
+        _, rep_sw, out_sw = self.run_train("shard-2")
+        os.remove(self.shards[1] + ".weight")
+        for f in ("int.safetensors", "float.safetensors"):
+            a, meta_rw = read_safetensors(os.path.join(out_rw, f))
+            b, _ = read_safetensors(os.path.join(out_sw, f))
+            self.assertEqual(sorted(a), sorted(b))
+            for k in a:
+                self.assertTrue(np.array_equal(a[k], b[k]), f"{f} {k}")
+        self.assertEqual([h["val_loss"] for h in rep_rw["history"]], [h["val_loss"] for h in rep_sw["history"]])
+        self.assertEqual(json.loads(meta_rw["train_row_weights_sha256"]), [None, sha_512])
+        # Some rows weighted: another network, recorded.
+        wa = np.full(300, 256, dtype="<u2")
+        wa[::3] = 512
+        wb = np.full(200, 256, dtype="<u2")
+        wb[:50] = 128
+        set_row_weights(self.shards[0], wa)
+        set_row_weights(self.shards[1], wb)
+        some, rep2, out2 = self.run_train("some")
+        self.assertNotEqual(some, plain)
+        self.assertEqual(rep2["data"]["train_row_weights"], [
+            {"file": "a.npy.rowweights", "sha256": sha256_file(self.shards[0] + ROW_WEIGHTS_SUFFIX), "rows": 300,
+             "rows_not_1": 100, "mean": float(wa.mean() / 256)},
+            {"file": "b.npy.rowweights", "sha256": sha256_file(self.shards[1] + ROW_WEIGHTS_SUFFIX), "rows": 200,
+             "rows_not_1": 50, "mean": float(wb.mean() / 256)}])
+        self.assertNotIn("train_weights", rep2["data"])
+        _, meta = read_safetensors(os.path.join(out2, "int.safetensors"))
+        self.assertEqual(json.loads(meta["train_row_weights_sha256"]),
+                         [r["sha256"] for r in rep2["data"]["train_row_weights"]])
+        # The CUDA-graph step's way (without a GPU: ``Replayed``) reads them too.
+        with mock.patch.object(train, "GRAPH_DEVICES", ("cpu",)), mock.patch.object(train, "GRAPH_CLASS", train.Replayed):
+            _, repg, _ = self.run_train("some-graph")
+        self.assertEqual(repg["device"]["train_step"]["mode"], "cuda-graph")
+        for a, b in zip(rep2["history"], repg["history"]):
+            self.assertAlmostEqual(a["val_loss"], b["val_loss"], delta=1e-4 * max(1.0, abs(a["val_loss"])))
+        # Refused: another length, a 0, another type.
+        for bad in (np.full(199, 256, dtype="<u2"), np.where(np.arange(200) == 7, 0, 256).astype("<u2"),
+                    np.full(200, 1.0, dtype="<f4")):
+            set_row_weights(self.shards[1], bad)
+            with self.assertRaises(SystemExit):
+                self.run_train("bad")
+
+    def test_a_streamed_shard_brings_its_row_weights(self):
+        w = os.path.join(self.dir.name, "watch")
+        os.makedirs(w)
+        drop(self.shards[0], w)
+        wb = np.full(200, 256, dtype="<u2")
+        wb[1::2] = 768
+        set_row_weights(os.path.join(w, "b.npy"), wb)
+        prog = os.path.join(self.dir.name, "rw.progress.json")
+
+        def feeder():
+            while True:
+                try:
+                    with open(prog) as f:
+                        if json.load(f).get("step") == "wait":
+                            break
+                except (OSError, ValueError):
+                    pass
+                time.sleep(0.02)
+            drop(self.shards[1], w)
+
+        t = threading.Thread(target=feeder, daemon=True)
+        t.start()
+        out = os.path.join(self.dir.name, "streamed-rows")
+        with contextlib.redirect_stdout(io.StringIO()):
+            train.main(["--watch-dir", w, "--expect", "2", "--partial-epochs", "1", "--val", self.val, "--out", out,
+                        "--widths", "16,8", "--epochs", "2", "--batch", "64", "--seed", "5", "--threads", "1",
+                        "--device", "cpu", "--progress", prog, "--watch-poll", "0.05"])
+        t.join(timeout=5)
+        with open(os.path.join(out, "report.json")) as f:
+            rep = json.load(f)
+        sha = sha256_file(os.path.join(w, "b.npy" + ROW_WEIGHTS_SUFFIX))
+        self.assertEqual([(p["name"], p["row_weights_sha256"]) for p in rep["stream"]["parts"]],
+                         [("a.npy", None), ("b.npy", sha)])
+        rw = rep["data"]["train_row_weights"]
+        self.assertIsNone(rw[0])
+        self.assertEqual((rw[1]["rows_not_1"], rw[1]["mean"]), (100, 2.0))
         self.assertEqual(len(rep["history"]), 3)
 
 

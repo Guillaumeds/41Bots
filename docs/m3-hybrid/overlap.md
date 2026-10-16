@@ -186,6 +186,24 @@ rented run shows the gain.
   unweighted training (tested). `--train` files take weights the same way. The report gives them
   (`data.train_weights`, `stream.parts[].weight`), and the network's metadata gives
   `train_weights` when one is not 1.
+- **Row weights:** `NAME.npy.rowweights`, one weight per row, also in place before the shard is
+  renamed into DIR (or beside a `--train` file). A row then counts its shard's weight times its
+  own.
+  - Format: a `.npy` file of a 1-D `<u2` array (little-endian 16-bit whole numbers), one per row in
+    row order, in units of 1/256: 256 is a weight of 1, 512 of 2, 384 of 1.5; 1 to 65535, never
+    0. Whole numbers, so a weight has one exact encoding and Rust writes the same bytes as
+    `numpy.save` (tested against a golden hash).
+  - Writers: Rust `nn::rowweights::write(shard_path, &weights)` (whole and atomic: a `.part` name,
+    then a rename; `nn::rowweights::fixed(2.0)` gives 512, `chosen_rows(rows, &indices, 512)` the
+    array where the listed rows weigh 2). From the command line: `nn-tool row-weights --shard
+    NAME.npy --weight 2 --rows ROWS.npy` (ROWS a 1-D `<u8` array of row indices); without
+    `--weight` it prints the sidecar's summary. From Python: `numpy.save` on an open file (given a
+    name, numpy adds `.npy` to it), then rename.
+  - A sidecar of all 256 trains the byte-identical network; all 512 trains the same network as a
+    shard weight of 2 (both tested). The validation shard's sidecar, if any, is not read.
+  - Recorded: `data.train_row_weights` (per training shard: file, SHA-256, rows, rows not 1, mean;
+    `null` without a sidecar), `stream.parts[].row_weights_sha256`, and the network's metadata
+    `train_row_weights_sha256` when a row weighs other than 1.
 - **Start:**
   - The training waits for the validation shard and at least one shard, then starts with every
     shard present.
@@ -194,7 +212,7 @@ rented run shows the gain.
   - More than N shards is an error.
   - When all N are there from the start, the training is exactly the `--train` one (tested).
 - **Report:** `stream`:
-  - `parts[]`: name, rows, SHA-256, weight, seconds until ready, first epoch;
+  - `parts[]`: name, rows, SHA-256, weight, row weights' SHA-256, seconds until ready, first epoch;
   - `first_full_epoch`;
   - `partial_epochs`;
   - `epochs_trained_on` (per shard).
