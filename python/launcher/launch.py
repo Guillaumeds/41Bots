@@ -63,7 +63,7 @@ Rules applied:
   41bots-<run_id> means vast rented it after all and it is adopted (never a second rental); if
   the list cannot be read either, the run stops. Otherwise the next-best offer is tried, up to 5.
 - --offer-id (an offer the owner picked on vast's website): one search by that id checks the
-  same things as the normal search (a verified host, reliability at least 0.98, the whole
+  same things as the normal search (a verified host, reliability at least 0.90, the whole
   machine, on-demand, and the GPU needs below); an offer that fails any of them, or that cannot
   be checked, is not rented.
 - GPU jobs (network training, docs/m3-hybrid/vast.md): --gpus N (exactly N GPUs on the machine),
@@ -133,7 +133,7 @@ BUSY_CPU_PCT = 50.0  # default; --busy-cpu-pct overrides
 GONE_CONFIRMATIONS = 3  # readings showing an instance exited/offline/absent before it counts as gone
 GONE_SPAN_S = 90  # ...spanning at least this long
 ADOPT_READINGS = 2  # readable instance listings without the run's label before a failed create counts as "nothing rented"
-MIN_RELIABILITY = 0.98
+MIN_RELIABILITY = 0.90  # owner, 2026-10-16: hosts with reliability of at least 90% are accepted, for every rental
 MAX_DOLLARS = 20.0  # the default dollar cap of a run (owner, 2026-10-16)
 # GitHub ends a job after 6 hours (vast-run.yml timeout-minutes: 360). Longer runs are handed over
 # before that: the machine keeps working and the run-aware cleanup (cleanup.py, every 15 minutes)
@@ -426,7 +426,7 @@ def describe(o: dict) -> str:
 
 def offer_check_failures(o: dict, floor: float = MIN_RELIABILITY) -> list[str]:
     """Why an offer fails the launcher's safety checks (what the search query filters on, applied
-    to one offer's record): a verified host, reliability at least 0.98, the whole machine (no
+    to one offer's record): a verified host, reliability at least 0.90, the whole machine (no
     sharing), on-demand and rentable. Empty when it passes."""
     failed = []
     if o.get("verified") is not True and (o.get("verification") or "") != "verified":
@@ -1601,7 +1601,7 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("--min-cores", type=int, default=16)
         s.add_argument("--min-ram-gb", type=int, default=32)
         s.add_argument("--min-reliability", type=float, default=MIN_RELIABILITY,
-                       help="the host reliability floor (default 0.98); lower only for one named offer the owner accepts")
+                       help="the host reliability floor (default 0.90, the owner's rule of 2026-10-16); raise it for a run that wants a steadier host")
         s.add_argument("--disk-gb", type=int, default=20)
         s.add_argument("--max-net-cost", type=float, default=0.10, help="max $/GB up or down (owner 2026-10-14: 0.10; our traffic is tiny)")
         s.add_argument("--premium", type=float, default=0.20, help="speed premium margin (owner's 20%% rule)")
@@ -1616,7 +1616,7 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("--min-compute-cap", type=int, default=MIN_COMPUTE_CAP,
                        help="GPU job: lowest compute capability x 100 (default 600 = 6.0, Pascal; below 1000 always)")
         s.add_argument("--offer-id", type=int, default=None,
-                       help="rent exactly this vast.ai offer: one search by its id checks it (verified host, reliability >= 0.98, "
+                       help="rent exactly this vast.ai offer: one search by its id checks it (verified host, reliability >= 0.90, "
                             "whole machine, on-demand) and nothing else is searched; an offer failing a check is not rented")
         s.add_argument("--offer-dph", type=float, default=None,
                        help="with --offer-id: the price per hour you saw (optional; a warning if vast reports another)")

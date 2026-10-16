@@ -48,7 +48,7 @@ class Comparable(unittest.TestCase):
     def test_unverified_shared_and_slow_machines_never_count(self):
         cpu = "AMD Ryzen Threadripper PRO 9995WX 96-Cores"
         market = [offer(1, cpu, 192, 251, 1.0, verification="deverified"), offer(2, cpu, 192, 251, 1.0, gpu_frac=0.5),
-                  offer(3, cpu, 192, 251, 1.0, reliability2=0.95), offer(4, cpu, 64, 80, 0.4)]   # 64 threads: too slow
+                  offer(3, cpu, 192, 251, 1.0, reliability2=0.85), offer(4, cpu, 64, 80, 0.4)]   # 64 threads: too slow
         ok, _ = V.comparable(self.m, market, self.ref, 1.3, 0.7)
         self.assertEqual(ok, [])
 
