@@ -113,3 +113,96 @@ pub fn golden_outcomes(seed: u64, count: usize, v: usize) -> Vec<crate::outcome:
         })
         .collect()
 }
+
+/// Frontier positions as a hybrid solve reaches them: for each of `worlds` random roots at the
+/// start of trick `trick − 1` ([`solver::worlds::sample_world`] with `seed`), every position the
+/// optimised solver (default options) values at a frontier at the start of `trick`, in the order
+/// it asks for them (repeats included), up to `max` in all. The frontier evaluator used while
+/// collecting is a cheap hash of the canonical form, so the search prunes as with a real
+/// network; the positions are real reached frontier positions. For benchmarks and tests.
+pub fn reached_frontier(
+    seed: u64,
+    trick: u8,
+    worlds: u64,
+    max: usize,
+    leaf: &(dyn Leaf + Sync),
+) -> Vec<(solver::CanonPos, solver::MatchCtx)> {
+    use std::sync::Mutex;
+    let out = Mutex::new(Vec::new());
+    for w in 0..worlds {
+        if out.lock().expect("no panics").len() >= max {
+            break;
+        }
+        let (pos, ctx, _) = solver::worlds::sample_world(seed, trick - 1, w, 0);
+        let rec = solver::FnFrontier(|c: &solver::CanonPos, x: &solver::MatchCtx| {
+            let mut v = out.lock().expect("no panics");
+            if v.len() < max {
+                v.push((*c, *x));
+            }
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            for b in c.slots.iter().chain(&c.scores).chain(&c.tricks) {
+                h = (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01B3);
+            }
+            let w: [u128; 4] = core::array::from_fn(|t| u128::from((h >> (16 * t)) & 0xFFFF) + 1);
+            MoneyChance::from_weights(w)
+        });
+        let cut = solver::FrontierCut::new(trick, &rec);
+        let mut mem = solver::SolveMem::new();
+        let _ = solver::solve_fast_cut(
+            &pos,
+            ctx,
+            &DynLeaf(leaf),
+            solver::FastOptions::default(),
+            Some(cut),
+            &mut mem,
+            None,
+        );
+    }
+    out.into_inner().expect("no panics")
+}
+
+struct DynLeaf<'a>(&'a (dyn Leaf + Sync));
+
+impl Leaf for DynLeaf<'_> {
+    fn value(&self, s: &MatchState) -> MoneyChance {
+        self.0.value(s)
+    }
+}
+
+/// A random integer network for benchmarks and differential tests: hidden widths `widths`,
+/// `n_out` outputs, the scheme of a trained network quantised by `python/nn` (every layer's
+/// weights `round(w × 2^24)`, shifts `[28, 24, …, 24, 20]`), with weights uniform in
+/// `±(pct / 100) / sqrt(fan-in)` and biases in `±(pct / 100) / 8` (fan-in of the first layer:
+/// 64, about the active inputs of a position). Integer only; drawn from SplitMix64 seeded with
+/// `seed`.
+pub fn random_net(seed: u64, widths: &[usize], n_out: usize, pct: u64) -> IntMlp {
+    let mut sm = SplitMix64::new(seed);
+    let mut dims = vec![N_FEATURES];
+    dims.extend_from_slice(widths);
+    dims.push(n_out);
+    let last = dims.len() - 2;
+    let layers = (0..dims.len() - 1)
+        .map(|k| {
+            let (n_in, n_out) = (dims[k], dims[k + 1]);
+            let fan = if k == 0 { 64 } else { n_in as u64 };
+            let a = ((1u64 << 48) / fan).isqrt() * pct / 100;
+            let w = (0..n_in * n_out)
+                .map(|_| ((sm.next_u64() % (2 * a + 1)) as i64 - a as i64) as i32)
+                .collect();
+            let s_in = if k == 0 { 24 } else { 20 };
+            let ab = (1u64 << 21) * pct / 100;
+            let b = (0..n_out)
+                .map(|_| ((sm.next_u64() % (2 * ab + 1)) as i64 - ab as i64) << s_in)
+                .collect();
+            let shift = 24 + s_in - if k == last { 24 } else { 20 };
+            Layer {
+                n_in,
+                n_out,
+                w,
+                b,
+                shift,
+            }
+        })
+        .collect();
+    IntMlp::new(layers).expect("a random network within the bounds")
+}

@@ -33,7 +33,7 @@ use equity::{MatchState, MoneyChance};
 use solver::frontier::CanonPos;
 use solver::{Leaf, MatchCtx};
 
-use crate::encode::rotation;
+use crate::encode::{DenseKey, rotation};
 
 /// The most outcomes of any trick (39 at trick 2), with room.
 pub const MAX_OUT: usize = 64;
@@ -84,26 +84,31 @@ impl Outcomes {
 /// The outcomes of a canonical position with its match context, in the encoder's rotated team
 /// order (`crate::encode::rotation`).
 pub fn outcomes(c: &CanonPos, ctx: &MatchCtx, leaf: &dyn Leaf) -> Outcomes {
+    outcomes_of(&DenseKey::of(c, ctx), top_team(c), leaf)
+}
+
+/// The team (rotated order) holding the highest live trump, if a trump is live (classes 0–2 are
+/// slots 0..15, best first).
+pub fn top_team(c: &CanonPos) -> Option<u8> {
     let r = rotation(c);
-    let rt = |t: u8| usize::from((t + r) % 4);
-    let mut scores = [0u8; 4];
-    let mut flags = [false; 4];
-    let mut tricks = [0u8; 4];
-    let mut games = [0u8; 4];
-    for t in 0..4u8 {
-        scores[rt(t)] = c.scores[usize::from(t)];
-        flags[rt(t)] = c.flags[usize::from(t)];
-        tricks[rt(t)] = c.tricks[usize::from(t)];
-        games[rt(t)] = ctx.games[usize::from(t)];
-    }
-    let next = ((rt(ctx.dealer_team) + 1) % 4) as u8;
-    let left = engine::game::TRICKS_PER_HAND - c.tricks_done;
+    (0..15).find_map(|i| c.slot(i)).map(|(s, _)| (s + r) % 4)
+}
+
+/// [`outcomes`] from what they depend on: the position's [`DenseKey`] and its [`top_team`]
+/// (equal arguments give equal outcomes, so a caller may compute them once per argument pair).
+pub fn outcomes_of(k: &DenseKey, top: Option<u8>, leaf: &dyn Leaf) -> Outcomes {
+    let scores = k.scores;
+    let flags = k.flags;
+    let tricks = k.tricks;
+    let games = k.games;
+    let next = (k.dealer + 1) % 4;
+    let left = engine::game::TRICKS_PER_HAND - k.tricks_done;
     // The bonus still to come and its team: the live 5's holder, else the end-bonus team.
-    let five_holder = c.slot(0).map(|(s, _)| ((s + r) % 4) as usize);
-    let bonus_team = if c.five_played {
+    let five_holder = k.five.map(usize::from);
+    let bonus_team = if k.five_played {
         None
     } else {
-        five_holder.or(c.end_bonus.map(rt))
+        five_holder.or(k.end.map(usize::from))
     };
     let bonus_of = |t: usize| -> u8 {
         if bonus_team == Some(t) {
@@ -116,10 +121,7 @@ pub fn outcomes(c: &CanonPos, ctx: &MatchCtx, leaf: &dyn Leaf) -> Outcomes {
             0
         }
     };
-    // The team holding the highest live trump (classes 0–2 are slots 0..15, best first).
-    let top = (0..15)
-        .find_map(|i| c.slot(i))
-        .map(|(s, _)| ((s + r) % 4) as usize);
+    let top = top.map(usize::from);
     let comps = compositions(left);
     let n = GAME_WON + comps.len();
     let mut mask = 0u64;
@@ -137,7 +139,7 @@ pub fn outcomes(c: &CanonPos, ctx: &MatchCtx, leaf: &dyn Leaf) -> Outcomes {
             })
         });
         let reach = u32::from(scores[t]) + 5 * u32::from(left) + u32::from(bonus_of(t));
-        let jink = tricks[t] == c.tricks_done;
+        let jink = tricks[t] == k.tricks_done;
         if reach >= u32::from(engine::game::WINNING_SCORE) || jink {
             mask |= 1 << t;
         }
@@ -172,21 +174,26 @@ pub fn outcomes(c: &CanonPos, ctx: &MatchCtx, leaf: &dyn Leaf) -> Outcomes {
 /// the weighted mean of their money vectors in `u128` with largest-remainder rounding
 /// ([`MoneyChance::mix_wide`]: sums to exactly 2^32, ties to the lower team).
 pub fn money_from_outcomes(z: &[i64], o: &Outcomes) -> MoneyChance {
-    let m = (0..o.n)
-        .filter(|&i| o.mask >> i & 1 == 1)
+    mix_outcomes(z, o.n, o.mask, &o.vecs)
+}
+
+/// [`money_from_outcomes`] of `n` outcomes given as their mask and money vectors.
+pub fn mix_outcomes(z: &[i64], n: usize, mask: u64, vecs: &[MoneyChance]) -> MoneyChance {
+    let m = (0..n)
+        .filter(|&i| mask >> i & 1 == 1)
         .map(|i| z[i])
         .max()
         .expect("a position has at least one possible outcome");
-    let terms: Vec<(u128, MoneyChance)> = (0..o.n)
-        .filter(|&i| o.mask >> i & 1 == 1)
-        .map(|i| {
-            (
-                u128::from(crate::money::exp_weight((m - z[i]) as u64)),
-                o.vecs[i],
-            )
-        })
-        .collect();
-    MoneyChance::mix_wide(&terms)
+    let mut terms = [(0u128, MoneyChance::even()); MAX_OUT];
+    let mut k = 0;
+    for i in (0..n).filter(|&i| mask >> i & 1 == 1) {
+        terms[k] = (
+            u128::from(crate::money::exp_weight((m - z[i]) as u64)),
+            vecs[i],
+        );
+        k += 1;
+    }
+    MoneyChance::mix_wide(&terms[..k])
 }
 
 #[cfg(test)]
