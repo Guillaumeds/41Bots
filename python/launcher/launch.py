@@ -76,7 +76,8 @@ Rules applied:
   a GPU need overrides --cpu-only, and any other key is refused before anything is rented. Every
   other rule (verified host, reliability, whole machine, on-demand only, dollar cap) is unchanged.
 - Destroying is verified: "destroyed (verified)" only once a later status call shows the instance
-  exited, offline or absent; when that call fails 3 times the destroy is reported as unverified
+  exited, offline or absent, in two readings 10 s apart (one reading, such as an empty instance
+  list, is never enough); when that call fails 3 times the destroy is reported as unverified
   (in the log, the report and the step summary), never counted as done.
 - Format-2 manifests (docs/M3-SPEC.md section 7.3) resume: when the heartbeat goes missing for 3
   minutes, the machine never starts, or the instance dies before DONE, the launcher destroys it
@@ -132,6 +133,7 @@ SILENT_BUSY_MIN = 15  # default; --silent-busy-min overrides
 BUSY_CPU_PCT = 50.0  # default; --busy-cpu-pct overrides
 GONE_CONFIRMATIONS = 3  # readings showing an instance exited/offline/absent before it counts as gone
 GONE_SPAN_S = 90  # ...spanning at least this long
+DESTROY_RECHECK_S = 10  # destroy(): a "dead" reading counts only when a second one this much later agrees
 ADOPT_READINGS = 2  # readable instance listings without the run's label before a failed create counts as "nothing rented"
 MIN_RELIABILITY = 0.90  # owner, 2026-10-16: hosts with reliability of at least 90% are accepted, for every rental
 MAX_DOLLARS = 20.0  # the default dollar cap of a run (owner, 2026-10-16)
@@ -560,6 +562,25 @@ def instance_env(run_id: str, ncpu: int, dph: float, bin_sha: str, image: str = 
     return " ".join(f"-e {k}={v}" for k, v in kv.items())
 
 
+def destroy_reading(instance_id: int) -> tuple[str, dict | None]:
+    """One reading for destroy(): like instance_state(), except that "dead" must be seen twice,
+    DESTROY_RECHECK_S seconds apart. A single listing has been wrong (2026-10-16, 09:56 UTC: vast's
+    `show instances` held no 41bots instance, or returned an empty list, while the machine was
+    running and sending heartbeats), and destroy() decides on one reading where the Liveness class
+    needs three over 90 s. If the second reading shows the instance alive, that is the answer (the
+    first reading is forgotten); if it cannot be read ("unknown"), that is the answer: unknown is
+    never dead."""
+    state, info = instance_state(instance_id)
+    if state != "dead":
+        return state, info
+    log(f"instance {instance_id} reads dead ({info_word(info)}); reading again in {DESTROY_RECHECK_S} s to be sure")
+    time.sleep(DESTROY_RECHECK_S)
+    state, info = instance_state(instance_id)
+    if state == "alive":
+        log(f"instance {instance_id} reads alive on the second reading ({info_word(info)}): the first was wrong")
+    return state, info
+
+
 def destroy(instance_id: int) -> str:
     """Destroys the instance and checks that it is gone. Returns "verified" (a later status call
     showed it exited, offline or absent from the instance list), "unverified" (the destroy call
@@ -572,14 +593,17 @@ def destroy(instance_id: int) -> str:
     instance, so every destroy call fails. After each failed call the status is read; if that
     reading shows the instance gone ("dead": exited, offline or absent from a listing that was
     read successfully) it counts as verified. If the status cannot be read ("unknown"), or shows
-    the instance still there, the destroy is tried again."""
+    the instance still there, the destroy is tried again.
+
+    "Dead" counts only when two readings DESTROY_RECHECK_S seconds apart both say dead (see
+    destroy_reading): one reading is never enough, after a failed call or after a successful one."""
     for attempt in range(5):
         try:
             # -y: without it vastai asks "Are you sure?" on stdin, reads EOF and silently does nothing.
             vast("destroy", "instance", str(instance_id), "-y", raw=False)
         except RuntimeError as e:
             log(f"destroy attempt {attempt + 1} failed: {e}")
-            state, info = instance_state(instance_id)
+            state, info = destroy_reading(instance_id)
             if state == "dead":
                 log(f"instance {instance_id} was already gone when the destroy call failed "
                     f"({info_word(info)}); counting it as destroyed (verified)")
@@ -589,7 +613,7 @@ def destroy(instance_id: int) -> str:
         time.sleep(5)
         unread = 0
         while unread < 3:
-            state, info = instance_state(instance_id)
+            state, info = destroy_reading(instance_id)
             if state == "unknown":
                 unread += 1
                 time.sleep(10)

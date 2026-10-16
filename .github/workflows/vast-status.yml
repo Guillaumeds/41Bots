@@ -30,8 +30,14 @@ jobs:
           python3 - <<'PY'
           import json, time
           now = time.time()
-          rows = [i for i in json.load(open("inst.json")) if (i.get("label") or "").startswith("41bots-")]
-          print(f"{len(rows)} 41bots instance(s)")
+          allrows = json.load(open("inst.json"))
+          rows = [i for i in allrows if (i.get("label") or "").startswith("41bots-")]
+          print(f"{len(rows)} 41bots instance(s); {len(allrows)} instance(s) on the account in all")
+          # Anything else on the account (unlabelled, or labelled otherwise) is listed too: it bills the same.
+          for i in allrows:
+              if i not in rows:
+                  print(f'  other: {i.get("id")} label={i.get("label")!r} {i.get("actual_status")}/{i.get("intended_status")} '
+                        f'dph=${i.get("dph_total")} cpu={i.get("cpu_name")}')
           for i in rows:
               age = (now - float(i.get("start_date") or now)) / 60
               print(f'{i["id"]} {i.get("label")} {i.get("actual_status")}/{i.get("intended_status")} '
