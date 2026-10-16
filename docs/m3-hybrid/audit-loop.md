@@ -100,9 +100,32 @@ For a rung k (trick-4 network, then trick 3), one round is:
    every reached position inside any weak group, up to a cap per decision; drawing decisions from
    every stratum and seat), to lift the group's share of the training set to at least 3× its natural
    share; and give rows inside weak groups a loss weight of 2 (recorded in the report).
-6. **Retrain and repeat** from step 1 with the enlarged set. Stop when step 3 finds no confirmed
-   group and step 4's slices all pass, or after `R_max` rounds (then the report says which groups
-   remain and the next lever is network capacity).
+6. **Retrain and repeat** from step 1 with the enlarged set. Stop when every confirmed group's
+   decision-level bound (step 4: its golden slice, or its mini golden set) is ≤ 0.01% and the
+   golden set passes overall, or after `R_max` rounds (then the report says which groups remain
+   and the next lever is network capacity).
+
+**Decision of 2026-10-16, after the first real audit** (auditor `2be1c56`, lead-3c's network on a
+fresh 300k-row trick-4 shard): the auditor, told nothing, found the race positions by itself (its
+tree groups are 100% race classes 3–4 and hold 93% of all class-4 positions, through the dense
+features "a team wins the match by taking the last two tricks"), plus "a team on 36 points" for
+each team, at SD 1.6–2.8% against 0.30% for calm positions. But with α_sd = 1% (barely above the
+network's overall 0.93%) the confirmed groups covered 82% of the positions, and the smaller ones
+were not stable across split seeds. So the roles are split:
+- the **auditor's thresholds choose what to target and slice** (erring towards too many groups is
+  cheap: they only steer the harvest and name the slices);
+- the **standard is decided at the decision level** (golden slices and mini golden sets, the §3
+  bootstrap bound ≤ 0.01%): a confirmed group whose decision-level bound passes is not "remaining";
+- mini golden sets only for groups with fewer than 50 golden decisions, in order of weight × SD²
+  (their expected share of the loss), at most `audit_mini_sets` (default 4) per round;
+- thresholds are recalibrated each round from the measured pairs (group SD, group decision-level
+  bound) and reported.
+Other implementation choices accepted from that build: candidates must also pass a one-sided
+p ≤ 0.01 screen on half A (SliceFinder's definition; the errors are very heavy-tailed, so a raw
+threshold alone admits thousands of single-row groups); the SD test is a t-test on the per-row
+mean square (no normality assumption); errors are per team relative to the trick's leader (the
+rows do not record the decider; a decider byte per row can be added later if a slice needs it);
+the dense-feature thresholds in predicates are whole numbers in the feature's own units.
 
 **One run, one machine, autonomous** (owner, 2026-10-16 21:10 Mauritius): the whole loop runs
 inside one `hybrid_rung` rental, round after round, and ends by itself when the network is
