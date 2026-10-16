@@ -1,5 +1,5 @@
 # The full rung-1 run of the hybrid yardstick (docs/M3-HYBRID-SPEC.md §3, §5, §6a;
-# docs/m3-hybrid/rung1.md): ~1M trick-4 labels, O_4 trained with the outcome head on CPU, the
+# docs/m3-hybrid/rung1.md): ~4M trick-4 labels (rung 1b overfitted at 0.9M), O_4 trained with the outcome head on CPU, the
 # trick-3 golden set (400 decisions x 320 worlds, seed 1) valued exactly, then H_4 checked
 # against it. One CPU job on a standard GitHub runner (4 vCPU, 16 GB RAM), well inside the
 # 6-hour job limit: labels ~2 min, golden worlds ~2-3 min, training capped by `train_minutes`
@@ -16,13 +16,13 @@ on:
     inputs:
       labels_random:
         description: "Trick-4 labels from random play at yardstick roots (seed 101)"
-        default: "800000"
+        default: "3200000"
       labels_rules:
         description: "Trick-4 labels from rules-v1 self-play (seed 102)"
-        default: "200000"
+        default: "800000"
       labels_val:
         description: "Validation labels (random, seed 201)"
-        default: "50000"
+        default: "100000"
       widths:
         description: "Hidden layer widths"
         default: "1024,512,128"
