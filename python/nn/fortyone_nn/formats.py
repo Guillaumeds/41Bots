@@ -25,6 +25,36 @@ INPUT_SHIFT = 24  # a binary feature that is on, and a dense value of 1, are 2^2
 # (crates/nn/src/encode.rs).
 OFF_GAMES = 801
 
+# The widest layer of the integer inference (crates/nn/src/mlp.rs `MAX_WIDTH`, audited). A network with
+# a wider layer cannot be loaded by Rust, so training one only wastes the time: the trainer refuses it
+# at once (``parse_widths``). Tested against Rust: the source line and ``nn-tool limits``.
+MAX_WIDTH = 1024
+
+
+def width_error(k, n):
+    """The refusal of hidden layer ``k`` (from 0) with ``n`` units, in the words of Rust's
+    ``nn::mlp::width_error`` (tested to be the same text)."""
+    return (f"layer {k}: {n} units, wider than {MAX_WIDTH} (the limit of the integer inference, "
+            f"`MAX_WIDTH` in crates/nn/src/mlp.rs); use layers of at most {MAX_WIDTH} units")
+
+
+def parse_widths(text):
+    """The hidden widths of ``--widths`` ("1024,512,128") as a list of ints; ``ValueError`` with the
+    reason for anything that is not a list of positive whole numbers, or for a layer wider than
+    ``MAX_WIDTH`` (named by its number, from 0, and the limit). Checked before any data is loaded."""
+    parts = [x.strip() for x in str(text).split(",")]
+    try:
+        widths = [int(x) for x in parts]
+    except ValueError:
+        raise ValueError('hidden-layer sizes like "1024,512,128" are needed') from None
+    if not widths or any(w < 1 for w in widths):
+        raise ValueError('hidden-layer sizes like "1024,512,128" are needed (each at least 1)')
+    for k, n in enumerate(widths):
+        if n > MAX_WIDTH:
+            raise ValueError(width_error(k, n))
+    return widths
+
+
 # Outcome-head vocabulary size by frontier trick (crates/nn/src/outcome.rs).
 VOCAB = {5: 8, 4: 14, 3: 24, 2: 39}
 

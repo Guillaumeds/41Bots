@@ -766,6 +766,12 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         .ok_or_else(|| {
             format!("hybrid_rung: widths {widths_text:?} must be hidden-layer sizes like \"1024,512,128\"")
         })?;
+    // The integer inference cannot load a layer wider than nn::MAX_WIDTH, so a network with one is
+    // refused here, before the machine installs or trains anything (a trick-3 run once trained
+    // 2048-1024-256 for 27 minutes and then failed at the check).
+    let hidden: Vec<usize> = widths.iter().map(|&w| w as usize).collect();
+    nn::mlp::check_hidden_widths(&hidden)
+        .map_err(|e| format!("hybrid_rung: widths {widths_text:?}: {e}"))?;
     let head = s("head", "outcome")?;
     if !["outcome", "money4"].contains(&head.as_str()) {
         return Err(format!("hybrid_rung: head {head:?}: outcome or money4"));
@@ -2628,6 +2634,16 @@ mod tests {
         bad(json!({ "widths": "1024,,128" }), "widths");
         bad(json!({ "widths": "" }), "widths");
         bad(json!({ "widths": 1024 }), "widths must be a string");
+        // A layer over the integer inference's limit (nn::MAX_WIDTH, 1024) is refused with the layer and the limit.
+        bad(
+            json!({ "widths": "2048,1024,256" }),
+            "widths \"2048,1024,256\": layer 0: 2048 units, wider than 1024",
+        );
+        bad(
+            json!({ "widths": "512, 4096" }),
+            "layer 1: 4096 units, wider than 1024",
+        );
+        bad(json!({ "widths": "1025" }), "MAX_WIDTH");
         bad(json!({ "head": "values" }), "head \"values\"");
         bad(json!({ "device": "gpu" }), "device \"gpu\"");
         bad(json!({ "epochs": 0 }), "epochs and batch");

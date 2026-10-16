@@ -31,7 +31,13 @@ pub const ACT_SHIFT: u32 = 20;
 pub const LOGIT_SHIFT: u32 = 24;
 /// The ReLU clip: 64.
 pub const CLIP: i64 = 64 << ACT_SHIFT;
-/// The widest layer supported.
+/// The widest layer supported: the audited limit of the integer inference. The scratch arrays of the
+/// plain and the fast forward pass hold this many units, and the overflow bound ([`SUM_BOUND`]) was
+/// audited for it. A network with a wider layer cannot be loaded ([`IntMlp::new`] refuses it), so
+/// training one is wasted time: every place that accepts a width checks it first with
+/// [`check_hidden_widths`]. Other places repeat this number, each with a test that it is this one:
+/// the trainer (`python/nn/fortyone_nn/formats.py` `MAX_WIDTH`, against `nn-tool limits`) and the
+/// runner's `hybrid_rung` settings (which call [`check_hidden_widths`]).
 pub const MAX_WIDTH: usize = 1024;
 /// The bound every layer's worst-case sum must stay within.
 pub const SUM_BOUND: i128 = 1 << 62;
@@ -56,6 +62,25 @@ pub struct Layer {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IntMlp {
     layers: Vec<Layer>,
+}
+
+/// The refusal of layer `k` with `n` units, wider than [`MAX_WIDTH`]: it names the number, the
+/// layer and the limit's place in the source.
+pub fn width_error(k: usize, n: usize) -> String {
+    format!(
+        "layer {k}: {n} units, wider than {MAX_WIDTH} (the limit of the integer inference, \
+         `MAX_WIDTH` in crates/nn/src/mlp.rs); use layers of at most {MAX_WIDTH} units"
+    )
+}
+
+/// Checks the hidden-layer widths of a network that is still to be trained (layer `k` is the
+/// `k`-th hidden layer, counting from 0, as in [`IntMlp::new`]'s messages): the first one wider
+/// than [`MAX_WIDTH`] is refused with [`width_error`]'s message.
+pub fn check_hidden_widths(widths: &[usize]) -> Result<(), String> {
+    match widths.iter().enumerate().find(|&(_, &n)| n > MAX_WIDTH) {
+        Some((k, &n)) => Err(width_error(k, n)),
+        None => Ok(()),
+    }
 }
 
 /// `(x + 2^(k−1)) >> k`: division by 2^k rounding halves up (`k = 0`: unchanged).
@@ -89,7 +114,7 @@ impl IntMlp {
                 return Err(format!("layer {k}: weight or bias size"));
             }
             if l.n_out > MAX_WIDTH {
-                return Err(format!("layer {k}: wider than {MAX_WIDTH}"));
+                return Err(width_error(k, l.n_out));
             }
             if k > 0 && l.n_in != layers[k - 1].n_out {
                 return Err(format!("layer {k}: takes {} inputs", l.n_in));
@@ -287,5 +312,35 @@ mod tests {
         let mut bad = tiny(1, 24);
         bad[0].shift = 63;
         assert!(IntMlp::new(bad).is_err());
+    }
+
+    #[test]
+    fn the_width_limit_is_1024_and_its_refusals_name_it() {
+        // The audited limit; python/nn/fortyone_nn/formats.py repeats it (tested against `nn-tool limits`).
+        assert_eq!(MAX_WIDTH, 1024);
+        let e = IntMlp::new(wide(MAX_WIDTH + 1, 1)).unwrap_err();
+        assert_eq!(e, width_error(0, MAX_WIDTH + 1));
+        for want in [
+            "layer 0",
+            "1025 units",
+            "wider than 1024",
+            "MAX_WIDTH",
+            "crates/nn/src/mlp.rs",
+        ] {
+            assert!(e.contains(want), "{e:?} lacks {want:?}");
+        }
+        // The check before training: the first hidden layer over the limit is named, by its number.
+        assert_eq!(check_hidden_widths(&[1024, 512, 128]), Ok(()));
+        assert_eq!(check_hidden_widths(&[]), Ok(()));
+        assert_eq!(
+            check_hidden_widths(&[2048, 1024, 256]),
+            Err(width_error(0, 2048))
+        );
+        assert_eq!(
+            check_hidden_widths(&[512, 4096, 2048]),
+            Err(width_error(1, 4096))
+        );
+        // Exactly the limit passes both checks.
+        assert!(IntMlp::new(wide(MAX_WIDTH, 1)).is_ok());
     }
 }

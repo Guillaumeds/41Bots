@@ -34,6 +34,6 @@ pub mod shard;
 pub mod synthetic;
 
 pub use encode::{Features, encode};
-pub use mlp::IntMlp;
+pub use mlp::{IntMlp, MAX_WIDTH};
 pub use money::money_from_logits;
 pub use oracle::Oracle;

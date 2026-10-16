@@ -7,6 +7,7 @@
 //! nn-tool golden  --out FILE.json [--seed 41] [--count 200]
 //! nn-tool random  --trick K --widths 512,256,64 --out FILE.safetensors [--seed 17] [--head outcome-v1|money4]
 //! nn-tool bench   --equity TABLE --trick K [--worlds 4] [--max 20000] [--seed 5]
+//! nn-tool limits                      (prints `max_width=N`: the audited width limit, `nn::MAX_WIDTH`)
 //!                 [--widths 512,256,64 --widths 1024,512,128 …] [--net WEIGHTS …] [--reps 3]
 //! ```
 //! - `fixture`: a label shard of random positions at the start of trick `K` (random deals and
@@ -79,8 +80,12 @@ fn main() -> ExitCode {
         Some("golden") => golden(&a),
         Some("bench") => bench(&a),
         Some("random") => random(&a),
+        Some("limits") => {
+            println!("max_width={}", nn::MAX_WIDTH);
+            Ok(())
+        }
         _ => Err(
-            "usage: nn-tool fixture|eval|classes|golden|random|bench … (see the source docs)"
+            "usage: nn-tool fixture|eval|classes|golden|random|bench|limits … (see the source docs)"
                 .into(),
         ),
     };
@@ -240,6 +245,7 @@ fn random(a: &Args) -> Result<(), String> {
         .split(',')
         .map(|x| x.parse().map_err(|_| format!("--widths {w}")))
         .collect::<Result<_, _>>()?;
+    nn::mlp::check_hidden_widths(&widths).map_err(|e| format!("--widths {w}: {e}"))?;
     let head = a.get("--head").unwrap_or("outcome-v1");
     let n_out = match head {
         "outcome-v1" => vocab(trick),
