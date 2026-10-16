@@ -113,6 +113,35 @@ current exact solver with that switch).
   hand end is unchanged); full exact solves (no cut) stay byte-identical to today, proven by the
   existing identity tests. Hybrid values carry a new values version naming the net's sha256.
 
+## 6a. Rung 1b (2026-10-16, after the first small run): the outcome head
+
+Finding of rung 1: even O_5 (one card each, no choice left) had a value error SD of 1.1%, and O_4
+3.0% with a bias of −0.16%. The networks are failing to reproduce the match-equity table's
+mapping from scores to money, not the card play.
+
+Fact used: in a perfect-information position the exact max^n value is always exactly the leaf value
+of one terminal state of the hand (backups only copy child vectors; Review A). So the value is one
+of a small set of known vectors: the equity table (or certain money) of each reachable end-of-hand
+or game-won state.
+
+Design (replaces the four-logit output of §6):
+- **Outcome vocabulary per cut trick k:** a fixed list of hand outcomes from the start of trick k
+  (for example: the winning team of each remaining trick, which team scores the 5 of trumps and when,
+  which team takes the best-trump bonus, and the game ending mid-hand), chosen so that the
+  position plus the outcome determines the terminal match state, which `equity` turns into an
+  exact money vector. Outcomes that lead to the same terminal state for a position are merged at
+  evaluation time.
+- **Label:** the outcome whose exact money vector equals the exact solver's value (first in a fixed
+  order when several equal it). A test over every label shard asserts such an outcome always exists:
+  that proves the vocabulary is complete.
+- **Network:** a classifier over the vocabulary (softmax, cross-entropy on the outcome label, plus
+  optionally the soft four-vector loss); value = sum over outcomes of p(outcome) x the exact money
+  vector of its terminal state, computed in integers (u128 accumulation, largest-remainder rule,
+  sums to exactly 2^32). Outcomes impossible for the position (for example a team with no card that
+  can win a trick) may be masked when that is cheap and exact.
+- Everything else in §3–§6 stands; the value-error report covers all four teams, not only the
+  decider's.
+
 ## 7. Run rules
 
 - Anything expected to take more than about 5 minutes on this VM runs elsewhere (vast.ai through
