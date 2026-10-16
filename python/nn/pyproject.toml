@@ -1,0 +1,22 @@
+[project]
+name = "fortyone-nn"
+version = "0.1.0"
+description = "41Bots oracle value networks: training, quantisation to the Rust integer scheme, export (docs/M3-HYBRID-SPEC.md §6)"
+requires-python = "==3.14.*"
+dependencies = [
+    "numpy==2.5.4",
+    "torch==2.14.1",
+]
+
+[tool.uv]
+package = false
+
+# PyTorch is pinned to 2.14.1 (never 2.15+, which drops the Pascal/Volta GPUs we rent: PLAN §11.2).
+# CPU wheels here (this VM and the laptop); vast.ai images install the cu126 build of the same version.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }

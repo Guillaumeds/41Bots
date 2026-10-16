@@ -1,0 +1,21 @@
+[package]
+name = "nn"
+version = "0.1.0"
+description = "Oracle value networks (M3 hybrid): the position encoder (single source of truth), integer-only MLP inference, money chance from logits, weights I/O (safetensors) and label shards (.npy)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+engine = { path = "../engine" }
+equity = { path = "../equity" }
+solver = { path = "../solver" }
+serde_json = "1.0.154"
+
+[[bin]]
+name = "nn-tool"
+path = "src/bin/nn-tool.rs"
+
+[lints]
+workspace = true
