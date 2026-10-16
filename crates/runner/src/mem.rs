@@ -357,7 +357,7 @@ pub(crate) fn other_bytes(equity: &Path, threads: u64) -> u64 {
 /// - `search_measure` with `"auto"` anywhere, `solver_spike` and `t1bench`: the whole budget
 ///   (they size their tables to the machine), so they never run beside another such chunk; and
 ///   `hybrid_rung` (the trainer's arrays of millions of label rows; the label shards themselves
-///   are streamed to disk);
+///   are streamed to disk) and `hybrid_t1check` (a table per thread);
 /// - every other kind: 0 (small, as before).
 pub(crate) fn chunk_need(
     kind: &str,
@@ -394,7 +394,7 @@ pub(crate) fn chunk_need(
                 _ => whole,
             }
         }
-        "solver_spike" | "t1bench" | "hybrid_rung" => whole,
+        "solver_spike" | "t1bench" | "hybrid_rung" | "hybrid_t1check" => whole,
         _ => 0,
     }
 }

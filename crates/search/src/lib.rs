@@ -35,6 +35,7 @@ pub mod oracle_labels;
 pub mod ordered;
 pub mod pimc;
 pub mod plan;
+pub mod saved;
 pub mod t1bench;
 pub mod teacher;
 pub mod worlds;

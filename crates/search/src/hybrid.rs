@@ -27,6 +27,11 @@
 //! sample of worlds (`verify_pct`, default 1%) is recomputed and must be byte-identical first
 //! (spec §4); any mismatch stops the check.
 //!
+//! **Chosen worlds** ([`check_worlds`]): the same measures on any worlds of each decision, with
+//! stored values where given, e.g. the exact trick-1 worlds earlier runs saved (`crate::saved`,
+//! spec §3 "Trick-1 checks"), each set with the burn rule that valued it
+//! ([`CheckJob::rules_robber_burn`]).
+//!
 //! Every value is computed in fixed point; the result is byte-identical for any thread count.
 //! Timings (milliseconds per world, nanoseconds per network evaluation) are reports only.
 
@@ -67,12 +72,45 @@ pub struct CheckJob {
     pub to: u64,
     /// Worker threads (never changes a value).
     pub threads: usize,
-    /// Transposition-table megabytes per solve.
+    /// Transposition-table megabytes per hybrid solve.
     pub tt_mb: usize,
     /// Percentage of stored worlds recomputed and compared (with stored exact values).
     pub verify_pct: f64,
     /// Recompute every exact value even when stored ones are given.
     pub recompute: bool,
+    /// Another seat's rob burn later in trick 1 is the `rules-v1` burn, in the exact solves and
+    /// the hybrid's alike (`SearchConfig::rules_robber_burn`): the rule of worlds valued before
+    /// values version 2 (`crate::saved`).
+    pub rules_robber_burn: bool,
+    /// Threads inside each exact solve this run makes (`solve_fast_par`, the same answer as one
+    /// thread); with more than one, the exact solves run first, `threads / exact_solve_threads`
+    /// at a time. Trick-1 worlds need this and big tables to be recomputed in hours, not days.
+    pub exact_solve_threads: usize,
+    /// Transposition-table megabytes per exact solve.
+    pub exact_tt_mb: usize,
+}
+
+impl CheckJob {
+    /// Whether world `w` of decision `id`, with stored exact values, is in the verification
+    /// sample (`verify_pct` percent, drawn by `(seed, id, w)`).
+    pub fn verify_sampled(&self, id: u64, w: u64) -> bool {
+        Rng::derive(self.seed, &[VERIFY, id, w]).bounded(1_000_000)
+            < (self.verify_pct * 10_000.0) as u64
+    }
+
+    /// The settings of the exact solves (`exact`) or of the hybrid's, with the job's burn rule.
+    pub fn config(&self, exact: bool) -> SearchConfig {
+        SearchConfig {
+            tt_mb: if exact { self.exact_tt_mb } else { self.tt_mb },
+            solve_threads: if exact {
+                self.exact_solve_threads.max(1)
+            } else {
+                1
+            },
+            rules_robber_burn: self.rules_robber_burn,
+            ..SearchConfig::default()
+        }
+    }
 }
 
 /// A frontier evaluator that times its evaluations (reports only).
@@ -93,18 +131,62 @@ impl Frontier for Timed<'_> {
     }
 }
 
+/// One world to check: its number, the decision seed it is drawn from
+/// ([`measure_seed`]`(seed, label, id)`) and its stored exact values, if any.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorldTask {
+    /// World number.
+    pub w: u64,
+    /// The decision seed the world is drawn from.
+    pub dseed: u64,
+    /// Stored exact values (candidate order).
+    pub stored: Option<Vec<MoneyChance>>,
+    /// How long the world is expected to take, in any unit common to the check's worlds (for
+    /// example the solver nodes its saved exact solve took; 0 = unknown): the longest go first.
+    /// It never changes a value.
+    pub cost: u64,
+}
+
+/// The worlds of one decision to check (any world numbers, in the order given).
+#[derive(Clone, Debug)]
+pub struct DecisionWorlds<'a> {
+    /// The decision.
+    pub d: &'a DecisionSpec,
+    /// Its worlds.
+    pub worlds: Vec<WorldTask>,
+}
+
 /// One world of one decision: exact and hybrid values of every candidate.
 #[derive(Clone, Debug)]
-struct WorldOut {
-    exact: Vec<MoneyChance>,
-    hybrid: Vec<MoneyChance>,
-    exact_us: u64,
-    hybrid_us: u64,
-    exact_nodes: u64,
-    hybrid_nodes: u64,
-    frontier: u64,
+pub struct WorldCheck {
+    /// World number.
+    pub w: u64,
+    /// Exact values (stored or computed here), candidate order.
+    pub exact: Vec<MoneyChance>,
+    /// H_k's values.
+    pub hybrid: Vec<MoneyChance>,
+    /// The exact values were computed by this run (no stored values, `recompute`, or the
+    /// verification sample).
+    pub exact_solved: bool,
     /// Stored exact values were compared with recomputed ones in this world: `Some(equal)`.
-    verified: Option<bool>,
+    pub verified: Option<bool>,
+    /// Exact solve time (µs; 0 unless solved here).
+    pub exact_us: u64,
+    /// Exact solver nodes (0 unless solved here).
+    pub exact_nodes: u64,
+    /// Hybrid solve time (µs).
+    pub hybrid_us: u64,
+    /// Hybrid solver nodes.
+    pub hybrid_nodes: u64,
+    /// The hybrid's solver nodes by trick (1–5).
+    pub hybrid_nodes_by_trick: [u64; 5],
+    /// The hybrid's network evaluations.
+    pub frontier: u64,
+    /// The largest transposition table the hybrid's solves used (bytes).
+    pub hybrid_tt_bytes: u64,
+    /// The seat other than the decider that robs later in trick 1 in this world (the burn the
+    /// burn rule decides), if any.
+    pub robber: Option<u8>,
 }
 
 /// The check of one decision.
@@ -147,6 +229,9 @@ pub struct DecisionCheck {
     pub hybrid_nodes: u64,
     /// Network evaluations.
     pub frontier: u64,
+    /// Every world's values and counters, in the order given.
+    #[serde(skip)]
+    pub world_checks: Vec<WorldCheck>,
 }
 
 /// The result of a check.
@@ -158,11 +243,30 @@ pub struct CheckRun {
     pub verified: (u64, u64),
     /// Time and count of network evaluations (ns, n).
     pub net: (u64, u64),
+    /// Recomputed worlds whose stored exact values differ (decision, world). When there is any,
+    /// the hybrid was not run and `decisions` is empty: the stored values are not this solver's.
+    pub mismatched: Vec<(u64, u64)>,
 }
 
-/// Run the check on `ds` (decisions before the cut's trick). `stored`: exact worlds records by
-/// decision id (from an existing worlds file), used instead of recomputing (after the
-/// verification sample) unless `job.recompute`.
+/// Live counters of a running check, for progress reports (they never change a value).
+#[derive(Debug, Default)]
+pub struct CheckProgress {
+    /// Exact solves this run makes, and those finished.
+    pub exact_total: AtomicU64,
+    /// See `exact_total`.
+    pub exact_done: AtomicU64,
+    /// Hybrid worlds, and those finished.
+    pub hybrid_total: AtomicU64,
+    /// See `hybrid_total`.
+    pub hybrid_done: AtomicU64,
+    /// Each hybrid world as it finishes, in finishing order: (decision, world, µs, solver
+    /// nodes, network evaluations). Progress reports drain it; a stopped run keeps what finished.
+    pub finished: Mutex<Vec<[u64; 5]>>,
+}
+
+/// Run the check on `ds` (decisions before the cut's trick), worlds `0..job.to` of each.
+/// `stored`: exact worlds records by decision id (from an existing worlds file), used instead of
+/// recomputing (after the verification sample) unless `job.recompute`.
 pub fn run_check(
     ds: &[DecisionSpec],
     stored: &BTreeMap<u64, WorldRows>,
@@ -170,32 +274,19 @@ pub fn run_check(
     ctx: &Ctx,
     net: &dyn Frontier,
 ) -> Result<CheckRun, String> {
-    struct Prep<'a> {
-        d: &'a DecisionSpec,
-        view: engine::view::SeatView,
-        cands: Vec<Candidate>,
-        dseed: u64,
-        rec: Option<&'a WorldRows>,
-    }
-    let mut preps = Vec::new();
+    let mut plan = Vec::new();
     for d in ds {
-        if d.trick >= job.cut || d.trick == 0 {
-            return Err(format!(
-                "decision {} is at trick {}: the hybrid with a frontier at trick {} is defined for \
-                 decisions at tricks 1..{}",
-                d.id, d.trick, job.cut, job.cut
-            ));
-        }
-        let (_, view, legal) = d.replay();
-        let (_, cands) = candidates(&view, &legal);
         let rec = stored.get(&d.id);
         let seed = rec
             .and_then(|r| r.fp.as_ref())
             .map_or(job.seed, |fp| fp.seed);
         let label = rec.map_or(job.label, |r| r.label);
         if let Some(r) = rec {
-            if r.cands != cands {
-                return Err(format!("decision {}: stored candidates differ", d.id));
+            if d.trick >= 1 && d.trick < job.cut {
+                let (_, view, legal) = d.replay();
+                if r.cands != candidates(&view, &legal).1 {
+                    return Err(format!("decision {}: stored candidates differ", d.id));
+                }
             }
             if r.from != 0 || (r.rows.len() as u64) < job.to {
                 return Err(format!(
@@ -207,13 +298,113 @@ pub fn run_check(
                 ));
             }
         }
-        preps.push(Prep {
-            d,
-            view,
-            cands,
-            dseed: measure_seed(seed, label, d.id),
-            rec,
+        let dseed = measure_seed(seed, label, d.id);
+        let worlds = (0..job.to)
+            .map(|w| {
+                Ok(WorldTask {
+                    w,
+                    dseed,
+                    cost: 0,
+                    stored: rec
+                        .map(|r| {
+                            r.rows[w as usize]
+                                .iter()
+                                .map(|&v| {
+                                    MoneyChance::from_raw(v).ok_or_else(|| {
+                                        format!(
+                                            "decision {} world {w}: stored values do not sum \
+                                             to one",
+                                            d.id
+                                        )
+                                    })
+                                })
+                                .collect::<Result<Vec<_>, String>>()
+                        })
+                        .transpose()?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        plan.push(DecisionWorlds { d, worlds });
+    }
+    check_worlds(&plan, job, ctx, net, None)
+}
+
+/// Runs `f(i, mem)` for every `i` of `order` on `threads` threads (a shared work queue in that
+/// order, each thread with its own solver memory); the results by index (`None` for an index not
+/// in `order`), `n` of them.
+fn pool<T: Send + Clone>(
+    threads: usize,
+    order: &[usize],
+    f: &(dyn Fn(usize, &mut SolveMem) -> T + Sync),
+    n: usize,
+) -> Vec<Option<T>> {
+    let slots: Mutex<Vec<Option<T>>> = Mutex::new(vec![None; n]);
+    let next = AtomicUsize::new(0);
+    let work = || {
+        let mut mem = SolveMem::new();
+        loop {
+            let q = next.fetch_add(1, Ordering::Relaxed);
+            let Some(&i) = order.get(q) else { break };
+            let out = f(i, &mut mem);
+            slots.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(out);
+        }
+    };
+    let threads = threads.max(1).min(order.len().max(1));
+    if threads == 1 {
+        work();
+    } else {
+        std::thread::scope(|s| {
+            for _ in 0..threads {
+                s.spawn(work);
+            }
         });
+    }
+    slots.into_inner().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Run the check on chosen worlds of each decision (any world numbers; stored exact values where
+/// given). The same measures as [`run_check`], which is this with worlds `0..to`. Exact values
+/// are computed for worlds without stored ones, for every world with `job.recompute`, and for
+/// the verification sample (`job.verify_pct` of the stored worlds, drawn by `(seed, id, w)`);
+/// those solves run first, then the hybrid's, one world per thread, the longest expected first
+/// (the worlds' cost hints, then the earliest positions in the trick). If any recomputed world's
+/// stored values differ, the hybrid is not run: the result lists those worlds (`mismatched`) and
+/// has no decisions. `progress` receives live counts.
+pub fn check_worlds(
+    plan: &[DecisionWorlds],
+    job: &CheckJob,
+    ctx: &Ctx,
+    net: &dyn Frontier,
+    progress: Option<&CheckProgress>,
+) -> Result<CheckRun, String> {
+    struct Prep {
+        view: engine::view::SeatView,
+        cands: Vec<Candidate>,
+    }
+    let mut preps = Vec::new();
+    for p in plan {
+        let d = p.d;
+        if d.trick >= job.cut || d.trick == 0 {
+            return Err(format!(
+                "decision {} is at trick {}: the hybrid with a frontier at trick {} is defined for \
+                 decisions at tricks 1..{}",
+                d.id, d.trick, job.cut, job.cut
+            ));
+        }
+        let (_, view, legal) = d.replay();
+        let (_, cands) = candidates(&view, &legal);
+        for t in &p.worlds {
+            if t.stored.as_ref().is_some_and(|s| s.len() != cands.len()) {
+                return Err(format!(
+                    "decision {} world {}: {} stored values for {} candidates",
+                    d.id,
+                    t.w,
+                    t.stored.as_ref().map_or(0, Vec::len),
+                    cands.len()
+                ));
+            }
+        }
+        preps.push(Prep { view, cands });
     }
     let worlds: Vec<_> = preps
         .iter()
@@ -225,90 +416,171 @@ pub fn run_check(
         n: AtomicU64::new(0),
     };
     let cut = FrontierCut::new(job.cut, &timed);
-    let cfg = SearchConfig {
-        tt_mb: job.tt_mb,
-        ..SearchConfig::default()
+    // Every (decision, world), and the queue order: the longest expected first (by the worlds'
+    // cost hints, then the earliest trick and position).
+    let tasks: Vec<(usize, usize)> = plan
+        .iter()
+        .enumerate()
+        .flat_map(|(k, p)| (0..p.worlds.len()).map(move |j| (k, j)))
+        .collect();
+    let mut order: Vec<usize> = (0..tasks.len()).collect();
+    order.sort_by_key(|&i| {
+        let (k, j) = tasks[i];
+        let d = plan[k].d;
+        (
+            std::cmp::Reverse(plan[k].worlds[j].cost),
+            d.trick,
+            d.position,
+            i,
+        )
+    });
+    let verify_of = |i: usize| -> bool {
+        let (k, j) = tasks[i];
+        let t = &plan[k].worlds[j];
+        t.stored.is_some() && !job.recompute && job.verify_sampled(plan[k].d.id, t.w)
     };
-    let per = job.to as usize;
-    let n_tasks = preps.len() * per;
-    let slots: Mutex<Vec<Option<WorldOut>>> = Mutex::new(vec![None; n_tasks]);
-    let next = AtomicUsize::new(0);
-    let work = || {
-        let mut mem = SolveMem::new();
-        loop {
-            let i = next.fetch_add(1, Ordering::Relaxed);
-            if i >= n_tasks {
-                break;
-            }
-            let (k, w) = (i / per, (i % per) as u64);
-            let p = &preps[k];
-            let m = world_match(&p.view, &*worlds[k], w, p.dseed, ctx.rules);
-            let stored_row = p.rec.filter(|_| !job.recompute).map(|r| {
-                r.rows[w as usize]
-                    .iter()
-                    .map(|&v| MoneyChance::from_raw(v).expect("stored values sum to one"))
-                    .collect::<Vec<_>>()
-            });
-            let verify = stored_row.is_some()
-                && Rng::derive(job.seed, &[VERIFY, p.d.id, w]).bounded(1_000_000)
-                    < (job.verify_pct * 10_000.0) as u64;
-            let (exact, exact_us, exact_nodes, verified) = match stored_row {
-                Some(s) if !verify => (s, 0, 0, None),
-                _ => {
-                    let mut run = WorldSolve::default();
-                    let t = Instant::now();
-                    let e = exact_world(&m, &p.cands, ctx, &cfg, None, &mut mem, &mut run, None)
-                        .expect("nothing stops a solve here");
-                    let us = t.elapsed().as_micros() as u64;
-                    let ok = stored_row.as_ref().map(|s| *s == e);
-                    (e, us, run.stats.nodes, ok)
-                }
-            };
-            let mut run = WorldSolve::default();
-            let t = Instant::now();
-            let hybrid = exact_world(&m, &p.cands, ctx, &cfg, None, &mut mem, &mut run, Some(cut))
-                .expect("nothing stops a solve here");
-            let out = WorldOut {
-                exact,
-                hybrid,
-                exact_us,
-                hybrid_us: t.elapsed().as_micros() as u64,
-                exact_nodes,
-                hybrid_nodes: run.stats.nodes,
-                frontier: run.stats.frontier,
-                verified,
-            };
-            slots.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(out);
+    let exact_needed = |i: usize| -> bool {
+        let (k, j) = tasks[i];
+        plan[k].worlds[j].stored.is_none() || job.recompute || verify_of(i)
+    };
+    let world_of = |i: usize| {
+        let (k, j) = tasks[i];
+        world_match(
+            &preps[k].view,
+            &*worlds[k],
+            plan[k].worlds[j].w,
+            plan[k].worlds[j].dseed,
+            ctx.rules,
+        )
+    };
+    // The exact solves.
+    let ex_order: Vec<usize> = order.iter().copied().filter(|&i| exact_needed(i)).collect();
+    if let Some(p) = progress {
+        p.exact_total
+            .store(ex_order.len() as u64, Ordering::Relaxed);
+        p.hybrid_total.store(tasks.len() as u64, Ordering::Relaxed);
+    }
+    let cfg_ex = job.config(true);
+    let solve_exact = |i: usize, mem: &mut SolveMem| -> (Vec<MoneyChance>, u64, u64) {
+        let m = world_of(i);
+        let mut run = WorldSolve::default();
+        let t = Instant::now();
+        let e = exact_world(
+            &m,
+            &preps[tasks[i].0].cands,
+            ctx,
+            &cfg_ex,
+            None,
+            mem,
+            &mut run,
+            None,
+        )
+        .expect("nothing stops a solve here");
+        let us = t.elapsed().as_micros() as u64;
+        if let Some(p) = progress {
+            p.exact_done.fetch_add(1, Ordering::Relaxed);
         }
+        (e, us, run.stats.nodes)
     };
-    let threads = job.threads.max(1).min(n_tasks.max(1));
-    if threads == 1 {
-        work();
-    } else {
-        std::thread::scope(|s| {
-            for _ in 0..threads {
-                s.spawn(work);
+    let ex_threads = (job.threads / job.exact_solve_threads.max(1)).max(1);
+    let exact = pool(ex_threads, &ex_order, &solve_exact, tasks.len());
+    // Stored values must be this solver's before anything is compared with them.
+    let mut verified = (0u64, 0u64);
+    let mut mismatched = Vec::new();
+    for &i in &ex_order {
+        let (k, j) = tasks[i];
+        let t = &plan[k].worlds[j];
+        if let (Some(s), Some((e, _, _)), false) = (&t.stored, &exact[i], job.recompute) {
+            verified.0 += 1;
+            if s != e {
+                verified.1 += 1;
+                mismatched.push((plan[k].d.id, t.w));
             }
+        }
+    }
+    if !mismatched.is_empty() {
+        return Ok(CheckRun {
+            decisions: Vec::new(),
+            verified,
+            net: (0, 0),
+            mismatched,
         });
     }
-    let outs: Vec<WorldOut> = slots
-        .into_inner()
-        .unwrap_or_else(|e| e.into_inner())
-        .into_iter()
-        .map(|o| o.expect("every world valued"))
-        .collect();
-    let mut verified = (0u64, 0u64);
+    // The hybrid's solves.
+    let cfg_h = job.config(false);
+    let solve_hybrid = |i: usize, mem: &mut SolveMem| -> (Vec<MoneyChance>, u64, WorldSolve) {
+        let m = world_of(i);
+        let mut run = WorldSolve::default();
+        let t = Instant::now();
+        let h = exact_world(
+            &m,
+            &preps[tasks[i].0].cands,
+            ctx,
+            &cfg_h,
+            None,
+            mem,
+            &mut run,
+            Some(cut),
+        )
+        .expect("nothing stops a solve here");
+        let us = t.elapsed().as_micros() as u64;
+        if let Some(p) = progress {
+            let (k, j) = tasks[i];
+            p.finished.lock().unwrap_or_else(|e| e.into_inner()).push([
+                plan[k].d.id,
+                plan[k].worlds[j].w,
+                us,
+                run.stats.nodes,
+                run.stats.frontier,
+            ]);
+            p.hybrid_done.fetch_add(1, Ordering::Relaxed);
+        }
+        (h, us, run)
+    };
+    let hybrid = pool(job.threads, &order, &solve_hybrid, tasks.len());
+    let mut outs: Vec<WorldCheck> = Vec::with_capacity(tasks.len());
+    for (i, (hy, ex)) in hybrid.into_iter().zip(exact).enumerate() {
+        let (h, hus, run) = hy.expect("every world valued by the hybrid");
+        let (k, j) = tasks[i];
+        let t = &plan[k].worlds[j];
+        let (exact, exact_us, exact_nodes, verified) = match (ex, &t.stored) {
+            (Some((e, us, nodes)), s) => {
+                let ok = s.as_ref().filter(|_| !job.recompute).map(|s| *s == e);
+                (e, us, nodes, ok)
+            }
+            (None, Some(s)) => (s.clone(), 0, 0, None),
+            (None, None) => unreachable!("worlds without stored values are solved"),
+        };
+        outs.push(WorldCheck {
+            w: t.w,
+            exact,
+            hybrid: h,
+            exact_solved: exact_needed(i),
+            verified,
+            exact_us,
+            exact_nodes,
+            hybrid_us: hus,
+            hybrid_nodes: run.stats.nodes,
+            hybrid_nodes_by_trick: run.stats.nodes_by_trick,
+            frontier: run.stats.frontier,
+            hybrid_tt_bytes: run.stats.tt_bytes,
+            robber: run.robber,
+        });
+    }
     let mut decisions = Vec::new();
-    for (k, p) in preps.iter().enumerate() {
-        let ws = &outs[k * per..(k + 1) * per];
+    let mut at = 0;
+    for (k, p) in plan.iter().enumerate() {
+        let ws = &outs[at..at + p.worlds.len()];
+        at += p.worlds.len();
+        let cands = &preps[k].cands;
         let team = engine::team_of(p.d.seat);
         let ex: Vec<Vec<MoneyChance>> = ws.iter().map(|o| o.exact.clone()).collect();
         let hy: Vec<Vec<MoneyChance>> = ws.iter().map(|o| o.hybrid.clone()).collect();
-        let (em, ec, _) = aggregate(&ex, p.cands.len(), team);
-        let (hm, _, _) = aggregate(&hy, p.cands.len(), team);
+        let (em, ec, _) = aggregate(&ex, cands.len(), team);
+        let (hm, _, _) = aggregate(&hy, cands.len(), team);
         let hc = best_index(&hm, team);
         let loss = em[ec].get(team) - em[hc].get(team);
-        let mut errors = Vec::with_capacity(4 * per * p.cands.len());
+        let mut errors = Vec::with_capacity(4 * ws.len() * cands.len());
         for o in ws {
             for (e, h) in o.exact.iter().zip(&o.hybrid) {
                 for rel in 0..4u8 {
@@ -316,32 +588,26 @@ pub fn run_check(
                     errors.push(h.get(t) as i64 - e.get(t) as i64);
                 }
             }
-            if let Some(ok) = o.verified {
-                verified.0 += 1;
-                verified.1 += u64::from(!ok);
-            }
         }
         decisions.push(DecisionCheck {
             id: p.d.id,
             position: p.d.position + 1,
             stratum: p.d.stratum,
             team,
-            cands: p.cands.len(),
-            worlds: job.to,
+            cands: cands.len(),
+            worlds: ws.len() as u64,
             exact_choice: ec,
             hybrid_choice: hc,
             loss,
             agree: loss == 0,
             errors,
-            exact_worlds: ws
-                .iter()
-                .filter(|o| o.verified.is_some() || p.rec.is_none() || job.recompute)
-                .count() as u64,
+            exact_worlds: ws.iter().filter(|o| o.exact_solved).count() as u64,
             exact_us: ws.iter().map(|o| o.exact_us).sum(),
             hybrid_us: ws.iter().map(|o| o.hybrid_us).sum(),
             exact_nodes: ws.iter().map(|o| o.exact_nodes).sum(),
             hybrid_nodes: ws.iter().map(|o| o.hybrid_nodes).sum(),
             frontier: ws.iter().map(|o| o.frontier).sum(),
+            world_checks: ws.to_vec(),
         });
     }
     Ok(CheckRun {
@@ -351,6 +617,7 @@ pub fn run_check(
             timed.ns.load(Ordering::Relaxed),
             timed.n.load(Ordering::Relaxed),
         ),
+        mismatched,
     })
 }
 
@@ -528,6 +795,9 @@ mod tests {
             tt_mb: 4,
             verify_pct: 100.0,
             recompute: false,
+            rules_robber_burn: false,
+            exact_solve_threads: 1,
+            exact_tt_mb: 4,
         };
         let a = run_check(&ds, &BTreeMap::new(), &job(1), &ctx, &f).expect("runs");
         let b = run_check(&ds, &BTreeMap::new(), &job(3), &ctx, &f).expect("runs");

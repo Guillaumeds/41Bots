@@ -62,6 +62,7 @@ mod sched;
 mod spike;
 mod stop;
 mod t1bench;
+mod t1check;
 mod v2;
 
 const USAGE: &str = "usage:
@@ -1405,6 +1406,7 @@ fn run_kind(ctx: &mut Ctx, kind: &str, params: &Value) -> Result<Value, String> 
         "search_measure" => measure::chunk(ctx, params)?,
         "t1bench" => t1bench::chunk(ctx, params)?,
         "hybrid_rung" => hybrid::chunk(ctx, params)?,
+        "hybrid_t1check" => t1check::chunk(ctx, params)?,
         "arena_block" => {
             return Err("arena_block chunks need the arena binary (not built yet)".into());
         }
