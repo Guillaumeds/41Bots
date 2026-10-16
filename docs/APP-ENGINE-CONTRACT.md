@@ -35,7 +35,7 @@ TypeScript names are kept exactly.
 | App field | Engine source | Notes |
 |---|---|---|
 | `candidates[]` best first | `pimc::candidates` + the PIMC means, sorted by `value` with the documented tie rule | Equivalent cards (same rank class in the solver's canonical form) are one candidate, as today's engine does; `action` names the lowest card of the class and lists the class in `equivalent` (new, optional). |
-| `candidates[i].action` | `engine::Action` (`Play(card)` or `Burn(card)`) | Same two kinds as the app. Card ids: the engine's 0..53 index (54 cards with the Joker); a table in the API doc maps them to the app's names. |
+| `candidates[i].action` | `engine::Action` (`Play(card)` or `Burn(card)`) | Same two kinds as the app. Card ids: the engine's 0..52 index (53 cards, one Joker = 52); the adapter maps the app's numbers (§6.1). |
 | `candidates[i].mean[4]` | the candidate's money-chance four-vector, pairs in the app's seat order from the seat's own view | `number[4]` in 0..1 (the fixed-point value ÷ 2³²); the fixed-point bytes are also given (`mean_fp`, four `u64` as decimal strings) for anyone who wants byte identity. |
 | `candidates[i].value` | `mean[own pair]` | |
 | `candidates[i].se` | standard error of the own-pair value over the deals (likelihood-weighted) | |
@@ -83,8 +83,9 @@ This is the engine's design, not a feature to add:
 - **No state between searches**: a transposition table per exact solve, the network's memo per
   thread that never changes a value, no move-ordering memory.
 - **Ties**: one rule, first card by index, nowhere seeded, identical everywhere. (The engine's
-  values in positions where a seat is indifferent depend on that rule; the app's `ties: average`
-  is its own smoothing on top and may stay.)
+  values in positions where a seat is indifferent depend on that rule. `ties: average` belongs to
+  today's TypeScript engine (forge e4e7f8c) and goes with it; the app's own tie rule in its grades,
+  `TIE_LOSS` = half the standard error, is the app's and stays.)
 
 ## 4. What cannot be met, and the design change
 
@@ -121,7 +122,53 @@ should take:
 
 Questions for the app's author are in §6; answers go into this file.
 
-## 6. Open questions for the app
+## 6. Answers from the app (2026-10-16) and the engine's decisions
+
+The app is deployed: fivefingers `main` = `app-modes` 581b2cd since 2026-10-16 (Guillaume
+approved). The engine swap goes into `main`, on a Monday (UTC).
+
+1. **Cards.** The app's card is a number 0..53, `suit*13 + (rank−1)`, ace 1 … king 13, Jokers 52
+   and 53, with suits **hearts 0, diamonds 1, clubs 2, spades 3** (`src/engine/types.ts`); the
+   engine's suits are **clubs 0, diamonds 1, hearts 2, spades 3**, one Joker 52
+   (`crates/engine/src/cards.rs`). The adapter swaps the blocks 0–12 ↔ 26–38 and leaves 13–25
+   (diamonds), 39–51 (spades) and 52 (the Joker) unchanged; tested both ways (the app's A♥ 0 is
+   the engine's 26, and back) over all 53 cards. A match with a second Joker (`config.jokers 2`,
+   the app's 53) is refused, as is any table that is not 8 seats.
+   **Actions.** App `play{card}` → `Play(card)`; app `rob{discard}` (the ace-of-trumps holder,
+   rule 20) and `steal{discard}` (the dealer taking a turned ace or Joker, rules 22 and 24) →
+   `Burn(card)`, told apart by the phase; `leaveJoker` is illegal and never a candidate.
+   **`declineRob` is not a candidate.** The owner's rule H1 (`docs/RULES.md`): illegal plays are
+   impossible and robbing is forced, so rules 25, 26, 34 and 37–41 (turning a partnership, passed
+   tricks) are not part of the engine and it cannot value a refusal. The app grades a decline as a
+   penalty, as it offered. If Guillaume ever wants a decline valued, that is an owner decision to
+   change H1 first.
+2. **`trickWinner`**: per seat, length 8, indexed by seat number; `trickWin` stays the pair's
+   share.
+3. **`expectedPoints` at tricks 1–2**: always a number, never null, on the exact scale (the pair's
+   points in the hand, the 11/10 as credited). Exact along the principal line up to the network's
+   cut; beyond it, the mean over the outcome head's endings: a hand-over ending gives every team's
+   points exactly (5 a trick, the bonus fixed by the position); a game-won ending credits the
+   winning pair the points that reach 41 (the game ends there, rule 32) and the other pairs their
+   points at the cut (a lower bound, stated in the API doc). Labelled by `meanHorizon`. Passed
+   tricks (rule 39) never happen in the engine (H1).
+4. **Engine version**: every `Result` carries `engine` = one string, `"<commit>+<network SHA-256 or
+   'exact'>+v<values version>"`, for `club_hands.engine` from the first day of the swap.
+5. **Server-side review on Cloudflare Workers Paid** (approved 2026-10-16: up to 5 min CPU and
+   128 MB per request, 64 MiB code). What it means for the engine:
+   - Memory: the equity table (26 MB), the network (6 MB), the WASM code and a transposition table
+     per solve must fit in 128 MB. The table size never changes a value (exact search), only the
+     time, so the server build uses a 16–32 MB table; the API takes `tt_mb`.
+   - Time: a review is split by the seeded shards into requests that each stay under the CPU limit
+     and merged by index: byte-identical whatever the split. The engine gives a `plan_only` call
+     that returns the shard list with a cost estimate per shard, so the app can size the requests.
+   - Trick 1 needs the trick-2 network O_2 (H_2: tenths of a second a deal); with only O_3 (H_3,
+     seconds to minutes a deal at trick 1) a trick-1 review does not fit Workers and stays on the
+     two-trick Pro until O_2 is proven.
+6. **Guide's lab at the player's turn** (today about 4 s on a laptop): the pace numbers (§5.2) are
+   given separately for trick 1 and trick 2 decisions, and for tricks 3–5, at 32 / 64 / 128 deals,
+   on a phone and on a Worker.
+
+## 7. The questions as asked (answered in §6)
 
 - Card naming: the engine's card index table is in `crates/engine/src/cards.rs`; confirm the app's
   `card` type (string or number) so the adapter maps it once.
