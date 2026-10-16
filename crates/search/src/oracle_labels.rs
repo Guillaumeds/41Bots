@@ -15,7 +15,10 @@
 //!   by the yardstick's generator, a world drawn from the decider's belief, then every frontier
 //!   position (start of trick `k`) that the hybrid's search from the decision reaches for every
 //!   candidate, recorded through the solver's frontier hook, deduplicated by canonical form, and a
-//!   seeded sample of at most a cap per decision.
+//!   seeded sample of at most a cap per decision. The search's frontier values come from a
+//!   [`Driver`]: exact values (every reached position solved; the default, cheap at trick 4) or a
+//!   network's (the previous round's O_k, as the hybrid really runs; only the sampled positions
+//!   are solved, which is what makes harvesting at trick 3 affordable).
 //!
 //! A line on which the game ends before trick `k` is replayed with fresh randomness.
 //!
@@ -29,8 +32,12 @@
 //! **Determinism**: row `i` depends only on (seed, source, trick, `i`) through
 //! `Rng::derive(seed, &[NN_LABEL, source, trick, i])`; rows are computed on any number of
 //! threads and put in row order, so the shard is byte-identical for any thread count. Harvested
-//! rows come by decision: decision `j`'s rows depend only on (seed, trick, `j`) and the harvest's
-//! settings, and the shard is decisions 0, 1, 2, … in order, cut at the row count.
+//! rows come by decision: decision `j`'s rows depend only on (seed, trick, `j`), the harvest's
+//! settings and the driver (exact, or the network's weights), and the shard is decisions 0, 1,
+//! 2, … in order, cut at the row count. Each decision's search runs on one thread (the
+//! sequential solver), so the positions it reaches, and the order it reaches them in, never
+//! depend on the thread count; a network's per-thread caches never change a value
+//! (`nn::oracle`).
 //!
 //! **Streaming** ([`write_label_shard`], [`write_harvest_shard`]): a shard of millions of rows is
 //! never held in memory. Workers make chunks of consecutive rows (or harvest decisions), each
@@ -432,6 +439,12 @@ pub struct ShardSummary {
     pub hash_time: Duration,
     /// Time spent writing (on the writer thread), for the log.
     pub write_time: Duration,
+    /// A harvest's time in its decisions' searches, summed over threads (the log only; zero for
+    /// other sources).
+    pub search_time: Duration,
+    /// A harvest's time labelling the sampled positions (their exact solves when a network drove
+    /// the search), summed over threads (the log only).
+    pub label_time: Duration,
 }
 
 /// Where a shard's bytes go, in order: into the SHA-256 here, and to the writer thread.
@@ -568,6 +581,8 @@ pub fn write_label_shard<W: Write + Send>(
         decisions: Vec::new(),
         hash_time,
         write_time,
+        search_time: Duration::ZERO,
+        label_time: Duration::ZERO,
     })
 }
 
@@ -693,6 +708,22 @@ pub fn position_schedule(w: [u64; 8]) -> Vec<u8> {
     out
 }
 
+/// The values a harvest's search uses at the frontier.
+#[derive(Clone, Copy)]
+pub enum Driver<'a> {
+    /// The exact value of every reached position: the search H_k makes when its network is right
+    /// (the exact solver's own search down to trick `k`). Every reached position is solved, so
+    /// the sampled ones' labels come with the search. The default; right for trick 4, where an
+    /// exact solve costs about 0.04 ms.
+    Exact,
+    /// A network's values (normally the previous round's integer O_k, `nn::Oracle`, with its
+    /// memo): the search H_k as it really runs with that network. Only the sampled positions are
+    /// solved exactly, for their labels. For trick 3 and earlier, where an exact solve of every
+    /// reached position is too dear (about 9 ms each at trick 3, and a trick-2 leader decision
+    /// reaches about 2,200 positions on average: docs/m3-hybrid/rung2.md).
+    Net(&'a dyn Frontier),
+}
+
 /// One frontier position reached by a harvest search.
 #[derive(Clone, Copy, Debug)]
 pub struct Reached {
@@ -702,9 +733,11 @@ pub struct Reached {
     pub ctx: MatchCtx,
     /// Its canonical form.
     pub canon: CanonPos,
-    /// Its exact value (absolute team order).
+    /// The value the search used for it (absolute team order): its exact value
+    /// ([`Driver::Exact`]) or the network's ([`Driver::Net`]).
     pub value: MoneyChance,
-    /// Solver nodes of that exact value.
+    /// Solver nodes of the exact value (0 when a network drove the search: the sampled
+    /// positions' own solves are counted in their rows' facts).
     pub nodes: u64,
 }
 
@@ -716,14 +749,16 @@ struct RecState {
 }
 
 /// The harvest's frontier evaluator: records every position the solver reaches at the frontier
-/// (first visits, in the order the sequential solver reaches them) and returns its exact value,
-/// so the search is exactly the hybrid H_k with a perfect network at the frontier (the exact
-/// solver's own search down to trick `k`). A canonical form met again (another line, or the same
-/// position after a table replacement) gets its recorded value. The exact value depends only on
-/// the canonical form and the context (`solver::frontier`), as the solvers require.
+/// (first visits, in the order the sequential solver reaches them) and returns the driver's
+/// value of it: the exact value ([`Driver::Exact`]; the search is then exactly the hybrid H_k
+/// with a perfect network at the frontier) or the network's ([`Driver::Net`]; the search is H_k
+/// with that network). A canonical form met again (another line, or the same position after a
+/// table replacement) gets its recorded value. Either value depends only on the canonical form
+/// and the context (`solver::frontier`), as the solvers require.
 struct Recorder<'a> {
     leaf: &'a SharedLeaf,
     opts: FastOptions,
+    driver: Driver<'a>,
     state: Mutex<RecState>,
 }
 
@@ -744,7 +779,10 @@ impl Frontier for Recorder<'_> {
         if let Some(&i) = st.seen.get(canon) {
             return st.list[i].value;
         }
-        let (value, nodes) = exact_value(pos, *ctx, self.leaf, self.opts, &mut st.mem);
+        let (value, nodes) = match self.driver {
+            Driver::Exact => exact_value(pos, *ctx, self.leaf, self.opts, &mut st.mem),
+            Driver::Net(net) => (net.value_at(pos, canon, ctx), 0),
+        };
         st.seen.insert(*canon, st.list.len());
         st.list.push(Reached {
             pos: *pos,
@@ -791,6 +829,11 @@ pub struct DecisionHarvest {
     pub positions: Vec<(Position, MatchCtx)>,
     /// Every distinct reached position, in first-visit order (before sampling).
     pub reached: Vec<Reached>,
+    /// Time in the search (reports only).
+    pub search_time: Duration,
+    /// Time labelling the sample, its exact solves included when a network drove the search
+    /// (reports only).
+    pub label_time: Duration,
 }
 
 /// Harvest decision `j` before its search: the decision (the yardstick's generator,
@@ -823,25 +866,29 @@ pub fn harvest_root(
 
 /// Harvest decision `j` ([`harvest_root`]): the hybrid's search from it for every candidate
 /// (`crate::pimc::exact_world` with a frontier at the start of `job.trick` and the [`Recorder`]
-/// there), the distinct reached positions, a seeded sample of at most `job.cap` of them (kept in
-/// reach order), each labelled.
+/// there, valuing the frontier as `driver` says), the distinct reached positions, a seeded sample
+/// of at most `job.cap` of them (kept in reach order), each labelled with its exact value (from
+/// the search with [`Driver::Exact`]; solved now, and only these, with [`Driver::Net`]).
 pub fn harvest_decision(
     job: &HarvestJob,
     j: u64,
     starts: &[Vec<HandStartState>; 4],
     leaf: &SharedLeaf,
     source: &dyn WorldSource,
+    driver: Driver<'_>,
     mem: &mut SolveMem,
 ) -> DecisionHarvest {
     let k = job.trick;
     let (d, cands, m, mut rng) = harvest_root(job, j, starts, source);
     let (t, st, pos) = (d.trick, usize::from(d.stratum - 1), usize::from(d.position));
+    let opts = FastOptions {
+        tt_mb: tt_mb_for(k),
+        ..FastOptions::default()
+    };
     let rec = Recorder {
         leaf,
-        opts: FastOptions {
-            tt_mb: tt_mb_for(k),
-            ..FastOptions::default()
-        },
+        opts,
+        driver,
         state: Mutex::new(RecState {
             mem: SolveMem::new(),
             seen: BTreeMap::new(),
@@ -859,6 +906,7 @@ pub fn harvest_decision(
         ..SearchConfig::default()
     };
     let mut run = WorldSolve::default();
+    let t0 = Instant::now();
     exact_world(
         &m,
         &cands,
@@ -870,8 +918,15 @@ pub fn harvest_decision(
         Some(FrontierCut::new(k, &rec)),
     )
     .expect("nothing stops a harvest search");
-    let st_rec = rec.state.into_inner().unwrap_or_else(|e| e.into_inner());
-    let n = st_rec.list.len();
+    let search_time = t0.elapsed();
+    let t1 = Instant::now();
+    let RecState {
+        mem: mut label_mem,
+        seen: _,
+        list,
+        evals,
+    } = rec.state.into_inner().unwrap_or_else(|e| e.into_inner());
+    let n = list.len();
     let take = n.min(job.cap as usize);
     let mut idx: Vec<usize> = (0..n).collect();
     for i in 0..take {
@@ -883,15 +938,19 @@ pub fn harvest_decision(
     let mut rows = Vec::with_capacity(take);
     let mut positions = Vec::with_capacity(take);
     for &i in &chosen {
-        let r = &st_rec.list[i];
+        let r = &list[i];
+        let (value, nodes) = match driver {
+            Driver::Exact => (r.value, r.nodes),
+            Driver::Net(_) => exact_value(&r.pos, r.ctx, leaf, opts, &mut label_mem),
+        };
         rows.push((
-            labelled_row(&r.pos, &r.ctx, r.value, SOURCE_HARVEST, leaf),
+            labelled_row(&r.pos, &r.ctx, value, SOURCE_HARVEST, leaf),
             RowInfo {
                 stratum: st as u8 + 1,
                 root_trick: t,
                 position: pos as u8 + 1,
                 retries: 0,
-                nodes: r.nodes,
+                nodes,
             },
         ));
         positions.push((r.pos, r.ctx));
@@ -903,14 +962,16 @@ pub fn harvest_decision(
             position: pos as u8 + 1,
             stratum: st as u8 + 1,
             cands: cands.len(),
-            evals: st_rec.evals,
+            evals,
             distinct: n as u32,
             rows: take as u32,
             search_nodes: run.stats.nodes,
         },
         rows,
         positions,
-        reached: st_rec.list,
+        reached: list,
+        search_time,
+        label_time: t1.elapsed(),
     }
 }
 
@@ -933,10 +994,12 @@ fn check_harvest_job(job: &HarvestJob) {
 /// to `take` in order with their rows (each worker with its own solver memory) until `take`
 /// returns `false` (decisions are claimed as workers come free, at most a window ahead of
 /// `take`: `crate::ordered`).
+#[allow(clippy::too_many_arguments)]
 fn harvest_decisions<T: Send>(
     job: &HarvestJob,
     starts: &[Vec<HandStartState>; 4],
     leaf: &SharedLeaf,
+    driver: Driver<'_>,
     progress: Option<&AtomicUsize>,
     make: impl Fn(DecisionHarvest) -> T + Sync,
     take: impl FnMut(u64, T) -> Result<bool, String>,
@@ -948,7 +1011,7 @@ fn harvest_decisions<T: Send>(
         window_for(job.threads),
         SolveMem::new,
         |mem, j| {
-            let out = harvest_decision(job, j, starts, leaf, &source, mem);
+            let out = harvest_decision(job, j, starts, leaf, &source, driver, mem);
             if let Some(p) = progress {
                 p.fetch_add(out.rows.len(), Ordering::Relaxed);
             }
@@ -959,9 +1022,9 @@ fn harvest_decisions<T: Send>(
 }
 
 /// The rows of a harvest run and the facts of the decisions they came from: decisions 0, 1, 2, …
-/// in order, each giving its rows ([`harvest_decision`]), until `job.count` rows (the last
-/// decision cut short). Decisions run on `job.threads` threads; the result is byte-identical for
-/// any thread count.
+/// in order, each giving its rows ([`harvest_decision`], the frontier valued as `driver` says),
+/// until `job.count` rows (the last decision cut short). Decisions run on `job.threads` threads;
+/// the result is byte-identical for any thread count.
 ///
 /// # Panics
 /// If `job.seed` is the golden-set seed, `job.trick` is not 2..=5, a decision trick is not
@@ -970,6 +1033,7 @@ pub fn harvest_rows(
     job: &HarvestJob,
     starts: &[Vec<HandStartState>; 4],
     leaf: &SharedLeaf,
+    driver: Driver<'_>,
     progress: Option<&AtomicUsize>,
 ) -> (Vec<(Row, RowInfo)>, Vec<HarvestDecision>) {
     check_harvest_job(job);
@@ -980,6 +1044,7 @@ pub fn harvest_rows(
             job,
             starts,
             leaf,
+            driver,
             progress,
             |out| (out.info, out.rows),
             |_, (mut info, mut got)| {
@@ -1007,6 +1072,7 @@ pub fn write_harvest_shard<W: Write + Send>(
     job: &HarvestJob,
     starts: &[Vec<HandStartState>; 4],
     leaf: &SharedLeaf,
+    driver: Driver<'_>,
     progress: Option<&AtomicUsize>,
     out: &mut W,
 ) -> Result<ShardSummary, String> {
@@ -1016,6 +1082,7 @@ pub fn write_harvest_shard<W: Write + Send>(
     let mut counts = RowCounts::default();
     let mut decisions = Vec::new();
     let mut left = job.count;
+    let (mut search_time, mut label_time) = (Duration::ZERO, Duration::ZERO);
     let ((), sha256, hash_time, write_time) = stream_shard(out, job.count, v, |sink| {
         if left == 0 {
             return Ok(());
@@ -1024,6 +1091,7 @@ pub fn write_harvest_shard<W: Write + Send>(
             job,
             starts,
             leaf,
+            driver,
             progress,
             |out| {
                 let mut bytes = Vec::with_capacity(out.rows.len() * rb);
@@ -1033,9 +1101,11 @@ pub fn write_harvest_shard<W: Write + Send>(
                     row_bytes(row, &mut bytes);
                     infos.push(*info);
                 }
-                (out.info, bytes, infos)
+                (out.info, bytes, infos, (out.search_time, out.label_time))
             },
-            |_, (mut info, mut bytes, infos)| {
+            |_, (mut info, mut bytes, infos, (ts, tl))| {
+                search_time += ts;
+                label_time += tl;
                 let keep = left.min(infos.len() as u64) as usize;
                 bytes.truncate(keep * rb);
                 for i in &infos[..keep] {
@@ -1056,6 +1126,8 @@ pub fn write_harvest_shard<W: Write + Send>(
         decisions,
         hash_time,
         write_time,
+        search_time,
+        label_time,
     })
 }
 
@@ -1181,7 +1253,7 @@ mod tests {
         for (k, tricks, w, n) in cases {
             let job = harvest_job(k, tricks.clone(), w, 6);
             for j in 0..n {
-                let out = harvest_decision(&job, j, &starts, &*l, &source, &mut mem);
+                let out = harvest_decision(&job, j, &starts, &*l, &source, Driver::Exact, &mut mem);
                 let (d, _, m, _) = harvest_root(&job, j, &starts, &source);
                 assert!(tricks.contains(&d.trick));
                 assert_eq!(d.stratum, (j % 4) as u8 + 1);
@@ -1247,7 +1319,15 @@ mod tests {
                     assert_eq!(row.outcomes[usize::from(row.label)], row.value);
                     assert_eq!((info.root_trick, info.position), (d.trick, d.position + 1));
                 }
-                let again = harvest_decision(&job, j, &starts, &*l, &source, &mut SolveMem::new());
+                let again = harvest_decision(
+                    &job,
+                    j,
+                    &starts,
+                    &*l,
+                    &source,
+                    Driver::Exact,
+                    &mut SolveMem::new(),
+                );
                 assert_eq!(
                     again.rows.iter().map(|r| &r.0).collect::<Vec<_>>(),
                     out.rows.iter().map(|r| &r.0).collect::<Vec<_>>()
@@ -1302,6 +1382,7 @@ mod tests {
             let rec = Recorder {
                 leaf: &*l,
                 opts: FastOptions::default(),
+                driver: Driver::Exact,
                 state: Mutex::new(RecState {
                     mem: SolveMem::new(),
                     seen: BTreeMap::new(),
@@ -1328,6 +1409,7 @@ mod tests {
                 let rec2 = Recorder {
                     leaf: &*l,
                     opts: FastOptions::default(),
+                    driver: Driver::Exact,
                     state: Mutex::new(RecState {
                         mem: SolveMem::new(),
                         seen: BTreeMap::from([(r.canon, 0)]),
@@ -1356,8 +1438,8 @@ mod tests {
                 5,
             )
         };
-        let (a, da) = harvest_rows(&job(1), &starts, &*l, None);
-        let (b, db) = harvest_rows(&job(4), &starts, &*l, None);
+        let (a, da) = harvest_rows(&job(1), &starts, &*l, Driver::Exact, None);
+        let (b, db) = harvest_rows(&job(4), &starts, &*l, Driver::Exact, None);
         assert_eq!(a.len(), 77);
         let ra: Vec<Row> = a.iter().map(|x| x.0.clone()).collect();
         let rb: Vec<Row> = b.iter().map(|x| x.0.clone()).collect();
@@ -1374,12 +1456,16 @@ mod tests {
         let mut mem = SolveMem::new();
         let mut want = Vec::new();
         for d in &da {
-            let out = harvest_decision(&job(1), d.id, &starts, &*l, &src, &mut mem);
+            let out = harvest_decision(&job(1), d.id, &starts, &*l, &src, Driver::Exact, &mut mem);
             want.extend(out.rows.into_iter().take(d.rows as usize).map(|r| r.0));
         }
         assert_eq!(want, ra);
         let empty = HarvestJob { count: 0, ..job(2) };
-        assert!(harvest_rows(&empty, &starts, &*l, None).0.is_empty());
+        assert!(
+            harvest_rows(&empty, &starts, &*l, Driver::Exact, None)
+                .0
+                .is_empty()
+        );
     }
 
     fn counts_of(rows: &[(Row, RowInfo)]) -> RowCounts {
@@ -1497,7 +1583,7 @@ mod tests {
                 threads,
                 ..harvest_job(5, vec![4], [1; 8], 4)
             };
-            let e = write_harvest_shard(&h, &starts, &*l, None, &mut Failing(3000))
+            let e = write_harvest_shard(&h, &starts, &*l, Driver::Exact, None, &mut Failing(3000))
                 .expect_err("the disk fails");
             assert!(e.contains("disk full"), "{e}");
         }
@@ -1514,7 +1600,7 @@ mod tests {
             threads,
             ..harvest_job(4, vec![3], [1; 8], 5)
         };
-        let (rows, ds) = harvest_rows(&job(1, 41), &starts, &*l, None);
+        let (rows, ds) = harvest_rows(&job(1, 41), &starts, &*l, Driver::Exact, None);
         let want = nn::shard::to_npy(
             &rows.iter().map(|r| r.0.clone()).collect::<Vec<_>>(),
             nn::outcome::vocab(4),
@@ -1522,8 +1608,15 @@ mod tests {
         let facts = |d: &[HarvestDecision]| serde_json::to_string(d).expect("json");
         for threads in [1, 4] {
             let mut out = Vec::new();
-            let sum = write_harvest_shard(&job(threads, 41), &starts, &*l, None, &mut out)
-                .expect("written");
+            let sum = write_harvest_shard(
+                &job(threads, 41),
+                &starts,
+                &*l,
+                Driver::Exact,
+                None,
+                &mut out,
+            )
+            .expect("written");
             assert!(out == want, "{threads} threads");
             assert_eq!(sum.sha256, equity::sha256::sha256_hex(&want));
             assert_eq!(facts(&sum.decisions), facts(&ds));
@@ -1531,7 +1624,8 @@ mod tests {
             assert_eq!(sum.rows, 41);
         }
         let mut out = Vec::new();
-        let sum = write_harvest_shard(&job(4, 0), &starts, &*l, None, &mut out).expect("written");
+        let sum = write_harvest_shard(&job(4, 0), &starts, &*l, Driver::Exact, None, &mut out)
+            .expect("written");
         assert_eq!(out, nn::shard::to_npy(&[], nn::outcome::vocab(4)));
         assert!(sum.decisions.is_empty());
     }
@@ -1546,7 +1640,7 @@ mod tests {
             count: 1,
             ..harvest_job(4, vec![3], [1; 8], 4)
         };
-        harvest_rows(&job, &starts, &*l, None);
+        harvest_rows(&job, &starts, &*l, Driver::Exact, None);
     }
 
     #[test]
@@ -1579,6 +1673,255 @@ mod tests {
             "1,2,3,4",
         ] {
             assert!(parse_band_shares(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// A random integer network (outcome head) for frontier trick `k`, valued with the synthetic
+    /// leaf: a stand-in for the previous round's O_k (tests only).
+    fn random_oracle(k: u8, seed: u64) -> nn::Oracle {
+        let net = nn::synthetic::random_net(seed, &[32, 16], nn::outcome::vocab(k), 100);
+        let meta = BTreeMap::from([("head".to_string(), "outcome-v1".to_string())]);
+        nn::Oracle::from_bytes(&nn::oracle::write_net(&net, k, &meta), leaf()).expect("loads")
+    }
+
+    /// Driven by a network, the harvest's search is the hybrid H_k with that network (the same
+    /// candidate values as a plain frontier of the network), it reaches only real frontier
+    /// positions (each reachable from the decision's world, one per canonical form, valued by
+    /// the network), and the rows are a sample of at most the cap in reach order, each labelled
+    /// with the exact solver's value of its position (solved for the label only); the same again
+    /// on a second run with fresh memory.
+    #[test]
+    fn net_driven_harvest_is_the_hybrid_search_and_labels_exactly() {
+        let starts = collect_starts(400, 9);
+        let l = leaf();
+        let source = BeliefSource::new();
+        let ctx = Ctx {
+            leaf: &*l,
+            source: &source,
+            rules: Rules::HOUSE,
+        };
+        let cfg = SearchConfig {
+            tt_mb: HARVEST_TT_MB,
+            ..SearchConfig::default()
+        };
+        let mut mem = SolveMem::new();
+        let (mut decisions, mut repeats, mut capped, mut rows, mut net_differs) = (0, 0, 0, 0, 0);
+        let every = [1; 8];
+        let last = [0, 0, 0, 0, 0, 0, 0, 1];
+        let cases: [(u8, Vec<u8>, [u64; 8], u64); 3] = [
+            (4, vec![3], every, 16),
+            (5, vec![4], every, 8),
+            (3, vec![2], last, 2),
+        ];
+        for (k, tricks, w, n) in cases {
+            let net = random_oracle(k, 23 + u64::from(k));
+            let job = harvest_job(k, tricks.clone(), w, 6);
+            for j in 0..n {
+                let out =
+                    harvest_decision(&job, j, &starts, &*l, &source, Driver::Net(&net), &mut mem);
+                let (d, cands, m, _) = harvest_root(&job, j, &starts, &source);
+                assert!(tricks.contains(&d.trick));
+                assert_eq!(
+                    (out.info.trick, out.info.position, out.info.stratum),
+                    (d.trick, d.position + 1, d.stratum)
+                );
+                // The recording search is the hybrid with the network at the frontier.
+                let rec = Recorder {
+                    leaf: &*l,
+                    opts: FastOptions::default(),
+                    driver: Driver::Net(&net),
+                    state: Mutex::new(RecState {
+                        mem: SolveMem::new(),
+                        seen: BTreeMap::new(),
+                        list: Vec::new(),
+                        evals: 0,
+                    }),
+                };
+                let search = |cut| {
+                    exact_world(
+                        &m,
+                        &cands,
+                        &ctx,
+                        &cfg,
+                        None,
+                        &mut SolveMem::new(),
+                        &mut WorldSolve::default(),
+                        Some(cut),
+                    )
+                    .expect("solved")
+                };
+                assert_eq!(
+                    search(FrontierCut::new(k, &rec)),
+                    search(FrontierCut::new(k, &net)),
+                    "trick {k} decision {j}: the harvest search is H_{k}"
+                );
+                let st = rec.state.into_inner().expect("unpoisoned");
+                assert_eq!(
+                    st.list.iter().map(|r| r.canon).collect::<Vec<_>>(),
+                    out.reached.iter().map(|r| r.canon).collect::<Vec<_>>(),
+                    "the same positions in the same order"
+                );
+                let (root, _, _) = from_match(&m).expect("a play is awaited");
+                let mut all = std::collections::BTreeSet::new();
+                reachable(&root, k, &mut all);
+                let mut seen = std::collections::BTreeSet::new();
+                for r in &out.reached {
+                    let p = &r.pos;
+                    assert_eq!((p.n_played, p.hand.tricks_done + 1), (0, k));
+                    assert!(p.rob.is_none());
+                    assert_eq!(canonical(p), r.canon);
+                    assert!(all.contains(&r.canon), "reached positions are reachable");
+                    assert!(seen.insert(r.canon), "one position per canonical form");
+                    assert_eq!(r.value, net.eval(&r.canon, &r.ctx), "the network's value");
+                    assert_eq!(r.nodes, 0, "nothing solved during the search");
+                }
+                assert_eq!(out.info.distinct as usize, out.reached.len());
+                repeats += out.info.evals - u64::from(out.info.distinct);
+                let take = out.reached.len().min(6);
+                assert_eq!(out.rows.len(), take);
+                capped += usize::from(out.reached.len() > take);
+                let at: Vec<usize> = out
+                    .positions
+                    .iter()
+                    .map(|(p, _)| {
+                        out.reached
+                            .iter()
+                            .position(|r| r.canon == canonical(p))
+                            .expect("a sampled position was reached")
+                    })
+                    .collect();
+                assert!(at.windows(2).all(|w| w[0] < w[1]), "reach order");
+                for (((row, info), (p, pctx)), &i) in out.rows.iter().zip(&out.positions).zip(&at) {
+                    let sol = solve_fast(p, *pctx, &SyntheticLeaf, FastOptions::default());
+                    let exact = sol.value.expect("solved");
+                    let c = canonical(p);
+                    let r = nn::encode::rotation(&c);
+                    assert_eq!(
+                        row.value,
+                        exact.rotate(r % 4),
+                        "the label is the exact value"
+                    );
+                    assert_eq!((row.source, row.trick), (SOURCE_HARVEST, k));
+                    assert_eq!(
+                        decode(&row.features).expect("decodes"),
+                        rotate_canon(&c, pctx, r)
+                    );
+                    assert_eq!(row.outcomes[usize::from(row.label)], row.value);
+                    assert_eq!((info.root_trick, info.position), (d.trick, d.position + 1));
+                    assert_eq!(info.nodes, sol.stats.nodes, "the label's own solve");
+                    net_differs += usize::from(out.reached[i].value != exact);
+                }
+                let again = harvest_decision(
+                    &job,
+                    j,
+                    &starts,
+                    &*l,
+                    &source,
+                    Driver::Net(&random_oracle(k, 23 + u64::from(k))),
+                    &mut SolveMem::new(),
+                );
+                assert_eq!(
+                    again.rows.iter().map(|r| &r.0).collect::<Vec<_>>(),
+                    out.rows.iter().map(|r| &r.0).collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    serde_json::to_string(&again.info).expect("json"),
+                    serde_json::to_string(&out.info).expect("json")
+                );
+                decisions += 1;
+                rows += out.rows.len();
+            }
+        }
+        assert_eq!(decisions, 26);
+        assert!(repeats > 0, "the dedupe is exercised");
+        assert!(
+            capped > 0 && rows > 60,
+            "{capped} capped decisions, {rows} rows"
+        );
+        assert!(net_differs > 0, "the network's values are not the labels");
+    }
+
+    /// A net-driven harvest run is byte-identical on 1 and 4 threads (rows, streamed shard,
+    /// decisions' facts), its streamed shard is `to_npy` of its rows, and where the network's
+    /// search reaches what the exact search reaches its rows are the exact driver's rows.
+    #[test]
+    fn net_driven_harvest_is_thread_independent() {
+        let starts = collect_starts(400, 9);
+        let l = leaf();
+        for (k, shares, count, cap) in [(4, "0.4,0.4,0.2", 61, 5), (3, "0,0,1", 10, 3)] {
+            let net = random_oracle(k, 31);
+            let job = |threads, count| HarvestJob {
+                count,
+                threads,
+                ..harvest_job(
+                    k,
+                    vec![k - 1],
+                    parse_band_shares(shares).expect("shares"),
+                    cap,
+                )
+            };
+            let (a, da) = harvest_rows(&job(1, count), &starts, &*l, Driver::Net(&net), None);
+            let (b, db) = harvest_rows(&job(4, count), &starts, &*l, Driver::Net(&net), None);
+            let ra: Vec<Row> = a.iter().map(|x| x.0.clone()).collect();
+            let rb: Vec<Row> = b.iter().map(|x| x.0.clone()).collect();
+            let want = nn::shard::to_npy(&ra, nn::outcome::vocab(k));
+            assert!(
+                want == nn::shard::to_npy(&rb, nn::outcome::vocab(k)),
+                "trick {k}"
+            );
+            let facts = |d: &[HarvestDecision]| serde_json::to_string(d).expect("json");
+            assert_eq!(facts(&da), facts(&db));
+            assert_eq!(da.iter().map(|d| u64::from(d.rows)).sum::<u64>(), count);
+            assert!(
+                a.iter()
+                    .all(|r| r.0.trick == k && r.0.source == SOURCE_HARVEST)
+            );
+            for threads in [1, 4] {
+                let mut out = Vec::new();
+                let sum = write_harvest_shard(
+                    &job(threads, count),
+                    &starts,
+                    &*l,
+                    Driver::Net(&net),
+                    None,
+                    &mut out,
+                )
+                .expect("written");
+                assert!(out == want, "trick {k}, {threads} threads");
+                assert_eq!(sum.sha256, equity::sha256::sha256_hex(&want));
+                assert_eq!(facts(&sum.decisions), facts(&da));
+                assert_eq!(sum.counts, counts_of(&a));
+            }
+            if k == 3 {
+                continue;
+            }
+            // Against the exact driver on the same decisions: where the two searches reach the same
+            // positions in the same order (max^n prunes little, so the values steer the reached set
+            // little: docs/m3-hybrid/rung1.md), the sample and the rows are the same bytes, since
+            // the labels are exact either way.
+            let src = BeliefSource::new();
+            let mut mem = SolveMem::new();
+            let mut same = 0;
+            for d in &da {
+                let mut run = |driver| {
+                    harvest_decision(&job(1, 0), d.id, &starts, &*l, &src, driver, &mut mem)
+                };
+                let (e, n) = (run(Driver::Exact), run(Driver::Net(&net)));
+                if e.reached
+                    .iter()
+                    .map(|r| r.canon)
+                    .eq(n.reached.iter().map(|r| r.canon))
+                {
+                    same += 1;
+                    assert_eq!(
+                        e.rows.iter().map(|r| &r.0).collect::<Vec<_>>(),
+                        n.rows.iter().map(|r| &r.0).collect::<Vec<_>>(),
+                        "decision {}",
+                        d.id
+                    );
+                }
+            }
+            assert!(same > 0, "some decisions compared");
         }
     }
 }

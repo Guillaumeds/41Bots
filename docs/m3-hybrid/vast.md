@@ -110,6 +110,17 @@ for 4M on the RTX 4090 of `m3-hybrid-rung1b-1`). The 10.2 GB of compact training
 GPU's memory on a GPU of 12 GB or more; on a smaller one the trainer feeds them from the host
 ("staged"), slower. Peak memory of the label step is about 15 GB (the 6.4M random-play shard).
 
+## Rung 2 (O_3): a network-driven harvest and a stored golden set
+
+Three more optional settings (`docs/m3-hybrid/rung2.md`): `harvest_net` (the key
+`inputs/sha256/<hex>` of an earlier run's `int.safetensors`, which then drives the harvest's
+search: the way to harvest at trick 3), and `golden_decisions_input` with `golden_worlds_input`
+(the keys of a stored golden set, reused instead of generated, with the check's 1% recheck;
+`verify_pct` at least 1). The runner fetches and hash-checks them before anything else; the
+launcher checks they are in R2 before renting. A generated golden set is now also uploaded to
+`inputs/sha256/<hex>`, and `rung.json`'s `golden.reuse_params` gives the settings that reuse it.
+Proposal: `docs/vast/m3-hybrid-t3-round2.manifest.json` (placeholders to fill in first).
+
 ## Time and money (estimates for the AMD EPYC 9654 (384 threads) + RTX A2000 class at about $1/h)
 
 These are estimates from this VM's and GitHub's measurements, not measurements on that machine;

@@ -30,7 +30,7 @@
 //! search labels    --trick K --count N --seed S --source random|rules|harvest --out FILE.npy
 //!                  --equity TABLE [--threads T] [--start-hands 20000] [--chunk-rows 32]
 //!                  harvest only: [--harvest-cap 16] [--harvest-positions 0.25,0.25,0.5]
-//!                  [--harvest-tricks K-1 | --harvest-tricks 2,3]
+//!                  [--harvest-tricks K-1 | --harvest-tricks 2,3] [--harvest-net WEIGHTS]
 //! search hybrid-check --trick T --cut K --net WEIGHTS --equity TABLE
 //!                  [--decisions FILE | --count N] [--seed 1] [--start-hands 20000]
 //!                  [--first I] [--last J] [--ids …] [--to 320] [--label 1]
@@ -50,10 +50,14 @@
 //! (`search::measure::collect_starts_with`). `--source harvest` (spec §5 source (c),
 //! `search::oracle_labels::harvest_rows`): training decisions drawn by the yardstick's generator at the tricks `--harvest-tricks`
 //! (default K−1), a world from the decider's belief each, the frontier positions the hybrid's
-//! search from the decision reaches (exact values at the frontier), deduplicated by canonical
-//! form, at most `--harvest-cap` per decision (a seeded sample); `--harvest-positions` gives the
+//! search from the decision reaches (exact values at the frontier by default), deduplicated by
+//! canonical form, at most `--harvest-cap` per decision (a seeded sample); `--harvest-positions` gives the
 //! shares of decisions for the decider's positions 1–2, 3–4 and 5–8 (default uniform over the
-//! eight positions). The sidecar adds the harvest's settings and counts per position, stratum
+//! eight positions). `--harvest-net WEIGHTS` (an integer O_K of an earlier round, as
+//! `hybrid-check` takes it) drives the search with that network's values at the frontier instead
+//! of exact ones, and only the sampled positions are solved exactly, for their labels: the way to
+//! harvest at trick 3, where solving every reached position is too dear. The sidecar adds the
+//! harvest's settings, the driver (and the network's SHA-256) and counts per position, stratum
 //! and decision trick.
 //! `hybrid-check` measures the hybrid H_K (exact to the start of trick K, the oracle network
 //! there) against exact search on the same worlds (docs/M3-HYBRID-SPEC.md §3, `search::hybrid`):
@@ -1196,8 +1200,9 @@ fn binary_sha256() -> String {
 /// `search labels`: a label shard for the oracle network O_K and its sidecar.
 fn labels_cmd(a: &Args) -> Result<(), String> {
     use search::oracle_labels::{
-        CHUNK_ROWS, GOLDEN_SEED, HARVEST_CAP, HARVEST_SHARES, HARVEST_TT_MB, HarvestJob, LabelJob,
-        Source, parse_band_shares, position_schedule, write_harvest_shard, write_label_shard,
+        CHUNK_ROWS, Driver, GOLDEN_SEED, HARVEST_CAP, HARVEST_SHARES, HARVEST_TT_MB, HarvestJob,
+        LabelJob, Source, parse_band_shares, position_schedule, write_harvest_shard,
+        write_label_shard,
     };
     let trick = a.num("--trick", 4)? as u8;
     if !(2..=5).contains(&trick) {
@@ -1217,7 +1222,12 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         source: Source::parse(a.req("--source")?)?,
         threads: a.num("--threads", 1)?.max(1) as usize,
     };
-    let harvest_flags = ["--harvest-cap", "--harvest-positions", "--harvest-tricks"];
+    let harvest_flags = [
+        "--harvest-cap",
+        "--harvest-positions",
+        "--harvest-tricks",
+        "--harvest-net",
+    ];
     let harvest = if job.source == Source::Harvest {
         let cap = a.num("--harvest-cap", u64::from(HARVEST_CAP))?;
         if !(1..=u64::from(u32::MAX)).contains(&cap) {
@@ -1277,6 +1287,29 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
     let (table, table_sha) = load_equity_sha(a.req("--equity")?)?;
     let leaf: Arc<SharedLeaf> = Arc::new(table);
     let table_s = t0.elapsed().as_secs_f64();
+    // The network that drives a harvest's search (`--harvest-net`): the integer O_k of an
+    // earlier round, loaded as `search hybrid-check` loads it.
+    let net = match a.get("--harvest-net") {
+        Some(p) => {
+            let o = nn::Oracle::load(Path::new(p), leaf.clone())?;
+            if o.trick != trick {
+                return Err(format!(
+                    "--harvest-net {p} was trained for trick {} positions, not trick {trick}",
+                    o.trick
+                ));
+            }
+            eprintln!(
+                "labels: harvest driven by the network {p} (sha256 {}, {} head, widths {:?}): \
+                 only the sampled positions are solved exactly",
+                o.sha256,
+                o.head.name(),
+                o.net().widths()
+            );
+            Some((o, p.to_string()))
+        }
+        None => None,
+    };
+    let driver = net.as_ref().map_or(Driver::Exact, |(o, _)| Driver::Net(o));
     let start_hands = a.num("--start-hands", 20_000)?;
     let starts = collect_starts_with(start_hands, seed, job.threads);
     eprintln!(
@@ -1322,7 +1355,9 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         let mut file =
             std::fs::File::create(&part).map_err(|e| format!("{}: {e}", part.display()))?;
         let summary = match &harvest {
-            Some((h, _, _)) => write_harvest_shard(h, &starts, &*leaf, Some(done), &mut file),
+            Some((h, _, _)) => {
+                write_harvest_shard(h, &starts, &*leaf, driver, Some(done), &mut file)
+            }
             None => write_label_shard(&job, &starts, &*leaf, Some(done), chunk_rows, &mut file),
         }
         .map_err(|e| format!("{}: {e}", part.display()))?;
@@ -1338,6 +1373,10 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
     let (hash_s, write_s) = (
         shard.hash_time.as_secs_f64(),
         shard.write_time.as_secs_f64(),
+    );
+    let (search_s, label_s) = (
+        shard.search_time.as_secs_f64(),
+        shard.label_time.as_secs_f64(),
     );
     let decisions = shard.decisions;
     let secs = t0.elapsed().as_secs_f64();
@@ -1371,7 +1410,14 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         side["rows_by_position"] = serde_json::json!(&by_position[1..]);
     }
     if let Some((h, shares, weights)) = &harvest {
-        side["harvest"] = harvest_record(h, shares, weights, &decisions, HARVEST_TT_MB);
+        side["harvest"] = harvest_record(
+            h,
+            shares,
+            weights,
+            &decisions,
+            HARVEST_TT_MB,
+            net.as_ref().map(|(o, p)| (o, p.as_str())),
+        );
         let n = decisions.len().max(1) as f64;
         let distinct: u64 = decisions.iter().map(|d| u64::from(d.distinct)).sum();
         eprintln!(
@@ -1383,6 +1429,15 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
             decisions.iter().map(|d| d.evals).sum::<u64>() as f64 / n,
             decisions.iter().filter(|d| d.distinct > h.cap).count(),
             h.cap
+        );
+        eprintln!(
+            "labels: harvest: frontier driven by {}; searches {search_s:.1} thread-s, labelling \
+             the sample {label_s:.1} thread-s ({:.2} thread-s per 1,000 rows in all)",
+            match &net {
+                Some((o, _)) => format!("the network {}", &o.sha256[..12]),
+                None => "exact values".to_string(),
+            },
+            (search_s + label_s) * 1000.0 / n_rows.max(1) as f64
         );
     }
     let mut side_path = out.as_os_str().to_owned();
@@ -1414,19 +1469,31 @@ fn harvest_record(
     weights: &[u64; 8],
     ds: &[search::oracle_labels::HarvestDecision],
     tt_mb: usize,
+    net: Option<(&nn::Oracle, &str)>,
 ) -> serde_json::Value {
     let mut by_pos = [0u64; 8];
     let mut rows_by_pos = [0u64; 8];
+    let mut distinct_by_pos = [0u64; 8];
+    let mut evals_by_pos = [0u64; 8];
     let mut by_stratum = [0u64; 4];
     let mut by_trick = [0u64; 6];
     let mut distinct: Vec<u32> = Vec::with_capacity(ds.len());
     for d in ds {
-        by_pos[usize::from(d.position - 1)] += 1;
-        rows_by_pos[usize::from(d.position - 1)] += u64::from(d.rows);
+        let p = usize::from(d.position - 1);
+        by_pos[p] += 1;
+        rows_by_pos[p] += u64::from(d.rows);
+        distinct_by_pos[p] += u64::from(d.distinct);
+        evals_by_pos[p] += d.evals;
         by_stratum[usize::from(d.stratum - 1)] += 1;
         by_trick[usize::from(d.trick)] += 1;
         distinct.push(d.distinct);
     }
+    let mean_by_pos = |tot: &[u64; 8]| -> Vec<f64> {
+        tot.iter()
+            .zip(&by_pos)
+            .map(|(&t, &n)| (t as f64 / n.max(1) as f64 * 10.0).round() / 10.0)
+            .collect()
+    };
     distinct.sort_unstable();
     let q = |f: f64| {
         distinct
@@ -1439,17 +1506,49 @@ fn harvest_record(
         .split(',')
         .map(|x| x.trim().parse().unwrap_or(f64::NAN))
         .collect();
+    let (what, frontier_values, driver) = match net {
+        None => (
+            "frontier positions (start of the trick) that the hybrid's search from training \
+             decisions reaches for every candidate, with exact values at the frontier (H_k with a \
+             perfect network), deduplicated by canonical form within a decision, then a seeded \
+             sample of at most cap_per_decision of them, kept in the order reached",
+            "exact (solver::solve_fast_with of the reached position, the label's own value)"
+                .to_string(),
+            serde_json::json!({ "kind": "exact" }),
+        ),
+        Some((o, path)) => (
+            "frontier positions (start of the trick) that the hybrid's search from training \
+             decisions reaches for every candidate, with the network's values at the frontier \
+             (H_k with that network, as the hybrid runs), deduplicated by canonical form within \
+             a decision, then a seeded sample of at most cap_per_decision of them, kept in the \
+             order reached; only the sampled positions are solved exactly, for their labels",
+            format!(
+                "the network's (net sha256 {}: nn::Oracle, integer inference with its memo) during \
+                 the search; each sampled position then solved exactly (solver::solve_fast_with, \
+                 the label's value)",
+                o.sha256
+            ),
+            serde_json::json!({
+                "kind": "net",
+                "drove_the_search": true,
+                "net_sha256": o.sha256,
+                "net_file": Path::new(path).file_name().map(|f| f.to_string_lossy().into_owned()),
+                "net_trick": o.trick,
+                "net_head": o.head.name(),
+                "net_widths": o.net().widths(),
+                "net_meta": o.meta,
+            }),
+        ),
+    };
     serde_json::json!({
-        "what": "frontier positions (start of the trick) that the hybrid's search from training \
-                 decisions reaches for every candidate, with exact values at the frontier (H_k \
-                 with a perfect network), deduplicated by canonical form within a decision, then \
-                 a seeded sample of at most cap_per_decision of them, kept in the order reached",
+        "what": what,
         "decision_generator": "search::measure::build_decision (the yardstick's): stratum j mod 4 + 1, \
                                decider position from the schedule, decision trick uniform over decision_tricks",
         "decision_seed": "Rng::derive(seed, [NN_LABEL, SOURCE_HARVEST, trick, j]); the same stream \
                           then draws the world (belief sampler) and the sample",
         "search": format!("pimc::exact_world, sequential solver, table {tt_mb} MB, frontier at the start of trick {}", h.trick),
-        "frontier_values": "exact (solver::solve_fast_with of the reached position, the label's own value)",
+        "frontier_values": frontier_values,
+        "frontier_driver": driver,
         "cap_per_decision": h.cap,
         "decision_tricks": h.tricks,
         "position_shares": { "bands": ["1-2", "3-4", "5-8"], "given": shares, "shares": shares_given },
@@ -1463,6 +1562,8 @@ fn harvest_record(
         "decisions_capped": ds.iter().filter(|d| d.distinct > h.cap).count(),
         "frontier_evaluations": ds.iter().map(|d| d.evals).sum::<u64>(),
         "distinct_positions": distinct.iter().map(|&x| u64::from(x)).sum::<u64>(),
+        "distinct_mean_by_position": mean_by_pos(&distinct_by_pos),
+        "evaluations_mean_by_position": mean_by_pos(&evals_by_pos),
         "distinct_per_decision": {
             "mean": (distinct.iter().map(|&x| f64::from(x)).sum::<f64>() / n * 10.0).round() / 10.0,
             "min": q(0.0), "p10": q(0.1), "median": q(0.5), "p90": q(0.9), "max": q(1.0),
@@ -1716,4 +1817,111 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
         .map_err(|e| format!("{out}: {e}"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use search::oracle_labels::{HarvestDecision, HarvestJob, position_schedule};
+
+    fn decision(position: u8, distinct: u32, evals: u64, rows: u32) -> HarvestDecision {
+        HarvestDecision {
+            id: 0,
+            trick: 2,
+            position,
+            stratum: 1,
+            cands: 3,
+            evals,
+            distinct,
+            rows,
+            search_nodes: 10,
+        }
+    }
+
+    /// The harvest sidecar names its driver: `exact`, or `net` with the network's SHA-256, file,
+    /// trick, head and widths (the network drove the search); and gives the mean positions
+    /// reached and evaluations per decision for each seat.
+    #[test]
+    fn harvest_record_names_the_driver() {
+        let h = HarvestJob {
+            trick: 3,
+            count: 40,
+            seed: 7,
+            threads: 4,
+            cap: 16,
+            tricks: vec![2],
+            schedule: position_schedule([1; 8]),
+        };
+        let ds = [
+            decision(1, 2000, 2500, 16),
+            decision(1, 1000, 1100, 16),
+            decision(2, 300, 310, 8),
+        ];
+        let net = nn::synthetic::random_net(5, &[16, 8], nn::outcome::vocab(3), 100);
+        let meta = BTreeMap::from([("head".to_string(), "outcome-v1".to_string())]);
+        let bytes = nn::oracle::write_net(&net, 3, &meta);
+        let o =
+            nn::Oracle::from_bytes(&bytes, Arc::new(nn::synthetic::SyntheticLeaf)).expect("loads");
+        let shares = "0.25,0.25,0.5";
+        let w = [1; 8];
+        let r = harvest_record(
+            &h,
+            shares,
+            &w,
+            &ds,
+            64,
+            Some((&o, "/runs/o3/int.safetensors")),
+        );
+        let d = &r["frontier_driver"];
+        assert_eq!(d["kind"], "net");
+        assert_eq!(d["drove_the_search"], true);
+        assert_eq!(d["net_sha256"], equity::sha256::sha256_hex(&bytes).as_str());
+        assert_eq!(
+            (
+                d["net_file"].as_str(),
+                d["net_trick"].as_u64(),
+                d["net_head"].as_str()
+            ),
+            (Some("int.safetensors"), Some(3), Some("outcome-v1"))
+        );
+        assert_eq!(d["net_widths"], serde_json::json!([16, 8, 24]));
+        assert!(
+            r["frontier_values"]
+                .as_str()
+                .is_some_and(|v| v.contains(&o.sha256) && v.contains("solved exactly")),
+            "{r}"
+        );
+        assert!(
+            r["what"]
+                .as_str()
+                .is_some_and(|v| v.contains("only the sampled"))
+        );
+        assert_eq!(
+            r["distinct_mean_by_position"],
+            serde_json::json!([1500.0, 300.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        );
+        assert_eq!(
+            r["evaluations_mean_by_position"],
+            serde_json::json!([1800.0, 310.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        );
+        assert_eq!(
+            r["decisions_by_position"],
+            serde_json::json!([2, 1, 0, 0, 0, 0, 0, 0])
+        );
+        assert_eq!(
+            r["rows_by_position"],
+            serde_json::json!([32, 8, 0, 0, 0, 0, 0, 0])
+        );
+        let e = harvest_record(&h, shares, &w, &ds, 64, None);
+        assert_eq!(e["frontier_driver"], serde_json::json!({ "kind": "exact" }));
+        assert!(
+            e["frontier_values"]
+                .as_str()
+                .is_some_and(|v| v.starts_with("exact"))
+        );
+        assert_eq!(
+            e["distinct_mean_by_position"],
+            r["distinct_mean_by_position"]
+        );
+    }
 }

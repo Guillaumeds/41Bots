@@ -692,6 +692,38 @@ class LauncherTest(unittest.TestCase):
         code, _ = self.run_launch(w, m)
         self.assertEqual((code, w.created_on), (0, [1]))
 
+    def test_hybrid_input_params_are_checked_before_renting(self):
+        # A hybrid rung's stored inputs (the harvest's network, a stored golden set) are fetched by
+        # the runner itself; a missing one, or a value that is no key, stops the launch before
+        # anything is rented.
+        net, dec, wor = "a1" * 32, "b2" * 32, "c3" * 32
+        params = {"threads": "all", "cut": 3, "labels_harvest": 10, "harvest_net": f"inputs/sha256/{net}",
+                  "golden_decisions_input": f"sha256:{dec}", "golden_worlds_input": f"inputs/sha256/{wor.upper()}"}
+        m = {"format": 2, "run_id": RUN, "run_seed": 1, "streams": [
+            {"name": "rung", "priority": 1, "kind": "hybrid_rung", "chunks": 1, "params": params}]}
+        self.assertEqual(launch.param_inputs(m), {"rung.harvest_net": net, "rung.golden_decisions_input": dec,
+                                                  "rung.golden_worlds_input": wor})
+        w = World([offer(1, 11, 1.0)], ["done:1"])
+        w.store["inputs/sha256/" + dec] = b"d"
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, m)
+        self.assertIn(f"rung.harvest_net (inputs/sha256/{net})", str(e.exception))
+        self.assertIn(f"rung.golden_worlds_input (inputs/sha256/{wor})", str(e.exception))
+        self.assertNotIn("golden_decisions_input", str(e.exception))
+        self.assertEqual(w.created_on, [])
+        params["harvest_net"] = "REPLACE-with-the-round-1-net"
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, m)
+        self.assertIn("params.harvest_net must be", str(e.exception))
+        params["harvest_net"] = f"inputs/sha256/{net}"
+        w.store["inputs/sha256/" + net] = b"n"
+        w.store["inputs/sha256/" + wor] = b"w"
+        code, _ = self.run_launch(w, m)
+        self.assertEqual((code, w.created_on), (0, [1]))
+        # Other kinds' params are not read.
+        other = {"format": 2, "streams": [{"name": "x", "kind": "search_measure", "params": {"harvest_net": "x"}}]}
+        self.assertEqual(launch.param_inputs(other), {})
+
     def test_bin_sha_mismatch_refused(self):
         w = World([offer(1, 11, 1.0)], ["done:1"])
         with self.assertRaises(SystemExit):

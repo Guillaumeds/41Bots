@@ -321,3 +321,6 @@ exactly: at trick 3 that is about 830 trick-3 positions per trick-2 decision (le
 thread, about 2.5 s per label: too dear for millions. The O_3 harvest should drive its search with
 the first-round network (or any fixed value) and solve only the sampled positions; at trick 4 the
 reached sets are nearly the same either way (lines above).
+**Built** (branch `m3-hybrid-t3`, `docs/m3-hybrid/rung2.md`): `search labels --harvest-net`, about
+10 thread-seconds per 1,000 trick-3 labels; the network-driven search reaches 99.94% of what the
+exact-driven one reaches at trick 3 too.

@@ -18,6 +18,13 @@
 //! `harvest_cap_per_decision` (16) and `harvest_positions` (the shares of decisions for the
 //! decider's positions 1–2, 3–4 and 5–8, default `"0.25,0.25,0.5"`, uniform over the eight
 //! positions); the shard joins the training set after the random-play and rules-v1 shards.
+//! `harvest_net` (none): a stored integer network (`int.safetensors` of an earlier run, the
+//! previous round's O_cut) whose values drive the harvest's search instead of exact ones (`search
+//! labels --harvest-net`: only the sampled positions are solved exactly, the way to harvest at
+//! trick 3), given by its key `inputs/sha256/<hex>` (or `sha256:<hex>`). `golden_decisions_input`
+//! and `golden_worlds_input` (none; both or neither): a stored golden set (a decisions file and its
+//! exact worlds file, by key) reused instead of generated (step 5); `verify_pct` must then be at
+//! least 1 (spec §4: reuse after a byte-identical recheck).
 //! Also: `mix_weight` (1.0), `start_hands` (20000, for the label roots and the golden
 //! decisions), `tt_mb` (64, the solver table per thread of the golden worlds
 //! and the check), `verify_pct` (1, the check's recomputed sample of stored exact worlds),
@@ -28,6 +35,12 @@
 //! `equity_input`.
 //!
 //! Steps (each a child process with its own log; the heartbeat names the step and its progress):
+//! 0. **Inputs** (only when the settings name stored inputs): `harvest_net` and the stored golden
+//!    set fetched from the remote store (`inputs/sha256/<hex>`, the path a format-2 manifest's
+//!    `inputs` take: `remote::fetch_input`) into `hybrid-work/inputs/`, each SHA-256 checked,
+//!    and a stored decisions file must hold `golden_count` decisions at `golden_trick` (a missing
+//!    key, other bytes or another set stop the chunk before anything is installed); recorded in
+//!    `rung.json`'s `inputs`.
 //! 1. **Equity table v0** (`spike::build_table_from`: a manifest input, else R2's copy under its
 //!    recorded hash, else built from the model in the repository; hash-checked).
 //! 2. **Python environment**: `uv sync --locked` of `python/nn` (the release bundle carries the
@@ -52,6 +65,11 @@
 //!    then `search worlds --method exact`):
 //!    `golden_count` decisions at trick `golden_trick` (seed `golden_seed`), `golden_worlds`
 //!    worlds each, valued exactly; `out/hybrid/decisions-t<G>.jsonl`, `exact-t<G>-n<W>.jsonl`.
+//!    Both files are then shared content-addressed to `inputs/sha256/<hex>` (as `upload_shards`;
+//!    a failure is a warning, the files being in the bundle too), and `rung.json`'s
+//!    `golden.reuse_params` gives the two settings that reuse them. With a stored golden set
+//!    (step 0) nothing is generated, and the check recomputes `verify_pct`% of the stored worlds
+//!    with this binary and stops on any byte difference.
 //! 6. **Training** (`python -m fortyone_nn.train`, which also quantises the network and measures
 //!    the integer network): `out/hybrid/net/` holds `float.safetensors`, `int.safetensors` and
 //!    `report.json` (history, errors, device facts). The heartbeat shows the epoch and batches.
@@ -76,9 +94,11 @@
 //! the integer network is what the check validates, and its SHA-256 is recorded
 //! (docs/M3-HYBRID-SPEC.md §6).
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
@@ -86,11 +106,12 @@ use serde_json::{Map, Value, json};
 use search::oracle_labels::{HARVEST_CAP, HARVEST_SHARES, parse_band_shares};
 
 use crate::bundle::sha256_file;
+use crate::remote::{Remote, fetch_input, input_hex, input_key, put_input};
 use crate::spike::build_table_from;
 use crate::{Ctx, sibling};
 
 /// The settings a `hybrid_rung` chunk takes; any other key is refused.
-pub(crate) const KEYS: [&str; 35] = [
+pub(crate) const KEYS: [&str; 38] = [
     "cut",
     "labels_random",
     "labels_random_seed",
@@ -100,12 +121,15 @@ pub(crate) const KEYS: [&str; 35] = [
     "labels_harvest_seed",
     "harvest_cap_per_decision",
     "harvest_positions",
+    "harvest_net",
     "val_count",
     "val_seed",
     "golden_trick",
     "golden_count",
     "golden_seed",
     "golden_worlds",
+    "golden_decisions_input",
+    "golden_worlds_input",
     "start_hands",
     "tt_mb",
     "verify_pct",
@@ -202,6 +226,13 @@ pub(crate) struct Params {
     pub train_threads: Option<u64>,
     pub compare_cpu: bool,
     pub upload_shards: bool,
+    /// `harvest_net`: the SHA-256 of the integer network (`int.safetensors` of an earlier run,
+    /// stored at `inputs/sha256/<hex>`) whose values drive the harvest's search; `None`: exact
+    /// values at the frontier.
+    pub harvest_net: Option<String>,
+    /// `golden_decisions_input` and `golden_worlds_input`: the SHA-256 of a stored golden set's
+    /// decisions and exact worlds files, reused instead of generated; `None`: generated.
+    pub golden_inputs: Option<(String, String)>,
 }
 
 impl Params {
@@ -219,7 +250,10 @@ impl Params {
             "train": self.train.iter().map(|s| (s.name.to_string(), set(s))).collect::<Map<_, _>>(),
             "val": set(&self.val),
             "golden": { "trick": self.golden_trick, "count": self.golden_count,
-                        "seed": self.golden_seed, "worlds": self.golden_worlds },
+                        "seed": self.golden_seed, "worlds": self.golden_worlds,
+                        "decisions_input": self.golden_inputs.as_ref().map(|(d, _)| input_key(d)),
+                        "worlds_input": self.golden_inputs.as_ref().map(|(_, w)| input_key(w)) },
+            "harvest_net": self.harvest_net.as_deref().map(input_key),
             "start_hands": self.start_hands, "tt_mb": self.tt_mb, "verify_pct": self.verify_pct,
             "net": { "widths": self.widths, "head": self.head, "epochs": self.epochs,
                      "batch": self.batch, "lr": self.lr, "patience": self.patience,
@@ -327,6 +361,43 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
     if !(1..=u64::from(u32::MAX)).contains(&cap) {
         return Err("hybrid_rung: harvest_cap_per_decision must be at least 1".into());
     }
+    // Stored inputs, by content: `inputs/sha256/<hex>` (or `sha256:<hex>`, as a manifest's
+    // `inputs` and `shards.json` write them).
+    let input = |k: &str| -> Result<Option<String>, String> {
+        match o.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(v)) => input_hex(v).map(Some).ok_or_else(|| {
+                format!(
+                    "hybrid_rung: {k} {v:?} must be a stored input's key, \
+                     \"inputs/sha256/<64 hex digits>\" (or \"sha256:<64 hex digits>\")"
+                )
+            }),
+            Some(_) => Err(format!(
+                "hybrid_rung: {k} must be a string, \"inputs/sha256/<64 hex digits>\""
+            )),
+        }
+    };
+    let harvest_net = input("harvest_net")?;
+    if harvest_net.is_some() && harvest.count == 0 {
+        return Err(
+            "hybrid_rung: harvest_net drives the harvest's search: it needs labels_harvest above 0"
+                .into(),
+        );
+    }
+    let golden_inputs = match (
+        input("golden_decisions_input")?,
+        input("golden_worlds_input")?,
+    ) {
+        (Some(d), Some(w)) => Some((d, w)),
+        (None, None) => None,
+        _ => {
+            return Err(
+                "hybrid_rung: golden_decisions_input and golden_worlds_input go together (a \
+                 stored golden set is its decisions and their exact worlds)"
+                    .into(),
+            );
+        }
+    };
     let shares = s("harvest_positions", HARVEST_SHARES)?;
     parse_band_shares(&shares)
         .map_err(|e| format!("hybrid_rung: harvest_positions: {e}"))
@@ -429,6 +500,13 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
     if verify_pct > 100.0 {
         return Err("hybrid_rung: verify_pct is a percentage (0 to 100)".into());
     }
+    if golden_inputs.is_some() && verify_pct < 1.0 {
+        return Err(
+            "hybrid_rung: a stored golden set is reused only after at least 1% of its worlds are \
+             recomputed and found byte-identical (spec §4): verify_pct must be at least 1"
+                .into(),
+        );
+    }
     Ok(Params {
         cut,
         train,
@@ -453,6 +531,8 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         train_threads,
         compare_cpu: b("compare_cpu")?,
         upload_shards: b("upload_shards")?,
+        harvest_net,
+        golden_inputs,
     })
 }
 
@@ -463,6 +543,9 @@ pub(crate) struct Tools {
     /// `python/nn`: `pyproject.toml`, `uv.lock`, `fortyone_nn/`.
     pub python_dir: PathBuf,
     pub nvidia_smi: PathBuf,
+    /// The remote store (R2 in production, `RUNNER_REMOTE_DIR` on a laptop, a directory in the
+    /// tests): stored inputs come from it, the shards and the golden set go to it.
+    pub remote: Option<Arc<dyn Remote>>,
 }
 
 impl Tools {
@@ -475,6 +558,7 @@ impl Tools {
             uv: sibling("uv"),
             python_dir: python_dir()?,
             nvidia_smi: PathBuf::from("nvidia-smi"),
+            remote: crate::remote::from_env().map(Arc::from),
         })
     }
 }
@@ -529,6 +613,26 @@ fn gpus_listed(nvidia_smi: &Path) -> Option<Vec<String>> {
         .map(str::to_string)
         .collect();
     (!lines.is_empty()).then_some(lines)
+}
+
+/// The decisions at trick `trick` in a decisions file (`search decisions`' JSON lines).
+fn decisions_at(path: &Path, trick: u64) -> Result<u64, String> {
+    let text =
+        fs::read_to_string(path).map_err(|e| format!("hybrid_rung: {}: {e}", path.display()))?;
+    let mut n = 0;
+    for (i, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let v: Value = serde_json::from_str(line).map_err(|e| {
+            format!(
+                "hybrid_rung: golden_decisions_input, line {}: not a decision ({e})",
+                i + 1
+            )
+        })?;
+        n += u64::from(v["trick"].as_u64() == Some(trick));
+    }
+    Ok(n)
 }
 
 /// The last `labels: <done> of <total> rows` line `search labels` wrote to its log.
@@ -605,10 +709,12 @@ pub(crate) fn chunk_with(
         t0: Instant::now(),
         python: PathBuf::new(),
         device: String::new(),
+        inputs: BTreeMap::new(),
     };
     r.rec.insert("params".into(), params.to_json());
     r.rec.insert("table".into(), table_rec);
     r.rec.insert("threads".into(), json!(r.ctx.threads));
+    r.fetch_inputs()?;
     r.python_env()?;
     r.device_check()?;
     let shards = r.labels()?;
@@ -670,6 +776,8 @@ struct Rung<'a> {
     python: PathBuf,
     /// Where the network trains: `cuda` or `cpu` (empty before the GPU check).
     device: String,
+    /// Stored inputs fetched and checked (`harvest_net`, `golden_decisions`, `golden_worlds`).
+    inputs: BTreeMap<&'static str, PathBuf>,
 }
 
 impl Rung<'_> {
@@ -721,6 +829,68 @@ impl Rung<'_> {
             .env("PYTHONDONTWRITEBYTECODE", "1")
             .args(["-m", module]);
         c
+    }
+
+    /// Step 0 (only when the settings name stored inputs): the harvest's network and a stored
+    /// golden set, each fetched from `inputs/sha256/<hex>` into the work directory
+    /// (`remote::fetch_input`, the path a format-2 run's manifest inputs take) and its SHA-256
+    /// checked; first, so a wrong key stops the chunk before anything is installed.
+    fn fetch_inputs(&mut self) -> Result<(), String> {
+        let mut want: Vec<(&'static str, String)> = Vec::new();
+        if let Some(h) = &self.p.harvest_net {
+            want.push(("harvest_net", h.clone()));
+        }
+        if let Some((d, w)) = &self.p.golden_inputs {
+            want.push(("golden_decisions", d.clone()));
+            want.push(("golden_worlds", w.clone()));
+        }
+        if want.is_empty() {
+            return Ok(());
+        }
+        let t = Instant::now();
+        let progress = self.progress("inputs", json!({ "inputs": want.len() }));
+        self.ctx.set_phase("chunk", progress);
+        let remote = self.tools.remote.clone().ok_or(
+            "hybrid_rung: stored inputs (harvest_net, golden_decisions_input, \
+             golden_worlds_input) come from the remote store (R2, or RUNNER_REMOTE_DIR), and \
+             there is none",
+        )?;
+        let dir = self.work.join("inputs");
+        let mut recs = Map::new();
+        for (name, hex) in want {
+            let t1 = Instant::now();
+            let local = dir.join(&hex);
+            let (r, h, l) = (Arc::clone(&remote), hex.clone(), local.clone());
+            let downloaded = self
+                .ctx
+                .blocking(move || fetch_input(&*r, &h, &l))
+                .map_err(|e| format!("hybrid_rung: {name}: {e}"))?;
+            let bytes = fs::metadata(&local).map_or(0, |m| m.len());
+            println!(
+                "runner: hybrid_rung: {name}: {} ({bytes} bytes, SHA-256 checked)",
+                input_key(&hex)
+            );
+            recs.insert(
+                name.into(),
+                json!({ "key": input_key(&hex), "sha256": hex, "bytes": bytes,
+                        "downloaded": downloaded, "seconds": secs(t1) }),
+            );
+            self.inputs.insert(name, local);
+        }
+        // A stored golden set must be the one the settings describe; checked now, before the
+        // labels and the training.
+        if let Some(d) = self.inputs.get("golden_decisions") {
+            let (g, want) = (self.p.golden_trick, self.p.golden_count);
+            let n = decisions_at(d, g)?;
+            if n != want {
+                return Err(format!(
+                    "hybrid_rung: the stored golden decisions hold {n} decisions at trick {g}, \
+                     but golden_trick {g} and golden_count {want} ask for {want}"
+                ));
+            }
+        }
+        self.rec.insert("inputs".into(), Value::Object(recs));
+        self.done("inputs", t)
     }
 
     /// Step 2: the Python environment.
@@ -882,6 +1052,14 @@ impl Rung<'_> {
                 .args(["--threads", &self.threads().to_string()])
                 .args(["--start-hands", &self.p.start_hands.to_string()])
                 .args(&s.args);
+            // The network that drives the harvest's search (`harvest_net`), fetched and checked.
+            let net = self
+                .inputs
+                .get("harvest_net")
+                .filter(|_| s.source == "harvest");
+            if let Some(net) = net {
+                c.arg("--harvest-net").arg(net);
+            }
             let base = self.progress(&step, json!({ "rows_total": s.count }));
             self.ctx.set_phase("chunk", base.clone());
             let log_path = self.ctx.logs.join(&log);
@@ -899,12 +1077,15 @@ impl Rung<'_> {
             let side_dst = self.out.join("labels").join(format!("{file}.json"));
             write_json(&side_dst, &side)?;
             let bytes = fs::metadata(&path).map_or(0, |m| m.len());
-            recs.push(
-                json!({ "name": s.name, "source": s.source, "count": s.count,
-                              "seed": s.seed, "file": file, "bytes": bytes,
-                              "shard_sha256": side["shard_sha256"],
-                              "seconds": secs(t) }),
-            );
+            let mut rec = json!({ "name": s.name, "source": s.source, "count": s.count,
+                                  "seed": s.seed, "file": file, "bytes": bytes,
+                                  "shard_sha256": side["shard_sha256"],
+                                  "seconds": secs(t) });
+            if net.is_some() {
+                rec["harvest_net_sha256"] = json!(self.p.harvest_net);
+                rec["harvest_driver"] = side["harvest"]["frontier_driver"].clone();
+            }
+            recs.push(rec);
             self.rec.insert("labels".into(), json!(recs));
             self.done(&step, t)?;
             paths.push(path);
@@ -917,9 +1098,7 @@ impl Rung<'_> {
         let t = Instant::now();
         let progress = self.progress("upload shards", json!({ "shards": shards.len() }));
         self.ctx.set_phase("chunk", progress);
-        let Some(remote) =
-            crate::remote::from_env().map(std::sync::Arc::<dyn crate::remote::Remote>::from)
-        else {
+        let Some(remote) = self.tools.remote.clone() else {
             self.warn(
                 "upload_shards: no remote store (R2, or RUNNER_REMOTE_DIR): the label shards \
                  were not uploaded"
@@ -936,44 +1115,18 @@ impl Rung<'_> {
                 .unwrap_or_default()
                 .to_string();
             let file = labels[k]["file"].as_str().unwrap_or_default().to_string();
-            let (p2, r) = (path.clone(), std::sync::Arc::clone(&remote));
-            let res = self
+            let (p2, r) = (path.clone(), Arc::clone(&remote));
+            let (sha, bytes, status) = self
                 .ctx
-                .blocking(move || -> Result<(String, u64, &'static str), String> {
-                    let (sha, bytes) = sha256_file(&p2)?;
-                    if sha != want {
-                        return Err(format!(
-                            "{}: SHA-256 {sha}, but its sidecar says {want}",
-                            p2.display()
-                        ));
-                    }
-                    let key = format!("inputs/sha256/{sha}");
-                    let size = |r: &dyn crate::remote::Remote| -> Result<Option<u64>, String> {
-                        Ok(r.list_sized("inputs/sha256/")?
-                            .into_iter()
-                            .find(|(k, _)| *k == key)
-                            .map(|(_, n)| n))
-                    };
-                    if size(&*r)? == Some(bytes) {
-                        return Ok((sha, bytes, "already there"));
-                    }
-                    crate::remote::retry(3, || r.put(&p2, &key, true))?;
-                    match size(&*r)? {
-                        Some(n) if n == bytes => Ok((sha, bytes, "uploaded")),
-                        other => Err(format!(
-                            "{key}: {other:?} bytes after the upload, want {bytes}"
-                        )),
-                    }
-                });
-            let (sha, bytes, status) =
-                res.map_err(|e| format!("hybrid_rung: upload_shards: {e}"))?;
+                .blocking(move || put_input(&*r, &p2, Some(&want)))
+                .map_err(|e| format!("hybrid_rung: upload_shards: {e}"))?;
             println!("runner: hybrid_rung: {file}: inputs/sha256/{sha} ({status})");
             inputs.insert(
                 file.trim_end_matches(".npy").to_string(),
                 json!(format!("sha256:{sha}")),
             );
             list.push(json!({ "file": file, "sha256": sha, "bytes": bytes,
-                              "key": format!("inputs/sha256/{sha}"), "status": status }));
+                              "key": input_key(&sha), "status": status }));
         }
         let doc = json!({ "shards": list, "manifest_inputs": inputs });
         write_json(&self.out.join("shards.json"), &doc)?;
@@ -981,8 +1134,15 @@ impl Rung<'_> {
         self.done("upload shards", t)
     }
 
-    /// Step 5: the golden set. Returns (decisions file, exact worlds file).
+    /// Step 5: the golden set, generated (then shared: [`Rung::share_golden`]) or stored
+    /// ([`Rung::golden_stored`]). Returns (decisions file, exact worlds file).
     fn golden(&mut self) -> Result<(PathBuf, PathBuf), String> {
+        if let (Some(d), Some(w)) = (
+            self.inputs.get("golden_decisions").cloned(),
+            self.inputs.get("golden_worlds").cloned(),
+        ) {
+            return self.golden_stored(d, w);
+        }
         let (g, w, seed) = (
             self.p.golden_trick,
             self.p.golden_worlds,
@@ -1046,7 +1206,98 @@ impl Rung<'_> {
                     "seconds": secs(t) }),
         );
         self.done("golden worlds", t)?;
+        self.share_golden(&decisions, &worlds)?;
         Ok((decisions, worlds))
+    }
+
+    /// Step 5 with a stored golden set (`golden_decisions_input` and `golden_worlds_input`,
+    /// fetched and checked at step 0, where its decisions file was found to hold `golden_count`
+    /// decisions at `golden_trick`): nothing is generated. The check (step 7) then recomputes
+    /// `verify_pct` (at least 1) percent of the stored worlds with this binary and stops on any
+    /// byte difference (docs/M3-HYBRID-SPEC.md §4), and refuses a decision whose stored record
+    /// does not hold worlds `0..golden_worlds` or whose candidates differ.
+    fn golden_stored(
+        &mut self,
+        decisions: PathBuf,
+        worlds: PathBuf,
+    ) -> Result<(PathBuf, PathBuf), String> {
+        let t = Instant::now();
+        let progress = self.progress("golden set (stored)", json!({}));
+        self.ctx.set_phase("chunk", progress);
+        let g = self.p.golden_trick;
+        let (dh, wh) = self
+            .p
+            .golden_inputs
+            .clone()
+            .ok_or("hybrid_rung: no stored golden set was asked for")?;
+        self.rec.insert(
+            "golden".into(),
+            json!({ "trick": g, "count": self.p.golden_count, "seed": self.p.golden_seed,
+                    "worlds": self.p.golden_worlds, "stored": true,
+                    "decisions_key": input_key(&dh), "decisions_sha256": dh,
+                    "worlds_key": input_key(&wh), "worlds_sha256": wh,
+                    "verify_pct": self.p.verify_pct,
+                    "note": "a stored golden set, reused: the hybrid check recomputes verify_pct \
+                             percent of its worlds with this binary and stops on any byte \
+                             difference (docs/M3-HYBRID-SPEC.md §4)",
+                    "seconds": secs(t) }),
+        );
+        self.done("golden set (stored)", t)?;
+        Ok((decisions, worlds))
+    }
+
+    /// Step 5b, after generating the golden set: its decisions and exact worlds files go to
+    /// `inputs/sha256/<hex>` (content-addressed, as the label shards), so a later run can reuse
+    /// them (`golden_decisions_input`, `golden_worlds_input`: `rung.json`'s
+    /// `golden.reuse_params`). A failure is only a warning: the files are in this run's bundle
+    /// too.
+    fn share_golden(&mut self, decisions: &Path, worlds: &Path) -> Result<(), String> {
+        let t = Instant::now();
+        let progress = self.progress("share golden set", json!({}));
+        self.ctx.set_phase("chunk", progress);
+        let Some(remote) = self.tools.remote.clone() else {
+            self.warn(
+                "the golden set was not shared for reuse: no remote store (R2, or \
+                 RUNNER_REMOTE_DIR); it is in this run's bundle"
+                    .into(),
+            );
+            return self.done("share golden set", t);
+        };
+        let mut reuse = Map::new();
+        for (name, path, param) in [
+            ("decisions", decisions, "golden_decisions_input"),
+            ("worlds", worlds, "golden_worlds_input"),
+        ] {
+            let want = self.rec["golden"][format!("{name}_sha256").as_str()]
+                .as_str()
+                .map(str::to_string);
+            let (p2, r) = (path.to_path_buf(), Arc::clone(&remote));
+            match self
+                .ctx
+                .blocking(move || put_input(&*r, &p2, want.as_deref()))
+            {
+                Ok((sha, bytes, status)) => {
+                    println!(
+                        "runner: hybrid_rung: golden {name}: {} ({bytes} bytes, {status})",
+                        input_key(&sha)
+                    );
+                    if let Some(g) = self.rec.get_mut("golden") {
+                        g[format!("{name}_key").as_str()] = json!(input_key(&sha));
+                    }
+                    reuse.insert(param.into(), json!(input_key(&sha)));
+                }
+                Err(e) => self.warn(format!(
+                    "the golden {name} were not shared for reuse: {e}; they are in this run's \
+                     bundle"
+                )),
+            }
+        }
+        if reuse.len() == 2
+            && let Some(g) = self.rec.get_mut("golden")
+        {
+            g["reuse_params"] = Value::Object(reuse);
+        }
+        self.done("share golden set", t)
     }
 
     /// Step 6: one training run on `device` into `dir`, recorded under `key`.
@@ -1263,6 +1514,12 @@ mod tests {
         assert_eq!((p.lr, p.max_minutes, p.mix_weight), (0.001, 200.0, 1.0));
         assert_eq!(p.device, Device::Auto);
         assert!(!p.compare_cpu && !p.upload_shards);
+        assert_eq!(
+            (p.harvest_net.as_ref(), p.golden_inputs.as_ref()),
+            (None, None)
+        );
+        assert_eq!(p.to_json()["harvest_net"], Value::Null);
+        assert_eq!(p.to_json()["golden"]["worlds_input"], Value::Null);
         assert_eq!(parse(&Value::Null).expect("null"), p);
         // The scheduler's keys pass.
         parse(
@@ -1322,6 +1579,22 @@ mod tests {
         assert_eq!(j["train"]["harvest"]["count"], 4_000_000);
         assert_eq!(j["train"]["harvest"]["args"][3], "0.4,0.4,0.2");
         assert!(j["train"]["random"].get("args").is_none());
+        // Stored inputs: the harvest's network and a golden set, as keys or manifest values.
+        let (n, d, w) = ("a1".repeat(32), "b2".repeat(32), "C3".repeat(32));
+        let p = parse(&json!({
+            "cut": 3, "labels_harvest": 1000, "harvest_net": format!("inputs/sha256/{n}"),
+            "golden_decisions_input": format!("sha256:{d}"),
+            "golden_worlds_input": format!("inputs/sha256/{w}"), "verify_pct": 2,
+        }))
+        .expect("stored inputs");
+        let w = w.to_lowercase();
+        assert_eq!(p.harvest_net.as_deref(), Some(n.as_str()));
+        assert_eq!(p.golden_inputs, Some((d.clone(), w.clone())));
+        assert_eq!(p.golden_trick, 2);
+        let j = p.to_json();
+        assert_eq!(j["harvest_net"], format!("inputs/sha256/{n}"));
+        assert_eq!(j["golden"]["decisions_input"], format!("inputs/sha256/{d}"));
+        assert_eq!(j["golden"]["worlds_input"], format!("inputs/sha256/{w}"));
         // Defaults of the harvest's settings; a harvest alone is a training set.
         let p = parse(&json!({ "labels_random": 0, "labels_rules": 0, "labels_harvest": 10 }))
             .expect("harvest only");
@@ -1415,6 +1688,40 @@ mod tests {
         );
         bad(json!({ "verify_pct": 150 }), "verify_pct");
         bad(json!([1, 2]), "must be an object");
+        let key = format!("inputs/sha256/{}", "ab".repeat(32));
+        bad(
+            json!({ "harvest_net": key }),
+            "harvest_net drives the harvest's search: it needs labels_harvest above 0",
+        );
+        bad(
+            json!({ "labels_harvest": 5, "harvest_net": "o3/int.safetensors" }),
+            "harvest_net \"o3/int.safetensors\" must be a stored input's key",
+        );
+        bad(
+            json!({ "labels_harvest": 5,
+                    "harvest_net": format!("inputs/sha256/{}", "ab".repeat(31)) }),
+            "must be a stored input's key",
+        );
+        bad(
+            json!({ "labels_harvest": 5, "harvest_net": 7 }),
+            "harvest_net must be a string",
+        );
+        bad(
+            json!({ "golden_decisions_input": key }),
+            "golden_decisions_input and golden_worlds_input go together",
+        );
+        bad(
+            json!({ "golden_worlds_input": key }),
+            "golden_decisions_input and golden_worlds_input go together",
+        );
+        bad(
+            json!({ "golden_decisions_input": key, "golden_worlds_input": key, "verify_pct": 0.5 }),
+            "verify_pct must be at least 1",
+        );
+        bad(
+            json!({ "golden_decisions_input": key, "golden_worlds_input": "worlds.jsonl" }),
+            "golden_worlds_input \"worlds.jsonl\" must be a stored input's key",
+        );
     }
 
     /// The committed manifests (docs/vast/m3-hybrid-*.manifest.json) are runnable: the runner
@@ -1473,6 +1780,52 @@ mod tests {
                 );
             }
         }
+        // The rung-2 (O_3) round-2 proposal: its three stored inputs are placeholders until
+        // round 1 has run and the golden files are uploaded, so it is refused as it is; filled
+        // in, it is a runnable trick-3 rung reusing the stored trick-2 golden set.
+        let path = dir.join("m3-hybrid-t3-round2.manifest.json");
+        let text = fs::read_to_string(&path).expect("read");
+        let v: Value = serde_json::from_str(&text).expect("json");
+        let e = crate::sched::parse_v2(&v).expect_err("placeholders");
+        assert!(
+            e.contains("harvest_net \"inputs/sha256/REPLACE_WITH"),
+            "{e}"
+        );
+        let filled = [
+            ("REPLACE_WITH_THE_ROUND_1_O3_INT_SAFETENSORS_SHA256", "a"),
+            ("REPLACE_WITH_THE_TRICK_2_GOLDEN_DECISIONS_SHA256", "b"),
+            ("REPLACE_WITH_THE_TRICK_2_GOLDEN_WORLDS_SHA256", "c"),
+        ]
+        .iter()
+        .fold(text.clone(), |t, (from, x)| {
+            assert_eq!(t.matches(from).count(), 1, "{from}");
+            t.replace(from, &x.repeat(64))
+        });
+        assert!(!filled.contains("REPLACE"));
+        let v: Value = serde_json::from_str(&filled).expect("json");
+        let m = crate::sched::parse_v2(&v).expect("filled in");
+        let p = parse(&m.streams[0].params).expect("settings");
+        assert_eq!(p.cut, 3);
+        assert_eq!(
+            (
+                p.golden_trick,
+                p.golden_count,
+                p.golden_worlds,
+                p.golden_seed
+            ),
+            (2, 400, 320, 1)
+        );
+        assert_eq!(p.train.iter().map(|s| s.count).sum::<u64>(), 4_000_000);
+        assert_eq!(p.harvest_net, Some("a".repeat(64)));
+        assert_eq!(p.golden_inputs, Some(("b".repeat(64), "c".repeat(64))));
+        assert_eq!(p.verify_pct, 1.0);
+        assert_eq!(
+            (p.widths_arg().as_str(), p.head.as_str()),
+            ("1024,512,128", "outcome")
+        );
+        assert_eq!(v["machine"]["gpus"], 1);
+        assert!(v.get("bin_sha").is_none());
+
         // A typo in a hybrid stream stops the manifest at once.
         let bad = json!({ "format": 2, "run_id": "x", "run_seed": 1, "streams": [
             { "name": "rung", "priority": 1, "kind": "hybrid_rung", "chunks": 1,
@@ -1500,16 +1853,39 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
-    /// Step sequencing with fake programs: a fake `search` (writes each output and a sidecar), a
-    /// fake `uv` (creates the environment with a fake `python`) and a fake `python` (the device
-    /// check and the trainer). Without a GPU (`nvidia-smi` missing) the chunk installs the `cpu`
-    /// group, warns, and trains on the CPU with every thread; with a fake GPU it installs `cu126`
-    /// and trains on it with at most 8 threads, then (compare_cpu) once more on the CPU.
+    /// A fake program (a shell script) `name` in `bin`.
     #[cfg(unix)]
-    #[test]
-    fn steps_run_in_order_with_fake_programs() {
+    fn fake_script(bin: &Path, name: &str, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
-        let base = std::env::temp_dir().join(format!("hybrid-fake-{}", std::process::id()));
+        let p = bin.join(name);
+        fs::write(&p, format!("#!/bin/sh\n{body}")).expect("write");
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).expect("chmod");
+        p
+    }
+
+    /// The fake programs of the step tests, in a fresh directory `hybrid-<tag>-<pid>`.
+    #[cfg(unix)]
+    struct Fakes {
+        base: PathBuf,
+        bin: PathBuf,
+        /// Every call of a fake program, one line each.
+        calls: PathBuf,
+        search: PathBuf,
+        uv: PathBuf,
+        py: PathBuf,
+        fake_py: PathBuf,
+        gpu: PathBuf,
+        table: PathBuf,
+        /// The SHA-256 the fake label sidecars record.
+        sha: String,
+    }
+
+    /// A fake `search` (writes each output and a sidecar), a fake `uv` (creates the environment
+    /// with a fake `python`), a fake `python` (the device check and the trainer), a fake
+    /// `nvidia-smi` and a fake equity table.
+    #[cfg(unix)]
+    fn fakes(tag: &str) -> Fakes {
+        let base = std::env::temp_dir().join(format!("hybrid-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let bin = base.join("bin");
         let py = base.join("python-nn");
@@ -1517,12 +1893,7 @@ mod tests {
         fs::create_dir_all(py.join("fortyone_nn")).expect("mkdir");
         fs::write(py.join("pyproject.toml"), "[project]\n").expect("write");
         fs::write(py.join("uv.lock"), "version = 1\n").expect("write");
-        let script = |name: &str, body: &str| {
-            let p = bin.join(name);
-            fs::write(&p, format!("#!/bin/sh\n{body}")).expect("write");
-            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).expect("chmod");
-            p
-        };
+        let script = |name: &str, body: &str| fake_script(&bin, name, body);
         let calls = base.join("calls.log");
         let sha = crate::bundle::sha256_hex(b"npy\n");
         // `arg NAME "$@"` prints the value after NAME.
@@ -1537,7 +1908,7 @@ case $1 in
   labels) echo "labels: 3 of 7 rows, 1 s" >&2; echo npy > "$out"
           echo '{{"shard_sha256": "{sha}", "count": 7}}' > "$out.json";;
   decisions) echo '{{"id": 0}}' > "$out";;
-  worlds) echo '{{"id": 0}}' > "$out"
+  worlds) echo '{{"id": 0, "method": "exact"}}' > "$out"
           echo '{{"worlds_done": 1, "worlds_total": 1}}' > "$(arg --progress "$@")";;
   hybrid-check) echo '{{"pass": false, "groups": [{{"group": "all", "summary": {{"mean_loss": 0.0002}}}}], "net": {{"sha256": "abc"}}, "values": {{"hybrid": "2+O4:abc"}}}}' > "$(arg --json "$@")"
           echo "standard: FAIL";;
@@ -1582,14 +1953,51 @@ esac
             "nvidia-smi",
             "echo 'NVIDIA RTX A2000, 6138 MiB, 570.86, 8.6'\n",
         );
+        let table = base.join("equity-v0.npy");
+        fs::write(&table, "table").expect("write");
+        Fakes {
+            base,
+            bin,
+            calls,
+            search,
+            uv,
+            py,
+            fake_py,
+            gpu,
+            table,
+            sha,
+        }
+    }
+
+    /// Step sequencing with fake programs ([`fakes`]). Without a GPU (`nvidia-smi` missing) the
+    /// chunk installs the `cpu` group, warns, and trains on the CPU with every thread; with a fake
+    /// GPU it installs `cu126` and trains on it with at most 8 threads, then (compare_cpu) once
+    /// more on the CPU. The generated golden set is shared to the (fake) remote store.
+    #[cfg(unix)]
+    #[test]
+    fn steps_run_in_order_with_fake_programs() {
+        let Fakes {
+            base,
+            bin,
+            calls,
+            search,
+            uv,
+            py,
+            fake_py,
+            gpu,
+            table,
+            sha,
+        } = fakes("fake");
+        let script = |name: &str, body: &str| fake_script(&bin, name, body);
+        let remote: Arc<dyn Remote> = Arc::new(crate::remote::DirRemote {
+            root: base.join("remote"),
+        });
         let params = parse(&json!({
             "labels_random": 7, "labels_rules": 5, "val_count": 3, "golden_count": 2,
             "golden_worlds": 4, "widths": "16,8", "epochs": 2, "compare_cpu": true,
             "labels_harvest": 9, "harvest_positions": "0.4,0.4,0.2",
         }))
         .expect("params");
-        let table = base.join("equity-v0.npy");
-        fs::write(&table, "table").expect("write");
 
         // 1. No GPU.
         let root = base.join("nogpu");
@@ -1598,6 +2006,7 @@ esac
             uv: uv.clone(),
             python_dir: py.clone(),
             nvidia_smi: base.join("no-such-nvidia-smi"),
+            remote: Some(Arc::clone(&remote)),
         };
         let mut ctx = Ctx::local("hybrid-test", &root, 4);
         let r = chunk_with(
@@ -1742,10 +2151,30 @@ esac
                 "labels val (4 of 4)",
                 "golden decisions",
                 "golden worlds",
+                "share golden set",
                 "train",
                 "hybrid check"
             ]
         );
+        // The generated golden set is in the remote store under its SHA-256, for reuse.
+        let g = &rung["golden"];
+        for (name, file) in [
+            ("decisions", "decisions-t3.jsonl"),
+            ("worlds", "exact-t3-n4.jsonl"),
+        ] {
+            let hex = crate::bundle::sha256_file(&out.join(file)).expect("sha").0;
+            assert_eq!(g[format!("{name}_sha256").as_str()], hex.as_str());
+            let key = format!("inputs/sha256/{hex}");
+            assert_eq!(g[format!("{name}_key").as_str()], key.as_str());
+            assert_eq!(
+                g["reuse_params"][format!("golden_{name}_input").as_str()],
+                key.as_str()
+            );
+            assert_eq!(
+                remote.sha256(&key).expect("listed"),
+                Some((hex, fs::metadata(out.join(file)).expect("file").len()))
+            );
+        }
         // The last heartbeat says done, with the warning.
         let hb = read_json(&root.join("heartbeat.json")).expect("heartbeat");
         assert_eq!(hb["progress"]["step"], "done");
@@ -1825,5 +2254,200 @@ esac
         let e = chunk_with(&mut ctx, &p, &tools, &table, json!({})).expect_err("no GPU");
         assert!(e.contains("\"cuda\" was asked for"), "{e}");
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Stored inputs in a dry run with fake programs ([`fakes`]) and a fake remote store: the
+    /// harvest's network and a stored golden set are fetched from `inputs/sha256/<hex>` first,
+    /// their SHA-256 checked, the network passed to the harvest's labels only, nothing of the
+    /// golden set generated, and the stored files given to the check with its 1% recheck. A
+    /// missing key, an object whose bytes are not its key's, a decision count that is not
+    /// `golden_count` and no remote store each stop the chunk before anything is installed.
+    #[cfg(unix)]
+    #[test]
+    fn stored_inputs_are_fetched_checked_and_used() {
+        let f = fakes("stored");
+        let remote: Arc<dyn Remote> = Arc::new(crate::remote::DirRemote {
+            root: f.base.join("remote"),
+        });
+        let store = |name: &str, bytes: &[u8]| {
+            let p = f.base.join(name);
+            fs::write(&p, bytes).expect("write");
+            put_input(&*remote, &p, None).expect("stored").0
+        };
+        let net = store("int.safetensors", b"an integer O_3");
+        let dec = store(
+            "decisions-t2.jsonl",
+            b"{\"id\":0,\"trick\":2}\n{\"id\":1,\"trick\":2}\n",
+        );
+        let wor = store(
+            "exact-t2-n320.jsonl",
+            b"{\"id\":0,\"method\":\"exact\"}\n{\"id\":1,\"method\":\"exact\"}\n",
+        );
+        let settings = |net: &str, golden_count: u64| {
+            json!({
+                "cut": 3, "labels_random": 7, "labels_rules": 0, "labels_harvest": 9,
+                "harvest_net": format!("inputs/sha256/{net}"), "val_count": 3,
+                "golden_count": golden_count, "golden_worlds": 4,
+                "golden_decisions_input": format!("sha256:{dec}"),
+                "golden_worlds_input": format!("inputs/sha256/{wor}"),
+                "widths": "16,8", "epochs": 1,
+            })
+        };
+        let tools = Tools {
+            search: f.search.clone(),
+            uv: f.uv.clone(),
+            python_dir: f.py.clone(),
+            nvidia_smi: f.base.join("no-such-nvidia-smi"),
+            remote: Some(Arc::clone(&remote)),
+        };
+        let run = |root: &str, params: &Params, tools: &Tools| {
+            fs::write(&f.calls, "").expect("truncate");
+            let mut ctx = Ctx::local("hybrid-test", &f.base.join(root), 4);
+            chunk_with(&mut ctx, params, tools, &f.table, json!({}))
+        };
+
+        let params = parse(&settings(&net, 2)).expect("params");
+        let r = run("ok", &params, &tools).expect("the chunk runs");
+        assert_eq!(r["verdict"], "FAIL");
+        let log = fs::read_to_string(&f.calls).expect("calls");
+        assert!(
+            !log.contains("search decisions") && !log.contains("search worlds"),
+            "nothing of the golden set is generated:\n{log}"
+        );
+        let root = f.base.join("ok");
+        let inputs = std::path::absolute(root.join("hybrid-work").join("inputs")).expect("abs");
+        let line = |p: &str| {
+            log.lines()
+                .find(|l| l.starts_with(p))
+                .unwrap_or_else(|| panic!("no call {p:?} in\n{log}"))
+        };
+        let harvest = line("search labels --trick 3 --count 9 --seed 103 --source harvest");
+        assert!(
+            harvest.ends_with(&format!(
+                "--harvest-cap 16 --harvest-positions 0.25,0.25,0.5 --harvest-net {}",
+                inputs.join(&net).display()
+            )),
+            "{harvest}"
+        );
+        for other in [
+            "search labels --trick 3 --count 7 --seed 101",
+            "search labels --trick 3 --count 3 --seed 201",
+        ] {
+            assert!(!line(other).contains("--harvest-net"), "{other}");
+        }
+        let check = line("search hybrid-check --trick 2 --cut 3");
+        for want in [
+            format!("--decisions {}", inputs.join(&dec).display()),
+            format!("--worlds {}", inputs.join(&wor).display()),
+            "--to 4 --seed 1 --threads 4 --tt-mb 64 --verify-pct 1 --json".to_string(),
+        ] {
+            assert!(check.contains(&want), "{want:?} in {check}");
+        }
+        for hex in [&net, &dec, &wor] {
+            assert!(inputs.join(hex).is_file());
+        }
+        let rung = read_json(&root.join("out/hybrid/rung.json")).expect("rung.json");
+        let steps: Vec<&str> = rung["steps"]
+            .as_array()
+            .expect("steps")
+            .iter()
+            .filter_map(|s| s["step"].as_str())
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                "inputs",
+                "python environment",
+                "GPU check",
+                "labels random (1 of 3)",
+                "labels harvest (2 of 3)",
+                "labels val (3 of 3)",
+                "golden set (stored)",
+                "train",
+                "hybrid check"
+            ]
+        );
+        for (name, hex) in [
+            ("harvest_net", &net),
+            ("golden_decisions", &dec),
+            ("golden_worlds", &wor),
+        ] {
+            let x = &rung["inputs"][name];
+            assert_eq!(x["sha256"], hex.as_str(), "{name}");
+            assert_eq!(x["key"], format!("inputs/sha256/{hex}"), "{name}");
+            assert_eq!(x["downloaded"], true, "{name}");
+        }
+        assert_eq!(rung["labels"][1]["name"], "harvest");
+        assert_eq!(rung["labels"][1]["harvest_net_sha256"], net.as_str());
+        assert!(rung["labels"][0].get("harvest_net_sha256").is_none());
+        let g = &rung["golden"];
+        assert_eq!(g["stored"], true);
+        assert_eq!(
+            (g["decisions_sha256"].as_str(), g["worlds_sha256"].as_str()),
+            (Some(dec.as_str()), Some(wor.as_str()))
+        );
+        assert_eq!(g["verify_pct"], 1.0);
+        assert_eq!(
+            rung["params"]["harvest_net"],
+            format!("inputs/sha256/{net}")
+        );
+
+        // A key that is not in the store: stopped before anything is installed.
+        let missing = "0".repeat(64);
+        let p = parse(&settings(&missing, 2)).expect("params");
+        let e = run("missing", &p, &tools).expect_err("missing input");
+        assert_eq!(
+            e,
+            format!("hybrid_rung: harvest_net: inputs/sha256/{missing} not found")
+        );
+        assert_eq!(
+            fs::read_to_string(&f.calls).expect("calls"),
+            "",
+            "nothing ran"
+        );
+        // An object whose bytes are not its key's.
+        let bad = "1".repeat(64);
+        fs::write(
+            f.base.join("remote/inputs/sha256").join(&bad),
+            b"not these bytes",
+        )
+        .expect("write");
+        let p = parse(&settings(&bad, 2)).expect("params");
+        let e = run("bad", &p, &tools).expect_err("wrong bytes");
+        assert!(e.contains("downloaded sha256"), "{e}");
+        assert!(!f.base.join("bad/hybrid-work/inputs").join(&bad).exists());
+        assert_eq!(
+            fs::read_to_string(&f.calls).expect("calls"),
+            "",
+            "nothing ran"
+        );
+        // The stored decisions are not the set the settings describe.
+        let p = parse(&settings(&net, 3)).expect("params");
+        let e = run("count", &p, &tools).expect_err("count");
+        assert!(
+            e.contains("the stored golden decisions hold 2 decisions at trick 2"),
+            "{e}"
+        );
+        assert_eq!(
+            fs::read_to_string(&f.calls).expect("calls"),
+            "",
+            "nothing ran"
+        );
+        // No remote store.
+        let none = Tools {
+            remote: None,
+            search: f.search.clone(),
+            uv: f.uv.clone(),
+            python_dir: f.py.clone(),
+            nvidia_smi: f.base.join("no-such-nvidia-smi"),
+        };
+        let e = run("none", &params, &none).expect_err("no store");
+        assert!(e.contains("and there is none"), "{e}");
+        assert_eq!(
+            fs::read_to_string(&f.calls).expect("calls"),
+            "",
+            "nothing ran"
+        );
+        let _ = fs::remove_dir_all(&f.base);
     }
 }

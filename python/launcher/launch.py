@@ -1125,6 +1125,31 @@ def manifest_inputs(manifest: dict) -> dict[str, str]:
     return out
 
 
+# hybrid_rung settings that name a stored input by its key (crates/runner/src/hybrid.rs): the
+# chunk fetches them itself from inputs/sha256/<hex>, so they are checked here with the
+# manifest's `inputs`, before anything is rented.
+HYBRID_INPUT_PARAMS = ("harvest_net", "golden_decisions_input", "golden_worlds_input")
+
+
+def param_inputs(manifest: dict) -> dict[str, str]:
+    """Stored inputs named in hybrid_rung streams' params: "<stream>.<param>" -> lowercase sha256
+    hex. A value that is not "inputs/sha256/<64 hex>" (or "sha256:<64 hex>") stops the launch."""
+    out = {}
+    for st in manifest.get("streams") or []:
+        if not isinstance(st, dict) or st.get("kind") != "hybrid_rung":
+            continue
+        params = st.get("params") or {}
+        for k in HYBRID_INPUT_PARAMS:
+            v = params.get(k)
+            if v is None:
+                continue
+            m = re.fullmatch(r"(?:inputs/sha256/|sha256:)([0-9a-fA-F]{64})", v) if isinstance(v, str) else None
+            if not m:
+                sys.exit(f"launch: stream {st.get('name')!r}: params.{k} must be \"inputs/sha256/<64 hex digits>\"")
+            out[f"{st.get('name')}.{k}"] = m.group(1).lower()
+    return out
+
+
 # The keys of a format-2 stream (crates/runner/src/sched.rs STREAM_KEYS); the runner refuses
 # any other, so a manifest with one is refused here before anything is rented.
 STREAM_KEYS = ("name", "priority", "kind", "params", "chunks")
@@ -1170,7 +1195,8 @@ def cmd_run(a) -> int:
         sys.exit(f"launch: runs/{run_id}/ already exists in R2; choose a new run_id")
     if not r2_get(f"bin/{a.bin_sha}/manifest.json"):
         sys.exit(f"launch: no release binaries at bin/{a.bin_sha}/ (run release-binaries.yml first)")
-    missing = [f"{n} (inputs/sha256/{h})" for n, h in manifest_inputs(manifest).items()
+    wanted = {**manifest_inputs(manifest), **(param_inputs(manifest) if resumable else {})}
+    missing = [f"{n} (inputs/sha256/{h})" for n, h in wanted.items()
                if not r2_exists(f"inputs/sha256/{h}")]
     if missing:
         sys.exit("launch: manifest inputs missing in R2: " + ", ".join(missing)
