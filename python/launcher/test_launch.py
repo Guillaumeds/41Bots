@@ -43,6 +43,8 @@ class World:
         self.forbid_search = False  # the account's daily search quota is used up: any full search is a bug
         self.status_fails = False  # `show instance` fails (vast's API down)
         self.listing_fails = False  # `show instances` fails
+        self.status_none = False  # `show instance` answers a record whose actual_status is None (loading, or just destroyed)
+        self.listed_status_none = False  # ...and the instance list shows None for the instances it holds
         self.r2_list_fails_until = 0.0  # r2_list raises while the clock is below this
         self.poll = launch.POLL_S  # the launcher's poll interval in this test (--poll-s)
         self.progress = None  # a heartbeat's progress object (e.g. with an eta), if set
@@ -174,7 +176,8 @@ class World:
             if self.hidden_listings > 0:
                 self.hidden_listings -= 1
                 hide = max(self.instances)
-            return [{"id": iid, "label": inst["label"], "actual_status": "running" if inst["alive"] else "exited",
+            return [{"id": iid, "label": inst["label"],
+                     "actual_status": None if self.listed_status_none else "running" if inst["alive"] else "exited",
                      "intended_status": "running" if inst["alive"] else "stopped"}
                     for iid, inst in self.instances.items() if not inst.get("destroyed") and iid != hide]
         if cmd == ("create", "api-key"):
@@ -191,6 +194,8 @@ class World:
         if cmd == ("show", "instance"):
             if self.status_fails:
                 raise RuntimeError("vastai show instance failed: 502 Bad Gateway")
+            if self.status_none:
+                return {"actual_status": None, "intended_status": "running", "status_msg": ""}
             inst = self.instances.get(int(args[2]))
             if not inst or not inst["alive"]:
                 return {"actual_status": "exited", "intended_status": "stopped"}
@@ -1163,6 +1168,66 @@ class LauncherTest(unittest.TestCase):
             w.vast = lambda *a, **kw: {"error": "x"} if a[:2] == ("show", "instances") else orig(*a, **kw)
             launch.vast = w.vast
             self.assertEqual(launch.instance_state(100), ("unknown", None))
+
+    def test_status_none_is_decided_by_the_instance_list(self):
+        # 2026-10-16 (run m3-t1-leader-layouts-9654): after a destroy, `show instance` still answered a
+        # record whose actual_status was None, so the machine never read as gone and the job failed. A
+        # None record is judged by the account's instance list. (A machine still loading shows None too.)
+        # None, and absent from a successfully read list: dead.
+        w = self.destroy_world(alive=False, destroyed=True)
+        w.status_none = True
+        with self.patched(w):
+            self.assertEqual(launch.instance_state(100), ("dead", None))
+        # None, and listed with None as well (a fresh machine loading): alive, judged by the listed row.
+        w = self.destroy_world(alive=True)
+        w.status_none = w.listed_status_none = True
+        with self.patched(w):
+            state, info = launch.instance_state(100)
+            self.assertEqual((state, info["id"], info["actual_status"]), ("alive", 100, None))
+        # None, and listed as running: alive. Listed as exited: dead.
+        w = self.destroy_world(alive=True)
+        w.status_none = True
+        with self.patched(w):
+            self.assertEqual(launch.instance_state(100)[0], "alive")
+            w.instances[100]["alive"] = False
+            self.assertEqual(launch.instance_state(100)[0], "dead")
+        # None, and the list cannot be read (a failed call, or an answer that is not a list): unknown, never dead.
+        w = self.destroy_world(alive=False, destroyed=True)
+        w.status_none = w.listing_fails = True
+        with self.patched(w):
+            self.assertEqual(launch.instance_state(100), ("unknown", None))
+            w.listing_fails = False
+            orig = w.vast
+            w.vast = lambda *a, **kw: {"error": "x"} if a[:2] == ("show", "instances") else orig(*a, **kw)
+            launch.vast = w.vast
+            self.assertEqual(launch.instance_state(100), ("unknown", None))
+        # A None record that says intended_status "stopped" is dead without reading the list, as before.
+        w = self.destroy_world(alive=True)
+        w.status_none = True
+        orig = w.vast
+        w.vast = lambda *a, **kw: ({"actual_status": None, "intended_status": "stopped"} if a[:2] == ("show", "instance")
+                                   else (_ for _ in ()).throw(AssertionError("the list was read")) if a[:2] == ("show", "instances")
+                                   else orig(*a, **kw))
+        with self.patched(w):
+            self.assertEqual(launch.instance_state(100)[0], "dead")
+
+    def test_destroy_is_verified_when_the_status_reads_none_but_the_list_no_longer_holds_it(self):
+        # The destroy call goes through; `show instance` keeps answering actual_status None; the list
+        # (read successfully) no longer holds the instance: verified, one call, no error.
+        w = self.destroy_world(alive=True)
+        w.status_none = True
+        result, out = self.run_destroy(w)
+        self.assertEqual((result, w.destroy_calls), ("verified", 1))
+        self.assertIn("destroyed instance 100 (verified: not listed)", out)
+        self.assertNotIn("still actual_status None", out)
+        self.assertNotIn("::error::", out)
+        self.assertTrue(w.instances[100]["destroyed"])
+        # The same, but the list cannot be read: never counted as destroyed (unverified, not verified).
+        w = self.destroy_world(alive=True)
+        w.status_none = w.listing_fails = True
+        result, out = self.run_destroy(w)
+        self.assertEqual((result, w.destroy_calls), ("unverified", 1))
+        self.assertIn("NOT verified", out)
 
     def run_launch_minutes(self, world: World, manifest: dict, minutes: int) -> tuple[int, dict]:
         saved = {n: getattr(launch, n) for n in ("vast", "r2_get", "r2_put", "r2_list", "r2_exists", "r2_delete", "time")}
