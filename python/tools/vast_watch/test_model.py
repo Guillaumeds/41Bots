@@ -61,7 +61,8 @@ class Cost(unittest.TestCase):
         self.assertTrue(M.launcher_ok(offer(1, "x", 128, 100, 1.0)))
         self.assertFalse(M.launcher_ok(offer(1, "x", 128, 100, 1.0, gpu_frac=0.5)))
         self.assertFalse(M.launcher_ok(offer(1, "x", 128, 100, 1.0, verification="deverified")))
-        self.assertFalse(M.launcher_ok(offer(1, "x", 128, 100, 1.0, reliability2=0.97)))
+        self.assertTrue(M.launcher_ok(offer(1, "x", 128, 100, 1.0, reliability2=0.95)))   # floor is 0.90 (owner, 2026-10-16)
+        self.assertFalse(M.launcher_ok(offer(1, "x", 128, 100, 1.0, reliability2=0.85)))
         self.assertFalse(M.launcher_ok(offer(1, "x", 128, 100, 1.0, inet_up_cost=0.2)))
 
 

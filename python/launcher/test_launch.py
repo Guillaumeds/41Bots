@@ -38,6 +38,7 @@ class World:
         self.deleted_keys: list[int] = []
         self.searches = 0
         self.id_lookups = 0  # searches by offer id (`id=N`), the one search --offer-id makes
+        self.queries = []  # the query text of every full search
         self.forbid_search = False  # the account's daily search quota is used up: any full search is a bug
         self.status_fails = False  # `show instance` fails (vast's API down)
         self.listing_fails = False  # `show instances` fails
@@ -135,6 +136,7 @@ class World:
                     raise RuntimeError("vastai search offers failed: 429 Too Many Requests")
                 return [dict(o) for o in self.offers if o["id"] == int(args[2][3:])]
             self.searches += 1
+            self.queries.append(args[2])
             if self.forbid_search:
                 raise AssertionError("a search was made")
             if self.search_fails:
@@ -331,7 +333,7 @@ class LauncherTest(unittest.TestCase):
         # Unverified, shared, unreliable or interruptible: refused by name. Not on offer, or a
         # lookup that fails: refused too (the checks are never skipped). Nothing is rented.
         cases = [({"verification": "unverified"}, "host not verified"), ({"gpu_frac": 0.5}, "shared machine"),
-                 ({"reliability2": 0.95}, "reliability 0.950 below 0.98"), ({"is_bid": True}, "interruptible")]
+                 ({"reliability2": 0.85}, "reliability 0.850 below 0.9"), ({"is_bid": True}, "interruptible")]
         for kw, word in cases:
             w = World([offer(500, 50, 1.0, **kw)], ["done:1"])
             w.forbid_search = True
@@ -351,6 +353,34 @@ class LauncherTest(unittest.TestCase):
         self.assertIn("could not be checked", str(e.exception))
         self.assertEqual(w.created_on, [])
         self.assertEqual(launch.offer_check_failures(offer(7, 7, 1.0)), [])
+
+    def test_reliability_floor_is_90_percent(self):
+        # Owner, 2026-10-16: hosts with reliability of at least 90% are accepted, for every rental.
+        self.assertEqual(launch.MIN_RELIABILITY, 0.90)
+        manifest = {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}}
+        # The default search asks vast for reliability above 0.9 (not 0.98); a run can still ask for more.
+        w = World([offer(1, 11, 1.0)], ["done:1"])
+        code, _ = self.run_launch(w, manifest)
+        self.assertEqual(code, 0)
+        self.assertIn("reliability>0.9", w.queries[0].split())
+        self.assertNotIn("reliability>0.98", w.queries[0])
+        w = World([offer(1, 11, 1.0)], ["done:1"])
+        self.run_launch(w, manifest, "--min-reliability", "0.98")
+        self.assertIn("reliability>0.98", w.queries[0].split())
+        # The checks for a named offer (--offer-id): 0.95 and exactly 0.90 pass, 0.85 fails.
+        for rel, ok in ((0.95, True), (0.90, True), (0.85, False)):
+            self.assertEqual(launch.offer_check_failures(offer(7, 7, 1.0, reliability2=rel)),
+                             [] if ok else ["reliability 0.850 below 0.9"], rel)
+            w = World([offer(500, 50, 1.0, reliability2=rel)], ["done:1"])
+            w.forbid_search = True
+            if ok:
+                code, report = self.run_launch(w, manifest, "--offer-id", "500")
+                self.assertEqual((code, w.created_on), (0, [500]), rel)
+            else:
+                with self.assertRaises(SystemExit) as e:
+                    self.run_launch(w, manifest, "--offer-id", "500")
+                self.assertIn("reliability 0.850 below 0.9", str(e.exception))
+                self.assertEqual(w.created_on, [], rel)
 
     def test_unreadable_create_answer_adopts_the_rented_instance(self):
         # vast rented the machine but its answer could not be read: the launcher finds it by its

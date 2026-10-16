@@ -48,6 +48,13 @@ class VastMarketTest(unittest.TestCase):
     def tearDown(self):
         self.dir.cleanup()
 
+    def test_reliability_floor_is_90_percent_like_the_launcher(self):
+        # Owner, 2026-10-16: the launcher accepts hosts above 0.9; the market view labels offers the same way.
+        q = vm.queries(16, 32)
+        self.assertEqual(q["eligible"]["reliability"], {"gt": 0.90})
+        self.assertEqual(q["reliability_0.80-0.90"]["reliability"], {"gt": 0.80, "lte": 0.90})
+        self.assertNotIn("reliability_0.90-0.98", q)
+
     def test_factor_precedence(self):
         self.assertEqual(vm.factor(self.sp, "AMD Fast 64-Core", "compute")[:2], (2.0, "estimate"))
         self.assertEqual(vm.factor(self.sp, "Slow chip", "compute")[:2], (1.1, "measured"))

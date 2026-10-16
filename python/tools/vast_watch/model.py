@@ -42,6 +42,8 @@ LABELS = {"cheapest": "Cheapest (speed does not matter)",
 DEFAULT_MEASURED = os.path.join(REPO, "docs", "vast", "measured-speeds.json")
 DEFAULT_SPEED = os.path.join(REPO, "docs", "vast", "speed-factors.json")
 NET_CAP = 0.10
+# Host reliability floor, matching launch.py MIN_RELIABILITY (owner, 2026-10-16: 90%).
+MIN_RELIABILITY = 0.90
 
 
 # ------------------------------------------------------------------ table-size penalty
@@ -136,7 +138,7 @@ class Model:
 def launcher_ok(o: dict) -> bool:
     """Can python/launcher/launch.py rent it: whole machine, verified, reliable, cheap network."""
     return ((o.get("gpu_frac") or 0) >= 1 and o.get("verification") == "verified"
-            and (o.get("reliability2") or 0) > 0.98 and (o.get("inet_down_cost") or 0) <= NET_CAP
+            and (o.get("reliability2") or 0) > MIN_RELIABILITY and (o.get("inet_down_cost") or 0) <= NET_CAP
             and (o.get("inet_up_cost") or 0) <= NET_CAP)
 
 

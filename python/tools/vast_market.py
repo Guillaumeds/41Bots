@@ -59,12 +59,14 @@ KEEP = ["id", "machine_id", "host_id", "cpu_name", "cpu_cores", "cpu_cores_effec
 
 # Max $/GB up or down, matching launch.py --max-net-cost (owner 2026-10-14: 0.10; our traffic is tiny).
 NET_CAP = 0.10
+# Host reliability floor, matching launch.py MIN_RELIABILITY (owner, 2026-10-16: 90%).
+MIN_RELIABILITY = 0.90
 
 def base_query(min_cores: int, min_ram_gb: int) -> dict:
     """The launcher's CPU-only filter (launch.py offer_query with --cpu-only), as API JSON."""
     return {
         "verified": {"eq": True}, "external": {"eq": False}, "rentable": {"eq": True},
-        "reliability": {"gt": 0.98}, "num_gpus": {"gte": 1}, "gpu_frac": {"eq": 1},
+        "reliability": {"gt": MIN_RELIABILITY}, "num_gpus": {"gte": 1}, "gpu_frac": {"eq": 1},
         "cpu_cores_effective": {"gte": min_cores}, "cpu_ram": {"gte": min_ram_gb * 1000},
         "disk_space": {"gte": 20}, "inet_down_cost": {"lte": NET_CAP}, "inet_up_cost": {"lte": NET_CAP},
         "order": [["dph_total", "asc"]], "type": "on-demand", "limit": 2000, "allocated_storage": 20,
@@ -77,14 +79,14 @@ def queries(min_cores: int, min_ram_gb: int) -> dict[str, dict]:
     eligible = base_query(min_cores, min_ram_gb)
     net = {k: v for k, v in eligible.items() if k not in ("inet_down_cost", "inet_up_cost")}
     partial = dict(eligible, gpu_frac={"lt": 1})
-    low_rel = dict(eligible, reliability={"gt": 0.90, "lte": 0.98})
+    low_rel = dict(eligible, reliability={"gt": 0.80, "lte": MIN_RELIABILITY})
     unverified = dict(eligible, verified={"eq": False})
     return {"eligible": eligible, "network_cost_over_cap": net, "partial_machine": partial,
-            "reliability_0.90-0.98": low_rel, "unverified": unverified}
+            "reliability_0.80-0.90": low_rel, "unverified": unverified}
 
 
 WHY = {"network_cost_over_cap": f"network > ${NET_CAP}/GB", "partial_machine": "shared machine",
-       "reliability_0.90-0.98": "reliability < 0.98", "unverified": "unverified"}
+       "reliability_0.80-0.90": f"reliability < {MIN_RELIABILITY}", "unverified": "unverified"}
 
 
 def search(q: dict) -> list[dict]:
@@ -260,8 +262,9 @@ def report(snap: dict, sp: dict, a) -> str:
     offers = [annotate(dict(o), sp) for o in snap["offers"]]
     elig = [o for o in offers if o["query"] == "eligible"]
     min_cores = snap["queries"].get("eligible", {}).get("cpu_cores_effective", {}).get("gte", a.min_cores)
+    floor = snap["queries"].get("eligible", {}).get("reliability", {}).get("gt", MIN_RELIABILITY)  # a saved snapshot keeps its own floor
     out.append(f"vast.ai on-demand market at {snap['utc']}: {len(elig)} offers launch.py can rent "
-               f"(whole machine, verified, reliability > 0.98, network <= ${NET_CAP}/GB, >= {min_cores} effective cores)"
+               f"(whole machine, verified, reliability > {floor}, network <= ${NET_CAP}/GB, >= {min_cores} effective cores)"
                + "".join(f"; {sum(o['query'] == q for o in offers)} {q}" for q in snap["queries"] if q != "eligible"))
     out.append("Speed: per hardware thread with all threads busy, EPYC 7502 = 1.00; '~' = estimate, not yet measured. "
                "1 unit of work = 1 hour of one EPYC 7502 thread.\n")

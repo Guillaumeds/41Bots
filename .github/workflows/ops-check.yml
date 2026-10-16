@@ -59,7 +59,7 @@ jobs:
         run: |
           set -euo pipefail
           for MIN in 16 48 96 160; do
-            vastai search offers "reliability>0.98 num_gpus>=1 gpu_frac=1 cpu_cores_effective>=$MIN cpu_ram>=32 compute_cap>=600 compute_cap<1000 cuda_vers>=12.6 rentable=true" --order 'dph_total' --limit 6 --raw > "offers-$MIN.json"
+            vastai search offers "reliability>0.9 num_gpus>=1 gpu_frac=1 cpu_cores_effective>=$MIN cpu_ram>=32 compute_cap>=600 compute_cap<1000 cuda_vers>=12.6 rentable=true" --order 'dph_total' --limit 6 --raw > "offers-$MIN.json"
           done
           python3 - <<'PY'
           import json

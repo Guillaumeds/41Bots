@@ -685,7 +685,7 @@ These address SPARTA's warning that partners searching independently can mislead
   | `cpu_cores_effective >= N` | Only the cores actually rented count |
   | `gpu_frac=1` | **Renting all of a machine's GPUs is what gives you its full CPU.** Renting 1 of 4 GPUs gives only about ¼ of the CPUs. |
   | `compute_cap>=600 compute_cap<1000 cuda_vers>=12.6` | Matches our PyTorch build |
-  | `reliability>0.98` | Avoids flaky hosts |
+  | `reliability>0.9` | Avoids flaky hosts (owner, 2026-10-16: the floor is 90%; it was 98%) |
   | low `inet_up_cost` / `inet_down_cost` | Hosts charge per GB, and we upload results |
 
 - **Rank by price per unit of work, not price per hour:**
