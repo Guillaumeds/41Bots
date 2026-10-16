@@ -29,7 +29,8 @@ Rules applied:
 - Owner's rule: among offers within 20% (--premium) of the cheapest cost per unit of work, take
   the one doing the most work per hour.
 - Watch through the vast API and the R2 heartbeat every --poll-s (60) seconds, never SSH. Destroy
-  when: no heartbeat within --startup-minutes; heartbeat older than 3 minutes; CPU use below
+  when: no heartbeat within --startup-minutes (the image-pull rule below can extend this);
+  heartbeat older than 3 minutes; CPU use below
   --low-cpu-pct (85%) for --low-cpu-s (300) seconds while the chunk is running (unless its
   heartbeat says progress.partial_cpu_ok); the dollar cap --max-dollars ($20 by default) reached;
   DONE/FAILED seen. Always destroy, never stop. No time limit by default (owner, 2026-10-16: a run
@@ -40,6 +41,24 @@ Rules applied:
   inject", "OCI runtime") is destroyed at once and the next offer is rented (counted as a
   replacement, for format 1 too: nothing ran on it), instead of waiting for --startup-minutes;
   one that vast shows exited, offline or not listed is treated the same once that is confirmed.
+- Image pulls take time (2026-10-16, run m3-hybrid-r1-c16m-2: the base image grew to 5-6 GB with
+  PyTorch baked in, two machines with slow downlinks were still pulling it at 15 minutes and were
+  destroyed, 33 minutes and $0.14 lost). So the 15 minutes (--startup-minutes) to the first
+  heartbeat are counted like this: (1) once vast's status_msg reads "success, running ..." the
+  container has started, and the first heartbeat is due within --startup-minutes of THAT moment;
+  (2) before that, a machine that is still pulling the image when the 15 minutes from renting are
+  used up is given more time, as long as vast's status_msg shows pull progress (a "Pulling fs
+  layer", "Downloading", "Download complete", "Extracting" or "Pull complete" line) and has
+  changed within the last --pull-stall-min (10) minutes; it is destroyed as before when its
+  status stops changing for that long, or --pull-ceiling-min (40) minutes after renting. A
+  machine that never showed pull progress is destroyed at 15 minutes as before; nothing is ever
+  destroyed earlier than before. Each poll logs "still pulling the image (N min): <status_msg>".
+- Fast downlinks are preferred: every search carries inet_down>=--min-inet-down (default 500,
+  Mbps; 0 = no filter; vast's offer field `inet_down` is in Mb/s, vastai 1.8.3 `search offers`).
+  Unless --cheapest, an offer whose link is under 200 Mbps (SLOW_LINK_MBPS) has its cost per
+  unit of work multiplied by 1 + (200 - Mbps) / 200 (x1.5 at 100 Mbps, x2 at 0), so the ranking
+  avoids it; an offer that reports no link speed gets no penalty. --offer-id reports a link slower
+  than --min-inet-down in the log and rents it anyway (the owner named it).
 - No single answer from vast can say a machine is gone (2026-10-15): a failed call or an
   unreadable reply means "unknown" and changes nothing; a machine is declared gone (dead before
   DONE, stopped before its first heartbeat, destroyed itself) only after 3 consecutive readings
@@ -135,6 +154,10 @@ GONE_SPAN_S = 90  # ...spanning at least this long
 DESTROY_RECHECK_S = 10  # destroy(): a "dead" reading counts only when a second one this much later agrees
 ADOPT_READINGS = 2  # readable instance listings without the run's label before a failed create counts as "nothing rented"
 MIN_RELIABILITY = 0.90  # owner, 2026-10-16: hosts with reliability of at least 90% are accepted, for every rental
+PULL_CEILING_MIN = 40  # default; --pull-ceiling-min overrides: the latest an image pull is allowed to end, from renting
+PULL_STALL_MIN = 10  # default; --pull-stall-min overrides: vast's status unchanged this long while pulling = dead
+MIN_INET_DOWN = 500.0  # default; --min-inet-down overrides: Mbps of download speed an offer must report (0 = no filter)
+SLOW_LINK_MBPS = 200.0  # below this download speed the ranking adds a penalty (see link_factor)
 MAX_DOLLARS = 20.0  # the default dollar cap of a run (owner, 2026-10-16)
 # GitHub ends a job after 6 hours (vast-run.yml timeout-minutes: 360). Longer runs are handed over
 # before that: the machine keeps working and the run-aware cleanup (cleanup.py, every 15 minutes)
@@ -217,7 +240,14 @@ def offer_query(a, verified: bool = True) -> str:
         f"cpu_cores_effective>={a.min_cores}", f"cpu_ram>={a.min_ram_gb}",
     ] + ([] if a.cpu_only else ["compute_cap>=600", "compute_cap<1000", "cuda_vers>=12.6"]) + [
         f"disk_space>={a.disk_gb}", f"inet_down_cost<={a.max_net_cost}", f"inet_up_cost<={a.max_net_cost}",
-    ] + ([f"dph_total<={a.max_dph}"] if a.max_dph else []))
+    ] + ([f"dph_total<={a.max_dph}"] if a.max_dph else []) + inet_down_clause(a))
+
+
+def inet_down_clause(a) -> list[str]:
+    """The query token asking for a fast downlink (`inet_down` is the offer's download speed in
+    Mb/s), or nothing when --min-inet-down is 0. Every search carries it: the base image is big."""
+    floor = float(getattr(a, "min_inet_down", MIN_INET_DOWN) or 0)
+    return [f"inet_down>={floor:g}"] if floor > 0 else []
 
 
 def search_offers(a, verified: bool = True) -> list[dict]:
@@ -318,14 +348,45 @@ def load_bench(use_r2: bool) -> dict[str, float]:
     return _BENCH
 
 
-def rank(offers: list[dict], bench: dict[str, float], premium: float) -> tuple[dict | None, list[dict]]:
+def inet_down_of(o: dict) -> float | None:
+    """The offer's download speed in Mb/s as vast reports it (`inet_down`), or None when absent."""
+    try:
+        return float(o["inet_down"]) if o.get("inet_down") is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def link_factor(o: dict) -> float:
+    """The ranking penalty for a slow download link: 1.0 at SLOW_LINK_MBPS (200) Mbps or more, and
+    1 + (200 - Mbps) / 200 below it (x1.5 at 100 Mbps, x2.0 at 0). An offer that reports no speed
+    gets no penalty (nothing is known). The base image is several GB, so a slow link means a long
+    pull, which is paid for before any work starts. Not applied with --cheapest."""
+    mbps = inet_down_of(o)
+    if mbps is None or mbps >= SLOW_LINK_MBPS:
+        return 1.0
+    return 1.0 + (SLOW_LINK_MBPS - max(mbps, 0.0)) / SLOW_LINK_MBPS
+
+
+def link_note(o: dict) -> str:
+    """The offer's download link for a log line: ", link 850 Mbps", ", link 120 Mbps (slow: cost/work x1.40)"
+    or ", link speed not reported"."""
+    mbps = inet_down_of(o)
+    if mbps is None:
+        return ", link speed not reported"
+    f = o.get("_link_factor", link_factor(o))
+    return f", link {mbps:.0f} Mbps" + (f" (slow: cost/work x{f:.2f})" if f > 1.0 else "")
+
+
+def rank(offers: list[dict], bench: dict[str, float], premium: float,
+         link_penalty: bool = True) -> tuple[dict | None, list[dict]]:
     default_rate = statistics.median(bench.values()) if bench else 1.0
     for o in offers:
         slug = cpu_slug(o.get("cpu_name"))
         o["_rate"] = bench.get(slug, default_rate)
         o["_measured"] = slug in bench
         o["_work_per_hour"] = o["cpu_cores_effective"] * o["_rate"]
-        o["_cost_per_work"] = o["dph_total"] / o["_work_per_hour"]
+        o["_link_factor"] = link_factor(o) if link_penalty else 1.0
+        o["_cost_per_work"] = o["dph_total"] / o["_work_per_hour"] * o["_link_factor"]
     offers.sort(key=lambda o: (o["_cost_per_work"], o["id"]))
     if not offers:
         return None, offers
@@ -424,6 +485,15 @@ def lookup_offer(a) -> dict:
     if not is_verified(row):
         log(f"offer {oid} is on a host that is {host_status(row)}, not verified: accepted, because the owner named it "
             f"(owner rule 2026-10-16: unverified or deverified hosts are acceptable; every other check passed)")
+    link = inet_down_of(row)
+    floor = float(getattr(a, "min_inet_down", MIN_INET_DOWN) or 0)
+    if link is not None and floor > 0 and link < floor:
+        log(f"::warning::offer {oid} reports a download link of {link:.0f} Mbps, below --min-inet-down {floor:g}: "
+            f"the image pull may be slow (the launcher waits while it advances, up to {getattr(a, 'pull_ceiling_min', PULL_CEILING_MIN)} minutes); "
+            f"accepted, because the owner named it")
+    elif link is None and floor > 0:
+        log(f"offer {oid} reports no download link speed (inet_down); --min-inet-down {floor:g} could not be checked; "
+            f"accepted, because the owner named it")
     best = dict(row)
     best.setdefault("machine_id", a.offer_machine or oid)
     if best.get("reliability2") is None:
@@ -450,10 +520,11 @@ def choose(a) -> dict | None:
         a._offer_given_used = True
         best = lookup_offer(a)
         best["_rate"], best["_measured"] = 1.0, False
+        best["_link_factor"] = 1.0  # a named offer is not ranked
         best["_work_per_hour"] = best["cpu_cores_effective"]
         best["_cost_per_work"] = best["dph_total"] / max(best["cpu_cores_effective"], 1e-9)
         log(f"offer {best['id']} chosen by the owner and checked by id (reliability "
-            f"{float(best.get('reliability2') or 0):.3f}, whole machine, on-demand): {describe(best)}")
+            f"{float(best.get('reliability2') or 0):.3f}, whole machine, on-demand): {describe(best)}{link_note(best)}")
         return best
     offers = search_offers(a)
     if not offers:
@@ -473,16 +544,16 @@ def choose(a) -> dict | None:
                 log("no offer matches even with unverified/deverified hosts allowed")
     have_r2 = all(os.environ.get(n) for n in ("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET", "R2_S3_ENDPOINT"))
     bench = load_bench(have_r2)
-    best, ranked = rank(offers, bench, a.premium)
+    best, ranked = rank(offers, bench, a.premium, link_penalty=not a.cheapest)
     if a.cheapest and ranked:
         # Test runs: the lowest hourly price, whatever its speed.
         best = min(ranked, key=lambda o: (float(o["dph_total"]), o["id"]))
     log(f"{len(ranked)} on-demand offers with >= {a.min_cores} effective cores; {len(bench)} CPU models benchmarked")
     for o in ranked[:10]:
-        log(("  * " if o is best else "    ") + describe(o))
+        log(("  * " if o is best else "    ") + describe(o) + link_note(o))
     if best:
         how = "cheapest per hour (--cheapest)" if a.cheapest else f"within {a.premium:.0%} of cheapest cost per work, fastest"
-        log(f"chosen ({how}): {describe(best)}")
+        log(f"chosen ({how}): {describe(best)}{link_note(best)}")
     return best
 
 
@@ -785,6 +856,111 @@ def container_start_error(info: dict | None) -> str | None:
     if any(e in msg.lower() for e in CONTAINER_ERRORS):
         return msg[:300]
     return None
+
+
+# What vast's status_msg looks like while it pulls the image: docker's own progress lines, one per
+# layer ("<id>: Pulling fs layer", "Waiting", "Downloading [===>  ] 12MB/90MB", "Verifying
+# Checksum", "Download complete", "Extracting ...", "Pull complete", "Already exists"). A started
+# container reads "success, running <image> ...".
+PULL_WORDS = ("pulling", "downloading", "download complete", "pull complete", "extracting",
+              "verifying checksum", "already exists")
+LAYER_WAITING = re.compile(r"\b[0-9a-f]{6,}: waiting\b")
+STARTED_PREFIX = "success, running"
+
+
+def status_msg_of(info: dict | None) -> str | None:
+    """vast's status_msg of an instance record as one trimmed string, or None when the record has
+    none to read (no record, or a record without that key, such as a row of the instance list)."""
+    if not info or "status_msg" not in info:
+        return None
+    return str(info.get("status_msg") or "").strip()
+
+
+def pull_message(msg: str) -> bool:
+    """Whether a status_msg shows the image being pulled."""
+    low = msg.lower()
+    return any(w in low for w in PULL_WORDS) or bool(LAYER_WAITING.search(low))
+
+
+def container_started(msg: str) -> bool:
+    """Whether a status_msg says the container started ("success, running ...")."""
+    return msg.lower().startswith(STARTED_PREFIX)
+
+
+class StartClock:
+    """When the first heartbeat of one machine is due, given how far its start has got (2026-10-16:
+    the base image grew to 5-6 GB and machines with slow downlinks were destroyed while still
+    pulling it). Fed one reading of vast's record per poll (`see`), asked once per poll whether to
+    give up (`verdict`).
+
+    - Container started (status_msg "success, running ..."; latched): the first heartbeat is due
+      within `startup_min` minutes of that moment.
+    - Not started, `startup_min` minutes from renting not used up: keep waiting, as before.
+    - Not started, those minutes used up: the machine is given more time only if it showed image
+      pull progress and vast's status_msg changed within the last `stall_min` minutes, and only up
+      to `ceiling_min` minutes from renting. Otherwise it is given up on, with the old reason
+      ("no heartbeat within N minutes of renting") plus the detail.
+    A reading without a status_msg (vast unreadable, or a list row) changes nothing. Nothing here
+    ever gives up earlier than the old rule (N minutes from renting) did."""
+
+    def __init__(self, created: float, startup_min: float, ceiling_min: float = PULL_CEILING_MIN,
+                 stall_min: float = PULL_STALL_MIN):
+        self.created = created
+        self.startup_min = startup_min
+        self.base_s = startup_min * 60
+        self.ceiling_s = max(ceiling_min, startup_min) * 60
+        self.stall_s = stall_min * 60
+        self.started_at: float | None = None
+        self.msg: str | None = None
+        self.last_change = created
+        self.seen_pull = False  # a pull-progress message was read at some poll
+        self.pulling = False  # ...and the latest one is such a message
+
+    def see(self, now: float, info: dict | None) -> None:
+        msg = status_msg_of(info)
+        if msg is None:
+            return
+        if msg != self.msg:
+            self.msg, self.last_change = msg, now
+        self.pulling = pull_message(msg)
+        self.seen_pull = self.seen_pull or self.pulling
+        if self.started_at is None and container_started(msg):
+            self.started_at = now
+
+    def verdict(self, now: float) -> str | None:
+        """None while the machine may go on starting, else why it is given up on."""
+        n = self.startup_min
+        if self.started_at is not None:
+            if now - self.started_at > self.base_s:
+                return f"no heartbeat within {n} minutes of the container starting"
+            return None
+        if now - self.created <= self.base_s:
+            return None
+        if not self.seen_pull:
+            return f"no heartbeat within {n} minutes of renting"
+        quiet = now - self.last_change
+        if quiet >= self.stall_s:
+            return (f"no heartbeat within {n} minutes of renting: the image pull stalled "
+                    f"(vast's status unchanged for {quiet / 60:.0f} minutes)")
+        if now - self.created > self.ceiling_s:
+            return (f"no heartbeat within {n} minutes of renting: the image was still pulling "
+                    f"{self.ceiling_s / 60:g} minutes after renting (the ceiling)")
+        return None
+
+    def line(self, now: float, info: dict | None, state: str, detail: str) -> str:
+        """The log line of one poll while the first heartbeat is awaited."""
+        minutes = (now - self.created) / 60
+        if self.started_at is None and self.pulling:
+            text = f"still pulling the image ({minutes:.0f} min): {redact(self.msg or '')[:300]}"
+            if now - self.created > self.base_s:
+                text += (f"; past the usual {self.startup_min} minutes, waiting while the pull moves "
+                         f"(gives up after {self.stall_s / 60:g} min unchanged, or {self.ceiling_s / 60:g} min in all)")
+        else:
+            text = f"waiting for the machine to start (image download and boot): {redact(status_line(info))}"
+            if self.started_at is not None:
+                text += (f"; container started {(now - self.started_at) / 60:.0f} min ago, first heartbeat due within "
+                         f"{self.startup_min} minutes of that")
+        return text + (f"; {detail}" if state != "alive" else "")
 
 
 def vast_cpu_pct(info: dict | None) -> float | None:
@@ -1394,6 +1570,8 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
     silent_logged = False
     eta_warned = False
     live = Liveness(instance_id)
+    start = StartClock(created, a.startup_minutes, getattr(a, "pull_ceiling_min", PULL_CEILING_MIN),
+                       getattr(a, "pull_stall_min", PULL_STALL_MIN))
     # Heartbeats of an earlier machine of this run do not count as this one's.
     first_key = None
     for attempt in range(3):
@@ -1429,8 +1607,6 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
             last_key, last_change = key, now
         last_hb = hb
         if key is None:
-            if now - created > a.startup_minutes * 60:
-                return "", f"no heartbeat within {a.startup_minutes} minutes of renting", True, False
             state, info = live.check()
             bad = container_start_error(info)
             if bad:
@@ -1439,8 +1615,12 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
             if state == "gone":
                 # Nothing ran on it, so even a format-1 run is safe to retry on another offer.
                 return "", f"{START_FAILED}: instance gone before the first heartbeat ({live.detail})", True, False
-            log(f"waiting for the machine to start (image download and boot): {redact(status_line(info))}"
-                + (f"; {live.detail}" if state != "alive" else ""))
+            start.see(now, info)
+            why = start.verdict(now)
+            if why:
+                log(f"::warning::giving up on instance {instance_id}: {why}; last status: {redact(status_line(info))}")
+                return "", why, True, False
+            log(start.line(now, info, state, live.detail))
             continue
         silent_s = now - last_change
         if silent_s > HEARTBEAT_STALE_S:
@@ -1566,6 +1746,10 @@ def main(argv: list[str] | None = None) -> int:
                        help="the host reliability floor (default 0.90, the owner's rule of 2026-10-16); raise it for a run that wants a steadier host")
         s.add_argument("--disk-gb", type=int, default=20)
         s.add_argument("--max-net-cost", type=float, default=0.10, help="max $/GB up or down (owner 2026-10-14: 0.10; our traffic is tiny)")
+        s.add_argument("--min-inet-down", type=float, default=MIN_INET_DOWN,
+                       help="minimum download speed in Mbps an offer must report (vast's inet_down; default 500: the base "
+                            "image is several GB; 0 = no filter). Under 200 Mbps the ranking adds a penalty (without "
+                            "--cheapest); --offer-id only reports a slower link")
         s.add_argument("--premium", type=float, default=0.20, help="speed premium margin (owner's 20%% rule)")
         s.add_argument("--max-dph", type=float, default=None, help="max total $/hour for the offer")
         s.add_argument("--cpu-match", default="", help="regex the offer's CPU name must match (e.g. EPYC)")
@@ -1612,7 +1796,16 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--max-dollars", type=float, default=MAX_DOLLARS,
                    help=f"stop the run (stop and upload, then destroy) once its machines have cost this much "
                         f"(default ${MAX_DOLLARS:.0f}; 0 = no limit)")
-    s.add_argument("--startup-minutes", type=int, default=15)
+    s.add_argument("--startup-minutes", type=int, default=15,
+                   help="minutes to the first heartbeat: from renting, or from the container starting once vast's "
+                        "status says 'success, running' (a machine still pulling the image is given longer, see "
+                        "--pull-ceiling-min)")
+    s.add_argument("--pull-ceiling-min", type=float, default=PULL_CEILING_MIN,
+                   help="a machine still pulling the image when --startup-minutes from renting are used up is given "
+                        "more time while vast's status shows the pull advancing, but never past this many minutes "
+                        "from renting")
+    s.add_argument("--pull-stall-min", type=float, default=PULL_STALL_MIN,
+                   help="...and it is destroyed when vast's status has not changed for this many minutes")
     s.add_argument("--stop-wait-s", type=int, default=STOP_WAIT_S,
                    help="before destroying a machine that is still working (time limit, low CPU, Ctrl-C), ask it to "
                         "stop and wait this long for it to upload what it finished")

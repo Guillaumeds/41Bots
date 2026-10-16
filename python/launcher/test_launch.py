@@ -58,6 +58,7 @@ class World:
         #                                      successfully read list without the instance), "fail", or "normal"
         self.listing_times: list[float] = []  # the clock at each `show instances` call
         self.status_times: list[float] = []  # ...and at each `show instance` call
+        self.status_msg_fn = None  # f(instance, minutes since it was rented) -> the status_msg `show instance` answers
 
     # ---- clock
     def time(self) -> float:
@@ -111,6 +112,15 @@ class World:
                 self.store[f"runs/{RUN}/DONE"] = b"{}"
                 inst["alive"] = False
             return
+        if kind == "late":
+            # Silent for n polls (its image was still being pulled), then heartbeats, done m polls later.
+            if inst["polls"] <= n:
+                return
+            self.heartbeat("chunk", 99.0)
+            if inst["polls"] >= n + int(args[1]):
+                self.store[f"runs/{RUN}/DONE"] = b"{}"
+                inst["alive"] = False
+            return
         if kind == "obeys" and inst["polls"] >= n:
             # A replacement that sees no STOP finishes its work.
             self.store[f"runs/{RUN}/DONE"] = b"{}"
@@ -148,6 +158,10 @@ class World:
             if self.search_fails:
                 raise RuntimeError("vastai search offers failed: 429 Too Many Requests")
             rows = [dict(o) for o in self.offers]
+            for tok in args[2].split():
+                if tok.startswith("inet_down>="):
+                    # vast filters on the download speed; an offer that reports none is kept here.
+                    rows = [o for o in rows if o.get("inet_down") is None or o["inet_down"] >= float(tok[11:])]
             if "verified=true" in args[2].split():
                 # vast's search then returns only verified hosts; `verified=any` lifts that.
                 rows = [o for o in rows if o.get("verification", "verified") == "verified"]
@@ -219,6 +233,10 @@ class World:
                 return {"actual_status": "created", "intended_status": "running",
                         "status_msg": "Error response from daemon: failed to create task for container: "
                                       "failed to inject CDI devices: OCI runtime create failed: sk-test-secret-3"}
+            if self.status_msg_fn is not None:
+                msg = self.status_msg_fn(inst, (self.t - inst["created"]) / 60)
+                return {"actual_status": "running" if msg.startswith("success") else "loading",
+                        "intended_status": "running", "status_msg": msg}
             return {"actual_status": "running", "intended_status": "running"}
         if cmd == ("destroy", "instance"):
             self.destroy_calls += 1
@@ -266,6 +284,18 @@ def offer(i: int, machine: int, dph: float, **kw) -> dict:
          "gpu_frac": 1.0, "rentable": True}
     o.update(kw)
     return o
+
+
+def pull_msgs(until: float | None = None, start: float | None = None):
+    """What vast's status_msg says over time for a machine pulling the image: a docker layer line
+    whose byte count grows each minute until minute `until` (then it freezes; None = never), and
+    "success, running ..." from minute `start` (the container started; None = never)."""
+    def msg(inst, minutes):
+        if start is not None and minutes >= start:
+            return "success, running img:1"
+        m = minutes if until is None else min(minutes, until)
+        return f"a1b2c3d4e5f6: Downloading [===>   ] {int(m * 10)}MB/900MB"
+    return msg
 
 
 class LauncherTest(unittest.TestCase):
@@ -756,6 +786,195 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(len(w.created_on), 4)
         self.assertEqual(report["replacements"], 3)
+
+    # ---- image pulls and download speed (2026-10-16, run m3-hybrid-r1-c16m-2)
+
+    FORMAT1 = {"run_id": RUN, "chunk": {"difftest": {"matches": 10, "seed": 1}}}
+
+    def test_pull_progress_extends_the_wait_and_the_container_start_resets_the_clock(self):
+        # The harness gives 5 minutes (--startup-minutes 5). The image is still being pulled at
+        # minute 5, 6, ... and vast's status keeps changing: the machine is not destroyed. The
+        # container starts at minute 20 and the first heartbeat comes at minute 23, within 5
+        # minutes of the start (and long past 5 minutes from renting).
+        w = World([offer(1, 11, 1.0), offer(2, 12, 1.5)], ["late:22:3", "done:1"])
+        w.status_msg_fn = pull_msgs(start=20)
+        code, report = self.run_launch(w, self.FORMAT1)
+        self.assertEqual((code, report["outcome"]), (0, "DONE"))
+        self.assertEqual((w.created_on, report["replacements"]), ([1], 0))
+        self.assertGreaterEqual(report["attempts"][0]["minutes"], 23)
+        self.assertIn("still pulling the image (12 min): a1b2c3d4e5f6: Downloading", self.log)
+        self.assertIn("past the usual 5 minutes, waiting while the pull moves (gives up after 10 min unchanged, or 40 min in all)", self.log)
+        self.assertIn("container started 2 min ago, first heartbeat due within 5 minutes of that", self.log)
+        # Without the extension (ceiling no later than the startup minutes) the same machine dies
+        # at minute 6, which is what the old rule did.
+        w = World([offer(1, 11, 1.0)], ["late:22:3"])
+        w.status_msg_fn = pull_msgs(start=20)
+        code, report = self.run_launch(w, self.FORMAT1, "--pull-ceiling-min", "5")
+        self.assertEqual(code, 1)
+        self.assertIn("still pulling", report["attempts"][0]["ended"])
+        self.assertLess(report["attempts"][0]["minutes"], 8)
+
+    def test_a_stalled_pull_still_dies(self):
+        # The status changes until minute 6 and then freezes: past the 5 minutes, the machine is
+        # waited for until its status has not changed for 10 minutes (minute 16), then destroyed.
+        w = World([offer(1, 11, 1.0)], ["never:0"])
+        w.status_msg_fn = pull_msgs(until=6)
+        code, report = self.run_launch(w, self.FORMAT1)
+        self.assertEqual(code, 1)
+        ended = report["attempts"][0]["ended"]
+        self.assertTrue(ended.startswith("no heartbeat within 5 minutes of renting"), ended)
+        self.assertIn("image pull stalled (vast's status unchanged for 10 minutes)", ended)
+        self.assertTrue(15.5 <= report["attempts"][0]["minutes"] <= 17.5, report["attempts"][0]["minutes"])
+        self.assertIn("still pulling the image (10 min)", self.log)
+        # --pull-stall-min shortens it.
+        w = World([offer(1, 11, 1.0)], ["never:0"])
+        w.status_msg_fn = pull_msgs(until=6)
+        code, report = self.run_launch(w, self.FORMAT1, "--pull-stall-min", "3")
+        self.assertIn("unchanged for 3 minutes", report["attempts"][0]["ended"])
+        self.assertTrue(8.5 <= report["attempts"][0]["minutes"] <= 10.5, report["attempts"][0]["minutes"])
+
+    def test_the_pull_ceiling_ends_a_pull_that_keeps_changing(self):
+        self.assertEqual((launch.PULL_CEILING_MIN, launch.PULL_STALL_MIN, launch.MIN_INET_DOWN), (40, 10, 500))
+        w = World([offer(1, 11, 1.0)], ["never:0"])
+        w.status_msg_fn = pull_msgs()
+        code, report = self.run_launch(w, self.FORMAT1, "--pull-ceiling-min", "12")
+        self.assertEqual(code, 1)
+        ended = report["attempts"][0]["ended"]
+        self.assertIn("the image was still pulling 12 minutes after renting (the ceiling)", ended)
+        self.assertTrue(12.5 <= report["attempts"][0]["minutes"] <= 14.5, report["attempts"][0]["minutes"])
+
+    def test_without_pull_progress_the_old_rule_applies(self):
+        # A status that never shows a pull (even if its text changes): destroyed 5 minutes after
+        # renting, with the old reason word for word. Nothing is ever destroyed earlier than before.
+        w = World([offer(1, 11, 1.0)], ["never:0"])
+        w.status_msg_fn = lambda inst, minutes: f"Loading, {int(minutes)} min"
+        code, report = self.run_launch(w, self.FORMAT1)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["attempts"][0]["ended"], "no heartbeat within 5 minutes of renting")
+        self.assertTrue(5.5 <= report["attempts"][0]["minutes"] <= 7.5, report["attempts"][0]["minutes"])
+        # No status text at all (the plain fake): the same.
+        w = World([offer(1, 11, 1.0)], ["never:0"])
+        code, report = self.run_launch(w, self.FORMAT1)
+        self.assertEqual(report["attempts"][0]["ended"], "no heartbeat within 5 minutes of renting")
+        # A pull that froze before the 5 minutes were used up: still destroyed at 5, not later.
+        w = World([offer(1, 11, 1.0)], ["never:0"])
+        w.status_msg_fn = pull_msgs(until=0)
+        code, report = self.run_launch(w, self.FORMAT1, "--startup-minutes", "9", "--pull-stall-min", "2")
+        self.assertIn("image pull stalled", report["attempts"][0]["ended"])
+        self.assertTrue(9.5 <= report["attempts"][0]["minutes"] <= 11.5, report["attempts"][0]["minutes"])
+
+    def test_container_start_gives_the_first_heartbeat_five_minutes_from_the_start(self):
+        # Started at minute 4, first heartbeat at minute 8: after the 5 minutes from renting, within
+        # 5 minutes of the start.
+        w = World([offer(1, 11, 1.0)], ["late:7:3"])
+        w.status_msg_fn = pull_msgs(start=4)
+        code, report = self.run_launch(w, self.FORMAT1)
+        self.assertEqual((code, report["outcome"], w.created_on), (0, "DONE", [1]))
+        # Started at minute 4 and silent: destroyed 5 minutes after the start (minute 9), not before.
+        w = World([offer(1, 11, 1.0)], ["never:0"])
+        w.status_msg_fn = pull_msgs(start=4)
+        code, report = self.run_launch(w, self.FORMAT1)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["attempts"][0]["ended"], "no heartbeat within 5 minutes of the container starting")
+        self.assertTrue(9.5 <= report["attempts"][0]["minutes"] <= 11.5, report["attempts"][0]["minutes"])
+        # After a long pull (container started at minute 20), the 5 minutes count from minute 20.
+        w = World([offer(1, 11, 1.0)], ["never:0"])
+        w.status_msg_fn = pull_msgs(start=20)
+        code, report = self.run_launch(w, self.FORMAT1)
+        self.assertEqual(report["attempts"][0]["ended"], "no heartbeat within 5 minutes of the container starting")
+        self.assertTrue(25.5 <= report["attempts"][0]["minutes"] <= 27.5, report["attempts"][0]["minutes"])
+
+    def test_pull_message_and_start_clock_readings(self):
+        for msg in ("a1b2c3d4e5f6: Pulling fs layer", "a1b2c3d4e5f6: Waiting", "a1b2c3d4e5f6: Download complete",
+                    "a1b2c3d4e5f6: Pull complete", "a1b2c3d4e5f6: Extracting [==>  ] 1.2GB/3.5GB",
+                    "Verifying Checksum", "a1b2c3d4e5f6: Already exists", "Pulling from library/x"):
+            self.assertTrue(launch.pull_message(msg), msg)
+        for msg in ("", "Loading", "waiting for host", "success, running img:1", "created"):
+            self.assertFalse(launch.pull_message(msg), msg)
+        self.assertTrue(launch.container_started("success, running ghcr.io/x/y:1"))
+        self.assertTrue(launch.container_started("Success, running img"))
+        self.assertFalse(launch.container_started("a1b2c3d4e5f6: Pull complete"))
+        # A reading with no status_msg (vast unreadable, or a row of the instance list) changes nothing:
+        # in particular it does not restart the "unchanged for 10 minutes" clock.
+        c = launch.StartClock(0.0, 15, 40, 10)
+        c.see(60.0, {"status_msg": "a1b2c3d4e5f6: Downloading 1MB/9MB"})
+        c.see(120.0, {"actual_status": "running"})
+        c.see(180.0, None)
+        self.assertEqual((c.last_change, c.pulling, c.started_at), (60.0, True, None))
+        c.see(240.0, {"status_msg": "success, running img:1"})
+        self.assertEqual((c.started_at, c.pulling), (240.0, False))
+        c.see(900.0, {"status_msg": "something else"})
+        self.assertEqual(c.started_at, 240.0)  # once started, always started
+        self.assertIsNone(c.verdict(240.0 + 900.0))
+        self.assertIn("of the container starting", c.verdict(240.0 + 901.0))
+
+    def test_every_search_asks_for_a_fast_downlink(self):
+        w = World([offer(1, 11, 1.0)], ["done:1"])
+        self.run_launch(w, self.FORMAT1)
+        self.assertIn("inet_down>=500", w.queries[0].split())
+        # The fallback search (unverified hosts allowed) and a replacement's search carry it too.
+        w = World([offer(1, 11, 1.0, verification="unverified")], ["done:1"])
+        self.run_launch(w, self.FORMAT1, "--min-inet-down", "800")
+        self.assertEqual(len(w.queries), 2)
+        self.assertTrue(all("inet_down>=800" in q.split() for q in w.queries), w.queries)
+        # 0 turns the filter off.
+        w = World([offer(1, 11, 1.0)], ["done:1"])
+        self.run_launch(w, self.FORMAT1, "--min-inet-down", "0")
+        self.assertNotIn("inet_down", w.queries[0].replace("inet_down_cost", ""))
+        # An offer reporting a slower link is not returned by the (simulated) search.
+        w = World([offer(1, 11, 0.5, inet_down=120.0), offer(2, 12, 2.0, inet_down=900.0)], ["done:1"])
+        code, report = self.run_launch(w, self.FORMAT1)
+        self.assertEqual((code, w.created_on), (0, [2]))
+
+    def test_a_slow_link_adds_a_penalty_to_the_ranking_unless_cheapest(self):
+        lf = launch.link_factor
+        self.assertEqual([lf({"inet_down": v}) for v in (500, 200, 199.99 + 0.01, "850")], [1.0, 1.0, 1.0, 1.0])
+        self.assertAlmostEqual(lf({"inet_down": 100}), 1.5)
+        self.assertAlmostEqual(lf({"inet_down": 0}), 2.0)
+        self.assertAlmostEqual(lf({"inet_down": 150.0}), 1.25)
+        self.assertEqual(lf({}), 1.0)  # no speed reported: nothing is known, no penalty
+        self.assertEqual(lf({"inet_down": None}), 1.0)
+        self.assertEqual(lf({"inet_down": "n/a"}), 1.0)
+        # The slow offer is 13% cheaper per hour but its link is 100 Mbps (x1.5): the fast one wins.
+        offers = [offer(1, 11, 1.00, inet_down=100.0), offer(2, 12, 1.15, inet_down=900.0)]
+        w = World(offers, ["done:1"])
+        code, report = self.run_launch(w, self.FORMAT1, "--min-inet-down", "0")
+        self.assertEqual((code, w.created_on), (0, [2]))
+        self.assertIn("link 100 Mbps (slow: cost/work x1.50)", self.log)
+        self.assertIn("link 900 Mbps", self.log)
+        # --cheapest takes the lowest hourly price, link or not.
+        w = World(offers, ["done:1"])
+        code, report = self.run_launch(w, self.FORMAT1, "--min-inet-down", "0", "--cheapest")
+        self.assertEqual((code, w.created_on), (0, [1]))
+        self.assertNotIn("slow: cost/work", self.log)
+        # Equal links: the plain cost-per-work ranking, as before.
+        w = World([offer(1, 11, 1.00, inet_down=900.0), offer(2, 12, 1.15, inet_down=900.0)], ["done:1"])
+        self.run_launch(w, self.FORMAT1, "--min-inet-down", "0")
+        self.assertEqual(w.created_on, [1])
+
+    def test_offer_chosen_by_id_with_a_slow_link_is_accepted_and_reported(self):
+        w = World([offer(500, 50, 1.0, inet_down=80.0)], ["done:1"])
+        w.forbid_search = True
+        code, report = self.run_launch(w, self.FORMAT1, "--offer-id", "500")
+        self.assertEqual((code, w.created_on, w.searches, w.id_lookups), (0, [500], 0, 1))
+        self.assertIn("offer 500 reports a download link of 80 Mbps, below --min-inet-down 500", self.log)
+        self.assertIn("accepted, because the owner named it", self.log)
+        # A fast link: nothing to report. --min-inet-down 0: nothing to report either.
+        w = World([offer(500, 50, 1.0, inet_down=900.0)], ["done:1"])
+        self.run_launch(w, self.FORMAT1, "--offer-id", "500")
+        self.assertNotIn("below --min-inet-down", self.log)
+        w = World([offer(500, 50, 1.0, inet_down=80.0)], ["done:1"])
+        self.run_launch(w, self.FORMAT1, "--offer-id", "500", "--min-inet-down", "0")
+        self.assertNotIn("below --min-inet-down", self.log)
+        # A link speed vast does not report: said in the log, not refused.
+        w = World([offer(500, 50, 1.0)], ["done:1"])
+        code, _ = self.run_launch(w, self.FORMAT1, "--offer-id", "500")
+        self.assertEqual((code, w.created_on), (0, [500]))
+        self.assertIn("reports no download link speed", self.log)
+        # Every other check still refuses.
+        w = World([offer(500, 50, 1.0, inet_down=80.0, reliability2=0.5)], ["done:1"])
+        with self.assertRaises(SystemExit):
+            self.run_launch(w, self.FORMAT1, "--offer-id", "500")
 
     def test_silent_busy_machine_gets_time_then_stops_and_uploads(self):
         # Heartbeats stop but vast shows the machine busy (95% CPU): an upload problem, not a dead
