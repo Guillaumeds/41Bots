@@ -17,6 +17,9 @@ also run: the CUDA-graph step against the eager step, and training on the GPU ag
   ``--feed staged`` with a batch profile and ``--cuda-graph off`` give the same network as
   ``--device cpu``, and the progress file and the report record the device, the feed, the
   training step's mode and the profile;
+- streamed shards join in place (class ``Columns``): the rows of the former join, no earlier
+  feed alive at a join, a join's peak memory the joining rows and their load buffer (measured in
+  a fresh process), and the same network as the former join, byte for byte;
 - the CUDA-graph step's bookkeeping, without a GPU (``train.Replayed`` stands in for the graph:
   each replay runs the captured step again on the graph's input buffers): the same losses, loss
   sums and network as eager steps, bit for bit, over epochs with partial batches and a new
@@ -35,10 +38,14 @@ import copy
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
+import textwrap
 import threading
 import time
 import unittest
+import weakref
 from unittest import mock
 
 import numpy as np
@@ -571,6 +578,113 @@ class StreamTest(unittest.TestCase):
         self.assertGreaterEqual(rep["best_epoch"], 2, "the best network has seen every shard")
         self.assertEqual(rep["data"]["train"], [sha256_file(p) for p in self.shards])
         self.assertEqual(len(rep["seconds"]["epochs"]), 4)
+
+    def test_columns_grow_as_the_former_join(self):
+        """``Columns`` holds exactly the rows of the former join (``join_parts``), shard after
+        shard (one of none among them), drops each shard's own arrays as it copies them, and with
+        a view still held copies into new maps (the same rows, counted) rather than move under it."""
+        parts = [{"name": n, "comp": train.load_compact([load_shard(p)])}
+                 for n, p in zip("abcd", self.shards + [self.shards[1]])]
+        parts.insert(2, {"name": "empty", "comp": [c[:0].copy() for c in parts[0]["comp"]]})
+        want = None
+        for p in parts:
+            want = train.join_parts(want, [{"comp": [c.copy() for c in p["comp"]]}])
+        store = train.Columns()
+        store.join(parts[:2])
+        held = store.arrays()
+        store.join(parts[2:4])
+        self.assertEqual((store.joins, store.copied), (4, 1), "a held view: copied, not moved")
+        for a, b in zip(held, want):
+            self.assertTrue(np.array_equal(a, b[: len(a)]), "the held view still reads its rows")
+        del held
+        store.join(parts[4:])
+        self.assertEqual((store.joins, store.copied, store.rows), (5, 1, len(want[0])))
+        got = store.arrays()
+        self.assertEqual([(a.dtype, a.shape) for a in got], [(b.dtype, b.shape) for b in want])
+        for a, b in zip(got, want):
+            self.assertTrue(np.array_equal(a, b))
+        self.assertTrue(all("comp" not in p for p in parts), "each shard's own arrays are dropped")
+
+    def test_a_join_grows_in_place_and_peaks_at_the_rows_in(self):
+        """Measured in a fresh process (its peak resident memory, ``VmHWM``, from just before the
+        join): joining T rows to R
+        rows in place costs the joining shard's rows and their load buffer, never a second copy of
+        the R rows in (the former join: about 2R + 2T)."""
+        if not os.path.exists("/proc/self/clear_refs"):
+            self.skipTest("needs /proc/self/clear_refs (Linux)")
+        code = textwrap.dedent("""
+            import json, numpy as np
+            from fortyone_nn import train
+
+            def status(key):
+                with open("/proc/self/status") as f:
+                    return next(int(l.split()[1]) * 1024 for l in f if l.startswith(key))
+
+            def reset_peak():  # Linux: the peak (VmHWM) starts again from the memory in use now
+                with open("/proc/self/clear_refs", "w") as f:
+                    f.write("5")
+
+            R, T, W = 2_000_000, 500_000, 64
+            def part(n, v):
+                return {"comp": [np.full((n, W), v, dtype=np.int16)]}
+
+            store = train.Columns()
+            store.join([part(R, 1)])
+            reset_peak()
+            base = status("VmRSS")
+            store.join([part(T, 2)])
+            a = store.arrays()[0]
+            ok = bool(a[R - 1, 0] == 1 and a[R, 0] == 2 and a.shape == (R + T, W))
+            print(json.dumps({"base": base, "peak": status("VmHWM"), "r": R * W * 2, "t": T * W * 2, "ok": ok,
+                              "copied": store.copied}))
+        """)
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        out = subprocess.run([sys.executable, "-c", code], cwd=here, capture_output=True, text=True, check=True)
+        m = json.loads(out.stdout.strip().splitlines()[-1])
+        self.assertTrue(m["ok"])
+        self.assertEqual(m["copied"], 0)
+        grew = m["peak"] - m["base"]
+        # In place: the T rows and their T-row load buffer (2T, 128 MB measured on 2026-10-16); the
+        # former join also copied the R rows in (R + 2T, 384 MB measured).
+        self.assertLess(grew, 2 * m["t"] + m["r"] // 2, m)
+
+    def test_a_join_releases_the_old_rows_and_trains_the_same_network(self):
+        """At every join no earlier feed is alive (weak references; the feed holds the old rows or
+        their copy on the GPU), every join is in place, and the trained network is byte for byte
+        the network of the former join (``join_parts``, copies)."""
+        feeds, alive_at_join = [], []
+
+        class TrackedFeed(train.Feed):
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                feeds.append(weakref.ref(self))
+
+        class TrackedColumns(train.Columns):
+            def join(self, parts):
+                alive_at_join.append(sum(1 for r in feeds if r() is not None))
+                super().join(parts)
+
+        class FormerJoin:
+            """The former join behind ``Columns``' interface."""
+
+            def __init__(self):
+                self.comp, self.rows, self.joins, self.copied = None, 0, 0, 0
+
+            def join(self, parts):
+                self.comp = train.join_parts(self.comp, parts)
+                self.rows, self.joins = len(self.comp[0]), self.joins + len(parts)
+
+            def arrays(self):
+                return self.comp
+
+        with mock.patch.object(train, "Feed", TrackedFeed), mock.patch.object(train, "Columns", TrackedColumns):
+            a, rep = self.streamed("rel")
+        self.assertEqual(alive_at_join, [0, 0, 0], "no feed outlives its rows into a join")
+        self.assertEqual((rep["stream"]["joins_in_place"], rep["stream"]["joins_copied"]), (3, 0))
+        self.assertEqual(len(feeds), 3)
+        with mock.patch.object(train, "Columns", FormerJoin):
+            b, _ = self.streamed("former")
+        self.assertEqual(a, b, "the in-place join trains the former join's network")
 
     def test_wrong_shards_are_refused(self):
         w = os.path.join(self.dir.name, "two")

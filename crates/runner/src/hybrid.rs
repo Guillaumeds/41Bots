@@ -49,7 +49,7 @@
 //! the training starts once part 1 is made, watching the parts' directory (`train.py
 //! --watch-dir --expect`: each later shard joins between epochs; patience, the learning-rate
 //! scheduler and the best network count only epochs on every shard), and the later parts are
-//! made on the threads it leaves; its time limit counts from the last shard. `partial_epochs`
+//! made on the threads it leaves (its stall watch never counts a wait for a shard). `partial_epochs`
 //! (0: no limit) caps the epochs on each partial set (`--partial-epochs`). One part is the former
 //! behaviour, step for step. Epochs on part of the data warm-start the full training, which can
 //! cost a little accuracy (docs/m3-hybrid/overlap.md); the validation loss says.
@@ -128,8 +128,10 @@
 //! table, the last rows of a shard; the shards are hashed and written while their rows are made,
 //! and the start states are played on every thread), so their heartbeats can read low too: the
 //! rule would stop a healthy run. Instead the steps that could hang are time-limited (killed, and the chunk fails):
-//! each `uv sync` attempt 30 minutes, the GPU check 10 minutes, the training `max_minutes` plus
-//! 30 minutes; the run's dollar cap bounds everything.
+//! each `uv sync` attempt 30 minutes, the GPU check 10 minutes; the training stops itself after
+//! `max_minutes` and is killed only when its progress file stops changing for the larger of
+//! `train_stall_minutes` (30) and 3 times its longest epoch while it is not waiting for data
+//! ([`crate::Stall`]); the run's dollar cap bounds everything.
 //!
 //! Reproducibility: the labels, the golden set and the check are byte-identical on every machine
 //! and thread count (`search`). Float training on a GPU is not bit-reproducible across machines;
@@ -158,7 +160,7 @@ use crate::{Ctx, sibling};
 mod audit;
 
 /// The settings a `hybrid_rung` chunk takes; any other key is refused.
-pub(crate) const KEYS: [&str; 60] = [
+pub(crate) const KEYS: [&str; 61] = [
     "cut",
     "check",
     "audit_rounds",
@@ -210,6 +212,7 @@ pub(crate) const KEYS: [&str; 60] = [
     "patience",
     "train_seed",
     "max_minutes",
+    "train_stall_minutes",
     "mix_weight",
     "device",
     "train_threads",
@@ -238,8 +241,16 @@ const SYNC_LIMIT: Duration = Duration::from_secs(30 * 60);
 /// The GPU check's limit (a CUDA start-up that hangs on a faulty GPU).
 const CHECK_LIMIT: Duration = Duration::from_secs(10 * 60);
 
-/// The training's limit beyond its own `max_minutes`.
-const TRAIN_EXTRA: Duration = Duration::from_secs(30 * 60);
+/// The trainer is watched through its progress file, not a time limit ([`crate::Stall`]): it
+/// stops itself after `max_minutes` between epochs, but an epoch of a wide network on 60M+ rows,
+/// the loading of a shard that joins and the waits for the run's own shards (the audit loop's
+/// targeted harvest, mini golden sets and slices) can each take longer than any fixed extra.
+/// It is killed only when its progress file (rewritten about every 20 s within an epoch, and at
+/// every step) stays unchanged for the larger of `train_stall_minutes` (default this) and
+/// `TRAIN_STALL_EPOCHS` times its longest epoch, never while it waits for data the run is still
+/// making.
+const TRAIN_STALL_MINUTES: f64 = 30.0;
+const TRAIN_STALL_EPOCHS: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Device {
@@ -314,6 +325,8 @@ pub(crate) struct Params {
     pub patience: u64,
     pub train_seed: u64,
     pub max_minutes: f64,
+    /// `train_stall_minutes` (30): the floor of the trainer's stall watch ([`TRAIN_STALL_EPOCHS`]).
+    pub train_stall_minutes: f64,
     pub mix_weight: f64,
     pub device: Device,
     pub train_threads: Option<u64>,
@@ -404,6 +417,7 @@ impl Params {
             "net": { "widths": self.widths, "head": self.head, "epochs": self.epochs,
                      "batch": self.batch, "lr": self.lr, "patience": self.patience,
                      "seed": self.train_seed, "max_minutes": self.max_minutes,
+                     "train_stall_minutes": self.train_stall_minutes,
                      "mix_weight": self.mix_weight },
             "device": self.device.name(), "train_threads": self.train_threads,
             "compare_cpu": self.compare_cpu, "upload_shards": self.upload_shards,
@@ -594,12 +608,24 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         (0, 105),
     )?;
     let harvest_net = input("harvest_net")?;
-    if harvest_net.is_some() && harvest.count == 0 && race.count == 0 {
+    // The audit loop's harvests (its audit shards and targeted harvests) are harvests too: at
+    // trick 3 and earlier, round 1's audit shard is driven by `harvest_net` (no network of the
+    // loop's own exists yet), later rounds by the latest network.
+    let audit_rounds = o.get("audit_rounds").and_then(Value::as_u64).unwrap_or(0);
+    if harvest_net.is_some() && harvest.count == 0 && race.count == 0 && audit_rounds == 0 {
         return Err(
-            "hybrid_rung: harvest_net drives the harvest's search: it needs labels_harvest or \
-             labels_race above 0"
+            "hybrid_rung: harvest_net drives the harvest's search: it needs labels_harvest, \
+             labels_race or audit_rounds above 0"
                 .into(),
         );
+    }
+    if audit_rounds > 0 && cut <= 3 && harvest_net.is_none() {
+        return Err(format!(
+            "hybrid_rung: the audit loop at cut {cut} needs harvest_net: round 1's audit shard is \
+             harvested before the loop has a network of its own, and exact values at the \
+             frontier of trick {cut} (a search of every reached position to the end of the hand) \
+             would not finish"
+        ));
     }
     let golden_inputs = match (
         input("golden_decisions_input")?,
@@ -864,6 +890,10 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         patience: u("patience", 5)?,
         train_seed: u("train_seed", 1)?,
         max_minutes: f("max_minutes", 200.0)?,
+        train_stall_minutes: match f("train_stall_minutes", TRAIN_STALL_MINUTES)? {
+            m if m > 0.0 => m,
+            _ => return Err("hybrid_rung: train_stall_minutes must be above 0".into()),
+        },
         mix_weight: f("mix_weight", 1.0)?,
         device,
         train_threads,
@@ -2044,11 +2074,14 @@ impl Rung<'_> {
         c
     }
 
-    /// The trainer's time limit: it stops itself after `max_minutes` (between epochs); loading,
-    /// the last epoch, quantising and the integer check get 30 minutes more.
-    fn train_limit(&self) -> Option<Duration> {
-        (self.p.max_minutes > 0.0)
-            .then(|| Duration::from_secs_f64(self.p.max_minutes * 60.0) + TRAIN_EXTRA)
+    /// The trainer's watch ([`TRAIN_STALL_MINUTES`]) on its progress file `prog`. Its own
+    /// `max_minutes` still ends its training between epochs.
+    fn train_stall(&self, prog: &Path) -> crate::Stall {
+        crate::Stall::new(
+            prog.to_path_buf(),
+            Duration::from_secs_f64(self.p.train_stall_minutes * 60.0),
+            TRAIN_STALL_EPOCHS,
+        )
     }
 
     /// Step 6: one training run on `device` into `dir`, recorded under `key`.
@@ -2070,9 +2103,9 @@ impl Rung<'_> {
             json!({ "train_device": device, "train_threads": threads }),
         );
         self.ctx.set_phase("chunk", base.clone());
-        let limit = self.train_limit();
+        let stall = self.train_stall(&prog);
         self.ctx
-            .run_child_io(c, &format!("hybrid/{key}.log"), None, limit, &mut |ctx| {
+            .run_child_stall(c, &format!("hybrid/{key}.log"), stall, &mut |ctx| {
                 let mut p = base.clone();
                 merge_train(&mut p, &prog);
                 ctx.progress = p;
@@ -2102,8 +2135,9 @@ impl Rung<'_> {
     ) -> Result<(), String> {
         let device = self.device.clone();
         let threads = self.train_threads();
-        let limit = self.train_limit();
-        self.ctx.spawn_bg(c, log, "train", limit)?;
+        let stall = self.train_stall(&prog);
+        self.ctx.spawn_bg(c, log, "train", None)?;
+        self.ctx.watch_bg("train", stall);
         self.beside
             .push(("train".into(), "train".into(), Some(prog.clone()), threads));
         println!(
@@ -2749,7 +2783,8 @@ mod tests {
         let key = format!("inputs/sha256/{}", "ab".repeat(32));
         bad(
             json!({ "harvest_net": key }),
-            "harvest_net drives the harvest's search: it needs labels_harvest or labels_race above 0",
+            "harvest_net drives the harvest's search: it needs labels_harvest, labels_race or \
+             audit_rounds above 0",
         );
         bad(
             json!({ "labels_harvest": 5, "harvest_net": "o3/int.safetensors" }),
@@ -2832,6 +2867,51 @@ mod tests {
             json!({ "golden_decisions_input": key, "golden_worlds_input": "worlds.jsonl" }),
             "golden_worlds_input \"worlds.jsonl\" must be a stored input's key",
         );
+    }
+
+    /// Every committed manifest (docs/vast/*.manifest.json, found by listing the directory, so
+    /// one added later is checked too, before anyone rents for it) is one the runner accepts at
+    /// boot (`sched::parse_v2`: every stream's settings through its kind's parse, a hybrid
+    /// rung's audit settings included), its placeholders (`REPLACE_WITH_…`, stored inputs still
+    /// to upload) filled with stored-input keys; and each hybrid rung's settings parse again
+    /// here. None is skipped.
+    #[test]
+    fn every_committed_manifest_parses() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/vast");
+        let mut paths: Vec<PathBuf> = fs::read_dir(&dir)
+            .expect("docs/vast")
+            .map(|e| e.expect("entry").path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(".manifest.json"))
+            })
+            .collect();
+        paths.sort();
+        assert!(paths.len() >= 8, "{paths:?}");
+        let mut rungs = 0;
+        for path in &paths {
+            let mut text = fs::read_to_string(path).expect("read");
+            // Each placeholder its own 64-hex key.
+            let mut k = 0u64;
+            while let Some(at) = text.find("REPLACE_WITH_") {
+                let end = text[at..]
+                    .find(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+                    .map_or(text.len(), |n| at + n);
+                let token = text[at..end].to_string();
+                k += 1;
+                text = text.replace(&token, &format!("{k:064x}"));
+            }
+            let v: Value =
+                serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let m = crate::sched::parse_v2(&v)
+                .unwrap_or_else(|e| panic!("{}: the runner refuses it: {e}", path.display()));
+            for s in m.streams.iter().filter(|s| s.kind == "hybrid_rung") {
+                parse(&s.params).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                rungs += 1;
+            }
+        }
+        assert!(rungs >= 6, "{rungs} hybrid rungs");
     }
 
     /// The committed manifests (docs/vast/m3-hybrid-*.manifest.json) are runnable: the runner
@@ -3723,6 +3803,47 @@ esac
     /// The golden set made beside the training: when either fails the other is stopped at once
     /// and the chunk fails with the reason (nothing is left running).
     #[cfg(unix)]
+    /// The trainer is watched through its progress file (`train_stall_minutes`, here 0.02 min):
+    /// a trainer whose file stops changing while it trains is killed with the reason and the
+    /// chunk fails at once; one that waits for data beside the steps making it is not (the
+    /// stream test's trainers, and `crate::tests::stall_watch_kills_only_a_quiet_child`).
+    #[cfg(unix)]
+    #[test]
+    fn a_quiet_trainer_is_killed_by_its_stall_watch() {
+        let f = fakes("stall");
+        let params = parse(
+            &json!({ "labels_random": 7, "labels_rules": 0, "val_count": 3,
+                                    "golden_count": 2, "golden_worlds": 4, "widths": "16,8",
+                                    "epochs": 2, "train_stall_minutes": 0.02 }),
+        )
+        .expect("params");
+        assert_eq!(params.to_json()["net"]["train_stall_minutes"], 0.02);
+        let tools = gpu_tools(
+            &f,
+            "quiet-train",
+            r#"case "$2" in fortyone_nn.train)
+  p=""; prev=""; for a in "$@"; do [ "$prev" = --progress ] && p="$a"; prev="$a"; done
+  echo '{"step": "train", "epoch": 0}' > "$p"; sleep 30;; esac"#,
+            f.search.clone(),
+        );
+        let mut ctx = Ctx::local("hybrid-test", &f.base.join("a"), 16);
+        let t = Instant::now();
+        let e = chunk_steps(&mut ctx, &params, &tools, &f.table, json!({}))
+            .expect_err("the trainer was quiet");
+        assert!(
+            e.contains("step train: no progress in") && e.contains("net.progress.json"),
+            "{e}"
+        );
+        assert!(t.elapsed() < Duration::from_secs(25), "{:?}", t.elapsed());
+        assert!(ctx.bg.is_empty());
+        for bad in [json!(0), json!(-1)] {
+            let Err(e) = parse(&json!({ "train_stall_minutes": bad })) else {
+                panic!("refused")
+            };
+            assert!(e.contains("train_stall_minutes"), "{e}");
+        }
+    }
+
     #[test]
     fn golden_beside_training_fails_cleanly() {
         let f = fakes("overlapfail");
@@ -4376,8 +4497,29 @@ fi
             ]
         );
         assert_eq!(a.min_gain, 0.15);
-        let at3 = parse(&json!({ "cut": 3, "audit_rounds": 1 })).expect("trick 3");
+        let net = format!("inputs/sha256/{}", "ab".repeat(32));
+        let at3 =
+            parse(&json!({ "cut": 3, "audit_rounds": 1, "harvest_net": net })).expect("trick 3");
         assert_eq!(at3.audit.expect("on").target_rows, 4_000_000);
+        // harvest_net drives round 1's audit shard at trick 3 and earlier: accepted with the
+        // audit loop alone (no harvest or race labels), and required there.
+        assert_eq!(at3.harvest_net, Some("ab".repeat(32)));
+        assert!(
+            at3.train
+                .iter()
+                .all(|s| s.name != "harvest" && s.name != "race")
+        );
+        for cut in [2, 3] {
+            let Err(e) = parse(&json!({ "cut": cut, "audit_rounds": 2 })) else {
+                panic!("refused")
+            };
+            assert!(
+                e.contains(&format!("the audit loop at cut {cut} needs harvest_net")),
+                "{e}"
+            );
+        }
+        let at4 = parse(&json!({ "audit_rounds": 2, "harvest_net": net })).expect("trick 4");
+        assert!(at4.audit.is_some() && at4.harvest_net.is_some());
         let sh = parse(&json!({ "widths": "16,8", "audit_rounds": 2,
                                 "audit_shapes": "<widths>; 32,16 ;64,32,8", "audit_min_gain": 0.3 }))
         .expect("shapes");

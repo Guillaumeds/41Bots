@@ -36,7 +36,7 @@
 //!                  harvest only: [--harvest-cap 16] [--harvest-positions 0.25,0.25,0.5]
 //!                  [--harvest-tricks K-1 | --harvest-tricks 2,3] [--harvest-net WEIGHTS]
 //!                  [--harvest-strata 1,2,3,4] [--harvest-race-classes 2,4 [--harvest-race-cap 256]]
-//!                  [--harvest-keep PRED.json [--keep-cap 256]]
+//!                  [--harvest-keep PRED.json [--keep-cap 256]] [--max-decisions N]
 //! search hybrid-check --trick T --cut K --net WEIGHTS --equity TABLE
 //!                  [--decisions FILE | --count N] [--seed 1] [--start-hands 20000]
 //!                  [--first I] [--last J] [--ids …] [--to 320] [--label 1]
@@ -86,7 +86,11 @@
 //! position's encoded features) are a seeded sample of at most `--keep-cap` (256) per decision,
 //! drawn first on the decision's stream, the others of at most `--harvest-cap` (0: in-group
 //! positions only); the sidecar's `harvest.keep` gives the file's SHA-256 and the rows and
-//! reached positions per group. Every shard's sidecar counts its
+//! reached positions per group. `--max-decisions N` bounds the decisions a harvest plays (a
+//! targeted harvest without it: `oracle_labels::default_max_decisions`, max(1000, ⌈50 × count /
+//! keep-cap⌉)); a harvest stopped by its bound writes the rows it found (the first decisions'
+//! rows, the same for any thread count; the shard is otherwise byte-identical), and a harvest's
+//! sidecar says `rows` (written), `decisions_played`, `max_decisions` and `bounded`. Every shard's sidecar counts its
 //! rows by race class (`rows_by_race_class`); a harvest's records its strata and race settings.
 //! `hybrid-check` measures the hybrid H_K (exact to the start of trick K, the oracle network
 //! there) against exact search on the same worlds (docs/M3-HYBRID-SPEC.md §3, `search::hybrid`):
@@ -1484,8 +1488,8 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
     use search::oracle_labels::{
         CHUNK_ROWS, Driver, GOLDEN_SEED, HARVEST_CAP, HARVEST_SHARES, HARVEST_STRATA,
         HARVEST_TT_MB, HarvestJob, KEEP_CAP, LabelJob, PredKeep, RACE_CAP, RaceKeep, Source,
-        parse_band_shares, parse_race_classes, parse_strata, position_schedule,
-        write_harvest_shard, write_label_shard,
+        default_max_decisions, parse_band_shares, parse_race_classes, parse_strata,
+        position_schedule, reheader_shard, write_harvest_shard_upto, write_label_shard,
     };
     let trick = a.num("--trick", 4)? as u8;
     if !(2..=5).contains(&trick) {
@@ -1515,6 +1519,7 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         "--harvest-race-cap",
         "--harvest-keep",
         "--keep-cap",
+        "--max-decisions",
     ];
     let harvest = if job.source == Source::Harvest {
         let keep = match a.get("--harvest-keep") {
@@ -1615,6 +1620,21 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
                  fewer decimals"
             ));
         }
+        // The bound on decisions played: `--max-decisions N`, else for a targeted harvest
+        // `default_max_decisions` (its rare groups could otherwise need millions of decisions);
+        // none for other harvests unless asked.
+        let max_decisions = match a.get("--max-decisions") {
+            Some(_) => {
+                let m = a.num("--max-decisions", 0)?;
+                if m == 0 {
+                    return Err("--max-decisions is at least 1".into());
+                }
+                Some(m)
+            }
+            None => keep
+                .as_ref()
+                .map(|(k, _)| default_max_decisions(job.count, k.cap)),
+        };
         Some((
             HarvestJob {
                 trick,
@@ -1631,6 +1651,7 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
             shares.to_string(),
             weights,
             keep.map(|(_, f)| f),
+            max_decisions,
         ))
     } else {
         if let Some(f) = harvest_flags.iter().find(|f| a.has(f)) {
@@ -1709,15 +1730,25 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         let mut part = out.as_os_str().to_owned();
         part.push(".part");
         let part = PathBuf::from(part);
-        let mut file =
-            std::fs::File::create(&part).map_err(|e| format!("{}: {e}", part.display()))?;
-        let summary = match &harvest {
-            Some((h, _, _, _)) => {
-                write_harvest_shard(h, &starts, &*leaf, driver, Some(done), &mut file)
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&part)
+            .map_err(|e| format!("{}: {e}", part.display()))?;
+        let mut summary = match &harvest {
+            Some((h, _, _, _, max)) => {
+                write_harvest_shard_upto(h, *max, &starts, &*leaf, driver, Some(done), &mut file)
             }
             None => write_label_shard(&job, &starts, &*leaf, Some(done), chunk_rows, &mut file),
         }
         .map_err(|e| format!("{}: {e}", part.display()))?;
+        if summary.rows < job.count {
+            // Bounded: the header says the rows asked; it is set right for the rows found.
+            summary.sha256 = reheader_shard(&mut file, summary.rows)
+                .map_err(|e| format!("{}: {e}", part.display()))?;
+        }
         drop(file);
         std::fs::rename(&part, &out).map_err(|e| format!("{}: {e}", out.display()))?;
         Ok::<_, String>(summary)
@@ -1768,7 +1799,21 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
     if job.source != Source::Rules {
         side["rows_by_position"] = serde_json::json!(&by_position[1..]);
     }
-    if let Some((h, shares, weights, keep_file)) = &harvest {
+    if let Some((h, shares, weights, keep_file, max)) = &harvest {
+        // Rows written and decisions played: fewer rows than `count` only when the bound on
+        // decisions stopped the harvest ("bounded").
+        side["rows"] = serde_json::json!(n_rows);
+        side["decisions_played"] = serde_json::json!(decisions.len());
+        side["max_decisions"] = serde_json::json!(max);
+        side["bounded"] = serde_json::json!(n_rows < job.count);
+        if n_rows < job.count {
+            eprintln!(
+                "labels: bounded: {} decisions played (--max-decisions {}), {n_rows} of {} rows",
+                decisions.len(),
+                max.unwrap_or(0),
+                job.count
+            );
+        }
         side["harvest"] = harvest_record(
             h,
             shares,

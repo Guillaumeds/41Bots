@@ -543,8 +543,25 @@ fn stream_shard<W: Write + Send, R>(
     v: usize,
     fill: impl FnOnce(&mut ShardSink) -> Result<R, String>,
 ) -> Result<(R, String, Duration, Duration), String> {
+    let want = nn::shard::header(rows as usize, v).len() as u64 + rows * row_bytes_for(v) as u64;
+    let (r, sha, hash_time, write_time, bytes) = stream_shard_upto(out, rows, v, fill)?;
+    if bytes != want {
+        return Err(format!(
+            "the shard has {bytes} bytes, but {rows} rows make {want}"
+        ));
+    }
+    Ok((r, sha, hash_time, write_time))
+}
+
+/// [`stream_shard`] whose `fill` may put fewer rows than the header's `rows` (a bounded
+/// harvest, [`write_harvest_shard_upto`]); also returns the bytes written.
+fn stream_shard_upto<W: Write + Send, R>(
+    out: &mut W,
+    rows: u64,
+    v: usize,
+    fill: impl FnOnce(&mut ShardSink) -> Result<R, String>,
+) -> Result<(R, String, Duration, Duration, u64), String> {
     let head = nn::shard::header(rows as usize, v);
-    let want = head.len() as u64 + rows * row_bytes_for(v) as u64;
     std::thread::scope(|s| {
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(WRITE_QUEUE);
         let writer = s.spawn(move || -> std::io::Result<Duration> {
@@ -577,12 +594,7 @@ fn stream_shard<W: Write + Send, R>(
             .unwrap_or_else(|p| std::panic::resume_unwind(p));
         let write_time = w.map_err(|e| format!("writing the shard: {e}"))?;
         let r = r?;
-        if bytes != want {
-            return Err(format!(
-                "the shard has {bytes} bytes, but {rows} rows make {want}"
-            ));
-        }
-        Ok((r, hex(&hash.finalize()), hash_time, write_time))
+        Ok((r, hex(&hash.finalize()), hash_time, write_time, bytes))
     })
 }
 
@@ -1352,7 +1364,43 @@ pub fn write_harvest_shard<W: Write + Send>(
     progress: Option<&AtomicUsize>,
     out: &mut W,
 ) -> Result<ShardSummary, String> {
+    write_harvest_shard_upto(job, None, starts, leaf, driver, progress, out)
+}
+
+/// The default bound on a targeted harvest's decisions (`search labels --harvest-keep` without
+/// `--max-decisions`): `max(1000, ⌈50 × count / keep_cap⌉)`. A decision keeps at most `keep_cap`
+/// in-group positions, and reaches about 112 distinct frontier positions at trick 4 (mean;
+/// median 24: docs/m3-hybrid/rung1.md), so groups holding a fair share of what the search
+/// reaches fill `count` rows within the bound; with `keep_cap` 256 the bound is about count / 5
+/// decisions, three times the decisions an ordinary harvest of `count` rows plays at its cap of
+/// [`HARVEST_CAP`] (count / 16). It is reached only when the groups yield under `keep_cap` / 50
+/// (about 5) rows a decision, i.e. they hold under about 4.5% of the reached positions; at the
+/// rare groups of a late audit round (0.1–0.5% of positions, 0.1–0.6 rows a decision) `count`
+/// rows would take millions of network-driven decisions (hours).
+#[must_use]
+pub fn default_max_decisions(count: u64, keep_cap: u32) -> u64 {
+    (50 * count).div_ceil(u64::from(keep_cap.max(1))).max(1000)
+}
+
+/// [`write_harvest_shard`], playing at most `max_decisions` decisions (`None`: no bound, exactly
+/// [`write_harvest_shard`]). The decisions are 0, 1, 2, … in order whatever the thread count, so a
+/// bounded shard is byte-identical for any thread count too; when the bound stops it short of
+/// `job.count` rows its summary's `rows` says how many it holds, and the header written to `out`
+/// still says `job.count`: [`reheader_shard`] sets it right (the file's caller does).
+///
+/// # Panics
+/// As [`harvest_rows`], and if `max_decisions` is `Some(0)`.
+pub fn write_harvest_shard_upto<W: Write + Send>(
+    job: &HarvestJob,
+    max_decisions: Option<u64>,
+    starts: &[Vec<HandStartState>; 4],
+    leaf: &SharedLeaf,
+    driver: Driver<'_>,
+    progress: Option<&AtomicUsize>,
+    out: &mut W,
+) -> Result<ShardSummary, String> {
     check_harvest_job(job);
+    assert!(max_decisions != Some(0), "a bound of at least one decision");
     let v = nn::outcome::vocab(job.trick);
     let rb = row_bytes_for(v);
     let mut counts = RowCounts::default();
@@ -1360,7 +1408,7 @@ pub fn write_harvest_shard<W: Write + Send>(
     let mut left = job.count;
     let (mut search_time, mut label_time) = (Duration::ZERO, Duration::ZERO);
     let mut groups = job.keep.as_ref().map(|k| GroupTally::new(k.preds.len()));
-    let ((), sha256, hash_time, write_time) = stream_shard(out, job.count, v, |sink| {
+    let fill = |sink: &mut ShardSink| {
         if left == 0 {
             return Ok(());
         }
@@ -1401,12 +1449,21 @@ pub fn write_harvest_shard<W: Write + Send>(
                 decisions.push(info);
                 left -= keep as u64;
                 sink.put(bytes)?;
-                Ok(left > 0)
+                Ok(left > 0 && max_decisions.is_none_or(|m| (decisions.len() as u64) < m))
             },
         )
-    })?;
+    };
+    let ((), sha256, hash_time, write_time, bytes) = stream_shard_upto(out, job.count, v, fill)?;
+    let rows = job.count - left;
+    let want = nn::shard::header(job.count as usize, v).len() as u64 + rows * rb as u64;
+    if bytes != want || (left > 0 && max_decisions.is_none()) {
+        return Err(format!(
+            "the shard has {bytes} bytes, but {rows} rows make {want} (of {} asked)",
+            job.count
+        ));
+    }
     Ok(ShardSummary {
-        rows: job.count,
+        rows,
         sha256,
         counts,
         decisions,
@@ -1416,6 +1473,63 @@ pub fn write_harvest_shard<W: Write + Send>(
         label_time,
         groups,
     })
+}
+
+/// A shard file whose header says more rows than it holds (a bounded harvest,
+/// [`write_harvest_shard_upto`]) set right: its header rewritten in place for `rows` rows,
+/// padded with spaces to the length it had (a header for fewer rows is never longer; NumPy and
+/// [`nn::shard::parse_header`] skip the spaces, and it stays a multiple of 64 bytes), and the
+/// file's SHA-256 computed again from its start. Returns that SHA-256 (lowercase hex).
+///
+/// # Errors
+/// If the file is not a label shard, its records are not `rows` whole records, or reading or
+/// writing fails.
+pub fn reheader_shard<F: std::io::Read + Write + std::io::Seek>(
+    f: &mut F,
+    rows: u64,
+) -> Result<String, String> {
+    use std::io::{Read, SeekFrom};
+    let io = |e: std::io::Error| format!("rewriting the shard's header: {e}");
+    f.seek(SeekFrom::Start(0)).map_err(io)?;
+    let mut head = Vec::new();
+    Read::take(&mut *f, 1 << 16)
+        .read_to_end(&mut head)
+        .map_err(io)?;
+    let (_, v, start) = nn::shard::parse_header(&head)?;
+    let mut new = nn::shard::header(rows as usize, v);
+    if new.len() > start || head[6..8] != [1, 0] {
+        return Err(format!(
+            "a header for {rows} rows ({} bytes) does not fit the shard's ({start} bytes)",
+            new.len()
+        ));
+    }
+    let pad = start - new.len();
+    let nl = new.pop().expect("the header ends with a newline");
+    new.extend(std::iter::repeat_n(b' ', pad));
+    new.push(nl);
+    let hlen = u16::try_from(start - 10).map_err(|_| "header too long")?;
+    new[8..10].copy_from_slice(&hlen.to_le_bytes());
+    let size = f.seek(SeekFrom::End(0)).map_err(io)?;
+    let want = start as u64 + rows * row_bytes_for(v) as u64;
+    if size != want {
+        return Err(format!(
+            "the shard has {size} bytes, but {rows} rows make {want}"
+        ));
+    }
+    f.seek(SeekFrom::Start(0)).map_err(io)?;
+    f.write_all(&new).map_err(io)?;
+    f.flush().map_err(io)?;
+    f.seek(SeekFrom::Start(0)).map_err(io)?;
+    let mut hash = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf).map_err(io)?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buf[..n]);
+    }
+    Ok(hex(&hash.finalize()))
 }
 
 #[cfg(test)]
@@ -1918,6 +2032,96 @@ mod tests {
             .expect("written");
         assert_eq!(out, nn::shard::to_npy(&[], nn::outcome::vocab(4)));
         assert!(sum.decisions.is_empty());
+    }
+
+    /// A harvest bounded at `m` decisions (`write_harvest_shard_upto`): when the bound stops it
+    /// short, the shard is the rows of decisions 0..m (the unbounded run's first rows), on any
+    /// thread count, its summary says how many, and once [`reheader_shard`] sets its header right
+    /// it reads back as those rows and hashes to what it returns; a bound not reached is exactly
+    /// the unbounded shard. A header that a smaller row count shortens is padded to its length.
+    #[test]
+    fn bounded_harvest_is_the_first_decisions_rows() {
+        let starts = collect_starts(400, 9);
+        let l = leaf();
+        let job = |threads| HarvestJob {
+            count: 41,
+            threads,
+            ..harvest_job(4, vec![3], [1; 8], 5)
+        };
+        let (rows, ds) = harvest_rows(&job(1), &starts, &*l, Driver::Exact, None);
+        let full = nn::shard::to_npy(
+            &rows.iter().map(|r| r.0.clone()).collect::<Vec<_>>(),
+            nn::outcome::vocab(4),
+        );
+        assert!(ds.len() >= 3, "{} decisions", ds.len());
+        let m = ds.len() as u64 - 2;
+        let r: usize = ds[..m as usize].iter().map(|d| d.rows as usize).sum();
+        assert!(r < 41);
+        let want: Vec<Row> = rows[..r].iter().map(|x| x.0.clone()).collect();
+        let path = std::env::temp_dir().join(format!("oracle-bounded-{}.npy", std::process::id()));
+        let mut shas = Vec::new();
+        for threads in [1, 4] {
+            let mut f = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&path)
+                .expect("open");
+            let sum = write_harvest_shard_upto(
+                &job(threads),
+                Some(m),
+                &starts,
+                &*l,
+                Driver::Exact,
+                None,
+                &mut f,
+            )
+            .expect("written");
+            assert_eq!((sum.rows, sum.decisions.len() as u64), (r as u64, m));
+            let sha = reheader_shard(&mut f, sum.rows).expect("reheadered");
+            drop(f);
+            let bytes = std::fs::read(&path).expect("read");
+            assert_eq!(sha, equity::sha256::sha256_hex(&bytes));
+            assert!(nn::shard::from_npy(&bytes).expect("a shard") == want);
+            shas.push(sha);
+            // The bound not reached: the unbounded shard, byte for byte.
+            let mut out = Vec::new();
+            let sum = write_harvest_shard_upto(
+                &job(threads),
+                Some(ds.len() as u64),
+                &starts,
+                &*l,
+                Driver::Exact,
+                None,
+                &mut out,
+            )
+            .expect("written");
+            assert!(out == full);
+            assert_eq!(sum.rows, 41);
+        }
+        assert_eq!(shas[0], shas[1], "the same bytes on 1 and 4 threads");
+        let _ = std::fs::remove_file(&path);
+        // A header for many more rows than written, which the real count shortens.
+        let v = nn::outcome::vocab(4);
+        let short = nn::shard::header(r, v).len();
+        let count = (1..19)
+            .map(|k| 10usize.pow(k))
+            .find(|&c| nn::shard::header(c, v).len() > short)
+            .expect("a longer header");
+        let body = &nn::shard::to_npy(&want, v)[short..];
+        let mut c = std::io::Cursor::new([nn::shard::header(count, v), body.to_vec()].concat());
+        let sha = reheader_shard(&mut c, r as u64).expect("padded");
+        let bytes = c.into_inner();
+        assert_eq!(bytes.len(), nn::shard::header(count, v).len() + body.len());
+        assert_eq!(bytes.len() % 64, body.len() % 64);
+        assert_eq!(sha, equity::sha256::sha256_hex(&bytes));
+        assert!(nn::shard::from_npy(&bytes).expect("a shard") == want);
+        // The records must be whole.
+        let mut c = std::io::Cursor::new(nn::shard::to_npy(&want, v));
+        assert!(reheader_shard(&mut c, r as u64 + 1).is_err());
+        assert_eq!(default_max_decisions(300_000, 256), 58_594);
+        assert_eq!(default_max_decisions(1_000, 256), 1_000);
     }
 
     #[test]

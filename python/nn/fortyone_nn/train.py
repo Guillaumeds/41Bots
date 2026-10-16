@@ -97,10 +97,16 @@ generalising worse than one trained on all of it from the start (Ash & Adams, "O
 neural network training", 2020; measured in docs/m3-hybrid/overlap.md); the validation loss of
 the best (full-data) epoch is what tells.
 
+Streamed shards (``--watch-dir``) join between epochs in place (class ``Columns``): host memory
+holds the rows in, plus the joining shard's load buffer while it joins (847 bytes a row at
+trick 4), whatever the number of joins.
+
 ``--progress FILE`` is rewritten (atomically) at each step and about every 20 s within an
 epoch: ``step`` (load, train, quantise, int-eval, done), epoch, batches done, the last epoch's
 losses, minutes, device, the training step's mode (``step_mode``: ``cuda-graph``, or ``eager``
-and why); the runner's heartbeat reads it.
+and why); the runner's heartbeat reads it, and so does its stall watch (a trainer whose file
+stops changing, while its ``step`` is not ``wait``, for 30 minutes or 3 times its longest epoch
+is killed: crates/runner ``Stall``).
 
 Writes to DIR ``float.safetensors``,
 ``int.safetensors`` (the quantised network ``crates/nn`` loads, with its head) and
@@ -119,8 +125,10 @@ steps). The integer check runs the integer network exactly (``intnet.exact_matmu
 
 import argparse
 import copy
+import gc
 import json
 import math
+import mmap
 import os
 import threading
 import time
@@ -888,11 +896,93 @@ class Watcher:
 
 
 def join_parts(comp, parts):
-    """The compact columns ``comp`` (or None) with the parts' rows appended, in order."""
+    """The compact columns ``comp`` (or None) with the parts' rows appended, in order (a copy: the
+    former streamed join, kept as the tests' reference for ``Columns``)."""
     cols = [p["comp"] for p in parts]
     if comp is not None:
         cols = [comp] + cols
     return [np.concatenate([c[i] for c in cols]) if len(cols) > 1 else cols[0][i] for i in range(len(cols[0]))]
+
+
+class Columns:
+    """The compact training columns of a streamed training (``--watch-dir``), grown in place as
+    shards join, so that host memory holds the rows already in plus the joining shard's load
+    buffer and nothing more (847 bytes a row at trick 4; the former join kept the old columns, the
+    old feed and the first shards alive beside the joined copy, about 3R + 2T rows for R in and T
+    joining: out of memory at 60M+ rows).
+
+    Each column lives in a private anonymous memory map; ``join`` extends it with ``mremap``
+    (``mmap.resize``: the pages already in are neither copied nor duplicated) and copies the
+    joining shards' rows in after them, dropping each shard's own arrays (``part["comp"]``) as
+    it goes. ``arrays()`` are views of the maps; every view (and every tensor made from one, such
+    as a ``Feed``'s columns on the host) must be gone before the next ``join``: the map refuses to
+    move while a view exists (``BufferError``), so a reference left behind can never read freed
+    memory. If that ever happens the join copies the rows into new maps instead (the former
+    memory cost, the same rows) and counts the shard in ``copied`` (``joins`` counts every shard). The rows, and so the training, are
+    exactly those of the former join (``join_parts``)."""
+
+    def __init__(self):
+        self.maps, self.specs, self.rows = None, None, 0
+        self.joins, self.copied = 0, 0
+
+    @staticmethod
+    def _map(nbytes):
+        m = mmap.mmap(-1, max(1, nbytes), flags=mmap.MAP_PRIVATE)
+        Columns._huge(m)
+        return m
+
+    @staticmethod
+    def _huge(m):
+        # Large pages for the gathers of a host feed, as numpy asks for its own large arrays.
+        if hasattr(mmap, "MADV_HUGEPAGE"):
+            try:
+                m.madvise(mmap.MADV_HUGEPAGE)
+            except OSError:
+                pass
+
+    def _row_bytes(self, k):
+        dt, shape = self.specs[k]
+        return dt.itemsize * math.prod(shape)
+
+    def _view(self, k, rows):
+        dt, shape = self.specs[k]
+        return np.frombuffer(self.maps[k], dtype=dt, count=rows * math.prod(shape)).reshape((rows,) + shape)
+
+    def join(self, parts):
+        """Appends every part's compact columns (``part["comp"]``, removed from the part), in order."""
+        for p in parts:
+            comp = p.pop("comp")
+            specs = [(c.dtype, tuple(c.shape[1:])) for c in comp]
+            if self.specs is None:
+                self.specs = specs
+                self.maps = [self._map(0) for _ in specs]
+            elif specs != self.specs:
+                raise ValueError(f"{p.get('name')}: compact columns {specs}, the training's {self.specs}")
+            n = len(comp[0])
+            total = self.rows + n
+            copied = False
+            for k in range(len(self.maps)):
+                size = max(1, total * self._row_bytes(k))
+                try:
+                    self.maps[k].resize(size)
+                    self._huge(self.maps[k])
+                except BufferError:
+                    old = self.maps[k]
+                    self.maps[k] = self._map(total * self._row_bytes(k))
+                    self._view(k, self.rows)[:] = np.frombuffer(old, dtype=self.specs[k][0],
+                                                                count=self.rows * math.prod(self.specs[k][1])
+                                                                ).reshape((self.rows,) + self.specs[k][1])
+                    copied = True
+                self._view(k, total)[self.rows :] = comp[k]
+                comp[k] = None
+            del comp
+            self.rows = total
+            self.joins += 1
+            self.copied += copied
+
+    def arrays(self):
+        """The columns' rows as numpy arrays (views of the maps; see the class)."""
+        return [self._view(k, self.rows) for k in range(len(self.maps))]
 
 
 def error_stats(pred, target):
@@ -1052,9 +1142,10 @@ def main(argv=None):
     n_out = v if args.head == "outcome" else 4
     head_name = "outcome-v1" if args.head == "outcome" else "money4"
 
-    def add_parts(comp, new, epoch):
-        """The streamed shards ``new`` joined to the compact columns ``comp`` (their tricks
-        checked), recorded as first trained in ``epoch``."""
+    def add_parts(new, epoch):
+        """The streamed shards ``new`` (their tricks checked) joined in place to the columns
+        ``store`` (class ``Columns``: each shard's own arrays are dropped as they are copied),
+        recorded as first trained in ``epoch``."""
         for p in new:
             if p["tricks"] != {trick}:
                 raise SystemExit(f"{p['path']} holds tricks {sorted(p['tricks'])}, the validation shard {trick}")
@@ -1065,7 +1156,7 @@ def main(argv=None):
             sizes.append((p["rows"], p["weight"], p["row_weights"]))
             names.append(p["name"])
             rw_shas.append(p["row_weights_sha256"])
-        return join_parts(comp, new)
+        store.join(new)
 
     if watcher is None:
         n = sum(len(sh) for sh in shards)
@@ -1076,8 +1167,10 @@ def main(argv=None):
     else:
         sizes, names, rw_shas = [], [], []
         hashes = {"train": [], "val": sha256_file(args.val)}
-        comp = add_parts(None, parts, 0)
-        n = len(comp[0])
+        store = Columns()
+        add_parts(parts, 0)
+        del parts
+        n = store.rows
     print(
         f"train {n} rows, val {len(val)} rows, trick {trick}, head {head_name} "
         f"({n_out} outputs), widths {widths}, device {device.type}"
@@ -1090,11 +1183,12 @@ def main(argv=None):
         del shards
         hashes = {"train": [f.result() for f in train_sha], "val": val_sha.result()}
         hashing.shutdown()
+    else:
+        comp = store.arrays()
     va = tensors(val)
     val_classes = race_classes(val)
     feed = Feed(with_weights(comp, sizes), device, args.batch, args.feed)
-    if watcher is None:
-        del comp
+    del comp
     weighting = weights_record(names, sizes, rw_shas)
     facts["feed"] = feed.facts
     print(f"training rows {feed.facts['mode']} ({feed.facts['bytes'] / 2**20:.0f} MiB compact)"
@@ -1156,18 +1250,29 @@ def main(argv=None):
                 watcher.wait()
                 new = watcher.take()
             if new:
-                comp = add_parts(comp, new, epoch)
-                n = len(comp[0])
-                steps = (n + args.batch - 1) // args.batch
-                feed = Feed(with_weights(comp, sizes), device, args.batch, args.feed)
-                facts["feed"] = feed.facts
-                weighting = weights_record(names, sizes, rw_shas)
                 for k, x in step.counts.items():
                     past_counts[k] = past_counts.get(k, 0) + x
-                was = step
-                step = Step(model, opt, args.head, args.mix_weight, feed, args.batch, graphed=was.graphed,
+                was_graphed, was_reason = step.graphed, step.reason
+                # Everything that holds the old rows goes before the join (the old feed, which
+                # views the host columns or holds their copy on the GPU, and the old step with
+                # its captured graph; the graph trial's copies are garbage cycles, hence the
+                # collection), so the columns grow in place: peak host memory is the rows in,
+                # the joining shard's and its load buffer, and the GPU's free memory is
+                # measured without the old copy.
+                step = feed = None
+                gc.collect()
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+                add_parts(new, epoch)
+                del new
+                n = store.rows
+                steps = (n + args.batch - 1) // args.batch
+                feed = Feed(with_weights(store.arrays(), sizes), device, args.batch, args.feed)
+                facts["feed"] = feed.facts
+                weighting = weights_record(names, sizes, rw_shas)
+                step = Step(model, opt, args.head, args.mix_weight, feed, args.batch, graphed=was_graphed,
                             graph_class=GRAPH_CLASS, on_fail=fell_back)
-                step.reason = was.reason
+                step.reason = was_reason
                 on_this_set = 0
                 print(f"streamed: {len(stream['parts'])} of {args.expect} shards in, {n} rows, from epoch {epoch}",
                       flush=True)
@@ -1239,6 +1344,8 @@ def main(argv=None):
     if graphed and not step.graphed:  # a capture failed during the training: eager from then on
         step_facts.update(mode="eager", reason=step.reason)
     if stream is not None:
+        stream["joins_in_place"] = store.joins - store.copied
+        stream["joins_copied"] = store.copied
         stream["first_full_epoch"] = full_from
         stream["partial_epochs"] = full_from
         stream["epochs_trained_on"] = {
