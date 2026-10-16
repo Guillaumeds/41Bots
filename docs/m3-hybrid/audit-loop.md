@@ -179,7 +179,21 @@ steps when two run at once. Neither device waits for the other when it has a big
   estimate of exhaustive subgroup discovery, Grosskreutz et al. 2008, Lemmerich et al. 2016: a
   subset of at least gamma's rows has mean square at most sum(q)/minsup and every team's |bias| at
   most sum(max_t |e_t|)/minsup; valid, it never changes the candidates, and in practice it prunes
-  little). Measured on this VM: see "Auditor timings" below.
+  little). **Auditor timings** (this VM: 4 vCPU shared with three other agents, load 9-19, so
+  wall times are inflated; trick 4, the lead-4 network 1024-512-128, gamma 0.0001, 4 workers):
+  300k rows (minsup 15): network and error columns 43 s, items 2 s, trees 2 s, enumeration 990 s
+  wall of which about 6 minutes paused (508 items, 121k pairs, 8.7M triples counted, 7.0M
+  frequent), confirmation 7 s (191 candidates, 98 confirmed); 607 CPU-seconds in all, peak
+  3.1 GB (resident, shared pages counted per process). 1M rows (four trick-4 shards incl. race
+  harvests, minsup 50): network and error columns 73 s, trees 4 s, enumeration 792 s (8.1M
+  triples, 12,772 candidates); the confirmation of 12,772 candidates was cut by the measurement's
+  own 20-minute limit (since then confirmed 512 groups at a time per block). The triples dominate
+  (about 85% of the CPU). Projection, linear in rows: about 1,700 CPU-seconds per million rows for
+  the enumeration and 250-300 for the network at 1024 wide (about 12 times that at
+  4096-2048-1024-256); so 20M rows at trick 4 on a 128-thread machine (about 80 cores' worth)
+  about 7 minutes of enumeration plus 1 minute (1024 wide) to 14 minutes (4096 wide) of network,
+  and half that for 10M rows at trick 3. Not yet measured on a rental; the auditor's limit grows
+  with the shard (90 minutes plus 15 per million rows above 2M).
 - **The standard is a setting.** `search hybrid-check --standard PCT` (default 0.01) judges the
   overall, band, position and slice rows; the runner's `audit_standard` (default 0.01) and
   `audit_push_standard` (none by default). Once the loop is flat at the standard and a push
