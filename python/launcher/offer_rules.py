@@ -10,10 +10,14 @@ The rules (owner, 2026-10-16, unless dated otherwise):
 - the whole machine (gpu_frac 1), on-demand, rentable;
 - verified hosts are preferred, but unverified or deverified hosts are allowed (the launcher
   searches verified hosts first and only then the rest); `verified_only` turns that off;
-- download speed (vast's `inet_down`, Mb/s) at least MIN_INET_DOWN (500) in every search, because the
-  base image is several GB; a named offer with a slower link is reported, not refused (launch.py);
+- download speed (vast's `inet_down`, Mb/s) at least MIN_INET_DOWN (100; owner 2026-10-16: the baked 5-6 GB
+  image pulls in about 7 minutes at 100 Mbps) in every search; a named offer with a slower link is reported,
+  not refused (launch.py);
+- price at most MAX_DPH ($1.70 per hour; owner 2026-10-16), for every search and for a named offer too, unless
+  the run raises it (--max-dph, or the manifest's machine block);
 - network cost at most MAX_NET_COST ($0.10 per GB, up and down; owner 2026-10-14);
-- at least one GPU (the search asks num_gpus>=1); a GPU job asks for exactly N, with
+- at least one GPU (the search asks num_gpus>=1); a GPU job asks for AT LEAST N (owner 2026-10-16: the price is
+  per machine, a 2-GPU box that is cheap per CPU thread is fine; the trainer uses one GPU, cuda:0), with
   compute_cap from MIN_COMPUTE_CAP (600, Pascal) up to below MAX_COMPUTE_CAP (1000, no Blackwell) and a
   driver that supports CUDA MIN_CUDA (12.6), the limits of the PyTorch 2.14.1+cu126 build. A CPU-only
   job (the default) leaves the compute-capability and CUDA limits out.
@@ -23,7 +27,8 @@ from __future__ import annotations
 
 MIN_RELIABILITY = 0.90  # owner, 2026-10-16: hosts with reliability of at least 90% are accepted, for every rental
 MAX_NET_COST = 0.10  # $/GB up or down (owner 2026-10-14: 0.10; our traffic is tiny)
-MIN_INET_DOWN = 500.0  # Mbps of download speed an offer must report (0 = no filter)
+MIN_INET_DOWN = 100.0  # Mbps of download speed an offer must report (owner, 2026-10-16: 100; 0 = no filter)
+MAX_DPH = 1.70  # $ per hour, the default price cap of every search and of a named offer (owner, 2026-10-16); 0 = no cap
 SLOW_LINK_MBPS = 200.0  # below this download speed the launcher's ranking adds a penalty (link_factor)
 MIN_COMPUTE_CAP = 600  # vast's units: 600 = compute capability 6.0, the lowest the PyTorch 2.14.1+cu126 build supports
 MAX_COMPUTE_CAP = 1000  # exclusive: no Blackwell (10.0, 12.0) in the cu126 build
@@ -103,13 +108,14 @@ def check_failures(o: dict, floor: float = MIN_RELIABILITY, verified_only: bool 
 
 
 def gpu_failures(o: dict, gpus: int, min_gpu_ram_gb: float = 0, min_compute_cap: int = MIN_COMPUTE_CAP) -> list[str]:
-    """Why an offer fails a GPU job's needs (exactly `gpus` GPUs, `min_gpu_ram_gb`, `min_compute_cap`, and the
-    PyTorch build's limits), from vast's raw record (gpu_ram in MB, compute_cap x 100). With gpus 0 the
-    GPU count is not checked (a job that wants the limits but no particular count)."""
+    """Why an offer fails a GPU job's needs (at least `gpus` GPUs: a machine with more is fine, the price is per
+    machine; `min_gpu_ram_gb`, `min_compute_cap`, and the PyTorch build's limits), from vast's raw record
+    (gpu_ram in MB, compute_cap x 100). With gpus 0 the GPU count is not checked (a job that wants the limits
+    but no particular count)."""
     failed = []
     n, ram, cc, cuda = (number(o.get(k)) for k in ("num_gpus", "gpu_ram", "compute_cap", "cuda_max_good"))
-    if gpus and (n is None or int(n) != int(gpus)):
-        failed.append(f"{o.get('num_gpus')} GPUs, not the {gpus} asked for")
+    if gpus and (n is None or int(n) < int(gpus)):
+        failed.append(f"{o.get('num_gpus')} GPUs, fewer than the {gpus} asked for")
     if min_gpu_ram_gb and (ram is None or ram < min_gpu_ram_gb * 1000):
         failed.append(f"GPU memory {o.get('gpu_ram')} MB, below --min-gpu-ram-gb {min_gpu_ram_gb}")
     lo = max(MIN_COMPUTE_CAP, int(min_compute_cap or MIN_COMPUTE_CAP))
@@ -123,14 +129,19 @@ def gpu_failures(o: dict, gpus: int, min_gpu_ram_gb: float = 0, min_compute_cap:
 
 def search_failures(o: dict, *, min_inet_down: float | None = None, floor: float = MIN_RELIABILITY,
                     verified_only: bool = False, max_net_cost: float = MAX_NET_COST, gpus: int = 0,
-                    cpu_only: bool = True, min_gpu_ram_gb: float = 0, min_compute_cap: int = MIN_COMPUTE_CAP) -> list[str]:
+                    cpu_only: bool = True, min_gpu_ram_gb: float = 0, min_compute_cap: int = MIN_COMPUTE_CAP,
+                    max_dph: float | None = None) -> list[str]:
     """Why the launcher's SEARCH would not find an offer: `check_failures` plus the other filters of its
-    query (download speed, network cost, at least one GPU, and for a GPU job or a job that is not
+    query (download speed, price, network cost, at least one GPU, and for a GPU job or a job that is not
     CPU-only the compute-capability and CUDA limits). `min_inet_down` None means the default
-    MIN_INET_DOWN, 0 means no filter. An offer that does not report a value the search filters on
-    (download speed, network cost) fails: the search cannot match it. Empty = the launcher can rent it
-    (a verified host is preferred, see `host_flag`)."""
+    MIN_INET_DOWN, 0 means no filter; `max_dph` None means the default MAX_DPH, 0 means no cap. An offer
+    that does not report a value the search filters on (download speed) fails: the search cannot match
+    it. Empty = the launcher can rent it (a verified host is preferred, see `host_flag`)."""
     failed = check_failures(o, floor, verified_only)
+    cap = MAX_DPH if max_dph is None else float(max_dph)
+    price = number(o.get("dph_total"))
+    if cap > 0 and price is not None and price > cap:
+        failed.append(f"price ${price:.2f}/h above the cap ${cap:.2f}/h")
     want = MIN_INET_DOWN if min_inet_down is None else max(float(min_inet_down), 0.0)
     if want > 0:
         link = inet_down_of(o)

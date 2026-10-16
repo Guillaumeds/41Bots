@@ -138,9 +138,9 @@ class RecordsTest(unittest.TestCase):
         self.assertIn("| EPYC 9754 | plan | 2 | 1 | 0.950 | 0.950 |", text)
 
     def test_rank_uses_measured_speed_where_known(self):
-        model = mc.M.Model(None, None)  # no speed files: estimates fall back to the default factor
+        model = mc.M.Model(None, None, rules={"max_dph": 0})  # no speed files; no price cap (the EPYC offer costs $3.74)
         offers = [offer(1, TR, 192, 1.27), offer(2, EPYC, 256, 3.74), offer(3, "Some New Chip 9999", 128, 0.50),
-                  offer(4, TR, 32, 0.10), dict(offer(5, TR, 192, 0.50), inet_down=100.0),
+                  offer(4, TR, 32, 0.10), dict(offer(5, TR, 192, 0.50), inet_down=80.0),
                   dict(offer(6, TR, 192, 1.50), verification="unverified")]
         ranked = mc.rank_offers(offers, self.recs, model, min_threads=64)
         self.assertEqual(ranked[0]["id"], 1)                           # measured, cheapest first
@@ -154,7 +154,11 @@ class RecordsTest(unittest.TestCase):
         self.assertFalse(new["measured"])
         self.assertIn("estimate", new["source"])
         self.assertNotIn(4, [a["id"] for a in ranked])   # too few threads
-        self.assertNotIn(5, [a["id"] for a in ranked])   # the launcher cannot rent it: its download link is 100 Mbps
+        self.assertNotIn(5, [a["id"] for a in ranked])   # the launcher cannot rent it: its download link is 80 Mbps
+        # With the launcher's own price cap ($1.70/h, owner 2026-10-16) the $3.74 EPYC offer is not rentable either.
+        capped = mc.rank_offers(offers, self.recs, mc.M.Model(None, None), min_threads=64)
+        self.assertNotIn(2, [a["id"] for a in capped])
+        self.assertIn(1, [a["id"] for a in capped])
         six = next(a for a in ranked if a["id"] == 6)    # an unverified host is allowed (owner, 2026-10-16), and flagged
         self.assertEqual(six["launcher_flag"], "unverified")
         rows = {r[0]: r for r in mc.rank_rows(ranked)}

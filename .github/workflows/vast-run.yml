@@ -19,7 +19,12 @@ name: vast-run
 # more time while vast's status shows the pull advancing (at most 40 minutes from renting; a status
 # unchanged for 10 minutes ends it), counts the 15 minutes to the first heartbeat from the container
 # start, and only searches hosts reporting a download speed of at least 500 Mbps (launch.py
-# --min-inet-down, default 500). This workflow has no input for those; the defaults apply.
+# --min-inet-down, default 100). This workflow has no input for those; the defaults apply.
+# Looking for a machine (owner, 2026-10-16): at least 190 threads (min_cores), at most $1.70/h; when none matches the launcher
+# waits instead of failing, up to 2 hours, searching every minute at $1.20/h, then $1.45/h, then $1.70/h (3 tries each), and a
+# replacement search after a start failure does the same with the same floors. The wait and the price steps are launch.py
+# options (--wait-for-offer-min, --offer-poll-s, --price-steps, --tries-per-step, --max-dph), not inputs: the workflow
+# is near GitHub's limit of 25 inputs. A machine whose container did not start is left out of every search for 24 hours.
 
 on:
   workflow_dispatch:
@@ -29,8 +34,8 @@ on:
         required: true
         default: '{"run_id": "", "chunk": {"equity_sweep": {"bot": "rules-v1", "hands": 200000, "seed": 1}}}'
       min_cores:
-        description: "Minimum effective CPU cores"
-        default: "16"
+        description: "Minimum effective CPU cores (threads). Default 190 (owner, 2026-10-16): the launcher waits for such a machine, up to 2 hours, rather than rent a smaller one. A manifest's machine block can raise it"
+        default: "190"
       min_ram_gb:
         description: "Minimum RAM in GB (e.g. 480 for the one-deal-per-thread table measurement)"
         default: "32"
@@ -70,9 +75,9 @@ on:
         description: "Base image, e.g. ghcr.io/guillaumeds/41bots-base:20261013-abcdef123456"
         required: true
       cheapest:
-        description: "Pick the lowest $/hour offer (test runs) instead of best cost per unit of work"
+        description: "Off (the default): the launcher ranks offers by cost per unit of CPU work and takes the fastest within 20% of the best. On: the lowest $/hour offer instead, whatever its speed (test runs only)"
         type: boolean
-        default: true
+        default: false
       dry_run:
         description: "Only search and print the chosen offer; rent nothing"
         type: boolean

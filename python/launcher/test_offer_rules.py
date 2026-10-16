@@ -22,7 +22,8 @@ def offer(**kw) -> dict:
 
 class OfferRulesTest(unittest.TestCase):
     def test_thresholds(self):
-        self.assertEqual((R.MIN_RELIABILITY, R.MAX_NET_COST, R.MIN_INET_DOWN, R.SLOW_LINK_MBPS), (0.90, 0.10, 500.0, 200.0))
+        self.assertEqual((R.MIN_RELIABILITY, R.MAX_NET_COST, R.MIN_INET_DOWN, R.SLOW_LINK_MBPS, R.MAX_DPH),
+                         (0.90, 0.10, 100.0, 200.0, 1.70))
         self.assertEqual((R.MIN_COMPUTE_CAP, R.MAX_COMPUTE_CAP, R.MIN_CUDA), (600, 1000, 12.6))
 
     def test_a_good_offer_passes_every_check(self):
@@ -55,15 +56,25 @@ class OfferRulesTest(unittest.TestCase):
         self.assertEqual(R.host_status({}), "unknown")
 
     def test_download_speed(self):
-        self.assertEqual(R.search_failures(offer(inet_down=300.0)), ["download link 300 Mbps below 500"])
-        self.assertEqual(R.search_failures(offer(inet_down=500.0)), [])
-        self.assertEqual(R.search_failures(offer(inet_down=300.0), min_inet_down=250), [])
-        self.assertEqual(R.search_failures(offer(inet_down=300.0), min_inet_down=0), [])
+        # The floor is 100 Mbps (owner, 2026-10-16): 300 is rentable, 80 is not.
+        self.assertEqual(R.search_failures(offer(inet_down=300.0)), [])
+        self.assertEqual(R.search_failures(offer(inet_down=80.0)), ["download link 80 Mbps below 100"])
+        self.assertEqual(R.search_failures(offer(inet_down=100.0)), [])
+        self.assertEqual(R.search_failures(offer(inet_down=80.0), min_inet_down=50), [])
+        self.assertEqual(R.search_failures(offer(inet_down=80.0), min_inet_down=0), [])
         self.assertEqual(R.search_failures(offer(inet_down=900.0), min_inet_down=1000), ["download link 900 Mbps below 1000"])
         o = offer()
         del o["inet_down"]
         self.assertEqual(R.search_failures(o), ["download speed (inet_down) not reported"])
         self.assertEqual(R.search_failures(o, min_inet_down=0), [])
+
+    def test_price_cap(self):
+        # $1.70 per hour by default (owner, 2026-10-16); a run can raise it, 0 means no cap.
+        self.assertEqual(R.search_failures(offer(dph_total=1.70)), [])
+        self.assertEqual(R.search_failures(offer(dph_total=1.90)), ["price $1.90/h above the cap $1.70/h"])
+        self.assertEqual(R.search_failures(offer(dph_total=1.90), max_dph=2.5), [])
+        self.assertEqual(R.search_failures(offer(dph_total=9.0), max_dph=0), [])
+        self.assertEqual(R.search_failures(offer(dph_total=1.0), max_dph=0.9), ["price $1.00/h above the cap $0.90/h"])
 
     def test_network_cost_and_gpu_count(self):
         self.assertEqual(len(R.search_failures(offer(inet_up_cost=0.2))), 1)
@@ -74,11 +85,15 @@ class OfferRulesTest(unittest.TestCase):
     def test_gpu_job_limits(self):
         gpu = dict(num_gpus=1, gpu_ram=6138, compute_cap=860, cuda_max_good=12.8)
         self.assertEqual(R.search_failures(offer(**gpu), gpus=1, min_gpu_ram_gb=4), [])
-        for kw, word in (({"num_gpus": 2}, "2 GPUs, not the 1 asked for"), ({"compute_cap": 1200}, "compute capability 1200 outside 600..999"),
+        for kw, word in (({"num_gpus": 0}, "0 GPUs, fewer than the 1 asked for"), ({"compute_cap": 1200}, "compute capability 1200 outside 600..999"),
                          ({"compute_cap": 599}, "compute capability 599"), ({"cuda_max_good": 12.4}, "driver supports CUDA 12.4"),
                          ({"gpu_ram": 3000}, "GPU memory 3000 MB, below --min-gpu-ram-gb 4")):
             why = R.search_failures(offer(**{**gpu, **kw}), gpus=1, min_gpu_ram_gb=4)
             self.assertTrue(any(word in w for w in why), (kw, why))
+        # At least the GPUs asked for: a 2-GPU machine is fine for a 1-GPU job (the price is per machine), 1 is not for 2.
+        self.assertEqual(R.search_failures(offer(**{**gpu, "num_gpus": 2}), gpus=1, min_gpu_ram_gb=4), [])
+        self.assertEqual(R.search_failures(offer(**{**gpu, "num_gpus": 1}), gpus=2, min_gpu_ram_gb=4),
+                         ["1 GPUs, fewer than the 2 asked for"])
         # A CPU-only job leaves the compute-capability and CUDA limits out; a job that is not CPU-only keeps them.
         blackwell = offer(compute_cap=1200, cuda_max_good=12.0)
         self.assertEqual(R.search_failures(blackwell), [])

@@ -63,10 +63,11 @@ KEEP = ["id", "machine_id", "host_id", "cpu_name", "cpu_cores", "cpu_cores_effec
 # The launcher's thresholds, imported from python/launcher/offer_rules.py (never copied).
 NET_CAP = R.MAX_NET_COST          # max $/GB up or down (owner 2026-10-14)
 MIN_RELIABILITY = R.MIN_RELIABILITY   # owner, 2026-10-16: 90%
-MIN_INET_DOWN = R.MIN_INET_DOWN   # Mbps; the launcher asks for inet_down>=500 in every search
+MIN_INET_DOWN = R.MIN_INET_DOWN   # Mbps; the launcher asks for inet_down>=100 in every search (owner, 2026-10-16)
+MAX_DPH = R.MAX_DPH               # $/h; the launcher's price cap for every search (owner, 2026-10-16: 1.70)
 
 
-def base_query(min_cores: int, min_ram_gb: int, min_inet_down: float | None = None) -> dict:
+def base_query(min_cores: int, min_ram_gb: int, min_inet_down: float | None = None, max_dph: float | None = None) -> dict:
     """The launcher's CPU-only search (launch.py offer_query with --cpu-only), as API JSON. Verified hosts are
     preferred by the launcher, not required (owner, 2026-10-16), so there is no `verified` key: every host is
     asked for, and an offer's own `verification` word flags the unverified ones in the report."""
@@ -80,13 +81,16 @@ def base_query(min_cores: int, min_ram_gb: int, min_inet_down: float | None = No
     floor = MIN_INET_DOWN if min_inet_down is None else float(min_inet_down)
     if floor > 0:
         q["inet_down"] = {"gte": floor}
+    cap = MAX_DPH if max_dph is None else float(max_dph)
+    if cap > 0:
+        q["dph_total"] = {"lte": cap}
     return q
 
 
-def queries(min_cores: int, min_ram_gb: int, min_inet_down: float | None = None) -> dict[str, dict]:
+def queries(min_cores: int, min_ram_gb: int, min_inet_down: float | None = None, max_dph: float | None = None) -> dict[str, dict]:
     """Named searches, run in this order; an offer is tagged with the first one that finds it.
     Only 'eligible' offers can be rented by launch.py; the others show the rest of the market."""
-    eligible = base_query(min_cores, min_ram_gb, min_inet_down)
+    eligible = base_query(min_cores, min_ram_gb, min_inet_down, max_dph)
     net = {k: v for k, v in eligible.items() if k not in ("inet_down_cost", "inet_up_cost")}
     partial = dict(eligible, gpu_frac={"lt": 1})
     low_rel = dict(eligible, reliability={"gt": 0.80, "lte": MIN_RELIABILITY})
@@ -94,12 +98,14 @@ def queries(min_cores: int, min_ram_gb: int, min_inet_down: float | None = None)
            "reliability_0.80-0.90": low_rel}
     if "inet_down" in eligible:
         out["slow_link"] = dict(eligible, inet_down={"lt": eligible["inet_down"]["gte"]})
+    if "dph_total" in eligible:
+        out["price_over_cap"] = dict(eligible, dph_total={"gt": eligible["dph_total"]["lte"]})
     return out
 
 
 WHY = {"network_cost_over_cap": f"network > ${NET_CAP}/GB", "partial_machine": "shared machine",
        "reliability_0.80-0.90": f"reliability < {MIN_RELIABILITY}", "unverified": "unverified",
-       "slow_link": "download link too slow"}
+       "slow_link": "download link too slow", "price_over_cap": "price above the launcher's cap"}
 
 
 def search(q: dict) -> list[dict]:
@@ -120,8 +126,8 @@ def trim(o: dict, query: str) -> dict:
     return {k: (round(v, 4) if isinstance(v, float) else v) for k, v in t.items()}
 
 
-def snapshot(min_cores: int, min_ram_gb: int, min_inet_down: float | None = None) -> dict:
-    qs = queries(min_cores, min_ram_gb, min_inet_down)
+def snapshot(min_cores: int, min_ram_gb: int, min_inet_down: float | None = None, max_dph: float | None = None) -> dict:
+    qs = queries(min_cores, min_ram_gb, min_inet_down, max_dph)
     offers, seen = [], set()
     for name, q in qs.items():
         for o in search(q):
@@ -282,6 +288,7 @@ def report(snap: dict, sp: dict, a) -> str:
     # A saved snapshot keeps its own rules too: an old one asked for verified hosts only and had no download-speed filter.
     host = "verified host" if "verified" in eq else "any host (verified preferred, unverified ones flagged)"
     link = f", download >= {eq['inet_down']['gte']:g} Mbps" if "inet_down" in eq else ""
+    link += f", price <= ${eq['dph_total']['lte']:.2f}/h" if "dph_total" in eq else ""
     out.append(f"vast.ai on-demand market at {snap['utc']}: {len(elig)} offers launch.py can rent "
                f"(whole machine, {host}, reliability > {floor}{link}, network <= ${NET_CAP}/GB, >= {min_cores} effective cores)"
                + "".join(f"; {sum(o['query'] == q for o in offers)} {q}" for q in snap["queries"] if q != "eligible"))
@@ -318,12 +325,12 @@ def report(snap: dict, sp: dict, a) -> str:
     out.append(table(T1_HEAD, offer_rows(near_t[:a.top], "tt", a.t1_table_gb), md))
 
     if a.include_other:
-        other = [o for o in offers if o["query"] in ("network_cost_over_cap", "partial_machine", "slow_link")]
+        other = [o for o in offers if o["query"] in ("network_cost_over_cap", "partial_machine", "slow_link", "price_over_cap")]
         for o in other:
             o["_quirk"] = WHY[o["query"]] + ("; " + o["_quirk"] if o["_quirk"] else "")
         ranked_o, _ = rank(other, "compute", a.premium)
         out.append(f"\n## Not rentable by launch.py's current rules (network cost over the cap, a download link under the "
-                   f"floor, or part of a machine shared with other renters), cheapest compute work first, top {a.top}\n")
+                   f"floor, a price over the cap, or part of a machine shared with other renters), cheapest compute work first, top {a.top}\n")
         out.append(table(OFFER_HEAD, offer_rows(ranked_o[:a.top], "compute"), md))
     unknown = sorted({o["_model"] for o in offers if o["_compute_src"] == "default"})
     if unknown:
@@ -379,7 +386,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--min-cores", type=int, default=64)
     p.add_argument("--min-ram-gb", type=int, default=32)
     p.add_argument("--min-inet-down", type=float, default=None,
-                   help="the launcher's minimum download speed in Mbps (default 500, offer_rules.MIN_INET_DOWN; 0 = no filter)")
+                   help="the launcher's minimum download speed in Mbps (default 100, offer_rules.MIN_INET_DOWN; 0 = no filter)")
+    p.add_argument("--max-dph", type=float, default=None,
+                   help="the launcher's price cap in $/hour (default 1.70, offer_rules.MAX_DPH; 0 = no cap)")
     p.add_argument("--premium", type=float, default=0.20, help="owner's speed premium (default 20%%)")
     p.add_argument("--top", type=int, default=5)
     p.add_argument("--t1-min-ram-gb", type=float, default=480.0,
@@ -409,7 +418,7 @@ def main(argv: list[str] | None = None) -> int:
         with open(a.src, encoding="utf-8") as f:
             snap = json.load(f)
     else:
-        snap = snapshot(a.min_cores, a.min_ram_gb, a.min_inet_down)
+        snap = snapshot(a.min_cores, a.min_ram_gb, a.min_inet_down, a.max_dph)
     if a.save:
         with open(a.save, "w", encoding="utf-8") as f:
             json.dump(snap, f, indent=1, ensure_ascii=False)

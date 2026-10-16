@@ -148,9 +148,10 @@ class Model:
 def launcher_failures(o: dict, **rules) -> list[str]:
     """Why python/launcher/launch.py's search would not find this offer (empty = it can rent it). The rules are
     the launcher's own, from offer_rules.py: reliability at least 0.90, the whole machine, a download link of at
-    least 500 Mbps (or `min_inet_down`), network cost at most $0.10/GB, at least one GPU (a GPU job: exactly
-    `gpus`, with the compute-capability and CUDA limits). Verified hosts are preferred, not required:
-    an unverified or deverified host passes and is flagged (`launcher_flag`)."""
+    least 100 Mbps (or `min_inet_down`), a price of at most $1.70 per hour (or `max_dph`; 0 = no cap), network cost
+    at most $0.10/GB, at least one GPU (a GPU job: at least `gpus`, with the compute-capability and CUDA limits).
+    Verified hosts are preferred, not required: an unverified or deverified host passes and is flagged
+    (`launcher_flag`)."""
     return R.search_failures(o, **rules)
 
 

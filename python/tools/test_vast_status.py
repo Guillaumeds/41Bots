@@ -29,7 +29,7 @@ HW = {"cpu_model": "AMD Ryzen Threadripper PRO 9995WX 96-Cores", "cgroup_quota_c
 
 class Comparable(unittest.TestCase):
     def setUp(self):
-        self.m = M.Model()
+        self.m = M.Model(rules={"max_dph": 0})   # these fixtures include machines above the launcher's $1.70 cap
         self.ref = V.reference_machine(self.m, HW, 1.2685)
 
     def test_reference_is_the_measured_9995wx(self):
@@ -52,7 +52,7 @@ class Comparable(unittest.TestCase):
 
     def test_shared_unreliable_slow_link_and_small_machines_never_count(self):
         cpu = "AMD Ryzen Threadripper PRO 9995WX 96-Cores"
-        market = [offer(1, cpu, 192, 251, 1.0, inet_down=300.0),   # verified, but its download link is too slow
+        market = [offer(1, cpu, 192, 251, 1.0, inet_down=80.0),   # verified, but its download link is too slow (floor 100)
                   offer(2, cpu, 192, 251, 1.0, gpu_frac=0.5),
                   offer(3, cpu, 192, 251, 1.0, reliability2=0.89),
                   offer(4, cpu, 64, 80, 0.4)]   # 64 threads: too slow
@@ -63,15 +63,24 @@ class Comparable(unittest.TestCase):
         # Owner, 2026-10-16: verified preferred, unverified or deverified allowed.
         cpu = "AMD Ryzen Threadripper PRO 9995WX 96-Cores"
         market = [offer(1, cpu, 192, 251, 0.90, verification="unverified"), offer(2, cpu, 192, 251, 1.20),
-                  offer(3, cpu, 192, 251, 1.0, verification="deverified", inet_down=100.0)]   # slow link: out
+                  offer(3, cpu, 192, 251, 1.0, verification="deverified", inet_down=80.0)]   # slow link: out
         ok, _ = V.comparable(self.m, market, self.ref, 1.3, 0.7)
         self.assertEqual([o["id"] for o in ok], [2, 1])
         self.assertEqual([o["launcher_flag"] for o in ok], ["", "unverified"])
         self.assertIn("UNVERIFIED host", V.words(ok[1]))
         self.assertNotIn("UNVERIFIED", V.words(ok[0]))
         # --min-inet-down: this run's setting reaches the label through the model.
-        slow_ok, _ = V.comparable(M.Model(rules={"min_inet_down": 50}), market, self.ref, 1.3, 0.7)
+        slow_ok, _ = V.comparable(M.Model(rules={"min_inet_down": 50, "max_dph": 0}), market, self.ref, 1.3, 0.7)
         self.assertEqual({o["id"] for o in slow_ok}, {1, 2, 3})
+
+    def test_a_machine_above_the_launchers_price_cap_never_counts(self):
+        cpu = "AMD Ryzen Threadripper PRO 9995WX 96-Cores"
+        market = [offer(1, cpu, 192, 251, 1.20), offer(2, cpu, 192, 251, 1.65), offer(3, cpu, 192, 251, 1.90)]
+        capped = M.Model()   # the launcher's $1.70/h (owner, 2026-10-16)
+        ok, _ = V.comparable(capped, market, V.reference_machine(capped, HW, 1.2685), 2.0, 0.7)
+        self.assertEqual([o["id"] for o in ok], [1, 2])
+        ok, _ = V.comparable(M.Model(rules={"max_dph": 2.5}), market, V.reference_machine(self.m, HW, 1.2685), 2.0, 0.7)
+        self.assertEqual([o["id"] for o in ok], [1, 2, 3])
 
     def test_measured_only_filter(self):
         market = [offer(5, "AMD EPYC 7J13 64-Core Processor", 128, 252, 0.3)]   # an absurdly cheap unbenchmarked machine

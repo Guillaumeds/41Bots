@@ -72,18 +72,20 @@ class Cost(unittest.TestCase):
         self.assertEqual(why, ["reliability 0.890 below 0.9"])
 
     def test_a_verified_host_with_a_slow_link_is_not_rentable(self):
-        o = offer(1, "x", 128, 100, 1.0, verification="verified", inet_down=300.0)
+        # The floor is 100 Mbps (owner, 2026-10-16): 300 is rentable, 80 is not, even on a verified host.
+        self.assertTrue(M.launcher_ok(offer(1, "x", 128, 100, 1.0, verification="verified", inet_down=300.0)))
+        o = offer(1, "x", 128, 100, 1.0, verification="verified", inet_down=80.0)
         self.assertFalse(M.launcher_ok(o))
-        self.assertEqual(M.launcher_failures(o), ["download link 300 Mbps below 500"])
+        self.assertEqual(M.launcher_failures(o), ["download link 80 Mbps below 100"])
         a = M.annotate(self.m, o)
         self.assertFalse(a["launcher_ok"])
-        self.assertIn("download link 300 Mbps below 500", a["launcher_why"])
-        # Exactly 500 passes; the floor can be passed in (this run's --min-inet-down) either way.
-        self.assertTrue(M.launcher_ok(offer(1, "x", 128, 100, 1.0, inet_down=500.0)))
-        self.assertTrue(M.launcher_ok(o, min_inet_down=300))
+        self.assertIn("download link 80 Mbps below 100", a["launcher_why"])
+        # Exactly 100 passes; the floor can be passed in (this run's --min-inet-down) either way.
+        self.assertTrue(M.launcher_ok(offer(1, "x", 128, 100, 1.0, inet_down=100.0)))
+        self.assertTrue(M.launcher_ok(o, min_inet_down=50))
         self.assertTrue(M.launcher_ok(o, min_inet_down=0))
-        self.assertFalse(M.launcher_ok(offer(1, "x", 128, 100, 1.0, inet_down=900.0), min_inet_down=1000))
-        m = M.Model(rules={"min_inet_down": 200})
+        self.assertFalse(M.launcher_ok(offer(1, "x", 128, 100, 1.0, inet_down=300.0), min_inet_down=500))
+        m = M.Model(rules={"min_inet_down": 50})
         self.assertTrue(M.annotate(m, o)["launcher_ok"])
         # A link speed vast does not report cannot be matched by the search's inet_down filter.
         no_speed = offer(1, "x", 128, 100, 1.0)
@@ -91,9 +93,20 @@ class Cost(unittest.TestCase):
         self.assertFalse(M.launcher_ok(no_speed))
         self.assertTrue(M.launcher_ok(no_speed, min_inet_down=0))
 
+    def test_the_price_cap_is_1_70_an_hour(self):
+        # Owner, 2026-10-16: the launcher rents nothing above $1.70/h unless the run raises the cap.
+        self.assertTrue(M.launcher_ok(offer(1, "x", 128, 100, 1.70)))
+        o = offer(1, "x", 128, 100, 1.90)
+        self.assertFalse(M.launcher_ok(o))
+        self.assertEqual(M.launcher_failures(o), ["price $1.90/h above the cap $1.70/h"])
+        self.assertTrue(M.launcher_ok(o, max_dph=2.5))
+        self.assertTrue(M.launcher_ok(o, max_dph=0))
+        self.assertFalse(M.annotate(self.m, o)["launcher_ok"])
+        self.assertTrue(M.annotate(M.Model(rules={"max_dph": 0}), o)["launcher_ok"])
+
     def test_an_unverified_fast_host_is_rentable_and_flagged(self):
         for word in ("unverified", "deverified"):
-            o = offer(1, "x", 128, 100, 1.0, verification=word, inet_down=900.0)
+            o = offer(1, "x", 128, 100, 1.0, verification=word, inet_down=300.0)
             self.assertTrue(M.launcher_ok(o), word)
             a = M.annotate(self.m, o)
             self.assertEqual((a["launcher_ok"], a["launcher_flag"], a["launcher_why"]), (True, word, ""))
@@ -102,13 +115,16 @@ class Cost(unittest.TestCase):
         # The strict setting of the launcher (--verified-only) refuses them.
         self.assertFalse(M.launcher_ok(offer(1, "x", 128, 100, 1.0, verification="unverified"), verified_only=True))
         # An unverified host with a slow link is not rentable, and carries no "yes" flag.
-        slow = M.annotate(self.m, offer(1, "x", 128, 100, 1.0, verification="unverified", inet_down=100.0))
+        slow = M.annotate(self.m, offer(1, "x", 128, 100, 1.0, verification="unverified", inet_down=80.0))
         self.assertEqual((slow["launcher_ok"], slow["launcher_flag"]), (False, ""))
 
     def test_gpu_rules_are_the_launchers(self):
         base = dict(num_gpus=1, compute_cap=860, cuda_max_good=12.8, gpu_ram=6138)
         self.assertTrue(M.launcher_ok(offer(1, "x", 128, 100, 1.0, **base), gpus=1, min_gpu_ram_gb=4))
-        for kw, word in (({"num_gpus": 2}, "2 GPUs, not the 1 asked for"), ({"compute_cap": 1200}, "compute capability 1200"),
+        # At least the GPUs asked for (owner, 2026-10-16): a 2-GPU machine is fine for a 1-GPU job, a 1-GPU one is not for 2.
+        self.assertTrue(M.launcher_ok(offer(1, "x", 128, 100, 1.0, **{**base, "num_gpus": 2}), gpus=1, min_gpu_ram_gb=4))
+        self.assertFalse(M.launcher_ok(offer(1, "x", 128, 100, 1.0, **base), gpus=2, min_gpu_ram_gb=4))
+        for kw, word in (({"num_gpus": 0}, "0 GPUs, fewer than the 1 asked for"), ({"compute_cap": 1200}, "compute capability 1200"),
                          ({"compute_cap": 520}, "compute capability 520"), ({"cuda_max_good": 12.4}, "driver supports CUDA 12.4"),
                          ({"gpu_ram": 3000}, "GPU memory 3000 MB")):
             why = M.launcher_failures(offer(1, "x", 128, 100, 1.0, **{**base, **kw}), gpus=1, min_gpu_ram_gb=4)
@@ -164,7 +180,7 @@ class Dashboard(unittest.TestCase):
 
 class Categories(unittest.TestCase):
     def setUp(self):
-        self.m = M.Model()
+        self.m = M.Model(rules={"max_dph": 0})  # these fixtures include machines far above the launcher's $1.70 cap
         self.offers = [M.annotate(self.m, o) for o in [
             offer(1, "AMD Ryzen Threadripper PRO 9995WX 96-Cores", 192, 251, 1.27, machine=10),
             offer(2, "AMD Ryzen Threadripper PRO 9995WX 96-Cores", 192, 251, 1.40, machine=11),
@@ -193,7 +209,7 @@ class Categories(unittest.TestCase):
 
 class Records(unittest.TestCase):
     def setUp(self):
-        self.m = M.Model()
+        self.m = M.Model(rules={"max_dph": 0})  # the fixtures include machines above the launcher's $1.70 cap
         self.dir = tempfile.mkdtemp()
         self.path = os.path.join(self.dir, "history.json")
 
