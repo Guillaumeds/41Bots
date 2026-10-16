@@ -256,5 +256,68 @@ Total about 3–16 core-hours, nearly all of it training.
   1024-wide networks needs a new integer format (a decision for the owner, see that note).
 - **Accuracy.** O_4 overfits 900k labels; labels are cheap (1M in about a minute here), so the next
   round should use several million, a larger network, and harvested frontier positions from H_4's
-  own searches (`SOURCE_HARVEST` is reserved in the shard format).
+  own searches (`SOURCE_HARVEST` is reserved in the shard format). **Harvesting is built** (branch
+  `m3-hybrid-harvest`, next section).
 - The CI parity step and the rung-1 workflow have not been run (no workflows triggered from here).
+
+## Harvested positions (spec §5 source (c); branch `m3-hybrid-harvest`, 2026-10-16)
+
+**Why.** Two trainings of the rung-1b recipe (4M labels from random play and rules-v1 self-play)
+came out at the edge of the standard on the trick-3 golden set (decision loss 95% upper bound
+0.0083% and 0.0108%; positions 1–2 and 3–4 failing; a team bias of 0.013–0.017%). The hybrid H_4
+asks the network about *every* position its search reaches at the start of trick 4, including
+lines no sensible player would choose (the search must look at every card to know it is bad).
+Random play and self-play give one position per deal; the search asks about hundreds of
+neighbouring positions of the same deal, a different mix. Harvesting [collecting training
+positions from the search itself] trains the network on exactly what it will be asked. It is the
+proven remedy (DAgger [train on the situations your own method gets into], Ross et al. 2011).
+
+**How** (`search labels --source harvest`, `search::oracle_labels::harvest_rows`):
+
+1. A training decision drawn exactly as the yardstick draws its decisions (the generator of
+   `search decisions`: a rules-v1 hand from a match state of each stratum S1–S4 in turn), at
+   trick 3 by default (`--harvest-tricks`), with its own seed (seed 1, the golden sets', is
+   refused).
+2. One world drawn from the decider's belief, as for the random-play labels.
+3. The hybrid's search from the decision, for every candidate, with the *exact* value at the
+   frontier (the search H_4 makes when its network is right). Every position it reaches at the
+   start of trick 4 is recorded through the solver's frontier hook, in the order reached.
+4. A position met again (another line to the same canonical form) is kept once; then a seeded
+   sample of at most 16 per decision (`--harvest-cap`), so the decisions that reach hundreds of
+   positions do not dominate.
+5. Each is labelled exactly like the other sources (same exact value, tie rule, outcome label and
+   record format; source tag 3 in the shard).
+6. `--harvest-positions 0.4,0.4,0.2` sets the shares of decisions for the decider's position
+   bands 1–2, 3–4 and 5–8 (default 0.25,0.25,0.5: the eight positions equally). The sidecar
+   records the settings and the counts reached: decisions and rows per position, per stratum and
+   per trick, and the positions reached per decision.
+
+The same bytes come out for any number of threads (tested on 1 and 4 threads; also checked on a
+20,000-row shard).
+
+**Measured on the build VM** (trick 3 decisions, frontier at trick 4):
+
+| | |
+|---|---|
+| positions reached per decision (distinct) | mean 112, median 24, 90th percentile 324, max 2,184 (138 frontier evaluations on average) |
+| by the decider's position 1 … 8 (400 decisions) | 502, 202, 96, 41, 28, 9, 5, 2 |
+| share of all reachable positions that the search reaches | 95% (45,872 of 48,321 over 400 decisions; all of them in 385 decisions) |
+| positions the trained rung-1b network's H_4 reaches that the harvest also reaches | 99.2% |
+| time (one thread) | 0.33 s per 1,000 labels (positions uniform), 0.41 s with positions 1–4 oversampled (0.4,0.4,0.2); random-play labels 0.23 s, rules-v1 0.07 s; 4M harvested labels about 30 thread-minutes (seconds on a rented machine) |
+| rows by position with 0.4,0.4,0.2 (50,000 rows) | 89% from positions 1–4 (a late player has few cards left to choose from, so its search reaches few positions) |
+| overlap with the other sources | 0 of 20,000 harvested positions are among the first 100,000 random-play labels of the training seed (101), or among 100,000 rules-v1 labels |
+
+The overlap is nil because a deal of 53 cards never repeats: no exact position recurs between
+sources. What the harvest adds is the search's own neighbourhood of each deal (the third and
+fourth lines above show that it is that neighbourhood, whatever values drive the search).
+
+**Training** reads the harvested shard like the others (`--train random.npy rules.npy
+harvest.npy`; the trainer ignores the source tag). The validation shard stays random play and the
+verdict stays the golden set. The runner's `hybrid_rung` takes it with `labels_harvest` (rows),
+`labels_harvest_seed`, `harvest_cap_per_decision` and `harvest_positions` (`docs/m3-hybrid/vast.md`).
+
+**For O_3 later (not built).** With exact values at the frontier every reached position is solved
+exactly: at trick 3 that is about 830 trick-3 positions per trick-2 decision (leader), 40 s on one
+thread, about 2.5 s per label: too dear for millions. The O_3 harvest should drive its search with
+the first-round network (or any fixed value) and solve only the sampled positions; at trick 4 the
+reached sets are nearly the same either way (lines above).
