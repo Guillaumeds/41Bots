@@ -286,3 +286,24 @@ their SHA-256 in the manifest), put the network's SHA-256 in place of the placeh
 `docs/vast/m3-hybrid-t1check.manifest.json`. The known hard world alone first, if wanted: the same
 manifest with `"only": "0:3"` and `"verify_pct": 0` (one world, one thread: a small machine
 suffices).
+
+## 5. O_2 round 1: a train-only rung, checked on the saved trick-1 worlds
+
+O_2 (exact trick 1, the network from the start of trick 2) cannot have a generated golden set: its
+golden set would be trick-1 decisions with exact worlds. Its check is §4's, on the saved worlds,
+with `--cut 2`. So `hybrid_rung` has a train-only mode (`"check": false`, `vast.md`), and every
+rung now shares its integer network content-addressed (`net.int_key`), ready to be the
+`hybrid_t1check`'s `o3`/`o2` input.
+
+**Cut 2 end to end, on this VM:** `search labels --trick 2` (random play and rules-v1), the Python
+trainer on those shards (39 hand endings at trick 2), and `search hybrid-check --trick 1 --cut 2
+--saved …` with the resulting tiny network on saved worlds (the hard world included) all run.
+With a tiny network H_2 takes 0.3 s on the hard world (67,000 network evaluations): the O_2 trick-1
+check will be cheap; the labels are the cost.
+
+**Price of a trick-2 label** (one thread, 20 labels, this VM, shared with other jobs): random play
+2.67 s a label, rules-v1 3.22 s. The proposal's 1,300,000 labels (1M random play, 250,000 rules-v1,
+50,000 validation) are then about 1,000 thread-hours: about 5.5 hours on 184 threads, about $6 at
+$1.1/h if a rented thread is as fast as this VM's; a hyper-threaded thread on a fully loaded machine
+may be up to half again slower (about 8 hours, $9). Training on the GPU adds up to `max_minutes`
+(200). To be priced with the owner before running (spec §5).

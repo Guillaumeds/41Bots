@@ -25,6 +25,10 @@
 //! and `golden_worlds_input` (none; both or neither): a stored golden set (a decisions file and its
 //! exact worlds file, by key) reused instead of generated (step 5); `verify_pct` must then be at
 //! least 1 (spec §4: reuse after a byte-identical recheck).
+//! `check` (true): `false` trains only, for a rung whose network is checked elsewhere (O_2: the
+//! trick-1 check on the saved exact worlds, `hybrid_t1check`): no golden set (step 5) and no
+//! hybrid check (step 7), and the verdict is [`TRAIN_ONLY`]; the golden set's and the check's
+//! settings (`golden_*`, `verify_pct`, `tt_mb`) are then refused, not ignored.
 //! Also: `mix_weight` (1.0), `start_hands` (20000, for the label roots and the golden
 //! decisions), `tt_mb` (64, the solver table per thread of the golden worlds
 //! and the check), `verify_pct` (1, the check's recomputed sample of stored exact worlds),
@@ -73,8 +77,12 @@
 //! 6. **Training** (`python -m fortyone_nn.train`, which also quantises the network and measures
 //!    the integer network): `out/hybrid/net/` holds `float.safetensors`, `int.safetensors` and
 //!    `report.json` (history, errors, device facts). The heartbeat shows the epoch and batches.
+//!    The integer network is then shared content-addressed (`put_input`, checked against its
+//!    SHA-256; `rung.json` `net.int_key` and `result.json` `net_int_key` give the key a later
+//!    run names it by, as `harvest_net` or a check's network); a failure is only a warning.
 //! 7. **Hybrid check** (`search hybrid-check`, all usable threads): H_cut against exact on the
-//!    golden set; `out/hybrid/hc-t<G>-o<K>.json` and its printed tables in `.txt`.
+//!    golden set; `out/hybrid/hc-t<G>-o<K>.json` and its printed tables in `.txt`. Skipped, with
+//!    step 5, when `check` is false.
 //! 8. **Summary**: `out/hybrid/rung.json` (rewritten after every step): the resolved settings,
 //!    each step's seconds, the environment and device facts, the label sidecars, the networks'
 //!    SHA-256, the check's verdict and its overall row, and every warning.
@@ -111,8 +119,9 @@ use crate::spike::build_table_from;
 use crate::{Ctx, sibling};
 
 /// The settings a `hybrid_rung` chunk takes; any other key is refused.
-pub(crate) const KEYS: [&str; 38] = [
+pub(crate) const KEYS: [&str; 39] = [
     "cut",
+    "check",
     "labels_random",
     "labels_random_seed",
     "labels_rules",
@@ -152,6 +161,9 @@ pub(crate) const KEYS: [&str; 38] = [
     "est_seconds",
     "equity_input",
 ];
+
+/// The verdict of a chunk that trains only (`"check": false`).
+pub(crate) const TRAIN_ONLY: &str = "not checked (train only)";
 
 /// The golden sets' seed, which `search labels` refuses (`search::oracle_labels::GOLDEN_SEED`).
 const GOLDEN_SEED: u64 = 1;
@@ -203,6 +215,10 @@ pub(crate) struct LabelSet {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Params {
     pub cut: u64,
+    /// Make the golden set and run the hybrid check (steps 5 and 7); `false` (`"check": false`)
+    /// trains only: the network is checked elsewhere (for O_2, on the saved exact trick-1 worlds,
+    /// `hybrid_t1check`).
+    pub check: bool,
     /// The training shards (counts above 0), random first.
     pub train: Vec<LabelSet>,
     pub val: LabelSet,
@@ -245,14 +261,18 @@ impl Params {
             }
             v
         };
+        let golden = self.check.then(|| {
+            json!({ "trick": self.golden_trick, "count": self.golden_count,
+                    "seed": self.golden_seed, "worlds": self.golden_worlds,
+                    "decisions_input": self.golden_inputs.as_ref().map(|(d, _)| input_key(d)),
+                    "worlds_input": self.golden_inputs.as_ref().map(|(_, w)| input_key(w)) })
+        });
         json!({
             "cut": self.cut,
+            "check": self.check,
             "train": self.train.iter().map(|s| (s.name.to_string(), set(s))).collect::<Map<_, _>>(),
             "val": set(&self.val),
-            "golden": { "trick": self.golden_trick, "count": self.golden_count,
-                        "seed": self.golden_seed, "worlds": self.golden_worlds,
-                        "decisions_input": self.golden_inputs.as_ref().map(|(d, _)| input_key(d)),
-                        "worlds_input": self.golden_inputs.as_ref().map(|(_, w)| input_key(w)) },
+            "golden": golden,
             "harvest_net": self.harvest_net.as_deref().map(input_key),
             "start_hands": self.start_hands, "tt_mb": self.tt_mb, "verify_pct": self.verify_pct,
             "net": { "widths": self.widths, "head": self.head, "epochs": self.epochs,
@@ -326,6 +346,31 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         return Err(format!(
             "hybrid_rung: cut {cut} must be 2..=5 (the frontier at the start of that trick)"
         ));
+    }
+    // Train only (`"check": false`): the golden set's and the check's settings would be
+    // ignored, so they are refused rather than silently dropped.
+    let check = match o.get("check") {
+        None | Some(Value::Null) => true,
+        Some(v) => v
+            .as_bool()
+            .ok_or("hybrid_rung: check must be true or false")?,
+    };
+    if !check {
+        let golden_keys = [
+            "golden_trick",
+            "golden_count",
+            "golden_seed",
+            "golden_worlds",
+            "golden_decisions_input",
+            "golden_worlds_input",
+            "verify_pct",
+            "tt_mb",
+        ];
+        if let Some(k) = golden_keys.iter().find(|k| o.contains_key(**k)) {
+            return Err(format!(
+                "hybrid_rung: check false trains only (no golden set, no hybrid check), but                  {k} is set: it belongs to the golden set or the check; remove it"
+            ));
+        }
     }
     let set = |name: &'static str, source: &'static str, count: &str, seed: &str, d: (u64, u64)| {
         Ok::<_, String>(LabelSet {
@@ -458,7 +503,11 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
     let golden_count = u("golden_count", 400)?;
     let golden_worlds = u("golden_worlds", 320)?;
     if golden_count == 0 || golden_worlds == 0 {
-        return Err("hybrid_rung: golden_count and golden_worlds must be at least 1".into());
+        return Err(
+            "hybrid_rung: golden_count and golden_worlds must be at least 1 (to train without a \
+             golden set and a check, set \"check\": false)"
+                .into(),
+        );
     }
     let widths_text = s("widths", "1024,512,128")?;
     let widths: Vec<u64> = widths_text
@@ -509,6 +558,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
     }
     Ok(Params {
         cut,
+        check,
         train,
         val,
         golden_trick,
@@ -721,7 +771,11 @@ pub(crate) fn chunk_with(
     if params.upload_shards {
         r.upload_shards(&shards)?;
     }
-    let (decisions, worlds) = r.golden()?;
+    let golden = if params.check {
+        Some(r.golden()?)
+    } else {
+        None
+    };
     let net = r.out.join("net");
     r.train(&shards, &net, &r.device.clone(), "train", "net")?;
     if params.compare_cpu {
@@ -738,7 +792,18 @@ pub(crate) fn chunk_with(
             r.warn("compare_cpu: the network was trained on the CPU already; no comparison".into());
         }
     }
-    let verdict = r.check(&net, &decisions, &worlds)?;
+    let verdict = match golden {
+        Some((decisions, worlds)) => r.check(&net, &decisions, &worlds)?,
+        None => {
+            r.rec.insert(
+                "check".into(),
+                json!({ "verdict": TRAIN_ONLY,
+                        "note": "check false: no golden set was made and no hybrid check was \
+                                 run; the network (net.int_key) is checked elsewhere" }),
+            );
+            TRAIN_ONLY.to_string()
+        }
+    };
     r.rec.insert("seconds".into(), json!(secs(r.t0)));
     r.save()?;
     r.ctx.set_phase(
@@ -752,6 +817,7 @@ pub(crate) fn chunk_with(
         "device": r.device,
         "gpu": r.rec.get("device").and_then(|d| d.get("gpu_name")).cloned(),
         "net_int_sha256": r.rec.get("net").and_then(|n| n.get("int_sha256")).cloned(),
+        "net_int_key": r.rec.get("net").and_then(|n| n.get("int_key")).cloned(),
         "steps": r.steps,
         "warnings": r.warnings,
     }))
@@ -1363,10 +1429,18 @@ impl Rung<'_> {
         let rel = dir
             .strip_prefix(&self.out)
             .map_or_else(|_| path_str(dir), path_str);
+        let int_sha = sha("int.safetensors")?;
+        // The integer network is shared content-addressed (as the golden set), so a later run
+        // names it as an input (`harvest_net`, a check's network); a failure is only a warning.
+        let int_key = if key == "net" {
+            self.share_net(&dir.join("int.safetensors"), &int_sha)
+        } else {
+            None
+        };
         self.rec.insert(
             key.into(),
             json!({ "dir": rel, "device": device, "threads": threads,
-                    "int_sha256": sha("int.safetensors")?,
+                    "int_sha256": int_sha, "int_key": int_key,
                     "float_sha256": sha("float.safetensors")?,
                     "epochs_run": report["history"].as_array().map_or(0, Vec::len),
                     "best_epoch": report["best_epoch"],
@@ -1380,6 +1454,39 @@ impl Rung<'_> {
                     "seconds": secs(t) }),
         );
         self.done(step, t)
+    }
+
+    /// Uploads the trained integer network to `inputs/sha256/<hex>` (`put_input`, checked
+    /// against `sha`); its key, or `None` with a warning when there is no remote store or the
+    /// upload fails (the network is in this run's bundle either way).
+    fn share_net(&mut self, path: &Path, sha: &str) -> Option<String> {
+        let Some(remote) = self.tools.remote.clone() else {
+            self.warn(
+                "the network was not shared as an input: no remote store (R2, or \
+                 RUNNER_REMOTE_DIR); it is in this run's bundle"
+                    .into(),
+            );
+            return None;
+        };
+        let (p2, want) = (path.to_path_buf(), sha.to_string());
+        match self
+            .ctx
+            .blocking(move || put_input(&*remote, &p2, Some(&want)))
+        {
+            Ok((sha, bytes, status)) => {
+                println!(
+                    "runner: hybrid_rung: network: {} ({bytes} bytes, {status})",
+                    input_key(&sha)
+                );
+                Some(input_key(&sha))
+            }
+            Err(e) => {
+                self.warn(format!(
+                    "the network was not shared as an input: {e}; it is in this run's bundle"
+                ));
+                None
+            }
+        }
     }
 
     /// `compare_cpu`: the GPU and CPU trainings side by side.
@@ -1527,6 +1634,43 @@ mod tests {
                        "table": { "hands": 1000000, "seed": 1 } }),
         )
         .expect("scheduler keys");
+    }
+
+    /// `"check": false` trains only; the golden set's and the check's settings are refused with
+    /// it, and `golden_count: 0` points to it.
+    #[test]
+    fn train_only_settings() {
+        let p = parse(&json!({ "cut": 2, "check": false, "labels_random": 10,
+                               "labels_random_seed": 511, "labels_rules": 0,
+                               "val_count": 5, "val_seed": 601 }))
+        .expect("train only");
+        assert!(!p.check);
+        assert_eq!(p.cut, 2);
+        let j = p.to_json();
+        assert_eq!(
+            (j["check"].clone(), j["golden"].clone()),
+            (json!(false), Value::Null)
+        );
+        assert!(parse(&json!({})).expect("defaults").check);
+        let key = format!("inputs/sha256/{}", "a".repeat(64));
+        for (k, v) in [
+            ("golden_trick", json!(1)),
+            ("golden_count", json!(32)),
+            ("golden_seed", json!(1)),
+            ("golden_worlds", json!(4)),
+            ("golden_decisions_input", json!(key)),
+            ("golden_worlds_input", json!(key)),
+            ("verify_pct", json!(1)),
+            ("tt_mb", json!(64)),
+        ] {
+            let mut x = json!({ "cut": 2, "check": false });
+            x[k] = v;
+            let e = parse(&x).expect_err(k);
+            assert!(e.contains(&format!("{k} is set")), "{e}");
+        }
+        let e = parse(&json!({ "golden_count": 0 })).expect_err("no golden set");
+        assert!(e.contains("\"check\": false"), "{e}");
+        assert!(parse(&json!({ "check": "no" })).is_err());
     }
 
     #[test]
@@ -1780,6 +1924,30 @@ mod tests {
                 );
             }
         }
+        // The trick-2 (O_2) round-1 proposal: train only (its check is the trick-1 check on the
+        // saved worlds, `hybrid_t1check`), runnable as it is.
+        let path = dir.join("m3-hybrid-t2-round1.manifest.json");
+        let v: Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("json");
+        let m = crate::sched::parse_v2(&v).expect("runnable");
+        let s = &m.streams[0];
+        assert_eq!((s.kind.as_str(), s.threads_all), ("hybrid_rung", true));
+        let p = parse(&s.params).expect("settings");
+        assert_eq!((p.cut, p.check), (2, false));
+        assert_eq!(
+            p.train
+                .iter()
+                .map(|s| (s.name, s.count, s.seed))
+                .collect::<Vec<_>>(),
+            [("random", 1_000_000, 511), ("rules", 250_000, 512)]
+        );
+        assert_eq!((p.val.count, p.val.seed), (50_000, 601));
+        assert_eq!(
+            (p.widths_arg().as_str(), p.head.as_str()),
+            ("1024,512,128", "outcome")
+        );
+        assert_eq!(v["machine"]["gpus"], 1);
+        assert!(v.get("bin_sha").is_none());
         // The rung-2 (O_3) round-2 proposal: its three stored inputs are placeholders until
         // round 1 has run and the golden files are uploaded, so it is refused as it is; filled
         // in, it is a runnable trick-3 rung reusing the stored trick-2 golden set.
@@ -2133,6 +2301,12 @@ esac
         assert_eq!(rung["labels"][0]["shard_sha256"], sha.as_str());
         assert_eq!(rung["net"]["device"], "cpu");
         assert_eq!(rung["net"]["epochs_run"], 2);
+        assert!(
+            rung["net"]["int_key"]
+                .as_str()
+                .is_some_and(|k| k.starts_with("inputs/sha256/")),
+            "{rung}"
+        );
         assert_eq!(rung["params"]["golden"]["worlds"], 4);
         let steps: Vec<&str> = rung["steps"]
             .as_array()
@@ -2262,6 +2436,96 @@ esac
     /// golden set generated, and the stored files given to the check with its 1% recheck. A
     /// missing key, an object whose bytes are not its key's, a decision count that is not
     /// `golden_count` and no remote store each stop the chunk before anything is installed.
+    /// A train-only rung (`"check": false`, here at cut 2): labels, training, the network
+    /// shared content-addressed, and no golden set and no hybrid check (no `search decisions`,
+    /// `worlds` or `hybrid-check` call); the verdict says it was not checked. Without a remote
+    /// store the network stays in the bundle, with a warning.
+    #[cfg(unix)]
+    #[test]
+    fn train_only_runs_no_golden_set_and_no_check() {
+        let f = fakes("trainonly");
+        let remote: Arc<dyn Remote> = Arc::new(crate::remote::DirRemote {
+            root: f.base.join("remote"),
+        });
+        let params = parse(&json!({
+            "cut": 2, "check": false, "labels_random": 7, "labels_random_seed": 511,
+            "labels_rules": 5, "labels_rules_seed": 512, "val_count": 3, "val_seed": 601,
+            "widths": "16,8", "epochs": 2,
+        }))
+        .expect("params");
+        let tools = Tools {
+            search: f.search.clone(),
+            uv: f.uv.clone(),
+            python_dir: f.py.clone(),
+            nvidia_smi: f.base.join("no-such-nvidia-smi"),
+            remote: Some(Arc::clone(&remote)),
+        };
+        let root = f.base.join("run");
+        let mut ctx = Ctx::local("hybrid-test", &root, 4);
+        let r = chunk_with(&mut ctx, &params, &tools, &f.table, json!({})).expect("the chunk runs");
+        assert_eq!(r["verdict"], TRAIN_ONLY);
+        let log = fs::read_to_string(&f.calls).expect("calls");
+        for gone in ["search decisions", "search worlds", "search hybrid-check"] {
+            assert!(!log.contains(gone), "{gone} in\n{log}");
+        }
+        for want in [
+            "search labels --trick 2 --count 7 --seed 511 --source random",
+            "search labels --trick 2 --count 5 --seed 512 --source rules",
+            "search labels --trick 2 --count 3 --seed 601 --source random",
+            "python -m fortyone_nn.train --train",
+        ] {
+            assert!(log.contains(want), "{want} in\n{log}");
+        }
+        let out = root.join("out").join("hybrid");
+        let rung = read_json(&out.join("rung.json")).expect("rung.json");
+        let steps: Vec<&str> = rung["steps"]
+            .as_array()
+            .expect("steps")
+            .iter()
+            .filter_map(|s| s["step"].as_str())
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                "python environment",
+                "GPU check",
+                "labels random (1 of 3)",
+                "labels rules (2 of 3)",
+                "labels val (3 of 3)",
+                "train"
+            ]
+        );
+        assert_eq!(rung["check"]["verdict"], TRAIN_ONLY);
+        assert_eq!(rung["params"]["golden"], Value::Null);
+        assert!(out.join("labels/t2-random-s511.npy.json").is_file());
+        assert!(!out.join("decisions-t1.jsonl").exists());
+        // The integer network, shared under its SHA-256.
+        let int = out.join("net").join("int.safetensors");
+        let hex = crate::bundle::sha256_file(&int).expect("sha").0;
+        let key = format!("inputs/sha256/{hex}");
+        assert_eq!(rung["net"]["int_sha256"], hex.as_str());
+        assert_eq!(rung["net"]["int_key"], key.as_str());
+        assert_eq!(r["net_int_key"], key.as_str());
+        assert_eq!(
+            remote.sha256(&key).expect("listed"),
+            Some((hex, fs::metadata(&int).expect("file").len()))
+        );
+        // No remote store: the network stays in the bundle, with a warning.
+        let tools = Tools {
+            remote: None,
+            ..tools
+        };
+        let mut ctx = Ctx::local("hybrid-test", &f.base.join("local"), 4);
+        let r = chunk_with(&mut ctx, &params, &tools, &f.table, json!({})).expect("runs");
+        assert_eq!(r["net_int_key"], Value::Null);
+        assert!(
+            r["warnings"].as_array().is_some_and(|w| w.iter().any(|w| w
+                .as_str()
+                .is_some_and(|w| w.contains("the network was not shared")))),
+            "{r}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn stored_inputs_are_fetched_checked_and_used() {

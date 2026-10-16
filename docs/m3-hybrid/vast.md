@@ -121,6 +121,19 @@ launcher checks they are in R2 before renting. A generated golden set is now als
 `inputs/sha256/<hex>`, and `rung.json`'s `golden.reuse_params` gives the settings that reuse it.
 Proposal: `docs/vast/m3-hybrid-t3-round2.manifest.json` (placeholders to fill in first).
 
+## Train only (O_2), and the trained network shared
+
+`"check": false` makes a train-only rung: labels and training as above, but no golden set and no
+hybrid check; the verdict reads "not checked (train only)". It is for O_2, whose check is the
+trick-1 check on the saved exact worlds (a generated trick-1 golden set is out of reach), run
+afterwards as a `hybrid_t1check` chunk (`docs/m3-hybrid/rung2.md` §4–5). With it the golden set's
+and the check's settings (`golden_*`, `verify_pct`, `tt_mb`) are refused rather than ignored.
+Every rung now also uploads its integer network to `inputs/sha256/<hex>` after training
+(`rung.json` `net.int_key`, `result.json` `net_int_key`), so the next run names it as an input
+without a manual `put-input`. Proposal: `docs/vast/m3-hybrid-t2-round1.manifest.json` (cut 2,
+1M random-play and 250,000 rules-v1 labels, 50,000 for validation, 1024-512-128; runnable as it
+is; priced in `rung2.md` §5 before anything is rented).
+
 ## Time and money (estimates for the AMD EPYC 9654 (384 threads) + RTX A2000 class at about $1/h)
 
 These are estimates from this VM's and GitHub's measurements, not measurements on that machine;
