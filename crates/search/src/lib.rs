@@ -25,10 +25,14 @@
 //!   candidate, the network's error there and its outcome probabilities.
 //! - [`oracle_labels`]: training labels for the oracle networks of the hybrid yardstick
 //!   (docs/M3-HYBRID-SPEC.md §5): positions at the start of a trick, encoded, valued exactly.
+//! - [`audit`]: the search side of the audit loop (docs/m3-hybrid/audit-loop.md): the frontier
+//!   positions a decision's search reaches inside a predicate file's groups, the golden slices
+//!   and the mini golden sets drawn by rejection.
 //!
 //! Everything that scores is fixed point ([`equity::MoneyChance`]); floats appear in reports
 //! only.
 
+pub mod audit;
 pub mod bot;
 pub mod curves;
 pub mod eta;

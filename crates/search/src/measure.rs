@@ -332,18 +332,27 @@ pub fn build_decisions(
     starts: &[Vec<HandStartState>; 4],
 ) -> Vec<DecisionSpec> {
     (0..count)
-        .map(|i| {
-            let mut rng = Rng::derive(seed, &[labels::MEASURE, u64::from(trick), i]);
-            build_decision(
-                trick,
-                i,
-                (i % 4) as usize,
-                ((i / 4) % 8) as usize,
-                &mut rng,
-                starts,
-            )
-        })
+        .map(|i| build_decision_at(trick, i, seed, starts))
         .collect()
+}
+
+/// Decision `i` of [`build_decisions`] (any `i`, so a set can be drawn further by rejection:
+/// `crate::audit`).
+pub fn build_decision_at(
+    trick: u8,
+    i: u64,
+    seed: u64,
+    starts: &[Vec<HandStartState>; 4],
+) -> DecisionSpec {
+    let mut rng = Rng::derive(seed, &[labels::MEASURE, u64::from(trick), i]);
+    build_decision(
+        trick,
+        i,
+        (i % 4) as usize,
+        ((i / 4) % 8) as usize,
+        &mut rng,
+        starts,
+    )
 }
 
 /// One decision of [`build_decisions`]: id `id` at trick `trick`, from stratum `st + 1` at

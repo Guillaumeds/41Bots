@@ -3,6 +3,10 @@
 //! ```text
 //! search decisions --trick T --count N --out FILE [--seed S] [--start-hands H] [--allow-uneven]
 //!                  [--threads T]
+//! search decisions --keep PRED.json --trick T --count N --out FILE --equity TABLE
+//!                  [--keep-share 0.5] [--keep-worlds 8] [--cut T+1] [--net WEIGHTS]
+//!                  [--first-candidate 0] [--max-candidates 200N] [--seed 1] [--label 1]
+//!                  [--tt-mb 64] [--source belief|rejection] [--threads T] [--start-hands H]
 //! search worlds    --decisions FILE --method exact|rollout --to N --out FILE
 //!                  [--from-world A] [--label L] [--seed S] [--first I] [--last J]
 //!                  [--ids 3,17,42 | --ids FILE] [--threads K] [--solve-threads K] [--tt-mb M]
@@ -32,6 +36,7 @@
 //!                  harvest only: [--harvest-cap 16] [--harvest-positions 0.25,0.25,0.5]
 //!                  [--harvest-tricks K-1 | --harvest-tricks 2,3] [--harvest-net WEIGHTS]
 //!                  [--harvest-strata 1,2,3,4] [--harvest-race-classes 2,4 [--harvest-race-cap 256]]
+//!                  [--harvest-keep PRED.json [--keep-cap 256]]
 //! search hybrid-check --trick T --cut K --net WEIGHTS --equity TABLE
 //!                  [--decisions FILE | --count N] [--seed 1] [--start-hands 20000]
 //!                  [--first I] [--last J] [--ids …] [--to 320] [--label 1]
@@ -39,6 +44,7 @@
 //!                  [--boot 1000] [--boot-seed 1] [--json OUT] [--source belief|rejection]
 //!                  [--verify-solve-threads 1] [--verify-tt-mb (--tt-mb)]
 //!                  [--explain 143,335 [--explain-worlds 3] [--explain-json FILE]]
+//!                  [--slices PRED.json [--slice-share 0.5]]
 //! search hybrid-check --trick T --cut K --net WEIGHTS --equity TABLE --decisions FILE
 //!                  --saved RUN=FILE [--saved RUN=FILE …] [--only D:W,…] [--hard D:W,…]
 //!                  [--verify-pct 0] [--verify-rule all|rules-v1|searched]
@@ -74,7 +80,13 @@
 //! classes (`nn::outcome::race_class`: 0 no game can end, 1 one team can win the game, 2 several
 //! can, 3 one team can win the match, 4 a team can win the match and another the game) are a
 //! seeded sample of at most `--harvest-race-cap` (256) per decision, the other classes' of at most
-//! `--harvest-cap` (which may then be 0: race positions only). Every shard's sidecar counts its
+//! `--harvest-cap` (which may then be 0: race positions only). `--harvest-keep PRED.json` makes a
+//! targeted harvest (docs/m3-hybrid/audit-loop.md §4 step 5; not with a race harvest): the
+//! reached positions inside any group of the predicate file (`nn::predicate`, decided on each
+//! position's encoded features) are a seeded sample of at most `--keep-cap` (256) per decision,
+//! drawn first on the decision's stream, the others of at most `--harvest-cap` (0: in-group
+//! positions only); the sidecar's `harvest.keep` gives the file's SHA-256 and the rows and
+//! reached positions per group. Every shard's sidecar counts its
 //! rows by race class (`rows_by_race_class`); a harvest's records its strata and race settings.
 //! `hybrid-check` measures the hybrid H_K (exact to the start of trick K, the oracle network
 //! there) against exact search on the same worlds (docs/M3-HYBRID-SPEC.md §3, `search::hybrid`):
@@ -105,8 +117,27 @@
 //! search copied up to each candidate, with the network's outcome probabilities there;
 //! `--explain-json FILE` writes every world (the principal positions of the
 //! `--explain-worlds` most misleading ones only).
+//! `--slices PRED.json` (not with `--saved` or `--explain`; docs/m3-hybrid/audit-loop.md §3 item
+//! 2, `search::hybrid::slices`): the hybrid's own search in every world also records the distinct
+//! frontier positions it reaches and their groups (never changing a value); a decision is in a
+//! group when at least `--slice-share` (0.5) of the positions its worlds' searches reach are in
+//! it. The report adds the §3 table per group and for the decisions in no group (reported, not
+//! judged), and the standard then also asks every group's slice with decisions to pass the
+//! decision-loss bound (JSON: `slices`, `pass` with them, `pass_without_slices`).
 //! `decisions` stratifies equally over the 4 strata and 8 positions, so `--count` must be a
 //! multiple of 32 (`--allow-uneven` overrides); it prints the position × stratum table it made.
+//! `decisions --keep PRED.json` draws a mini golden set by rejection (docs/m3-hybrid/
+//! audit-loop.md §3 item 3; `search::audit::keep_decisions`): candidates are the generator's
+//! decisions `--first-candidate`, the next, … (decision `i` is the one `search decisions` makes
+//! as its `i`th with the same `--seed`, and keeps `i` as its id, so `search worlds` and
+//! `hybrid-check` draw its worlds as for any decision set); each is searched on its worlds
+//! `0..--keep-worlds` (`--label`), by the hybrid with the network `--net` (an O_cut) at the
+//! frontier of trick `--cut`, or with exact values there when no network is given (cheap at
+//! trick 4); a candidate is kept when at least `--keep-share` of the distinct frontier positions
+//! its searches reach lie in one group of the predicate file, until `--count` are kept or
+//! `--max-candidates` drawn. The file holds the kept decisions in the ordinary format;
+//! `FILE.json` records the predicate file (SHA-256), the share, the frontier's driver, the
+//! candidates drawn, and each kept decision's reach by group. Byte-identical for any `--threads`.
 //! `worlds` and `teacher` take `--source belief|rejection`: the world generator, by default
 //! `crates/belief`'s counted uniform sampler (which also records each decision's exact world
 //! count); `rejection` is the engine-based oracle (same distribution, no counts).
@@ -238,6 +269,21 @@ fn main() -> ExitCode {
 const BLOCK: u64 = 32;
 
 fn decisions(a: &Args) -> Result<(), String> {
+    if a.has("--keep") {
+        return keep_decisions_cmd(a);
+    }
+    for f in [
+        "--keep-share",
+        "--keep-worlds",
+        "--net",
+        "--cut",
+        "--first-candidate",
+        "--max-candidates",
+    ] {
+        if a.has(f) {
+            return Err(format!("{f} is for --keep PRED.json (a mini golden set)"));
+        }
+    }
     let trick = a.num("--trick", 2)? as u8;
     let count = a.num("--count", 7 * BLOCK)?;
     let seed = a.num("--seed", 1)?;
@@ -257,8 +303,19 @@ fn decisions(a: &Args) -> Result<(), String> {
     let threads = a.num("--threads", 1)?.max(1) as usize;
     let starts = collect_starts_with(a.num("--start-hands", 20_000)?, seed, threads);
     let ds = build_decisions(trick, count, seed, &starts);
-    let mut cells = [[0usize; 4]; 8];
+    print_cells(trick, &ds);
+    let mut out = String::new();
     for d in &ds {
+        out.push_str(&serde_json::to_string(d).map_err(|e| e.to_string())?);
+        out.push('\n');
+    }
+    std::fs::write(a.req("--out")?, out).map_err(|e| e.to_string())
+}
+
+/// The position × stratum table of a decision set.
+fn print_cells(trick: u8, ds: &[DecisionSpec]) {
+    let mut cells = [[0usize; 4]; 8];
+    for d in ds {
         cells[usize::from(d.position)][usize::from(d.stratum - 1)] += 1;
     }
     println!(
@@ -277,12 +334,201 @@ fn decisions(a: &Args) -> Result<(), String> {
             row.iter().sum::<usize>()
         );
     }
-    let mut out = String::new();
-    for d in &ds {
-        out.push_str(&serde_json::to_string(d).map_err(|e| e.to_string())?);
-        out.push('\n');
+}
+
+/// `search decisions --keep PRED.json`: a mini golden set by rejection sampling (module notes).
+fn keep_decisions_cmd(a: &Args) -> Result<(), String> {
+    use search::audit::{KeepJob, keep_decisions};
+    let trick = a.num("--trick", 2)? as u8;
+    let cut = a.num("--cut", u64::from(trick) + 1)? as u8;
+    if !(2..=5).contains(&cut) || trick == 0 || trick >= cut {
+        return Err(format!(
+            "--cut {cut} must be 2..=5 and after --trick {trick} (and --trick at least 1)"
+        ));
     }
-    std::fs::write(a.req("--out")?, out).map_err(|e| e.to_string())
+    let pred_path = a.req("--keep")?;
+    let preds = nn::predicate::Predicates::load(Path::new(pred_path))?;
+    if preds.is_empty() {
+        return Err(format!("--keep {pred_path}: the file has no groups"));
+    }
+    let share_text = a.get("--keep-share").unwrap_or("0.5");
+    let share = nn::predicate::parse_share(share_text).map_err(|e| format!("--keep-share: {e}"))?;
+    let count = a.num("--count", 50)?;
+    let threads = a.num("--threads", 1)?.max(1) as usize;
+    let seed = a.num("--seed", 1)?;
+    let job = KeepJob {
+        trick,
+        cut,
+        seed,
+        label: a.num("--label", 1)?,
+        worlds: a.num("--keep-worlds", 8)?.max(1),
+        share,
+        count,
+        first: a.num("--first-candidate", 0)?,
+        max_candidates: a.num("--max-candidates", count.saturating_mul(200))?,
+        threads,
+        tt_mb: a.num("--tt-mb", 64)?.max(1) as usize,
+    };
+    let t0 = Instant::now();
+    let (table, table_sha) = load_equity_sha(a.req("--equity")?)?;
+    let leaf: Arc<SharedLeaf> = Arc::new(table);
+    let oracle = match a.get("--net") {
+        Some(p) => {
+            let o = nn::Oracle::load(Path::new(p), leaf.clone())?;
+            if o.trick != cut {
+                return Err(format!(
+                    "--net {p} was trained for trick {} positions, not trick {cut}",
+                    o.trick
+                ));
+            }
+            Some((o, p.to_string()))
+        }
+        None => None,
+    };
+    let start_hands = a.num("--start-hands", 20_000)?;
+    let starts = collect_starts_with(start_hands, seed, threads);
+    let src = world_source(a)?;
+    let ctx = Ctx {
+        leaf: &*leaf,
+        source: &*src,
+        rules: engine::game::Rules::HOUSE,
+    };
+    let net: Option<&dyn solver::frontier::Frontier> = oracle
+        .as_ref()
+        .map(|(o, _)| o as &dyn solver::frontier::Frontier);
+    eprintln!(
+        "decisions: mini golden set at trick {trick}, frontier at trick {cut} ({}), {} groups of \
+         {pred_path} (sha256 {}), share {share_text}, {} worlds a candidate, {count} wanted from \
+         candidate {} (at most {}), {threads} threads",
+        oracle
+            .as_ref()
+            .map_or("exact values".to_string(), |(o, _)| format!(
+                "network {}",
+                &o.sha256[..12]
+            )),
+        preds.len(),
+        &preds.sha256[..12],
+        job.worlds,
+        job.first,
+        job.max_candidates
+    );
+    let done = std::sync::atomic::AtomicU64::new(0);
+    let finished = AtomicBool::new(false);
+    let t1 = Instant::now();
+    let run = std::thread::scope(|s| {
+        let (done, finished) = (&done, &finished);
+        s.spawn(move || {
+            let mut last = Instant::now();
+            while !finished.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(200));
+                if last.elapsed() >= Duration::from_secs(20) {
+                    last = Instant::now();
+                    eprintln!(
+                        "decisions: {} candidates searched, {:.0} s",
+                        done.load(Ordering::Relaxed),
+                        t1.elapsed().as_secs_f64()
+                    );
+                }
+            }
+        });
+        // Stops the progress thread however the search ends (a panic included).
+        struct Finish<'a>(&'a AtomicBool);
+        impl Drop for Finish<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+        let _finish = Finish(finished);
+        keep_decisions(&job, &preds, &starts, &ctx, net, Some(done))
+    });
+    let wall = t1.elapsed().as_secs_f64();
+    let ds: Vec<DecisionSpec> = run.kept.iter().map(|k| k.d.clone()).collect();
+    print_cells(trick, &ds);
+    let names = preds.describe();
+    for (g, line) in names.iter().enumerate() {
+        println!(
+            "group {line}: {} of {} candidates in it ({:.1}% of the reached positions), {} kept",
+            run.drawn_in_group[g],
+            run.drawn,
+            100.0 * run.reach.share(g),
+            run.kept
+                .iter()
+                .filter(|k| k.groups.contains(&(g as u32)))
+                .count()
+        );
+    }
+    let complete = ds.len() as u64 >= count;
+    println!(
+        "kept {} of {count} wanted after {} candidates ({:.1} s wall, {:.1} thread-s searching: \
+         {:.2} thread-s per kept decision){}",
+        ds.len(),
+        run.drawn,
+        wall,
+        run.search_time.as_secs_f64(),
+        run.search_time.as_secs_f64() / ds.len().max(1) as f64,
+        if complete {
+            String::new()
+        } else {
+            format!(
+                "; INCOMPLETE: --max-candidates {} reached",
+                job.max_candidates
+            )
+        }
+    );
+    let out = a.req("--out")?;
+    let mut text = String::new();
+    for d in &ds {
+        text.push_str(&serde_json::to_string(d).map_err(|e| e.to_string())?);
+        text.push('\n');
+    }
+    std::fs::write(out, text).map_err(|e| format!("{out}: {e}"))?;
+    let side = serde_json::json!({
+        "what": "a mini golden set (docs/m3-hybrid/audit-loop.md §3 item 3): decisions of the \
+                 yardstick's generator (search::measure::build_decision_at: decision i of seed \
+                 `seed` at trick `trick`, id i), kept when at least `share` of the distinct \
+                 frontier positions that the hybrid's searches over the decision's worlds \
+                 0..worlds reach lie in one group of the predicate file (nn::predicate)",
+        "predicates_file": pred_path,
+        "predicates_sha256": preds.sha256,
+        "groups": preds.groups.iter().enumerate().map(|(g, x)| serde_json::json!({
+            "name": x.name,
+            "conditions": x.conditions_text(),
+            "candidates_in_group": run.drawn_in_group[g],
+            "kept": run.kept.iter().filter(|k| k.groups.contains(&(g as u32))).count(),
+            "reached_share": run.reach.share(g),
+            "audit": x.meta,
+        })).collect::<Vec<_>>(),
+        "share": share_text,
+        "share_millionths": share,
+        "trick": trick,
+        "cut": cut,
+        "seed": seed,
+        "label": job.label,
+        "worlds_searched": job.worlds,
+        "world_source": src.name(),
+        "frontier": match &oracle {
+            None => serde_json::json!({ "kind": "exact" }),
+            Some((o, p)) => serde_json::json!({ "kind": "net", "sha256": o.sha256, "file": p,
+                                                "trick": o.trick, "widths": o.net().widths() }),
+        },
+        "tt_mb": job.tt_mb,
+        "first_candidate": job.first,
+        "max_candidates": job.max_candidates,
+        "candidates_drawn": run.drawn,
+        "count_wanted": count,
+        "kept": ds.len(),
+        "complete": complete,
+        "decisions": run.kept.iter().map(|k| serde_json::json!({
+            "id": k.d.id, "position": k.d.position + 1, "stratum": k.d.stratum,
+            "reached": k.reach.reached, "in_group": k.reach.in_group, "groups": k.groups,
+        })).collect::<Vec<_>>(),
+        "start_hands": start_hands,
+        "binary_sha256": binary_sha256(),
+        "equity_sha256": table_sha,
+        "seconds": ((t0.elapsed().as_secs_f64()) * 10.0).round() / 10.0,
+        "search_thread_seconds": run.search_time.as_secs_f64(),
+    });
+    write_json(&format!("{out}.json"), &side)
 }
 
 /// Rewrite the progress file (write a temporary file, then rename it over the old one, so a
@@ -1237,9 +1483,9 @@ fn binary_sha256() -> String {
 fn labels_cmd(a: &Args) -> Result<(), String> {
     use search::oracle_labels::{
         CHUNK_ROWS, Driver, GOLDEN_SEED, HARVEST_CAP, HARVEST_SHARES, HARVEST_STRATA,
-        HARVEST_TT_MB, HarvestJob, LabelJob, RACE_CAP, RaceKeep, Source, parse_band_shares,
-        parse_race_classes, parse_strata, position_schedule, write_harvest_shard,
-        write_label_shard,
+        HARVEST_TT_MB, HarvestJob, KEEP_CAP, LabelJob, PredKeep, RACE_CAP, RaceKeep, Source,
+        parse_band_shares, parse_race_classes, parse_strata, position_schedule,
+        write_harvest_shard, write_label_shard,
     };
     let trick = a.num("--trick", 4)? as u8;
     if !(2..=5).contains(&trick) {
@@ -1267,8 +1513,46 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         "--harvest-strata",
         "--harvest-race-classes",
         "--harvest-race-cap",
+        "--harvest-keep",
+        "--keep-cap",
     ];
     let harvest = if job.source == Source::Harvest {
+        let keep = match a.get("--harvest-keep") {
+            None => {
+                if a.has("--keep-cap") {
+                    return Err(
+                        "--keep-cap is for a targeted harvest: give --harvest-keep PRED.json"
+                            .into(),
+                    );
+                }
+                None
+            }
+            Some(f) => {
+                if a.has("--harvest-race-classes") {
+                    return Err(
+                        "--harvest-keep and --harvest-race-classes: a harvest keeps a predicate \
+                         file's groups or race classes, not both"
+                            .into(),
+                    );
+                }
+                let preds = nn::predicate::Predicates::load(Path::new(f))
+                    .map_err(|e| format!("--harvest-keep: {e}"))?;
+                if preds.is_empty() {
+                    return Err(format!("--harvest-keep {f}: the file has no groups"));
+                }
+                let cap = a.num("--keep-cap", u64::from(KEEP_CAP))?;
+                if !(1..=u64::from(u32::MAX)).contains(&cap) {
+                    return Err("--keep-cap is at least 1".into());
+                }
+                Some((
+                    PredKeep {
+                        preds: Arc::new(preds),
+                        cap: cap as u32,
+                    },
+                    f.to_string(),
+                ))
+            }
+        };
         let race = match a.get("--harvest-race-classes") {
             None => {
                 if a.has("--harvest-race-cap") {
@@ -1291,9 +1575,10 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
             }
         };
         let cap = a.num("--harvest-cap", u64::from(HARVEST_CAP))?;
-        if cap > u64::from(u32::MAX) || (cap == 0 && race.is_none()) {
+        if cap > u64::from(u32::MAX) || (cap == 0 && race.is_none() && keep.is_none()) {
             return Err(
-                "--harvest-cap is at least 1 (0, keeping only the race classes, in a race harvest)"
+                "--harvest-cap is at least 1 (0, keeping only the race classes or the groups, in \
+                 a race or targeted harvest)"
                     .into(),
             );
         }
@@ -1341,9 +1626,11 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
                 schedule: position_schedule(weights),
                 strata,
                 race,
+                keep: keep.as_ref().map(|(k, _)| k.clone()),
             },
             shares.to_string(),
             weights,
+            keep.map(|(_, f)| f),
         ))
     } else {
         if let Some(f) = harvest_flags.iter().find(|f| a.has(f)) {
@@ -1425,7 +1712,7 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         let mut file =
             std::fs::File::create(&part).map_err(|e| format!("{}: {e}", part.display()))?;
         let summary = match &harvest {
-            Some((h, _, _)) => {
+            Some((h, _, _, _)) => {
                 write_harvest_shard(h, &starts, &*leaf, driver, Some(done), &mut file)
             }
             None => write_label_shard(&job, &starts, &*leaf, Some(done), chunk_rows, &mut file),
@@ -1481,7 +1768,7 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
     if job.source != Source::Rules {
         side["rows_by_position"] = serde_json::json!(&by_position[1..]);
     }
-    if let Some((h, shares, weights)) = &harvest {
+    if let Some((h, shares, weights, keep_file)) = &harvest {
         side["harvest"] = harvest_record(
             h,
             shares,
@@ -1490,6 +1777,21 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
             HARVEST_TT_MB,
             net.as_ref().map(|(o, p)| (o, p.as_str())),
         );
+        if let (Some(k), Some(t)) = (&h.keep, &shard.groups) {
+            side["harvest"]["keep"] = keep_record(k, keep_file.as_deref(), h.cap, &decisions, t);
+            eprintln!(
+                "labels: targeted harvest ({} groups of {}, sha256 {}): {} of {} rows in a \
+                 group; rows per group {:?}; {} of {} reached positions in a group",
+                k.preds.len(),
+                keep_file.as_deref().unwrap_or("?"),
+                &k.preds.sha256[..12],
+                t.rows_in_any,
+                n_rows,
+                t.rows,
+                t.reached_in_any,
+                t.reached_all
+            );
+        }
         let n = decisions.len().max(1) as f64;
         let distinct: u64 = decisions.iter().map(|d| u64::from(d.distinct)).sum();
         eprintln!(
@@ -1500,6 +1802,13 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
             distinct as f64 / n,
             decisions.iter().map(|d| d.evals).sum::<u64>() as f64 / n,
             match h.race {
+                None if h.keep.is_some() => format!(
+                    "{} decisions with more in-group positions than the keep cap",
+                    decisions
+                        .iter()
+                        .filter(|d| h.keep.as_ref().is_some_and(|k| d.keep_distinct > k.cap))
+                        .count()
+                ),
                 None => format!(
                     "{} decisions capped at {}",
                     decisions.iter().filter(|d| d.distinct > h.cap).count(),
@@ -1550,6 +1859,49 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         side["shard_sha256"].as_str().unwrap_or("")
     );
     Ok(())
+}
+
+/// The sidecar's `harvest.keep` record of a targeted harvest: the predicate file (path and
+/// SHA-256), its groups with their conditions, the caps, and the rows and reached positions per
+/// group.
+fn keep_record(
+    k: &search::oracle_labels::PredKeep,
+    file: Option<&str>,
+    other_cap: u32,
+    ds: &[search::oracle_labels::HarvestDecision],
+    t: &search::oracle_labels::GroupTally,
+) -> serde_json::Value {
+    let groups: Vec<serde_json::Value> = k
+        .preds
+        .groups
+        .iter()
+        .enumerate()
+        .map(|(g, x)| {
+            serde_json::json!({
+                "name": x.name,
+                "conditions": x.conditions_text(),
+                "rows": t.rows[g],
+                "reached": t.reached[g],
+                "audit": x.meta,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "what": "frontier positions inside any group of the predicate file (nn::predicate, \
+                 decided on the position's encoded features) are a seeded sample of at most \
+                 cap_per_decision of them, the others of at most other_cap_per_decision (drawn \
+                 after them on the same stream); a position in several groups counts in each",
+        "predicates_file": file,
+        "predicates_sha256": k.preds.sha256,
+        "cap_per_decision": k.cap,
+        "other_cap_per_decision": other_cap,
+        "groups": groups,
+        "rows_in_any_group": t.rows_in_any,
+        "rows_in_no_group": ds.iter().map(|d| u64::from(d.rows)).sum::<u64>() - t.rows_in_any,
+        "reached_in_any_group": t.reached_in_any,
+        "reached": t.reached_all,
+        "decisions_keep_capped": ds.iter().filter(|d| d.keep_distinct > k.cap).count(),
+    })
 }
 
 /// The sidecar's `harvest` record: the settings, the decisions' counts by position, stratum and
@@ -1666,7 +2018,7 @@ fn harvest_record(
         "rows_by_position": rows_by_pos,
         "decisions_by_stratum": by_stratum,
         "decisions_by_trick": &by_trick[1..usize::from(h.trick)],
-        "decisions_capped": ds.iter().filter(|d| d.distinct > h.cap && h.race.is_none()).count(),
+        "decisions_capped": ds.iter().filter(|d| d.distinct > h.cap && h.race.is_none() && h.keep.is_none()).count(),
         "frontier_evaluations": ds.iter().map(|d| d.evals).sum::<u64>(),
         "distinct_positions": distinct.iter().map(|&x| u64::from(x)).sum::<u64>(),
         "distinct_mean_by_position": mean_by_pos(&distinct_by_pos),
@@ -1681,7 +2033,7 @@ fn harvest_record(
 
 /// `search hybrid-check`: H_K against exact on the same worlds (docs/M3-HYBRID-SPEC.md §3).
 fn hybrid_check(a: &Args) -> Result<(), String> {
-    use search::hybrid::{CheckJob, report, run_check};
+    use search::hybrid::{CheckJob, report};
     let trick = a.num("--trick", 3)? as u8;
     let cut = a.num("--cut", u64::from(trick) + 1)? as u8;
     if !(2..=5).contains(&cut) || trick == 0 || trick >= cut {
@@ -1742,6 +2094,9 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
     };
     let boots = a.num("--boot", 1000)?;
     let boot_seed = a.num("--boot-seed", 1)?;
+    if a.has("--saved") && a.has("--slices") {
+        return Err("--slices is for a golden set's check, not --saved worlds".into());
+    }
     if a.has("--saved") {
         return hybrid_check_saved(
             a,
@@ -1787,6 +2142,27 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             r.id
         ));
     }
+    let slice_preds = match a.get("--slices") {
+        None => {
+            if a.has("--slice-share") {
+                return Err("--slice-share is for --slices PRED.json".into());
+            }
+            None
+        }
+        Some(f) => {
+            if a.has("--explain") {
+                return Err("--slices is for the check, not --explain".into());
+            }
+            let p = nn::predicate::Predicates::load(Path::new(f))?;
+            if p.is_empty() {
+                return Err(format!("--slices {f}: the file has no groups"));
+            }
+            Some((p, f.to_string()))
+        }
+    };
+    let share_text = a.get("--slice-share").unwrap_or("0.5");
+    let share =
+        nn::predicate::parse_share(share_text).map_err(|e| format!("--slice-share: {e}"))?;
     if let Some(ids) = a.get("--explain") {
         return hybrid_explain(a, ids, &ds, &stored, &job, &ctx, &oracle);
     }
@@ -1810,7 +2186,14 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
         job.threads
     );
     let t1 = Instant::now();
-    let run = run_check(&ds, &stored, &job, &ctx, &oracle)?;
+    let run = search::hybrid::run_check_slices(
+        &ds,
+        &stored,
+        &job,
+        &ctx,
+        &oracle,
+        slice_preds.as_ref().map(|(p, _)| p),
+    )?;
     let wall = t1.elapsed().as_secs_f64();
     if run.verified.1 > 0 {
         return Err(format!(
@@ -1835,9 +2218,46 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
         }
     );
     print_groups(&groups);
+    let sl = slice_preds
+        .as_ref()
+        .map(|(p, _)| search::hybrid::slices(&run, p, share, boots, boot_seed));
+    if let Some(sl) = &sl {
+        print_slices(sl, share_text);
+    }
     let time = check_time(&run, job.threads, wall);
     print_time(&time);
-    let (pass, line) = verdict(&groups);
+    let (bands_pass, line) = verdict(&groups);
+    let (pass, line) = match &sl {
+        None => (bands_pass, line),
+        Some(sl) => {
+            // The slices the audit names (the decisions in no group are reported, not judged:
+            // the overall row covers them).
+            let failing: Vec<&str> = sl
+                .iter()
+                .filter(|x| x.group.is_some() && x.pass == Some(false))
+                .map(|x| x.name.as_str())
+                .collect();
+            let pass = bands_pass && failing.is_empty();
+            let line = format!(
+                "{}; every slice's decision loss 95% upper bound <= 0.01%: {}{}; with the slices: {}",
+                line.trim_end_matches("; PASS").trim_end_matches("; FAIL"),
+                if failing.is_empty() { "yes" } else { "no" },
+                if failing.is_empty() {
+                    String::new()
+                } else if failing.len() <= 5 {
+                    format!(" (failing: {})", failing.join(", "))
+                } else {
+                    format!(
+                        " (failing: {} and {} more)",
+                        failing[..5].join(", "),
+                        failing.len() - 5
+                    )
+                },
+                if pass { "PASS" } else { "FAIL" }
+            );
+            (pass, line)
+        }
+    };
     println!("{line}");
     if let Some(out) = a.get("--json") {
         let v = serde_json::json!({
@@ -1859,12 +2279,77 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             "boot": {"replicates": boots, "seed": boot_seed, "bound": "97.5th percentile of bootstrap means (upper end of the 95% interval)"},
             "groups": groups.iter().map(|(n, s)| serde_json::json!({"group": n, "summary": s})).collect::<Vec<_>>(),
             "pass": pass,
+            "pass_without_slices": bands_pass,
+            "slices": slice_preds.as_ref().zip(sl.as_ref()).map(|((p, f), sl)| serde_json::json!({
+                "what": "a decision is in a group when at least `share` of the distinct frontier \
+                         positions the hybrid's searches over its worlds reach are in it \
+                         (search::audit::GroupRecorder, nn::predicate); `no group`: the others",
+                "predicates_file": f,
+                "predicates_sha256": p.sha256,
+                "share": share_text,
+                "share_millionths": share,
+                "groups": sl,
+                "pass": sl.iter().all(|x| x.group.is_none() || x.pass != Some(false)),
+                "failing": sl.iter().filter(|x| x.group.is_some() && x.pass == Some(false)).map(|x| x.name.clone()).collect::<Vec<_>>(),
+                "empty": sl.iter().filter(|x| x.group.is_some() && x.pass.is_none()).map(|x| x.name.clone()).collect::<Vec<_>>(),
+                "judged": "the groups' slices (every one with decisions must pass); `no group` is reported only (the overall row covers it)",
+            })),
             "time": time_json(&time, t1.duration_since(t0).as_secs_f64()),
             "decisions": run.decisions,
         });
         write_json(out, &v)?;
     }
     Ok(())
+}
+
+/// The slices' table of `hybrid-check --slices` (`search::hybrid::slices`).
+fn print_slices(sl: &[search::hybrid::Slice], share: &str) {
+    let spct = |x: f64| format!("{:+.4}%", 100.0 * x);
+    println!(
+        "slices (a decision is in a group when at least {share} of the distinct frontier positions its hybrid searches reach are in it):"
+    );
+    println!(
+        "{:<28} {:>5} {:>9} {:>10} {:>10} {:>7} {:>7} {:>10} {:>9}  conditions",
+        "slice", "dec", "reached", "mean loss", "95% upper", "<=0.01%", "agree", "bias own", "SD"
+    );
+    for x in sl {
+        let s = &x.summary;
+        let name: String = x.name.chars().take(28).collect();
+        if s.decisions == 0 {
+            println!(
+                "{:<28} {:>5} {:>9} {:>10} {:>10} {:>7} {:>7} {:>10} {:>9}  {}",
+                name,
+                0,
+                x.reached_share
+                    .map_or("-".into(), |r| format!("{:.2}%", 100.0 * r)),
+                "-",
+                "-",
+                "n/a",
+                "-",
+                "-",
+                "-",
+                x.conditions
+            );
+            continue;
+        }
+        println!(
+            "{:<28} {:>5} {:>9} {:>10} {:>10} {:>7} {:>6.1}% {:>10} {:>9}  {}",
+            name,
+            s.decisions,
+            x.reached_share
+                .map_or("-".into(), |r| format!("{:.2}%", 100.0 * r)),
+            pct(s.mean_loss),
+            pct(s.loss_upper95),
+            if s.loss_pass { "yes" } else { "no" },
+            100.0 * s.agreement,
+            spct(s.bias[0]),
+            pct(s.sd),
+            x.conditions
+        );
+    }
+    println!(
+        "(reached: the group's share of every frontier position the hybrid reached on these decisions; n/a: no decision of this set is in it, so a group needs a mini golden set; `no group` is reported, not judged: the overall row covers it)"
+    );
 }
 
 fn write_json(out: &str, v: &serde_json::Value) -> Result<(), String> {
@@ -2700,6 +3185,7 @@ mod tests {
             rows,
             search_nodes: 10,
             race_distinct: distinct / 4,
+            keep_distinct: 0,
         }
     }
 
@@ -2718,6 +3204,7 @@ mod tests {
             schedule: position_schedule([1; 8]),
             strata: vec![1, 2, 3, 4],
             race: None,
+            keep: None,
         };
         let ds = [
             decision(1, 2000, 2500, 16),
@@ -2803,6 +3290,39 @@ mod tests {
             cap: 0,
             ..h
         };
+        // A targeted harvest's record: the file, its groups with their rows and reached
+        // positions, the caps.
+        let preds = nn::predicate::Predicates::parse(
+            br#"[{"name": "g", "conditions": [{"feature": 801, "op": "==", "value": 1}], "sd": 0.03}]"#,
+        )
+        .expect("parses");
+        let keep = search::oracle_labels::PredKeep {
+            preds: Arc::new(preds),
+            cap: 64,
+        };
+        let mut kd = ds.clone();
+        kd[0].keep_distinct = 100;
+        let t = search::oracle_labels::GroupTally {
+            rows: vec![30],
+            rows_in_any: 30,
+            reached: vec![150],
+            reached_in_any: 150,
+            reached_all: 3300,
+        };
+        let k = keep_record(&keep, Some("/w/preds.json"), 0, &kd, &t);
+        assert_eq!(k["predicates_sha256"], keep.preds.sha256.as_str());
+        assert_eq!(k["groups"][0]["conditions"], "f801 == 1");
+        assert_eq!(k["groups"][0]["rows"], 30);
+        assert_eq!(k["groups"][0]["audit"]["sd"], 0.03);
+        assert_eq!(k["rows_in_no_group"], 40 - 30);
+        assert_eq!(k["decisions_keep_capped"], 1);
+        assert_eq!(
+            (
+                k["cap_per_decision"].as_u64(),
+                k["other_cap_per_decision"].as_u64()
+            ),
+            (Some(64), Some(0))
+        );
         let x = harvest_record(&race, shares, &w, &ds, 64, None);
         assert_eq!(x["strata"], serde_json::json!([4]));
         assert_eq!(x["race"]["classes"], serde_json::json!([2, 4]));

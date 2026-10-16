@@ -982,16 +982,16 @@ def main(argv=None):
                     help="with --watch-dir: at most this many epochs on each partial set of shards, then wait (0: no limit)")
     ap.add_argument("--watch-poll", type=float, default=1.0, help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
+    if args.watch_dir is None and not args.train:
+        ap.error("--train (or --watch-dir with --expect) is required")
+    if args.watch_dir is not None and args.expect < max(1, len(args.train)):
+        ap.error("--watch-dir needs --expect: the training shards in all, at least 1 and the --train ones")
     # Before anything else (no data loaded, no GPU probed, no output made): a layer wider than the
     # integer inference allows (formats.MAX_WIDTH, Rust's nn::MAX_WIDTH) would train for nothing.
     try:
         widths = parse_widths(args.widths)
     except ValueError as e:
         raise SystemExit(f"--widths {args.widths}: {e}") from None
-    if args.watch_dir is None and not args.train:
-        ap.error("--train (or --watch-dir with --expect) is required")
-    if args.watch_dir is not None and args.expect < max(1, len(args.train)):
-        ap.error("--watch-dir needs --expect: the training shards in all, at least 1 and the --train ones")
 
     t0 = time.time()
     torch.manual_seed(args.seed)

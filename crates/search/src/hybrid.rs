@@ -27,6 +27,13 @@
 //! sample of worlds (`verify_pct`, default 1%) is recomputed and must be byte-identical first
 //! (spec §4); any mismatch stops the check.
 //!
+//! **Slices** ([`check_worlds_with`] with a predicate file, [`slices`]; docs/m3-hybrid/
+//! audit-loop.md §3 item 2): the hybrid's own search in each world records the distinct frontier
+//! positions it reaches and their groups (`crate::audit::GroupRecorder`, which never changes a
+//! value); a decision is in a group when at least a share (default a half) of the positions its
+//! worlds' searches reach are in it, and the §3 measures are reported per group and for the
+//! decisions in no group.
+//!
 //! **Chosen worlds** ([`check_worlds`]): the same measures on any worlds of each decision, with
 //! stored values where given, e.g. the exact trick-1 worlds earlier runs saved (`crate::saved`,
 //! spec §3 "Trick-1 checks"), each set with the burn rule that valued it
@@ -42,10 +49,12 @@ use std::time::Instant;
 
 use engine::rng::Rng;
 use equity::{MoneyChance, ONE};
+use nn::predicate::Predicates;
 use serde::Serialize;
 use solver::frontier::{CanonPos, Frontier};
 use solver::{FrontierCut, MatchCtx, SolveMem};
 
+use crate::audit::{GroupRecorder, Reach};
 use crate::measure::{DecisionSpec, WorldRows, measure_seed};
 use crate::pimc::{
     Candidate, Ctx, SearchConfig, WorldSolve, aggregate, best_index, candidates, exact_world,
@@ -187,6 +196,8 @@ pub struct WorldCheck {
     /// The seat other than the decider that robs later in trick 1 in this world (the burn the
     /// burn rule decides), if any.
     pub robber: Option<u8>,
+    /// With slices: the distinct frontier positions the hybrid's search reached, by group.
+    pub reach: Option<Reach>,
 }
 
 /// The check of one decision.
@@ -229,6 +240,10 @@ pub struct DecisionCheck {
     pub hybrid_nodes: u64,
     /// Network evaluations.
     pub frontier: u64,
+    /// With slices: the distinct frontier positions the hybrid's searches reached (per world,
+    /// summed), by group.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reach: Option<Reach>,
     /// Every world's values and counters, in the order given.
     #[serde(skip)]
     pub world_checks: Vec<WorldCheck>,
@@ -273,6 +288,19 @@ pub fn run_check(
     job: &CheckJob,
     ctx: &Ctx,
     net: &dyn Frontier,
+) -> Result<CheckRun, String> {
+    run_check_slices(ds, stored, job, ctx, net, None)
+}
+
+/// [`run_check`], recording each world's reach in the groups of `slices` when given (module
+/// notes, [`slices`]).
+pub fn run_check_slices(
+    ds: &[DecisionSpec],
+    stored: &BTreeMap<u64, WorldRows>,
+    job: &CheckJob,
+    ctx: &Ctx,
+    net: &dyn Frontier,
+    slices: Option<&Predicates>,
 ) -> Result<CheckRun, String> {
     let mut plan = Vec::new();
     for d in ds {
@@ -326,7 +354,7 @@ pub fn run_check(
             .collect::<Result<Vec<_>, String>>()?;
         plan.push(DecisionWorlds { d, worlds });
     }
-    check_worlds(&plan, job, ctx, net, None)
+    check_worlds_with(&plan, job, ctx, net, None, slices)
 }
 
 /// Runs `f(i, mem)` for every `i` of `order` on `threads` threads (a shared work queue in that
@@ -376,6 +404,19 @@ pub fn check_worlds(
     ctx: &Ctx,
     net: &dyn Frontier,
     progress: Option<&CheckProgress>,
+) -> Result<CheckRun, String> {
+    check_worlds_with(plan, job, ctx, net, progress, None)
+}
+
+/// [`check_worlds`], recording each hybrid search's reach in the groups of `slices` when given
+/// (`crate::audit::GroupRecorder` around the network: the same values).
+pub fn check_worlds_with(
+    plan: &[DecisionWorlds],
+    job: &CheckJob,
+    ctx: &Ctx,
+    net: &dyn Frontier,
+    progress: Option<&CheckProgress>,
+    slices: Option<&Predicates>,
 ) -> Result<CheckRun, String> {
     struct Prep {
         view: engine::view::SeatView,
@@ -508,10 +549,12 @@ pub fn check_worlds(
     }
     // The hybrid's solves.
     let cfg_h = job.config(false);
-    let solve_hybrid = |i: usize, mem: &mut SolveMem| -> (Vec<MoneyChance>, u64, WorldSolve) {
+    type HybridOut = (Vec<MoneyChance>, u64, WorldSolve, Option<Reach>);
+    let solve_hybrid = |i: usize, mem: &mut SolveMem| -> HybridOut {
         let m = world_of(i);
         let mut run = WorldSolve::default();
         let t = Instant::now();
+        let rec = slices.map(|p| GroupRecorder::new(&timed, p, ctx.leaf));
         let h = exact_world(
             &m,
             &preps[tasks[i].0].cands,
@@ -520,9 +563,13 @@ pub fn check_worlds(
             None,
             mem,
             &mut run,
-            Some(cut),
+            Some(match &rec {
+                Some(r) => FrontierCut::new(job.cut, r),
+                None => cut,
+            }),
         )
         .expect("nothing stops a solve here");
+        let reach = rec.map(GroupRecorder::into_reach);
         let us = t.elapsed().as_micros() as u64;
         if let Some(p) = progress {
             let (k, j) = tasks[i];
@@ -535,12 +582,12 @@ pub fn check_worlds(
             ]);
             p.hybrid_done.fetch_add(1, Ordering::Relaxed);
         }
-        (h, us, run)
+        (h, us, run, reach)
     };
     let hybrid = pool(job.threads, &order, &solve_hybrid, tasks.len());
     let mut outs: Vec<WorldCheck> = Vec::with_capacity(tasks.len());
     for (i, (hy, ex)) in hybrid.into_iter().zip(exact).enumerate() {
-        let (h, hus, run) = hy.expect("every world valued by the hybrid");
+        let (h, hus, run, reach) = hy.expect("every world valued by the hybrid");
         let (k, j) = tasks[i];
         let t = &plan[k].worlds[j];
         let (exact, exact_us, exact_nodes, verified) = match (ex, &t.stored) {
@@ -565,6 +612,7 @@ pub fn check_worlds(
             frontier: run.stats.frontier,
             hybrid_tt_bytes: run.stats.tt_bytes,
             robber: run.robber,
+            reach,
         });
     }
     let mut decisions = Vec::new();
@@ -607,6 +655,13 @@ pub fn check_worlds(
             exact_nodes: ws.iter().map(|o| o.exact_nodes).sum(),
             hybrid_nodes: ws.iter().map(|o| o.hybrid_nodes).sum(),
             frontier: ws.iter().map(|o| o.frontier).sum(),
+            reach: slices.map(|p| {
+                let mut r = Reach::new(p.len());
+                for o in ws {
+                    r.add(o.reach.as_ref().expect("every world recorded"));
+                }
+                r
+            }),
             world_checks: ws.to_vec(),
         });
     }
@@ -748,6 +803,82 @@ pub fn report(run: &CheckRun, boots: u64, boot_seed: u64) -> Vec<(String, Summar
     out
 }
 
+/// One slice of a check (docs/m3-hybrid/audit-loop.md §3 item 2): the decisions in a group of a
+/// predicate file, or in none.
+#[derive(Clone, Debug, Serialize)]
+pub struct Slice {
+    /// The group's index in the file (`None`: the decisions in no group).
+    pub group: Option<usize>,
+    /// The group's name (`no group`).
+    pub name: String,
+    /// The group's conditions, as text.
+    pub conditions: String,
+    /// The decisions in the slice (ids).
+    pub ids: Vec<u64>,
+    /// Over the check's decisions, the group's share of all the reached frontier positions
+    /// (the group's weight as the hybrid reaches it; `None` for "no group").
+    pub reached_share: Option<f64>,
+    /// The §3 measures of the slice's decisions.
+    pub summary: Summary,
+    /// The decision-loss bound passes (`None` with no decisions: nothing to measure, a mini
+    /// golden set is needed).
+    pub pass: Option<bool>,
+}
+
+/// The slices of a check run with a predicate file ([`check_worlds_with`]): for each group, the
+/// decisions in it (at least the share `micro`, in millionths, of their reached frontier
+/// positions in the group: `crate::audit::Reach::groups_at`), then the decisions in no group;
+/// each with the §3 measures (the bootstrap tagged `1000 + g`, and `999` for no group).
+///
+/// # Panics
+/// If the run did not record reaches.
+pub fn slices(
+    run: &CheckRun,
+    preds: &Predicates,
+    micro: u64,
+    boots: u64,
+    boot_seed: u64,
+) -> Vec<Slice> {
+    let groups: Vec<Vec<u32>> = run
+        .decisions
+        .iter()
+        .map(|d| {
+            d.reach
+                .as_ref()
+                .expect("a check with slices records reaches")
+                .groups_at(micro)
+        })
+        .collect();
+    let mut total = Reach::new(preds.len());
+    for d in &run.decisions {
+        total.add(d.reach.as_ref().expect("recorded"));
+    }
+    let make = |g: Option<usize>, pick: &dyn Fn(&[u32]) -> bool| {
+        let ds: Vec<&DecisionCheck> = run
+            .decisions
+            .iter()
+            .zip(&groups)
+            .filter(|(_, gs)| pick(gs))
+            .map(|(d, _)| d)
+            .collect();
+        let summary = summarise(&ds, boots, boot_seed, g.map_or(999, |g| 1000 + g as u64));
+        Slice {
+            group: g,
+            name: g.map_or("no group".to_string(), |g| preds.groups[g].name.clone()),
+            conditions: g.map_or(String::new(), |g| preds.groups[g].conditions_text()),
+            ids: ds.iter().map(|d| d.id).collect(),
+            reached_share: g.map(|g| total.share(g)),
+            pass: (!ds.is_empty()).then_some(summary.loss_pass),
+            summary,
+        }
+    };
+    let mut out: Vec<Slice> = (0..preds.len())
+        .map(|g| make(Some(g), &|gs: &[u32]| gs.contains(&(g as u32))))
+        .collect();
+    out.push(make(None, &|gs: &[u32]| gs.is_empty()));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -845,5 +976,102 @@ mod tests {
         let s = report(&a, 50, 1);
         assert_eq!(s[0].1.decisions, 8);
         assert!(s[0].1.mean_loss <= s[0].1.loss_upper95 + 1e-12);
+    }
+
+    /// With slices, the check's values are unchanged, each decision's reach is its hybrid
+    /// searches' (`crate::audit::decision_reach` with the same evaluator and table), the same on
+    /// 1 and 3 threads, and the slices hold the decisions at the share, then those in no group.
+    #[test]
+    fn slices_record_the_hybrids_own_reach() {
+        let starts = collect_starts(300, 3);
+        let ds = build_decisions(3, 8, 5, &starts);
+        let l = leaf();
+        let src = BeliefSource::new();
+        let ctx = Ctx {
+            leaf: &*l,
+            source: &src,
+            rules: engine::game::Rules::HOUSE,
+        };
+        let f = FnFrontier(even as fn(&CanonPos, &MatchCtx) -> MoneyChance);
+        let job = |threads| CheckJob {
+            cut: 4,
+            seed: 5,
+            label: 1,
+            to: 3,
+            threads,
+            tt_mb: 4,
+            verify_pct: 0.0,
+            recompute: false,
+            rules_robber_burn: false,
+            exact_solve_threads: 1,
+            exact_tt_mb: 4,
+        };
+        let text = format!(
+            r#"[{{"name": "next team no trick", "conditions": [{{"feature": {}, "op": "==", "value": 1}}]}},
+                {{"name": "never", "conditions": [{{"feature": {}, "op": "==", "value": 1}},
+                                                   {{"feature": {}, "op": "==", "value": 1}}]}}]"#,
+            nn::encode::OFF_TRICKS + 5,
+            nn::encode::OFF_TRUMP,
+            nn::encode::OFF_TRUMP + 1
+        );
+        let p = Predicates::parse(text.as_bytes()).expect("parses");
+        let plain = run_check(&ds, &BTreeMap::new(), &job(1), &ctx, &f).expect("runs");
+        let a = run_check_slices(&ds, &BTreeMap::new(), &job(1), &ctx, &f, Some(&p)).expect("runs");
+        let b = run_check_slices(&ds, &BTreeMap::new(), &job(3), &ctx, &f, Some(&p)).expect("runs");
+        let vals = |r: &CheckRun| -> Vec<(u64, u64, Vec<i64>)> {
+            r.decisions
+                .iter()
+                .map(|d| (d.id, d.loss, d.errors.clone()))
+                .collect()
+        };
+        assert_eq!(vals(&plain), vals(&a), "slices never change a value");
+        assert!(plain.decisions.iter().all(|d| d.reach.is_none()));
+        let reaches = |r: &CheckRun| -> Vec<Reach> {
+            r.decisions
+                .iter()
+                .map(|d| d.reach.clone().expect("recorded"))
+                .collect()
+        };
+        assert_eq!(reaches(&a), reaches(&b), "thread-independent");
+        let mut mem = SolveMem::new();
+        for (d, x) in ds.iter().zip(&a.decisions) {
+            let want = crate::audit::decision_reach(
+                d,
+                &p,
+                &ctx,
+                4,
+                4,
+                measure_seed(5, 1, d.id),
+                3,
+                Some(&f),
+                &mut mem,
+            );
+            assert_eq!(x.reach.as_ref(), Some(&want), "decision {}", d.id);
+            assert_eq!(want.in_group[1], 0);
+        }
+        let sl = slices(&a, &p, 500_000, 50, 1);
+        assert_eq!(sl.len(), 3);
+        assert_eq!(
+            sl.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+            ["next team no trick", "never", "no group"]
+        );
+        let half: Vec<u64> = a
+            .decisions
+            .iter()
+            .filter(|d| {
+                let r = d.reach.as_ref().expect("recorded");
+                2 * r.in_group[0] >= r.reached
+            })
+            .map(|d| d.id)
+            .collect();
+        assert_eq!(sl[0].ids, half);
+        assert!(sl[1].ids.is_empty() && sl[1].pass.is_none());
+        assert_eq!(sl[0].ids.len() + sl[2].ids.len(), 8, "a partition here");
+        assert_eq!(sl[0].summary.decisions, sl[0].ids.len());
+        assert!(!sl[0].ids.is_empty() && !sl[2].ids.is_empty(), "{sl:?}");
+        assert_eq!(
+            sl[0].conditions,
+            format!("f{} == 1", nn::encode::OFF_TRICKS + 5)
+        );
     }
 }

@@ -1377,7 +1377,26 @@ fn chunk_step(dir: &Path) -> Option<Value> {
         k.ends_with("_done")
             || k.ends_with("_total")
             || k.starts_with("train_")
-            || ["device", "rows_done", "rows_total", "verdict"].contains(&k)
+            || [
+                "device",
+                "rows_done",
+                "rows_total",
+                "verdict",
+                // The audit loop's (hybrid_rung, docs/m3-hybrid/audit-loop.md §4 "Reporting").
+                "round",
+                "groups_found",
+                "groups_confirmed",
+                "groups_remaining",
+                "groups_failing",
+                "worst_group",
+                "shape",
+                "shape_step",
+                "thresholds",
+                "slices_failing",
+                "last_check",
+                "audit_stop",
+            ]
+            .contains(&k)
     };
     if let Some(o) = p.as_object() {
         for (k, x) in o {
