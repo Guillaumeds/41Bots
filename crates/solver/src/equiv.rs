@@ -148,7 +148,7 @@ impl Field {
 
 /// The six classes of a trump suit as lists of cards, each best card first, with their
 /// lengths: the 5 of trumps; the other top trumps; the ordinary trumps; the three plain suits.
-fn lists(trump: Suit) -> ([[Card; 15]; 6], [u8; 6]) {
+pub(crate) fn lists(trump: Suit) -> ([[Card; 15]; 6], [u8; 6]) {
     let mut lists = [[0 as Card; 15]; 6];
     let mut lens = [0u8; 6];
     let mut push = |i: usize, x: Card| {

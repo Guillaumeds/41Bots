@@ -339,6 +339,7 @@ impl WorldSolve {
         a.equiv_skipped += b.equiv_skipped;
         a.tt_bytes = a.tt_bytes.max(b.tt_bytes);
         a.forced += b.forced;
+        a.frontier += b.frontier;
         for (x, y) in a.nodes_by_trick.iter_mut().zip(&b.nodes_by_trick) {
             *x += y;
         }

@@ -29,18 +29,28 @@
 //! tied best cards the first in that order is kept. [`TieOrder::Descending`] reverses the order,
 //! for the root-flip measurement.
 //!
+//! **Hybrid frontier (docs/M3-HYBRID-SPEC.md).** [`solve_cut`], [`solve_fast_cut`] and
+//! [`solve_fast_par_cut`] take an optional [`FrontierCut`]: positions reached at the start of
+//! trick `k` are valued by an evaluator (the oracle network O_k) instead of being searched. The
+//! evaluator sees the canonical form of the position ([`frontier`]), which keeps equivalent-card
+//! merging and the transposition table exact, so the three solvers return identical hybrid
+//! values. Without a frontier every solve is exactly what it was.
+//!
 //! Everything is whole-number: values are [`MoneyChance`] (units of 2^-32, summing to exactly 1).
 
 pub mod denial;
 pub mod equiv;
 pub mod fast;
+pub mod frontier;
 mod tt;
 pub mod worlds;
 
 pub use fast::{
-    FastOptions, ParProgress, SolveMem, solve_fast, solve_fast_par, solve_fast_par_split,
-    solve_fast_par_with, solve_fast_watched, solve_fast_with,
+    FastOptions, ParProgress, SolveMem, solve_fast, solve_fast_cut, solve_fast_par,
+    solve_fast_par_cut, solve_fast_par_split, solve_fast_par_with, solve_fast_watched,
+    solve_fast_with,
 };
+pub use frontier::{CanonPos, FnFrontier, Frontier, FrontierCut, canonical};
 pub use tt::{TableMemory, shared_table_memory, table_memory};
 pub use worlds::sample_world;
 
@@ -173,6 +183,8 @@ pub struct Stats {
     /// Optimised solver only: cards played by the forced-play shortcut (a seat with one legal
     /// card, and the whole last trick), each in place of a node (see `fast::Search::forced`).
     pub forced: u64,
+    /// Positions valued by the frontier evaluator (hybrid solves only; 0 without a frontier).
+    pub frontier: u64,
 }
 
 /// The result of a root solve.
@@ -390,6 +402,7 @@ struct Search<'a, L: Leaf> {
     ctx: MatchCtx,
     leaf: &'a L,
     opts: Options,
+    cut: Option<FrontierCut<'a>>,
     tt: HashMap<Key, MoneyChance>,
     stats: Stats,
     start: Instant,
@@ -481,6 +494,12 @@ impl<L: Leaf> Search<'_, L> {
         if self.aborted {
             return None;
         }
+        if let Some(cut) = self.cut
+            && cut.applies(p)
+        {
+            self.stats.frontier += 1;
+            return Some(cut.value(p, &self.ctx));
+        }
         if let Some((_, burns)) = p.burn_choice() {
             return self.burn_node(p, burns);
         }
@@ -555,10 +574,24 @@ impl<L: Leaf> Search<'_, L> {
 /// Solve a position exactly: every legal root card is valued and the mover's team's best is
 /// chosen under the tie order.
 pub fn solve<L: Leaf>(pos: &Position, ctx: MatchCtx, leaf: &L, opts: Options) -> Solution {
+    solve_cut(pos, ctx, leaf, opts, None)
+}
+
+/// [`solve`] with an optional frontier (the hybrid H_k, docs/M3-HYBRID-SPEC.md §2): every
+/// position reached at the start of the frontier's trick is valued by its evaluator instead of
+/// being searched; everything else is [`solve`]'s search. With `None` this is exactly [`solve`].
+pub fn solve_cut<L: Leaf>(
+    pos: &Position,
+    ctx: MatchCtx,
+    leaf: &L,
+    opts: Options,
+    cut: Option<FrontierCut>,
+) -> Solution {
     let mut s = Search {
         ctx,
         leaf,
         opts,
+        cut,
         tt: HashMap::new(),
         stats: Stats::default(),
         start: Instant::now(),

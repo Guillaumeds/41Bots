@@ -17,6 +17,10 @@
 //! 4. **Shallow pruning** (Sturtevant & Korf 2000, for max^n with a known bound on the sum of
 //!    the values), proof below.
 //!
+//! With a hybrid frontier ([`crate::frontier`]) every speed-up stays exact: a frontier value is
+//! a pure function of the position's canonical form, which equivalent cards share and the table
+//! key determines; pruning only ever compares values, wherever they come from.
+//!
 //! # Shallow pruning: why it is safe here
 //! Every value is four non-negative whole numbers summing to exactly `ONE`. Take a node `N`
 //! whose mover's team is `t`, which has already found a best value `b` for `t` (from card `cb`),
@@ -65,6 +69,7 @@ use engine::team_of;
 use equity::{MatchState, MoneyChance, ONE};
 
 use crate::equiv::Classes;
+use crate::frontier::FrontierCut;
 use crate::tt::{SLOT_BYTES, SharedTable, Table, TtKey};
 use crate::{Leaf, MatchCtx, Position, Solution, Stats, Step, TieOrder, ordered};
 
@@ -290,6 +295,8 @@ struct Search<'a, L: Leaf> {
     ctx: MatchCtx,
     leaf: &'a L,
     opts: FastOptions,
+    /// The hybrid frontier, if any (`crate::frontier`).
+    cut: Option<FrontierCut<'a>>,
     classes: &'static Classes,
     leaves: LeafCache,
     tt: Tt<'a>,
@@ -537,6 +544,18 @@ impl<L: Leaf> Search<'_, L> {
                 return Res::Exact(v);
             }
         }
+        if let Some(cut) = self.cut
+            && cut.applies(p)
+        {
+            // A frontier position: the evaluator's value, stored in the table like a searched
+            // value (it is a function of the key within this solve: see `crate::frontier`).
+            self.stats.frontier += 1;
+            let v = cut.value(p, &self.ctx);
+            if let Some(k) = key {
+                self.tt.put(k, v);
+            }
+            return Res::Exact(v);
+        }
         if p.n_played == 0 && p.hand.tricks_done == engine::game::TRICKS_PER_HAND - 1 {
             let v = self.last_trick(p);
             if let Some(k) = key {
@@ -681,11 +700,29 @@ pub fn solve_fast_watched<L: Leaf>(
     mem: &mut SolveMem,
     progress: Option<&ParProgress>,
 ) -> Solution {
+    solve_fast_cut(pos, ctx, leaf, opts, None, mem, progress)
+}
+
+/// [`solve_fast_watched`] with an optional frontier (the hybrid H_k, docs/M3-HYBRID-SPEC.md
+/// §2): every position reached at the start of the frontier's trick is valued by its evaluator
+/// instead of being searched. The result equals [`crate::solve_cut`]'s with the same frontier
+/// (value, chosen card, every root card's value) under the same tie order, for every switch
+/// combination; with `None` it is exactly [`solve_fast_watched`]'s.
+pub fn solve_fast_cut<L: Leaf>(
+    pos: &Position,
+    ctx: MatchCtx,
+    leaf: &L,
+    opts: FastOptions,
+    cut: Option<FrontierCut>,
+    mem: &mut SolveMem,
+    progress: Option<&ParProgress>,
+) -> Solution {
     let _active = Active::enter(progress);
     let mut s = Search {
         ctx,
         leaf,
         opts,
+        cut,
         classes: Classes::shared(pos.trump),
         leaves: LeafCache::new(),
         tt: if opts.tt {
@@ -816,10 +853,17 @@ fn par_push<L: Leaf>(
     c: Card,
 ) -> usize {
     let n = match q.play(c) {
-        Step::Next(r) => {
-            frontier.push(nodes.len());
-            PNode::Task(r)
-        }
+        Step::Next(r) => match exp.cut {
+            // A hybrid frontier position is valued here, never split or searched.
+            Some(cut) if cut.applies(&r) => {
+                exp.stats.frontier += 1;
+                PNode::Done(cut.value(&r, &exp.ctx))
+            }
+            _ => {
+                frontier.push(nodes.len());
+                PNode::Task(r)
+            }
+        },
         Step::GameWon(t) => PNode::Done(exp.game_won(t)),
         Step::HandOver(sc) => PNode::Done(exp.hand_over(sc)),
     };
@@ -888,6 +932,33 @@ pub fn solve_fast_par_with<L: Leaf + Sync>(
         PAR_TASKS_PER_THREAD,
         progress,
         mem,
+        None,
+    )
+}
+
+/// [`solve_fast_par_with`] with an optional frontier (see [`solve_fast_cut`]): exactly
+/// [`solve_fast_cut`]'s result (and so [`crate::solve_cut`]'s) for any thread count.
+#[allow(clippy::too_many_arguments)]
+pub fn solve_fast_par_cut<L: Leaf + Sync>(
+    pos: &Position,
+    ctx: MatchCtx,
+    leaf: &L,
+    opts: FastOptions,
+    threads: usize,
+    progress: Option<&ParProgress>,
+    mem: &mut SolveMem,
+    cut: Option<FrontierCut>,
+) -> Solution {
+    par_solve(
+        pos,
+        ctx,
+        leaf,
+        opts,
+        threads,
+        PAR_TASKS_PER_THREAD,
+        progress,
+        mem,
+        cut,
     )
 }
 
@@ -911,6 +982,7 @@ pub fn solve_fast_par_split<L: Leaf + Sync>(
         tasks_per_thread,
         progress,
         &mut SolveMem::new(),
+        None,
     )
 }
 
@@ -924,6 +996,7 @@ fn par_solve<L: Leaf + Sync>(
     tasks_per_thread: usize,
     progress: Option<&ParProgress>,
     mem: &mut SolveMem,
+    cut: Option<FrontierCut>,
 ) -> Solution {
     let threads = threads.max(1);
     let own = ParProgress::default();
@@ -936,6 +1009,7 @@ fn par_solve<L: Leaf + Sync>(
         ctx,
         leaf,
         opts,
+        cut,
         classes: Classes::shared(pos.trump),
         leaves: LeafCache::new(),
         tt: Tt::Off,
@@ -1008,6 +1082,7 @@ fn par_solve<L: Leaf + Sync>(
                         ctx,
                         leaf,
                         opts,
+                        cut,
                         classes: Classes::shared(pos.trump),
                         leaves: LeafCache::new(),
                         tt: if opts.tt { Tt::Shared(shared) } else { Tt::Off },
@@ -1052,6 +1127,7 @@ fn par_solve<L: Leaf + Sync>(
         stats.cutoffs += w.cutoffs;
         stats.equiv_skipped += w.equiv_skipped;
         stats.forced += w.forced;
+        stats.frontier += w.frontier;
         for (a, b) in stats.nodes_by_trick.iter_mut().zip(&w.nodes_by_trick) {
             *a += b;
         }
