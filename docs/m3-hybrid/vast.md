@@ -108,18 +108,39 @@ attempt, 10 minutes, `max_minutes` + 30 minutes), and the dollar cap bounds ever
   against exact on the golden set. Label shards are not uploaded (4.4 GB; they are remade
   byte-identical in about a minute); set `"upload_shards": true` to keep them.
 
-**Network widths: at most 1024 units per layer** (the `widths` setting of `hybrid_rung`, the trainer's
+**Network widths: at most 4096 units per layer** (the `widths` setting of `hybrid_rung`, the trainer's
 `--widths`). The integer inference that loads, checks and uses the network refuses a layer wider
-than `MAX_WIDTH` = 1024 (`crates/nn/src/mlp.rs`, an audited limit: its scratch arrays and overflow
-bound were checked for it). A wider network would train for nothing and fail when loaded: a trick-3
-run on 2026-10-16 trained 2048-1024-256 for 27 minutes and then stopped at the check with
-`layer 0: wider than 1024`. Now every place that accepts a width refuses it at once, naming the
-layer (counted from 0) and the limit: the runner's `hybrid_rung` settings (before anything is
-installed or trained), the trainer's `--widths` (before any data is loaded), and loading a network
-file (`search labels --harvest-net`, `search hybrid-check`). The trainer's copy of the number
+than `MAX_WIDTH` = 4096 (`crates/nn/src/mlp.rs`). The limit was 1024 until 2026-10-16, when a
+trick-3 run trained 2048-1024-256 for 27 minutes and then stopped at the check with
+`layer 0: wider than 1024`. It was raised to 4096 the same day (owner: "go 2048 wide"), with the
+proof written in that module's notes ("Widths and the overflow bound"):
+- every sum stays exact because each network's own weights are checked against the `2^62` bound
+  when it is loaded, at any width; the trainer's quantiser picks the scale so that the bound holds
+  (trained-scale weights keep all 24 fraction bits at widths 2048 and 4096, far inside it);
+- what grows with the width is memory only (the fast pass's scratch, and the per-thread cache of
+  first-layer parts: 4 MiB a thread at width 2048);
+- every network up to 1024 wide gives byte-identical outputs to before (16 networks, 4 of them
+  trained), and the fast pass equals the plain reference at 1024, 2048 and 4096 (tests).
+
+Every place that accepts a width still refuses one over the limit at once, naming the layer
+(counted from 0) and the limit: the runner's `hybrid_rung` settings (before anything is installed
+or trained), the trainer's `--widths` (before any data is loaded), and loading a network file
+(`search labels --harvest-net`, `search hybrid-check`). The trainer's copy of the number
 (`MAX_WIDTH` in `python/nn/fortyone_nn/formats.py`) is tested against the Rust source and `nn-tool
-limits`. More capacity has to come within this limit (more layers, or more data); raising the limit
-itself means auditing the integer inference again.
+limits`.
+
+Cost of width (one frontier evaluation, random networks of a trained network's scale, this
+project's build VM, x86-64-v3 code as on the EPYC machines; `nn-tool bench`, 1,000 real frontier
+positions, best of 3; the VM is shared, so about ±15%):
+
+| network | trick 4 | trick 3 | file (`int.safetensors`) |
+|---|---|---|---|
+| 1024-512-128 | 42 µs | 37 µs | 6.1 MB |
+| 2048-1024-256 | 225 µs (×5.4) | 203 µs (×5.4) | 16.9 MB |
+| 2048-2048-1024-256 | 602 µs (×14) | 552 µs (×15) | 33.7 MB |
+
+Trained networks are faster than random ones of the same shape (more of their hidden units are
+zero): the trained 1024-512-128 networks take 12–17 µs.
 
 ## Adding harvested labels (spec §5 source (c))
 
