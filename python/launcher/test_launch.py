@@ -1719,6 +1719,155 @@ class LauncherTest(unittest.TestCase):
                                                  "disk_gb": 80}})
         self.assertEqual((a.gpus, a.min_gpu_ram_gb, a.min_cores, a.min_ram_gb, a.disk_gb), (1, 8, 256, 64, 80))
 
+    def test_manifest_gpu_names_are_checked_before_renting(self):
+        # gpu_names: a non-empty list of non-empty strings; anything else is refused before any search or rental.
+        base = {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}}
+        for bad in ([], "RTX 4090", {"RTX 4090": 1}, None, 4090, [1], ["RTX 4090", 5], ["RTX 4090", ""], ["  "], [None],
+                    [["RTX 4090"]], [True]):
+            w = World([offer(1, 11, 1.0, gpu_name="RTX 4090")], ["done:1"])
+            with self.assertRaises(SystemExit) as e:
+                self.run_launch(w, {**base, "machine": {"gpu_names": bad}})
+            self.assertIn("machine.gpu_names must be a list of GPU model names", str(e.exception), bad)
+            self.assertEqual((w.created_on, w.searches), ([], 0), bad)
+        # A good list is kept as given; the command line's list wins when it gave one; no key, no filter.
+        settings = dict(gpus=0, min_gpu_ram_gb=0, min_compute_cap=600, min_cores=16, min_ram_gb=32, disk_gb=20, cpu_only=True)
+        a = argparse.Namespace(**settings)
+        launch.apply_machine(a, {"machine": {"gpu_names": ["RTX 4090", "rtx  5090"]}})
+        self.assertEqual(a.gpu_names, ["RTX 4090", "rtx  5090"])
+        a = argparse.Namespace(**settings, gpu_names=["L40S"])
+        launch.apply_machine(a, {"machine": {"gpu_names": ["RTX 4090"]}})
+        self.assertEqual(a.gpu_names, ["L40S"])
+        a = argparse.Namespace(**settings)
+        launch.apply_machine(a, {"machine": {"disk_gb": 40}})
+        self.assertIsNone(getattr(a, "gpu_names", None))
+        self.assertIn("gpu_names", launch.MACHINE_KEYS)
+        # --gpu-names: comma-separated, default none; an empty name or no name at all is refused.
+        self.assertIsNone(launch.build_parser().parse_args(["plan"]).gpu_names)
+        self.assertEqual(launch.build_parser().parse_args(["plan", "--gpu-names", "RTX 4090, RTX 5090 ,H100 SXM"]).gpu_names,
+                         ["RTX 4090", "RTX 5090", "H100 SXM"])
+        for bad in ("", " ", "RTX 4090,", ",", "RTX 4090,,RTX 5090"):
+            with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit):
+                launch.build_parser().parse_args(["plan", "--gpu-names", bad])
+            self.assertIn("--gpu-names: must be GPU model names separated by commas", err.getvalue(), bad)
+
+    def test_gpu_names_limit_the_search_and_the_replacement_search(self):
+        offers = [offer(1, 11, 0.4, gpu_name="RTX 3090"), offer(2, 12, 0.9, gpu_name="RTX 4090"),
+                  offer(3, 13, 0.5, gpu_name="RTX 4090 D"), offer(4, 14, 1.0, gpu_name="RTX  5090"),
+                  offer(5, 15, 0.45, gpu_name="L40S"), offer(6, 16, 1.1, gpu_name="rtx 4090"),
+                  offer(7, 17, 0.3, gpu_name=None)]
+        m = {"format": 2, "run_id": RUN, "run_seed": 1, "streams": [], "machine": {"gpu_names": ["RTX 4090", "rtx 5090"]}}
+        # The cheapest offer of a listed model (case and spacing ignored): 2. Its machine dies; the replacement search
+        # holds to the list too and takes 4 ($1.00, "RTX  5090"), never the cheaper 3090, "RTX 4090 D", L40S or unnamed ones.
+        w = World(offers, ["die:2", "done:1"])
+        code, report = self.run_launch(w, m, "--cheapest")
+        self.assertEqual((code, w.created_on, report["replacements"]), (0, [2, 4], 1))
+        self.assertIn("only these GPU models are rented: RTX 4090, rtx 5090", self.log)
+        # The command line's list wins over the manifest's.
+        w = World(offers, ["done:1"])
+        code, _ = self.run_launch(w, m, "--cheapest", "--gpu-names", "L40S")
+        self.assertEqual((code, w.created_on), (0, [5]))
+        # Without a list nothing changes: the cheapest offer of any model (the unnamed 7 included).
+        w = World(offers, ["done:1"])
+        code, _ = self.run_launch(w, {**m, "machine": {}}, "--cheapest")
+        self.assertEqual((code, w.created_on), (0, [7]))
+        self.assertNotIn("only these GPU models", self.log)
+        # No offer of a listed model: nothing is rented, whatever else is on offer.
+        w = World([o for o in offers if o["id"] in (1, 3, 5, 7)], ["done:1"])
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, m, "--cheapest")
+        self.assertIn("no offer matches the filters", str(e.exception))
+        self.assertEqual(w.created_on, [])
+        # A GPU job keeps its own needs beside the list.
+        gpu = dict(num_gpus=1, gpu_ram=24000, compute_cap=890, cuda_max_good=12.8)
+        w = World([offer(1, 11, 0.4, **{**gpu, "gpu_name": "RTX 4090", "gpu_ram": 3000}),
+                   offer(2, 12, 0.5, **{**gpu, "gpu_name": "RTX 3090"}), offer(3, 13, 0.9, **{**gpu, "gpu_name": "RTX 4090"})],
+                  ["done:1"])
+        code, _ = self.run_launch(w, {**self.FORMAT1, "machine": {"gpus": 1, "min_gpu_ram_gb": 4, "gpu_names": ["RTX 4090"]}},
+                                  "--cheapest")
+        self.assertEqual((code, w.created_on), (0, [3]))
+
+    def test_offer_chosen_by_id_must_have_a_listed_gpu_model(self):
+        listed = {"run_id": RUN, "machine": {"gpu_names": ["RTX 4090"]}, "chunk": {"difftest": {"matches": 1, "seed": 1}}}
+        for model, word in (("RTX 3090", "GPU RTX 3090 not in gpu_names"), ("RTX 4090 D", "GPU RTX 4090 D not in gpu_names"),
+                            (None, "GPU model not reported, and gpu_names is set")):
+            w = World([offer(500, 50, 1.0, gpu_name=model)], ["done:1"])
+            w.forbid_search = True
+            with self.assertRaises(SystemExit) as e:
+                self.run_launch(w, listed, "--offer-id", "500")
+            self.assertIn("fails the launcher's checks", str(e.exception), model)
+            self.assertIn(word, str(e.exception), model)
+            self.assertEqual(w.created_on, [], model)
+        # A listed model (case and spacing ignored) is rented; the command line's list wins over the manifest's,
+        # and the list given on the command line alone refuses too.
+        w = World([offer(500, 50, 1.0, gpu_name="rtx   4090")], ["done:1"])
+        w.forbid_search = True
+        code, _ = self.run_launch(w, listed, "--offer-id", "500")
+        self.assertEqual((code, w.created_on), (0, [500]))
+        w = World([offer(500, 50, 1.0, gpu_name="RTX 3090")], ["done:1"])
+        w.forbid_search = True
+        code, _ = self.run_launch(w, listed, "--offer-id", "500", "--gpu-names", "RTX 3090,L40S")
+        self.assertEqual((code, w.created_on), (0, [500]))
+        w = World([offer(500, 50, 1.0, gpu_name="RTX 3090")], ["done:1"])
+        w.forbid_search = True
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}}, "--offer-id", "500",
+                            "--gpu-names", "RTX 4090,RTX 5090")
+        self.assertIn("GPU RTX 3090 not in gpu_names", str(e.exception))
+        self.assertEqual(w.created_on, [])
+        # A GPU job: the offer meets every GPU need but is of another model, so the model is the only reason.
+        a2000 = dict(num_gpus=1, gpu_name="RTX A2000", gpu_ram=6138, compute_cap=860, cuda_max_good=12.8)
+        gpu = {**listed, "machine": {"gpus": 1, "min_gpu_ram_gb": 4, "gpu_names": ["RTX 4090"]}}
+        w = World([offer(500, 50, 1.0, **a2000)], ["done:1"])
+        w.forbid_search = True
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, gpu, "--offer-id", "500")
+        self.assertIn("checks: GPU RTX A2000 not in gpu_names; nothing was rented", str(e.exception))
+        code, _ = self.run_launch(w, {**gpu, "machine": {**gpu["machine"], "gpu_names": ["RTX A2000"]}}, "--offer-id", "500")
+        self.assertEqual((code, w.created_on), (0, [500]))
+
+    def test_plan_and_dry_run_honour_gpu_names_and_the_waiting_log_names_the_gpu(self):
+        # Only 3090s on offer, a run that wants 4090s or 5090s: plan says what a run would wait for, with the reason.
+        w = World([big(5, 15, 0.8, gpu_name="RTX 3090"), big(6, 16, 1.0, gpu_name="RTX 3090"),
+                   big(8, 18, 1.0, gpu_name="RTX 4090 D")], [])
+        code, out = self.run_cli(w, ["plan", "--gpu-names", "RTX 4090,RTX 5090"])
+        self.assertEqual((code, w.t), (0, 1_000_000.0))
+        self.assertIn("floors: >= 190 threads", out)
+        self.assertIn("GPU model one of RTX 4090, RTX 5090", out)
+        self.assertIn("closest miss: offer 5 has 224 threads and costs $0.80/h but GPU RTX 3090 not in gpu_names "
+                      "(and 2 more like it)", out)
+        self.assertIn("nothing matches even at the price cap right now", out)
+        self.assertNotIn("chosen", out)
+        # The same from a manifest's machine block, in plan and in run --dry-run: nothing is rented or waited for.
+        manifest = {**self.FORMAT1, "machine": {"gpu_names": ["RTX 4090", "RTX 5090"]}}
+        w = World([big(5, 15, 0.8, gpu_name="RTX 3090")], ["done:1"])
+        code, out = self.run_cli(w, ["plan", "--manifest", json.dumps(manifest)])
+        self.assertEqual((code, w.t), (0, 1_000_000.0))
+        self.assertIn("closest miss: offer 5 has 224 threads and costs $0.80/h but GPU RTX 3090 not in gpu_names", out)
+        code, out = self.run_cli(w, ["run", "--manifest", json.dumps(manifest), "--image", "img:1", "--bin-sha", "abc", "--dry-run"])
+        self.assertEqual((code, w.created_on, w.t), (0, [], 1_000_000.0))
+        self.assertIn("GPU RTX 3090 not in gpu_names", out)
+        self.assertIn("dry run: no offer to rent right now; a real run would wait as described above", out)
+        # An offer of a listed model is what plan and --dry-run choose, though a cheaper 3090 is on offer.
+        w = World([big(5, 15, 0.8, gpu_name="RTX 3090"), big(7, 17, 1.0, gpu_name="rtx 4090")], ["done:1"])
+        code, out = self.run_cli(w, ["run", "--manifest", json.dumps(manifest), "--image", "img:1", "--bin-sha", "abc", "--dry-run"])
+        self.assertEqual((code, w.created_on), (0, []))
+        self.assertIn("chosen (", out)
+        self.assertIn("offer 7: ", out.split("chosen (")[1])
+        self.assertNotIn("offer 5: ", out.split("chosen (")[1])
+        # Without a list: unchanged, the 3090 is chosen and no GPU reason appears.
+        w = World([big(5, 15, 0.8, gpu_name="RTX 3090")], ["done:1"])
+        code, out = self.run_cli(w, ["plan"])
+        self.assertIn("chosen (", out)
+        self.assertNotIn("gpu_names", out)
+        # A waiting launcher explains itself in every attempt's line.
+        w = World([big(5, 15, 0.8, gpu_name="RTX 3090")], ["done:1"])
+        with self.assertRaises(SystemExit):
+            self.run_launch(w, manifest, *NEW, "--wait-for-offer-min", "3")
+        self.assertEqual(w.created_on, [])
+        self.assertEqual(self.log.count("waiting for an offer: price step"), 3)
+        self.assertEqual(self.log.count("no match; closest miss: offer 5 has 224 threads and costs $0.80/h but GPU RTX 3090 "
+                                        "not in gpu_names"), 3)
+
     def test_manifest_machine_min_inet_down_sets_the_download_floor(self):
         # machine.min_inet_down (Mbps) replaces the default floor of 100; 0 turns the filter off; with
         # --min-inet-down given too the larger wins; a negative number is refused before any search.

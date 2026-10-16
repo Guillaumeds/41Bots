@@ -99,6 +99,29 @@ class OfferRulesTest(unittest.TestCase):
         self.assertEqual(R.search_failures(blackwell), [])
         self.assertEqual(len(R.search_failures(blackwell, cpu_only=False)), 2)
 
+    def test_gpu_names_accept_only_the_listed_models(self):
+        # The names are spelled as vast reports them in an offer's gpu_name; case and runs of spaces do not matter.
+        names = ["RTX 4090", "RTX PRO 6000 S"]
+        for model in ("RTX 4090", "rtx 4090", "  RTX   4090 ", "RTX\t4090", "RTX PRO 6000 S", "rtx pro 6000 s"):
+            self.assertEqual(R.gpu_name_failures(offer(gpu_name=model), names), [], model)
+            self.assertEqual(R.search_failures(offer(gpu_name=model), gpu_names=names), [], model)
+        # A different model, a longer or shorter name of the same family, or no model at all: refused, with the model named.
+        for model in ("RTX 3090", "RTX 4090 D", "RTX PRO 6000 WS", "RTX PRO 6000", "RTX4090", "L40S"):
+            self.assertEqual(R.gpu_name_failures(offer(gpu_name=model), names), [f"GPU {model} not in gpu_names"], model)
+            self.assertEqual(R.search_failures(offer(gpu_name=model), gpu_names=names), [f"GPU {model} not in gpu_names"], model)
+        for missing in (offer(), offer(gpu_name=None), offer(gpu_name=""), offer(gpu_name=4090)):
+            self.assertEqual(R.gpu_name_failures(missing, names), ["GPU model not reported, and gpu_names is set"], missing)
+        # The names given may differ in case and spacing from the offer's too.
+        self.assertEqual(R.gpu_name_failures(offer(gpu_name="RTX 5090"), ["rtx  5090"]), [])
+        # No list (None or empty): no filter, as before; the other checks still apply beside it.
+        for none in (None, []):
+            self.assertEqual(R.gpu_name_failures(offer(gpu_name="RTX 3090"), none), [])
+            self.assertEqual(R.search_failures(offer(gpu_name="RTX 3090"), gpu_names=none), [])
+        self.assertEqual(R.search_failures(offer(gpu_name="RTX 3090")), [])
+        self.assertEqual(R.search_failures(offer(gpu_name="RTX 4090", dph_total=1.9), gpu_names=names),
+                         ["price $1.90/h above the cap $1.70/h"])
+        self.assertEqual(len(R.search_failures(offer(gpu_name="RTX 3090", dph_total=1.9), gpu_names=names)), 2)
+
     def test_link_factor(self):
         self.assertEqual([R.link_factor({"inet_down": v}) for v in (900, 500, 200, "850")], [1.0] * 4)
         self.assertAlmostEqual(R.link_factor({"inet_down": 100}), 1.5)

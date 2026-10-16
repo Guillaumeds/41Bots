@@ -20,7 +20,9 @@ The rules (owner, 2026-10-16, unless dated otherwise):
   per machine, a 2-GPU box that is cheap per CPU thread is fine; the trainer uses one GPU, cuda:0), with
   compute_cap from MIN_COMPUTE_CAP (600, Pascal) up to below MAX_COMPUTE_CAP (1000, no Blackwell) and a
   driver that supports CUDA MIN_CUDA (12.6), the limits of the PyTorch 2.14.1+cu126 build. A CPU-only
-  job (the default) leaves the compute-capability and CUDA limits out.
+  job (the default) leaves the compute-capability and CUDA limits out;
+- GPU model: a run may name the models it accepts (`gpu_names`, spelled as vast reports them in an offer's
+  `gpu_name`, like "RTX 4090"); an offer of any other model is refused. No list, no filter.
 """
 
 from __future__ import annotations
@@ -107,6 +109,23 @@ def check_failures(o: dict, floor: float = MIN_RELIABILITY, verified_only: bool 
     return failed
 
 
+def gpu_name_key(name) -> str:
+    """A GPU model name as `gpu_name_failures` compares it: lower case, every run of whitespace one space."""
+    return " ".join(name.split()).lower() if isinstance(name, str) else ""
+
+
+def gpu_name_failures(o: dict, gpu_names) -> list[str]:
+    """Why an offer's GPU model (vast's `gpu_name`, like "RTX 4090") is not one of `gpu_names`, the models a run
+    accepts, spelled as vast reports them and compared without case or extra whitespace. None or an empty list
+    means the run named none: no filter. With a list, an offer that reports no model fails."""
+    if not gpu_names:
+        return []
+    key = gpu_name_key(o.get("gpu_name"))
+    if key and key in {gpu_name_key(x) for x in gpu_names}:
+        return []
+    return [f"GPU {o.get('gpu_name')} not in gpu_names" if key else "GPU model not reported, and gpu_names is set"]
+
+
 def gpu_failures(o: dict, gpus: int, min_gpu_ram_gb: float = 0, min_compute_cap: int = MIN_COMPUTE_CAP) -> list[str]:
     """Why an offer fails a GPU job's needs (at least `gpus` GPUs: a machine with more is fine, the price is per
     machine; `min_gpu_ram_gb`, `min_compute_cap`, and the PyTorch build's limits), from vast's raw record
@@ -130,11 +149,12 @@ def gpu_failures(o: dict, gpus: int, min_gpu_ram_gb: float = 0, min_compute_cap:
 def search_failures(o: dict, *, min_inet_down: float | None = None, floor: float = MIN_RELIABILITY,
                     verified_only: bool = False, max_net_cost: float = MAX_NET_COST, gpus: int = 0,
                     cpu_only: bool = True, min_gpu_ram_gb: float = 0, min_compute_cap: int = MIN_COMPUTE_CAP,
-                    max_dph: float | None = None) -> list[str]:
+                    max_dph: float | None = None, gpu_names: list[str] | None = None) -> list[str]:
     """Why the launcher's SEARCH would not find an offer: `check_failures` plus the other filters of its
     query (download speed, price, network cost, at least one GPU, and for a GPU job or a job that is not
-    CPU-only the compute-capability and CUDA limits). `min_inet_down` None means the default
-    MIN_INET_DOWN, 0 means no filter; `max_dph` None means the default MAX_DPH, 0 means no cap. An offer
+    CPU-only the compute-capability and CUDA limits) and, when given, the GPU models a run accepts (`gpu_names`).
+    `min_inet_down` None means the default MIN_INET_DOWN, 0 means no filter; `max_dph` None means the default
+    MAX_DPH, 0 means no cap. An offer
     that does not report a value the search filters on (download speed) fails: the search cannot match
     it. Empty = the launcher can rent it (a verified host is preferred, see `host_flag`)."""
     failed = check_failures(o, floor, verified_only)
@@ -158,4 +178,4 @@ def search_failures(o: dict, *, min_inet_down: float | None = None, floor: float
         failed.append("no GPU (the launcher's search asks for at least one)")
     if gpus or not cpu_only:
         failed += gpu_failures(o, gpus, min_gpu_ram_gb, min_compute_cap)
-    return failed
+    return failed + gpu_name_failures(o, gpu_names)

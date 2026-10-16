@@ -24,7 +24,8 @@ name: vast-run
 # start, and only searches hosts reporting a download speed of at least 100 Mbps (launch.py
 # --min-inet-down, default 100). This workflow has no input for those (25-input limit); the defaults apply,
 # and a manifest's "machine" object can set them for one run: min_inet_down (Mbps; 0 = no filter), max_dph,
-# wait_for_offer_min, offer_poll_s, price_steps, tries_per_step.
+# wait_for_offer_min, offer_poll_s, price_steps, tries_per_step, gpu_names (a list of GPU model names as vast reports
+# them in an offer's gpu_name, like ["RTX 4090", "RTX 5090"]: no other model is rented; launch.py --gpu-names).
 # Looking for a machine (owner, 2026-10-16): at least 190 threads (min_cores), at most $1.70/h; when none matches the launcher
 # waits instead of failing, up to 2 hours, searching every minute at $1.20/h, then $1.45/h, then $1.70/h (3 tries each), and a
 # replacement search after a start failure does the same with the same floors. The wait and the price steps are launch.py

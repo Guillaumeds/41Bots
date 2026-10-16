@@ -140,6 +140,15 @@ Rules applied:
   default. A GPU count given both ways must agree, a GPU need overrides --cpu-only, and any other key is
   refused before anything is rented. Every other rule (the preference for verified hosts above, reliability, whole machine,
   on-demand only, dollar cap) is unchanged.
+- GPU models: "gpu_names" (a manifest machine key, or --gpu-names "RTX 4090,RTX 5090") is a non-empty list of GPU
+  model names exactly as vast reports them in an offer's `gpu_name` ("RTX 4090", "H100 SXM", "RTX PRO 6000 S"); the
+  training runs in strict float32, where GPUs of a similar price differ 2-4x in speed. When it is given, an offer is
+  acceptable only if its gpu_name is in the list (case and runs of spaces ignored): in the search, in every
+  replacement search, in plan and --dry-run, and for --offer-id (refused, with the reason). It is not a minimum:
+  the command line wins when it gave one, else the manifest's; absent, nothing changes. An empty list, a list that
+  is not one, or an entry that is not text is refused before anything is rented. The check is made on what vast
+  returns (the search query does not carry it), and the waiting log's closest miss names the cheapest offer that
+  fits but for its GPU model ("GPU RTX 3090 not in gpu_names").
 - Destroying is verified: "destroyed (verified)" only once a later status call shows the instance
   exited, offline or absent, in two readings 10 s apart (one reading, such as an empty instance
   list, is never enough); when that call fails 3 times the destroy is reported as unverified
@@ -191,7 +200,7 @@ from datetime import datetime, timedelta, timezone
 # shared with the market tools so that their "the launcher can rent it" labels cannot drift.
 from offer_rules import (  # noqa: E402,F401  (some names are re-exported for the tests)
     MAX_COMPUTE_CAP, MAX_DPH, MAX_NET_COST, MIN_COMPUTE_CAP, MIN_CUDA, MIN_INET_DOWN, MIN_RELIABILITY, SLOW_LINK_MBPS,
-    check_failures, gpu_failures, host_status, inet_down_of, is_verified, link_factor)
+    check_failures, gpu_failures, gpu_name_failures, host_status, inet_down_of, is_verified, link_factor)
 
 POLL_S = 60  # default; --poll-s overrides
 HEARTBEAT_STALE_S = 180
@@ -332,15 +341,25 @@ def inet_floor(a) -> float:
 def gpu_check_failures(o: dict, a) -> list[str]:
     """Why an offer fails a GPU job's needs (--gpus, --min-gpu-ram-gb, --min-compute-cap, and the
     PyTorch build's limits; offer_rules.gpu_failures), from vast's raw record (gpu_ram in MB,
-    compute_cap x 100). Empty for a CPU job or an offer that passes."""
-    if not gpu_job(a):
-        return []
-    return gpu_failures(o, int(a.gpus), getattr(a, "min_gpu_ram_gb", 0), getattr(a, "min_compute_cap", MIN_COMPUTE_CAP))
+    compute_cap x 100), and, whatever the job, the GPU models the run accepts (--gpu-names or the
+    manifest's gpu_names; offer_rules.gpu_name_failures). Empty for an offer that passes."""
+    failed = []
+    if gpu_job(a):
+        failed = gpu_failures(o, int(a.gpus), getattr(a, "min_gpu_ram_gb", 0), getattr(a, "min_compute_cap", MIN_COMPUTE_CAP))
+    return failed + gpu_name_failures(o, getattr(a, "gpu_names", None))
+
+
+def parse_gpu_names(text: str) -> list[str]:
+    """--gpu-names "RTX 4090,RTX 5090" as a list of GPU model names, spelled as vast reports them."""
+    names = [x.strip() for x in str(text).split(",")]
+    if any(not x for x in names):
+        raise argparse.ArgumentTypeError(f"must be GPU model names separated by commas, like \"RTX 4090,RTX 5090\" (got {text!r})")
+    return names
 
 
 # The keys of a manifest's "machine" object (what the launcher rents for it).
 MACHINE_KEYS = ("gpus", "min_gpu_ram_gb", "min_compute_cap", "min_cores", "min_ram_gb", "disk_gb", "min_inet_down",
-                "max_dph", "wait_for_offer_min", "offer_poll_s", "price_steps", "tries_per_step")
+                "max_dph", "wait_for_offer_min", "offer_poll_s", "price_steps", "tries_per_step", "gpu_names")
 
 
 def apply_machine(a, manifest: dict) -> None:
@@ -348,8 +367,8 @@ def apply_machine(a, manifest: dict) -> None:
     minimums take the larger value, a GPU count given both ways must agree, and a GPU need turns
     the GPU filters on even with --cpu-only. machine.min_inet_down (Mbps) replaces the default
     floor of 100, and is the larger of the two when --min-inet-down is given too. The settings that
-    are not minimums (max_dph, wait_for_offer_min, offer_poll_s, price_steps, tries_per_step) are the
-    command line's when it gave one, else the manifest's, else the default (finalize_settings).
+    are not minimums (max_dph, wait_for_offer_min, offer_poll_s, price_steps, tries_per_step, gpu_names) are the
+    command line's when it gave one, else the manifest's, else the default (finalize_settings; gpu_names: none).
     Exits (nothing rented) on an unknown key or a bad value (negative numbers included)."""
     m = manifest.get("machine")
     if m is None:
@@ -364,8 +383,13 @@ def apply_machine(a, manifest: dict) -> None:
         if (not isinstance(steps, list) or not steps
                 or any(isinstance(x, bool) or not isinstance(x, (int, float)) or x <= 0 for x in steps)):
             sys.exit(f"launch: machine.price_steps must be a list of dollars per hour above 0, like [1.2, 1.45, 1.7] (got {steps!r})")
+    names = m.get("gpu_names")
+    if "gpu_names" in m:
+        if not isinstance(names, list) or not names or any(not isinstance(x, str) or not x.strip() for x in names):
+            sys.exit(f"launch: machine.gpu_names must be a list of GPU model names as vast reports them, like "
+                     f"[\"RTX 4090\", \"RTX 5090\"] (got {names!r})")
     for k, v in m.items():
-        if k == "price_steps":
+        if k in ("price_steps", "gpu_names"):
             continue
         if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
             sys.exit(f"launch: machine.{k} must be a number, 0 or more (got {v!r})")
@@ -395,6 +419,8 @@ def apply_machine(a, manifest: dict) -> None:
             setattr(a, k, m[k])
     if "price_steps" in m and getattr(a, "price_steps", None) is None:
         a.price_steps = sorted({float(x) for x in steps})
+    if "gpu_names" in m and getattr(a, "gpu_names", None) is None:
+        a.gpu_names = list(names)
     if gpu_job(a) and a.cpu_only:
         log(f"the run needs {a.gpus} GPU(s): the GPU filters apply (--cpu-only is ignored)")
         a.cpu_only = False
@@ -404,7 +430,8 @@ def search_offers(a, verified: bool = True) -> list[dict]:
     # --type on-demand: fixed-price rental only. Interruptible (bid) machines are never used.
     rows = vast("search", "offers", offer_query(a, verified), "--type", "on-demand", "--order", "dph_total", "--limit", "200")
     # The query asks vast for every floor, and the launcher checks them again here: whatever vast returns, an offer
-    # below a floor (threads, RAM, download link, price) is never rented, in a replacement search either.
+    # below a floor (threads, RAM, download link, price) or of a GPU model outside gpu_names (checked only here, by
+    # `gpu_check_failures`: the query does not carry it) is never rented, in a replacement search either.
     floor = inet_floor(a)
     return [o for o in (rows or []) if not o.get("is_bid") and o.get("dph_total") and o.get("cpu_cores_effective")
             and (not a.max_dph or float(o["dph_total"]) <= a.max_dph)
@@ -699,7 +726,8 @@ def parse_price_steps(text) -> list[float]:
 def finalize_settings(a) -> None:
     """Turns the settings left unset on the command line (None) into their defaults, once the manifest has had its
     say: price cap 1.70 $/h (0 = no cap), price steps, tries per step, how long to wait for an offer (minutes) and
-    how often to search (seconds). Exits on a value that makes no sense."""
+    how often to search (seconds). Exits on a value that makes no sense. Says which GPU models the run accepts, if
+    it names any (gpu_names)."""
     cap = getattr(a, "max_dph", None)
     a.max_dph = MAX_DPH if cap is None else float(cap)
     steps = getattr(a, "price_steps", None)
@@ -715,6 +743,8 @@ def finalize_settings(a) -> None:
         sys.exit(f"launch: --offer-poll-s must be at least 1 second (got {a.offer_poll_s})")
     if float(a.wait_for_offer_min) < 0:
         sys.exit(f"launch: --wait-for-offer-min must be 0 (do not wait) or more (got {a.wait_for_offer_min})")
+    if getattr(a, "gpu_names", None):
+        log(f"only these GPU models are rented: {', '.join(a.gpu_names)} (checked on every offer vast returns, a named offer included)")
 
 
 def price_ladder(a) -> list[float]:
@@ -736,7 +766,7 @@ def with_price(a, price: float):
 
 
 def floors_text(a) -> str:
-    """The floors a search holds to, for the log: threads, RAM, link, price cap, GPUs, CPU name."""
+    """The floors a search holds to, for the log: threads, RAM, link, price cap, GPUs, GPU models, CPU name."""
     cap = float(a.max_dph or 0)
     parts = [f">= {a.min_cores} threads", f">= {a.min_ram_gb} GB RAM", f"reliability >= {a.min_reliability}"]
     link = inet_floor(a)
@@ -744,6 +774,8 @@ def floors_text(a) -> str:
     parts.append(f"price cap {rung_text(cap)}")
     if getattr(a, "gpus", 0):
         parts.append(f">= {a.gpus} GPU(s)")
+    if getattr(a, "gpu_names", None):
+        parts.append(f"GPU model one of {', '.join(a.gpu_names)}")
     if a.cpu_match:
         parts.append(f"CPU matching {a.cpu_match!r}")
     return ", ".join(parts)
@@ -761,20 +793,30 @@ def attempt_reaching(a, price: float, tries: int | None = None) -> int | None:
 def closest_miss(a, rung: float) -> str:
     """One log phrase about the nearest thing to a match, from one extra search that keeps every filter except that it
     lifts the price to the cap and halves the thread floor (so the cheapest 200 offers are not all small machines):
-    the cheapest offer that meets everything but this step's price, and the biggest one under the thread floor."""
+    the cheapest offer that meets everything but this step's price, the biggest one under the thread floor, and, when
+    the run names GPU models (gpu_names), the cheapest offer that meets everything at this step but its GPU model."""
     b = copy.copy(a)
     floor = int(a.min_cores)
     b.min_cores = max(1, floor // 2)
     b.max_dph = float(a.max_dph or 0)
+    names = getattr(a, "gpu_names", None)
+    b.gpu_names = None  # lifted for this look, so that an offer of another GPU model can be named
     try:
         rows = search_offers(b, verified=False)
     except RuntimeError as e:
         return f"closest miss unknown (the search failed: {redact(str(e))[:120]})"
     cores = lambda o: float(o["cpu_cores_effective"])  # noqa: E731
     dph = lambda o: float(o["dph_total"])  # noqa: E731
+    other_gpu = [o for o in rows if gpu_name_failures(o, names)]
+    rows = [o for o in rows if not gpu_name_failures(o, names)]
+    wrong_gpu = [o for o in other_gpu if cores(o) >= floor and (not rung or dph(o) <= rung)]
     over_price = [o for o in rows if cores(o) >= floor and rung and dph(o) > rung]
     under_floor = [o for o in rows if cores(o) < floor and (not rung or dph(o) <= rung)]
     parts = []
+    if wrong_gpu:
+        o = min(wrong_gpu, key=lambda o: (dph(o), o["id"]))
+        more = f" (and {len(wrong_gpu) - 1} more like it)" if len(wrong_gpu) > 1 else ""
+        parts.append(f"offer {o['id']} has {cores(o):.0f} threads and costs ${dph(o):.2f}/h but {gpu_name_failures(o, names)[0]}{more}")
     if over_price:
         o = min(over_price, key=lambda o: (dph(o), o["id"]))
         n = attempt_reaching(a, dph(o))
@@ -2258,6 +2300,10 @@ def build_parser() -> argparse.ArgumentParser:
         s.add_argument("--gpus", type=int, default=0,
                        help="GPU job: at least this many GPUs on the machine (0 = no GPU need; the manifest's machine.gpus also sets it)")
         s.add_argument("--min-gpu-ram-gb", type=int, default=0, help="GPU job: memory per GPU, in GB")
+        s.add_argument("--gpu-names", type=parse_gpu_names, default=None,
+                       help="rent only these GPU models, comma-separated and spelled as vast reports them in an offer's gpu_name, "
+                            "e.g. \"RTX 4090,RTX 5090\" (case and extra spaces ignored); the manifest's machine.gpu_names "
+                            "applies when this is not given; checked on every offer, --offer-id included")
         s.add_argument("--min-compute-cap", type=int, default=MIN_COMPUTE_CAP,
                        help="GPU job: lowest compute capability x 100 (default 600 = 6.0, Pascal; below 1000 always)")
         s.add_argument("--verified-only", action="store_true",
