@@ -5,18 +5,35 @@ description = "41Bots oracle value networks: training, quantisation to the Rust 
 requires-python = "==3.14.*"
 dependencies = [
     "numpy==2.5.4",
-    "torch==2.14.1",
 ]
+
+# PyTorch is pinned to 2.14.1 (never 2.15+, which drops the Pascal/Volta GPUs we rent: PLAN §11.2),
+# in one of two builds, chosen by dependency group (both locked, with hashes, in uv.lock):
+# - `cpu` (the default group: plain `uv sync` / `uv run`, this VM, the laptop, GitHub Actions);
+# - `cu126` (rented GPU machines, docs/m3-hybrid/vast.md):
+#   `uv sync --locked --no-default-groups --group cu126`.
+# The two groups conflict, so asking for both is an error rather than a silent mix.
+[dependency-groups]
+cpu = ["torch==2.14.1"]
+cu126 = ["torch==2.14.1"]
 
 [tool.uv]
 package = false
+default-groups = ["cpu"]
+conflicts = [[{ group = "cpu" }, { group = "cu126" }]]
 
-# PyTorch is pinned to 2.14.1 (never 2.15+, which drops the Pascal/Volta GPUs we rent: PLAN §11.2).
-# CPU wheels here (this VM and the laptop); vast.ai images install the cu126 build of the same version.
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
 [tool.uv.sources]
-torch = { index = "pytorch-cpu" }
+torch = [
+    { index = "pytorch-cpu", group = "cpu" },
+    { index = "pytorch-cu126", group = "cu126" },
+]
