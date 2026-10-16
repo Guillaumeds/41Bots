@@ -52,7 +52,10 @@
 //! - `benchmark`, `solver_spike`, `search_measure`, `t1bench`, `hybrid_rung`: as in format 1,
 //!   params unchanged, except that `search_measure`'s `params.ids_input` names an input whose
 //!   path becomes `params.ids`; `hybrid_rung` (`hybrid.rs`) trains in Python and keeps its label
-//!   shards outside `out/` (uploaded content-addressed when `params.upload_shards`).
+//!   shards outside `out/` (uploaded content-addressed when `params.upload_shards`);
+//! - `hybrid_t1check` (`t1check.rs`, format 2 only): its `net_input`, `decisions_input` and
+//!   `saved[].input` name inputs whose paths are added to its params (`net`, `decisions`,
+//!   `saved[].path`).
 //!
 //! The equity input is `inputs.equity` (or the input named by `params.equity_input`).
 //!
@@ -224,9 +227,14 @@ fn worker_inner(spec_path: &Path) -> Result<(), String> {
                     .ok_or_else(|| format!("search_measure needs input `{name}` (ids_input)"))?;
                 o.insert("ids".into(), json!(path));
             }
+            // `hybrid_t1check` names its files among the inputs: their paths join its params.
+            if kind == "hybrid_t1check" {
+                p = crate::t1check::resolve(&p, &inputs)?;
+            }
             // A prebuilt equity table among the inputs (`params.equity_input`, default
             // `equity`) replaces building it; its hash is still checked against the record.
-            if ["search_measure", "t1bench", "hybrid_rung"].contains(&kind.as_str())
+            if ["search_measure", "t1bench", "hybrid_rung", "hybrid_t1check"]
+                .contains(&kind.as_str())
                 && let Ok(path) = equity()
                 && let Some(o) = p.as_object_mut()
             {

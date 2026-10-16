@@ -25,7 +25,7 @@ use engine::rng::Rng;
 use serde_json::{Value, json};
 
 /// Kinds a format-2 stream may run.
-pub const KINDS: [&str; 12] = [
+pub const KINDS: [&str; 13] = [
     "difftest",
     "equity_sweep",
     "benchmark",
@@ -38,6 +38,7 @@ pub const KINDS: [&str; 12] = [
     "agree",
     "belief_bench",
     "hybrid_rung",
+    "hybrid_t1check",
 ];
 
 /// The keys of a stream object; everything else goes in `params`.
@@ -367,6 +368,19 @@ pub fn parse_v2(v: &Value) -> Result<Manifest2, String> {
         if kind == "hybrid_rung" {
             crate::hybrid::parse(&params).map_err(|e| format!("stream `{name}`: {e}"))?;
         }
+        // A trick-1 check names its files among the manifest's inputs.
+        if kind == "hybrid_t1check" {
+            for n in
+                crate::t1check::input_names(&params).map_err(|e| format!("stream `{name}`: {e}"))?
+            {
+                if !inputs.iter().any(|(i, _)| *i == n) {
+                    return Err(format!(
+                        "stream `{name}`: hybrid_t1check names input `{n}`, which the manifest's \
+                         inputs do not list"
+                    ));
+                }
+            }
+        }
         if kind == "arena_blocks" {
             for k in ["a", "b"] {
                 if params.get(k).and_then(Value::as_str).is_none() {
@@ -604,6 +618,29 @@ mod tests {
         json!({"name": "gate", "priority": 2, "kind": "arena_blocks", "chunks": chunks,
                "params": {"a": "rules-v1", "b": "random", "blocks_per_chunk": 2,
                           "sprt": {"s0": 0.0, "s1": 0.02, "max_blocks": max_blocks}}})
+    }
+
+    /// A `hybrid_t1check` stream must name its files among the manifest's inputs, and its
+    /// settings are checked when the manifest is read.
+    #[test]
+    fn t1check_inputs_are_checked() {
+        let h = |c: char| format!("sha256:{}", c.to_string().repeat(64));
+        let spec = |params: Value| {
+            json!({ "format": 2, "run_id": "t1c", "run_seed": 1,
+                "inputs": { "o3": h('a'), "dec": h('b'), "tables": h('c') },
+                "streams": [ { "name": "t1", "priority": 1, "kind": "hybrid_t1check", "chunks": 1,
+                               "params": params } ] })
+        };
+        let ok = json!({ "threads": "all", "net_input": "o3", "decisions_input": "dec",
+                         "saved": [ { "input": "tables", "run": "m3-t1-tables-1" } ] });
+        assert!(parse_v2(&spec(ok.clone())).is_ok());
+        let mut missing = ok.clone();
+        missing["saved"][0]["input"] = json!("ab1");
+        let e = parse_v2(&spec(missing)).expect_err("ab1 is not an input");
+        assert!(e.contains("`ab1`"), "{e}");
+        let mut typo = ok;
+        typo["verify_pct"] = json!("x");
+        assert!(parse_v2(&spec(typo)).is_err());
     }
 
     #[test]

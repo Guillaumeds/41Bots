@@ -36,6 +36,12 @@
 //!                  [--first I] [--last J] [--ids …] [--to 320] [--label 1]
 //!                  [--worlds FILE …] [--verify-pct 1] [--recompute] [--threads T] [--tt-mb 64]
 //!                  [--boot 1000] [--boot-seed 1] [--json OUT] [--source belief|rejection]
+//!                  [--verify-solve-threads 1] [--verify-tt-mb (--tt-mb)]
+//! search hybrid-check --trick T --cut K --net WEIGHTS --equity TABLE --decisions FILE
+//!                  --saved RUN=FILE [--saved RUN=FILE …] [--only D:W,…] [--hard D:W,…]
+//!                  [--verify-pct 0] [--verify-rule all|rules-v1|searched]
+//!                  [--verify-solve-threads 1] [--verify-tt-mb M] [--threads T] [--tt-mb 64]
+//!                  [--boot 1000] [--boot-seed 1] [--json OUT] [--progress FILE] [--plan-only]
 //! ```
 //! `labels` writes training labels for the oracle network O_K (docs/M3-HYBRID-SPEC.md §5,
 //! `search::oracle_labels`): a label shard (`nn::shard`, `.npy` records: encoded features, the exact
@@ -69,6 +75,17 @@
 //! `--recompute` ignores them). Worlds files made before the belief sampler became the default
 //! (no world counts, e.g. the trick-4 golden set `m3-agree-t4c`) were drawn by the rejection
 //! sampler: check them with `--source rejection`.
+//! With `--saved` (docs/M3-HYBRID-SPEC.md §3 "Trick-1 checks", `search::saved`) the worlds are
+//! those earlier runs saved exact values for (worlds files or their `.ckpt` checkpoints, each
+//! labelled by its run), split by the burn rule that valued them (values version 1: the
+//! `rules-v1` burn, checked with `rules_robber_burn`; the current version: searched); the sets run
+//! at once on `--threads` shared out by worlds, one world per thread, the largest saved first;
+//! each world's line goes to stderr as it finishes. `--verify-pct` (default 0 here) recomputes
+//! that share of the saved worlds first (`--verify-rule` picks the sets), each solve on
+//! `--verify-solve-threads` threads with a `--verify-tt-mb` table, and a set with any difference
+//! is not compared. The report: per world, per decision, the §3 tables per set, the `--hard`
+//! worlds with their saved exact times, the peak memory; `--plan-only` prints the sets and the
+//! verification sample and solves nothing.
 //! `decisions` stratifies equally over the 4 strata and 8 positions, so `--count` must be a
 //! multiple of 32 (`--allow-uneven` overrides); it prints the position × stratum table it made.
 //! `worlds` and `teacher` take `--source belief|rejection`: the world generator, by default
@@ -1607,9 +1624,51 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
     };
     let (first, last) = (a.num("--first", 0)?, a.num("--last", u64::MAX)?);
     let ids = a.get("--ids").map(parse_ids).transpose()?;
-    ds.retain(|d| d.id >= first && d.id <= last && ids.as_ref().is_none_or(|i| i.contains(&d.id)));
+    let selected =
+        |id: u64| id >= first && id <= last && ids.as_ref().is_none_or(|i| i.contains(&id));
+    ds.retain(|d| selected(d.id));
     if ds.is_empty() {
         return Err(format!("no decisions at trick {trick}"));
+    }
+    let tt_mb = a.num("--tt-mb", 64)? as usize;
+    let job = CheckJob {
+        cut,
+        seed,
+        label: a.num("--label", 1)?,
+        to: a.num("--to", 320)?,
+        threads: a.num("--threads", 1)?.max(1) as usize,
+        tt_mb,
+        verify_pct: float(a, "--verify-pct", if a.has("--saved") { 0.0 } else { 1.0 })?,
+        recompute: a.has("--recompute"),
+        rules_robber_burn: false,
+        exact_solve_threads: a.num("--verify-solve-threads", 1)?.max(1) as usize,
+        exact_tt_mb: a.num("--verify-tt-mb", tt_mb as u64)? as usize,
+    };
+    let src = world_source(a)?;
+    let ctx = Ctx {
+        leaf: &*leaf,
+        source: &*src,
+        rules: engine::game::Rules::HOUSE,
+    };
+    let boots = a.num("--boot", 1000)?;
+    let boot_seed = a.num("--boot-seed", 1)?;
+    if a.has("--saved") {
+        return hybrid_check_saved(
+            a,
+            SavedRun {
+                trick,
+                ds: &ds,
+                selected: &selected,
+                job,
+                ctx: &ctx,
+                oracle: &oracle,
+                net_path,
+                table_sha: &table_sha,
+                boots,
+                boot_seed,
+                t0,
+            },
+        );
     }
     let stored: BTreeMap<u64, WorldRows> = if a.has("--worlds") {
         let paths: Vec<&Path> = a.all("--worlds").into_iter().map(Path::new).collect();
@@ -1629,17 +1688,6 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
     {
         return Err(format!("decision {} has no stored exact worlds", d.id));
     }
-    let job = CheckJob {
-        cut,
-        seed,
-        label: a.num("--label", 1)?,
-        to: a.num("--to", 320)?,
-        threads: a.num("--threads", 1)?.max(1) as usize,
-        tt_mb: a.num("--tt-mb", 64)? as usize,
-        verify_pct: float(a, "--verify-pct", 1.0)?,
-        recompute: a.has("--recompute"),
-    };
-    let src = world_source(a)?;
     if src.name() != "rejection"
         && let Some(r) = stored.values().find(|r| r.log2_worlds.is_none())
     {
@@ -1649,11 +1697,6 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             r.id
         ));
     }
-    let ctx = Ctx {
-        leaf: &*leaf,
-        source: &*src,
-        rules: engine::game::Rules::HOUSE,
-    };
     let exact_from = if stored.is_empty() || job.recompute {
         "recomputed by this binary".to_string()
     } else {
@@ -1683,10 +1726,7 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             run.verified.1, run.verified.0
         ));
     }
-    let boots = a.num("--boot", 1000)?;
-    let groups = report(&run, boots, a.num("--boot-seed", 1)?);
-    let pct = |x: f64| format!("{:.4}%", 100.0 * x);
-    let spct = |x: f64| format!("{:+.4}%", 100.0 * x);
+    let groups = report(&run, boots, boot_seed);
     println!(
         "H_{cut} vs exact, trick {trick}: {} decisions x {} worlds (seed {seed}, label {}, {} source); net {} {:?}; exact values {exact_from}{}",
         run.decisions.len(),
@@ -1701,6 +1741,60 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             String::new()
         }
     );
+    print_groups(&groups);
+    let time = check_time(&run, job.threads, wall);
+    print_time(&time);
+    let (pass, line) = verdict(&groups);
+    println!("{line}");
+    if let Some(out) = a.get("--json") {
+        let v = serde_json::json!({
+            "trick": trick,
+            "cut": cut,
+            "seed": seed,
+            "label": job.label,
+            "worlds": job.to,
+            "world_source": src.name(),
+            "exact_values": exact_from,
+            "verified_worlds": run.verified.0,
+            "net": net_record(net_path, &oracle),
+            "values": {
+                "exact": search::measure::VALUES_VERSION,
+                "hybrid": format!("{}+O{cut}:{}", search::measure::VALUES_VERSION, oracle.sha256),
+            },
+            "equity_sha256": table_sha,
+            "binary_sha256": binary_sha256(),
+            "boot": {"replicates": boots, "seed": boot_seed, "bound": "97.5th percentile of bootstrap means (upper end of the 95% interval)"},
+            "groups": groups.iter().map(|(n, s)| serde_json::json!({"group": n, "summary": s})).collect::<Vec<_>>(),
+            "pass": pass,
+            "time": time_json(&time, t1.duration_since(t0).as_secs_f64()),
+            "decisions": run.decisions,
+        });
+        write_json(out, &v)?;
+    }
+    Ok(())
+}
+
+fn write_json(out: &str, v: &serde_json::Value) -> Result<(), String> {
+    std::fs::write(
+        out,
+        serde_json::to_string_pretty(v).map_err(|e| e.to_string())? + "\n",
+    )
+    .map_err(|e| format!("{out}: {e}"))
+}
+
+fn net_record(net_path: &str, oracle: &nn::Oracle) -> serde_json::Value {
+    serde_json::json!({
+        "path": net_path,
+        "sha256": oracle.sha256,
+        "widths": oracle.net().widths(),
+        "trick": oracle.trick,
+        "meta": oracle.meta,
+    })
+}
+
+/// The §3 table of `hybrid-check` (`search::hybrid::report`'s groups).
+fn print_groups(groups: &[(String, search::hybrid::Summary)]) {
+    let spct = |x: f64| format!("{:+.4}%", 100.0 * x);
     println!(
         "{:<9} {:>5} {:>10} {:>10} {:>7} {:>7} {:>8} {:>38} {:>9} {:>10} {:>9}",
         "group",
@@ -1731,98 +1825,676 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             pct(s.max_abs)
         );
     }
-    println!(
-        "(value error over all four teams' chances; bias per team relative to the decider; the decider's team alone: SD {}, p99.9|e| {})",
-        pct(groups[0].1.decider_sd),
-        pct(groups[0].1.decider_p999_abs)
-    );
-    let nw = (run.decisions.len() as u64 * job.to).max(1) as f64;
-    let ne = run
-        .decisions
-        .iter()
-        .map(|d| d.exact_worlds)
-        .sum::<u64>()
-        .max(1) as f64;
-    let exact_us: u64 = run.decisions.iter().map(|d| d.exact_us).sum();
-    let hybrid_us: u64 = run.decisions.iter().map(|d| d.hybrid_us).sum();
-    let exact_nodes: u64 = run.decisions.iter().map(|d| d.exact_nodes).sum();
-    let hybrid_nodes: u64 = run.decisions.iter().map(|d| d.hybrid_nodes).sum();
-    let evals: u64 = run.decisions.iter().map(|d| d.frontier).sum();
-    let ns_eval = run.net.0 as f64 / run.net.1.max(1) as f64;
-    println!(
-        "time: exact {:.3} ms a world ({:.0} nodes; {ne} worlds solved exactly here), hybrid {:.3} ms a world ({:.0} nodes, {:.0} frontier evaluations); {:.0} ns per frontier evaluation (encode + integer forward + softmax, or the oracle's memo of recent positions); {wall:.1} s wall on {} threads",
-        exact_us as f64 / 1000.0 / ne,
-        exact_nodes as f64 / ne,
-        hybrid_us as f64 / 1000.0 / nw,
-        hybrid_nodes as f64 / nw,
-        evals as f64 / nw,
-        ns_eval,
-        job.threads
-    );
+    if let Some((_, s)) = groups.first() {
+        println!(
+            "(value error over all four teams' chances; bias per team relative to the decider; the decider's team alone: SD {}, p99.9|e| {})",
+            pct(s.decider_sd),
+            pct(s.decider_p999_abs)
+        );
+    }
+}
+
+/// The standard of §3 on `groups`: whether it passes, and the line that says so.
+fn verdict(groups: &[(String, search::hybrid::Summary)]) -> (bool, String) {
     let loss_pass = groups.iter().take(4).all(|(_, s)| s.loss_pass);
-    let bias_pass = groups[0].1.bias_pass;
+    let bias_pass = groups.first().is_some_and(|(_, s)| s.bias_pass);
     let pass = loss_pass && bias_pass;
-    let worst_bias = groups[0].1.bias.iter().fold(0.0f64, |m, b| m.max(b.abs()));
-    println!(
+    let worst_bias = groups.first().map_or(0.0, |(_, s)| {
+        s.bias.iter().fold(0.0f64, |m, b| m.max(b.abs()))
+    });
+    let line = format!(
         "standard: decision loss 95% upper bound <= 0.01% overall and in every band: {}; every team's |bias| <= 0.01%: {} (largest {}); {}",
         if loss_pass { "yes" } else { "no" },
         if bias_pass { "yes" } else { "no" },
         pct(worst_bias),
         if pass { "PASS" } else { "FAIL" }
     );
+    (pass, line)
+}
+
+/// Times and counts of a check (reports only).
+struct CheckTime {
+    worlds: f64,
+    exact_worlds: f64,
+    exact_us: u64,
+    hybrid_us: u64,
+    exact_nodes: u64,
+    hybrid_nodes: u64,
+    evals: u64,
+    ns_eval: f64,
+    wall: f64,
+    threads: usize,
+}
+
+fn check_time(run: &search::hybrid::CheckRun, threads: usize, wall: f64) -> CheckTime {
+    let d = &run.decisions;
+    CheckTime {
+        worlds: d.iter().map(|d| d.worlds).sum::<u64>().max(1) as f64,
+        exact_worlds: d.iter().map(|d| d.exact_worlds).sum::<u64>() as f64,
+        exact_us: d.iter().map(|d| d.exact_us).sum(),
+        hybrid_us: d.iter().map(|d| d.hybrid_us).sum(),
+        exact_nodes: d.iter().map(|d| d.exact_nodes).sum(),
+        hybrid_nodes: d.iter().map(|d| d.hybrid_nodes).sum(),
+        evals: d.iter().map(|d| d.frontier).sum(),
+        ns_eval: run.net.0 as f64 / run.net.1.max(1) as f64,
+        wall,
+        threads,
+    }
+}
+
+fn print_time(t: &CheckTime) {
+    println!(
+        "time: exact {:.3} ms a world ({:.0} nodes; {} worlds solved exactly here), hybrid {:.3} ms a world ({:.0} nodes, {:.0} frontier evaluations); {:.0} ns per frontier evaluation (encode + integer forward + softmax, or the oracle's memo of recent positions); {:.1} s wall on {} threads",
+        t.exact_us as f64 / 1000.0 / t.exact_worlds.max(1.0),
+        t.exact_nodes as f64 / t.exact_worlds.max(1.0),
+        t.exact_worlds,
+        t.hybrid_us as f64 / 1000.0 / t.worlds,
+        t.hybrid_nodes as f64 / t.worlds,
+        t.evals as f64 / t.worlds,
+        t.ns_eval,
+        t.wall,
+        t.threads
+    );
+}
+
+fn time_json(t: &CheckTime, setup_s: f64) -> serde_json::Value {
+    serde_json::json!({
+        "exact_worlds_solved": t.exact_worlds,
+        "exact_ms_per_world": t.exact_us as f64 / 1000.0 / t.exact_worlds.max(1.0),
+        "hybrid_ms_per_world": t.hybrid_us as f64 / 1000.0 / t.worlds,
+        "exact_nodes_per_world": t.exact_nodes as f64 / t.exact_worlds.max(1.0),
+        "hybrid_nodes_per_world": t.hybrid_nodes as f64 / t.worlds,
+        "net_evals_per_world": t.evals as f64 / t.worlds,
+        "ns_per_net_eval": t.ns_eval,
+        "wall_s": t.wall,
+        "threads": t.threads,
+        "setup_s": setup_s,
+    })
+}
+
+/// What `hybrid_check_saved` needs from the common set-up.
+struct SavedRun<'a> {
+    trick: u8,
+    ds: &'a [DecisionSpec],
+    selected: &'a dyn Fn(u64) -> bool,
+    job: search::hybrid::CheckJob,
+    ctx: &'a Ctx<'a>,
+    oracle: &'a nn::Oracle,
+    net_path: &'a str,
+    table_sha: &'a str,
+    boots: u64,
+    boot_seed: u64,
+    t0: Instant,
+}
+
+/// `search hybrid-check --saved LABEL=FILE …`: H_K against the exact values earlier runs saved
+/// (`search::saved`; docs/M3-HYBRID-SPEC.md §3, "Trick-1 checks"), one set per burn rule, each
+/// checked with the matching `rules_robber_burn`; per world, per decision, the §3 tables per
+/// set, and the `--hard` worlds on their own lines with the saved exact times.
+fn hybrid_check_saved(a: &Args, r: SavedRun) -> Result<(), String> {
+    use search::hybrid::{CheckProgress, CheckRun, check_worlds, report};
+    use search::saved::{BurnRule, join_saved, parse_pairs, plan, read_saved, saved_sets};
+    for k in ["--worlds", "--recompute", "--to"] {
+        if a.has(k) {
+            return Err(format!(
+                "{k} does not go with --saved (the saved files give the worlds; --verify-pct 100 \
+                 recomputes them all)"
+            ));
+        }
+    }
+    let SavedRun { trick, ds, job, .. } = r;
+    let cut = job.cut;
+    let mut all = Vec::new();
+    let mut files = Vec::new();
+    for spec in a.all("--saved") {
+        let (label, path) = spec.split_once('=').unwrap_or((spec, spec));
+        let (w, info) = read_saved(Path::new(path), label)?;
+        eprintln!(
+            "saved {label}: {} lines ({} checkpoint lines, {} worlds records, {} torn), {} exact worlds, by values version {:?}{}",
+            info.lines,
+            info.ckpt_lines,
+            info.records,
+            info.torn,
+            info.worlds,
+            info.by_version,
+            if info.other_method > 0 {
+                format!(", {} worlds of other methods skipped", info.other_method)
+            } else {
+                String::new()
+            }
+        );
+        files.push(info);
+        all.extend(w);
+    }
+    let only = a.get("--only").map(parse_pairs).transpose()?;
+    let hard = a
+        .get("--hard")
+        .map(parse_pairs)
+        .transpose()?
+        .unwrap_or_default();
+    let sets = saved_sets(join_saved(all)?)?;
+    let keep =
+        |id: u64, w: u64| (r.selected)(id) && only.as_ref().is_none_or(|o| o.contains(&(id, w)));
+    let verify_rule = a.get("--verify-rule").unwrap_or("all");
+    if !["all", "rules-v1", "searched"].contains(&verify_rule) {
+        return Err(format!(
+            "--verify-rule {verify_rule}: all, rules-v1 or searched"
+        ));
+    }
+    let both: Vec<(u64, u64, bool)> = search::saved::both_rules(&sets)
+        .into_iter()
+        .filter(|&(d, w, _)| keep(d, w))
+        .collect();
+    let src_name = r.ctx.source.name().to_string();
+    // Each set's plan and settings (its burn rule; the verification where asked).
+    let mut work = Vec::new();
+    for (si, set) in sets.iter().enumerate() {
+        let (pl, notes) = plan(ds, set, job.seed, &src_name, r.table_sha, &keep)?;
+        if pl.is_empty() {
+            continue;
+        }
+        let verify_this = match verify_rule {
+            "rules-v1" => set.rule == BurnRule::RulesV1,
+            "searched" => set.rule == BurnRule::Searched,
+            _ => true,
+        };
+        let sjob = search::hybrid::CheckJob {
+            rules_robber_burn: set.rule.rules_robber_burn(),
+            verify_pct: if verify_this { job.verify_pct } else { 0.0 },
+            ..job.clone()
+        };
+        work.push((si, set, pl, notes, sjob));
+    }
+    // The sets run at once, the threads shared out by worlds (never more threads than worlds,
+    // never more in all than --threads, so no world's time is inflated by another's).
+    let counts: Vec<usize> = work
+        .iter()
+        .map(|w| w.2.iter().map(|d| d.worlds.len()).sum())
+        .collect();
+    let split = split_threads(job.threads, &counts);
+    for (w, &t) in work.iter_mut().zip(&split) {
+        w.4.threads = t;
+    }
+    println!(
+        "H_{cut} vs saved exact worlds, trick {trick}: net {} {:?}; {} source; {} threads (one world each; {}), tables {} MB; saved files: {}",
+        &r.oracle.sha256[..12],
+        r.oracle.net().widths(),
+        src_name,
+        job.threads,
+        work.iter()
+            .map(|w| format!("set {}: {} threads", w.0 + 1, w.4.threads))
+            .collect::<Vec<_>>()
+            .join(", "),
+        job.tt_mb,
+        files
+            .iter()
+            .map(|f| format!("{} ({} exact worlds)", f.from, f.worlds))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    if !both.is_empty() {
+        let differ: Vec<String> = both
+            .iter()
+            .filter(|b| !b.2)
+            .map(|(d, w, _)| format!("{d}:{w}"))
+            .collect();
+        println!(
+            "worlds saved under both burn rules: {}; values identical in {}{}",
+            both.len(),
+            both.len() - differ.len(),
+            if differ.is_empty() {
+                String::new()
+            } else {
+                format!(", different in {} ({})", differ.join(","), differ.len())
+            }
+        );
+    }
+    if a.has("--plan-only") {
+        // What the check would do, with nothing solved: to price a run before renting.
+        for (si, set, pl, notes, sjob) in &work {
+            let mut verify = Vec::new();
+            for d in pl {
+                for t in &d.worlds {
+                    if sjob.verify_sampled(d.d.id, t.w) {
+                        verify.push(format!("{}:{} (saved cost {})", d.d.id, t.w, t.cost));
+                    }
+                }
+            }
+            let cost: u64 = pl.iter().flat_map(|d| &d.worlds).map(|t| t.cost).sum();
+            println!(
+                "plan: set {} ({}): {} decisions, {} worlds, saved cost {cost} (nodes where recorded, else microseconds), {} threads; verification ({}%): {} worlds{}{}",
+                si + 1,
+                set.rule.name(),
+                notes.decisions,
+                notes.worlds,
+                sjob.threads,
+                sjob.verify_pct,
+                verify.len(),
+                if verify.is_empty() { "" } else { ": " },
+                verify.join(", ")
+            );
+        }
+        return Ok(());
+    }
+    let progress_path = a.get("--progress").map(PathBuf::from);
+    let progs: Vec<CheckProgress> = work.iter().map(|_| CheckProgress::default()).collect();
+    let finished = AtomicBool::new(false);
+    let t1 = Instant::now();
+    let runs: Vec<(Result<CheckRun, String>, f64)> = std::thread::scope(|s| {
+        let (progs, finished) = (&progs, &finished);
+        let sum = move |f: fn(&CheckProgress) -> &std::sync::atomic::AtomicU64| -> u64 {
+            progs.iter().map(|p| f(p).load(Ordering::Relaxed)).sum()
+        };
+        if let Some(p) = &progress_path {
+            let threads = job.threads as u64;
+            let ex_workers: u64 = work
+                .iter()
+                .map(|w| (w.4.threads / w.4.exact_solve_threads.max(1)).max(1) as u64)
+                .sum();
+            s.spawn(move || {
+                while !finished.load(Ordering::Relaxed) {
+                    let (ed, et) = (sum(|p| &p.exact_done), sum(|p| &p.exact_total));
+                    let (hd, ht) = (sum(|p| &p.hybrid_done), sum(|p| &p.hybrid_total));
+                    write_atomic(
+                        p,
+                        &serde_json::json!({
+                            "exact_done": ed, "exact_total": et,
+                            "worlds_done": hd, "worlds_total": ht,
+                            // Fewer solves left than threads: some threads are idle by design.
+                            "tail": if ed < et { et - ed < ex_workers } else { ht - hd < threads },
+                            "elapsed_s": t1.elapsed().as_secs_f64(),
+                        }),
+                    );
+                    for _ in 0..20 {
+                        if finished.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                }
+            });
+        }
+        // Each world on stderr as it finishes, so a stopped run still shows what finished.
+        let set_of: Vec<usize> = work.iter().map(|w| w.0 + 1).collect();
+        s.spawn(move || {
+            let mut last = false;
+            while !last {
+                last = finished.load(Ordering::Relaxed);
+                for (p, set) in progs.iter().zip(&set_of) {
+                    let done: Vec<[u64; 5]> =
+                        std::mem::take(&mut *p.finished.lock().unwrap_or_else(|e| e.into_inner()));
+                    for [d, w, us, nodes, evals] in done {
+                        eprintln!(
+                            "set {set} d{d}:w{w}: H_{cut} {:.2} s, {:.3e} nodes, {evals} evaluations ({}/{} worlds, {:.0} s)",
+                            us as f64 / 1e6,
+                            nodes as f64,
+                            sum(|p| &p.hybrid_done),
+                            sum(|p| &p.hybrid_total),
+                            t1.elapsed().as_secs_f64()
+                        );
+                    }
+                }
+                if !last {
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }
+        });
+        let handles: Vec<_> = work
+            .iter()
+            .zip(progs)
+            .map(|(w, p)| {
+                s.spawn(move || {
+                    let t = Instant::now();
+                    let run = check_worlds(&w.2, &w.4, r.ctx, r.oracle, Some(p));
+                    (run, t.elapsed().as_secs_f64())
+                })
+            })
+            .collect();
+        let out = handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+            .collect();
+        finished.store(true, Ordering::Relaxed);
+        out
+    });
+    let mut set_docs = Vec::new();
+    let mut hard_lines: Vec<serde_json::Value> = Vec::new();
+    for ((si, set, _pl, notes, sjob), (run, wall)) in work.iter().zip(runs) {
+        let run = run?;
+        let n_worlds: usize = run.decisions.iter().map(|d| d.worlds as usize).sum();
+        let found: usize = set
+            .worlds
+            .iter()
+            .filter(|w| keep(w.id, w.w))
+            .map(|w| w.found.len())
+            .sum();
+        println!();
+        println!(
+            "set {}: {} (values version {}, rules_robber_burn = {}): {} decisions, {} worlds (found {found} times in the files); {} threads",
+            si + 1,
+            set.rule.name(),
+            set.values,
+            sjob.rules_robber_burn,
+            notes.decisions,
+            if run.mismatched.is_empty() {
+                n_worlds
+            } else {
+                notes.worlds
+            },
+            sjob.threads
+        );
+        if notes.table_unrecorded > 0 || notes.seed_unrecorded > 0 || notes.fp_unrecorded > 0 {
+            println!(
+                "  not recorded in the files (so not checked): the equity table of {} worlds, the seed of {} (seed {} assumed), the decision fingerprint of {}",
+                notes.table_unrecorded, notes.seed_unrecorded, job.seed, notes.fp_unrecorded
+            );
+        }
+        let verification = if run.verified.0 == 0 {
+            if set.rule == BurnRule::RulesV1 {
+                format!(
+                    "stored, NOT re-verified on this binary (--verify-pct {}): these values were made by an older binary (values version 1); that the current solver with rules_robber_burn gives the same bytes is not confirmed",
+                    sjob.verify_pct
+                )
+            } else {
+                format!(
+                    "stored, NOT re-verified on this binary (--verify-pct {})",
+                    sjob.verify_pct
+                )
+            }
+        } else if run.verified.1 == 0 {
+            format!(
+                "stored; {} worlds recomputed by this binary (--verify-pct {}, {} threads a solve) and byte-identical",
+                run.verified.0, sjob.verify_pct, sjob.exact_solve_threads
+            )
+        } else {
+            format!(
+                "stored; {} of {} recomputed worlds DIFFER from this binary's (decision:world {}): this set's stored values are not the current solver's{}, so H_{cut} was not compared with them",
+                run.verified.1,
+                run.verified.0,
+                run.mismatched
+                    .iter()
+                    .map(|(d, w)| format!("{d}:{w}"))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                if sjob.rules_robber_burn {
+                    " with rules_robber_burn"
+                } else {
+                    ""
+                }
+            )
+        };
+        println!("  exact values: {verification}");
+        let mut doc = serde_json::json!({
+            "set": si + 1,
+            "burn_rule": set.rule.name(),
+            "values_version": set.values,
+            "rules_robber_burn": sjob.rules_robber_burn,
+            "threads": sjob.threads,
+            "plan": notes,
+            "exact_values": verification,
+            "verification": {
+                "verify_pct": sjob.verify_pct,
+                "solve_threads": sjob.exact_solve_threads,
+                "tt_mb": sjob.exact_tt_mb,
+                "recomputed": run.verified.0,
+                "differ": run.verified.1,
+                "mismatched": run.mismatched,
+                "done": run.verified.0 > 0,
+            },
+        });
+        if !run.mismatched.is_empty() {
+            set_docs.push(doc);
+            continue;
+        }
+        let saved_of = |id: u64, w: u64| {
+            set.worlds
+                .iter()
+                .find(|s| s.id == id && s.w == w)
+                .map(|s| s.found.clone())
+                .unwrap_or_default()
+        };
+        println!(
+            "  per world: the decider's team's money chance for each candidate, exact | H_{cut} (%), the largest |H - exact| over the four teams; H_{cut}'s time on one thread, nodes and network evaluations; the saved exact time and nodes (as recorded by each run, with its own threads per world)"
+        );
+        let mut worlds_json = Vec::new();
+        for d in &run.decisions {
+            for wc in &d.world_checks {
+                let saved = saved_of(d.id, wc.w);
+                let ch = |v: &[equity::MoneyChance]| {
+                    v.iter()
+                        .map(|m| {
+                            format!("{:.3}", 100.0 * m.get(d.team) as f64 / equity::ONE as f64)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                };
+                let worst = wc
+                    .exact
+                    .iter()
+                    .zip(&wc.hybrid)
+                    .flat_map(|(e, h)| (0..4u8).map(move |t| h.get(t).abs_diff(e.get(t))))
+                    .max()
+                    .unwrap_or(0);
+                let saved_txt = saved
+                    .iter()
+                    .map(|s| {
+                        format!(
+                            "{} {}{}",
+                            s.from,
+                            s.us.map_or("-".to_string(), |u| format!("{:.1} s", u as f64 / 1e6)),
+                            s.nodes
+                                .map_or(String::new(), |n| format!(" {:.3e} nodes", n as f64))
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                println!(
+                    "  d{} w{} pos {} S{}{}: exact {} | H {} | max|e| {}; H_{cut} {:.2} s, {:.3e} nodes (tricks 1-5: {:?}), {} evals{}; saved exact: {saved_txt}",
+                    d.id,
+                    wc.w,
+                    d.position,
+                    d.stratum,
+                    wc.robber
+                        .map_or(String::new(), |s| format!(" (seat {s} robs later)")),
+                    ch(&wc.exact),
+                    ch(&wc.hybrid),
+                    pct(worst as f64 / equity::ONE as f64),
+                    wc.hybrid_us as f64 / 1e6,
+                    wc.hybrid_nodes as f64,
+                    wc.hybrid_nodes_by_trick,
+                    wc.frontier,
+                    match wc.verified {
+                        Some(true) => "; exact recomputed: identical",
+                        Some(false) => "; exact recomputed: DIFFERS",
+                        None => "",
+                    }
+                );
+                let raw = |v: &[equity::MoneyChance]| v.iter().map(|m| m.0).collect::<Vec<_>>();
+                let wj = serde_json::json!({
+                    "id": d.id, "w": wc.w, "position": d.position, "stratum": d.stratum,
+                    "team": d.team, "cands": d.cands, "robber": wc.robber,
+                    "exact": raw(&wc.exact), "hybrid": raw(&wc.hybrid),
+                    "max_abs_error": worst,
+                    "exact_solved": wc.exact_solved, "verified": wc.verified,
+                    "exact_us": wc.exact_us, "exact_nodes": wc.exact_nodes,
+                    "hybrid_us": wc.hybrid_us, "hybrid_nodes": wc.hybrid_nodes,
+                    "hybrid_nodes_by_trick": wc.hybrid_nodes_by_trick,
+                    "net_evals": wc.frontier, "hybrid_tt_bytes": wc.hybrid_tt_bytes,
+                    "saved": saved,
+                });
+                if hard.contains(&(d.id, wc.w)) {
+                    hard_lines.push(serde_json::json!({ "set": si + 1, "burn_rule": set.rule.name(), "world": wj.clone() }));
+                }
+                worlds_json.push(wj);
+            }
+        }
+        println!(
+            "  per decision (choices are candidate indices; loss in the decider's team's money chance):"
+        );
+        for d in &run.decisions {
+            println!(
+                "  d{} pos {} S{}: {} worlds, {} candidates; exact choice {}, H_{cut} choice {}, loss {}{}",
+                d.id,
+                d.position,
+                d.stratum,
+                d.worlds,
+                d.cands,
+                d.exact_choice,
+                d.hybrid_choice,
+                pct(d.loss as f64 / equity::ONE as f64),
+                if d.agree { " (agree)" } else { "" }
+            );
+        }
+        let groups = report(&run, r.boots, r.boot_seed);
+        print_groups(&groups);
+        let time = check_time(&run, sjob.threads, wall);
+        print_time(&time);
+        let (pass, line) = verdict(&groups);
+        println!("{line}");
+        let o = doc.as_object_mut().expect("an object");
+        o.insert(
+            "values".into(),
+            serde_json::json!({
+                "exact": set.values,
+                "hybrid": format!("{}+O{cut}:{}", search::measure::VALUES_VERSION, r.oracle.sha256),
+            }),
+        );
+        o.insert(
+            "groups".into(),
+            groups
+                .iter()
+                .map(|(n, s)| serde_json::json!({"group": n, "summary": s}))
+                .collect(),
+        );
+        o.insert("pass".into(), serde_json::json!(pass));
+        o.insert("time".into(), time_json(&time, 0.0));
+        o.insert("decisions".into(), serde_json::json!(run.decisions));
+        o.insert("worlds".into(), serde_json::json!(worlds_json));
+        set_docs.push(doc);
+    }
+    println!();
+    for h in &hard {
+        let lines: Vec<&serde_json::Value> = hard_lines
+            .iter()
+            .filter(|l| l["world"]["id"] == h.0 && l["world"]["w"] == h.1)
+            .collect();
+        if lines.is_empty() {
+            println!("hard world d{}:w{}: not among the checked worlds", h.0, h.1);
+        }
+        for l in lines {
+            let w = &l["world"];
+            let hs = w["hybrid_us"].as_u64().unwrap_or(0) as f64 / 1e6;
+            let saved = w["saved"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|s| {
+                    let us = s["us"].as_u64();
+                    format!(
+                        "{}: {}{}{}",
+                        s["from"].as_str().unwrap_or("?"),
+                        us.map_or("time not recorded".to_string(), |u| format!(
+                            "{:.0} s",
+                            u as f64 / 1e6
+                        )),
+                        s["nodes"]
+                            .as_u64()
+                            .map_or(String::new(), |n| format!(", {:.3e} nodes", n as f64)),
+                        us.filter(|_| hs > 0.0).map_or(String::new(), |u| format!(
+                            " ({:.1} times H_{cut}'s time)",
+                            u as f64 / 1e6 / hs
+                        ))
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            println!(
+                "hard world d{}:w{} ({}): H_{cut} {hs:.1} s on one thread, {:.3e} nodes, {} network evaluations, largest |H - exact| {}; saved exact: {saved}",
+                h.0,
+                h.1,
+                l["burn_rule"].as_str().unwrap_or("?"),
+                w["hybrid_nodes"].as_u64().unwrap_or(0) as f64,
+                w["net_evals"],
+                pct(w["max_abs_error"].as_u64().unwrap_or(0) as f64 / equity::ONE as f64)
+            );
+        }
+    }
+    let peak = search::t1bench::proc_peak_rss_mb();
+    let max_tt = set_docs
+        .iter()
+        .flat_map(|d| d["worlds"].as_array().into_iter().flatten())
+        .filter_map(|w| w["hybrid_tt_bytes"].as_u64())
+        .max()
+        .unwrap_or(0);
+    println!(
+        "memory: peak resident {} MB for {} threads (largest hybrid table {:.0} MB of {} MB allowed)",
+        peak.map_or("?".to_string(), |m| m.to_string()),
+        job.threads,
+        max_tt as f64 / f64::from(1 << 20),
+        job.tt_mb
+    );
     if let Some(out) = a.get("--json") {
         let v = serde_json::json!({
             "trick": trick,
             "cut": cut,
-            "seed": seed,
-            "label": job.label,
-            "worlds": job.to,
-            "world_source": src.name(),
-            "exact_values": exact_from,
-            "verified_worlds": run.verified.0,
-            "net": {
-                "path": net_path,
-                "sha256": oracle.sha256,
-                "widths": oracle.net().widths(),
-                "trick": oracle.trick,
-                "meta": oracle.meta,
-            },
-            "values": {
-                "exact": search::measure::VALUES_VERSION,
-                "hybrid": format!("{}+O{cut}:{}", search::measure::VALUES_VERSION, oracle.sha256),
-            },
-            "equity_sha256": table_sha,
+            "seed": job.seed,
+            "world_source": src_name,
+            "saved_files": files,
+            "only": only,
+            "net": net_record(r.net_path, r.oracle),
+            "equity_sha256": r.table_sha,
             "binary_sha256": binary_sha256(),
-            "boot": {"replicates": boots, "seed": a.num("--boot-seed", 1)?, "bound": "97.5th percentile of bootstrap means (upper end of the 95% interval)"},
-            "groups": groups.iter().map(|(n, s)| serde_json::json!({"group": n, "summary": s})).collect::<Vec<_>>(),
-            "pass": pass,
-            "time": {
-                "exact_worlds_solved": ne,
-                "exact_ms_per_world": exact_us as f64 / 1000.0 / ne,
-                "hybrid_ms_per_world": hybrid_us as f64 / 1000.0 / nw,
-                "exact_nodes_per_world": exact_nodes as f64 / ne,
-                "hybrid_nodes_per_world": hybrid_nodes as f64 / nw,
-                "net_evals_per_world": evals as f64 / nw,
-                "ns_per_net_eval": ns_eval,
-                "wall_s": wall,
-                "threads": job.threads,
-                "setup_s": t1.duration_since(t0).as_secs_f64(),
-            },
-            "decisions": run.decisions,
+            "boot": {"replicates": r.boots, "seed": r.boot_seed, "bound": "97.5th percentile of bootstrap means (upper end of the 95% interval)"},
+            "threads": job.threads,
+            "tt_mb": job.tt_mb,
+            "peak_rss_mb": peak,
+            "wall_s": t1.elapsed().as_secs_f64(),
+            "setup_s": t1.duration_since(r.t0).as_secs_f64(),
+            "hard": hard_lines,
+            "both_rules": both.iter().map(|(d, w, same)| serde_json::json!({"id": d, "w": w, "identical": same})).collect::<Vec<_>>(),
+            "verify_rule": verify_rule,
+            "sets": set_docs,
         });
-        std::fs::write(
-            out,
-            serde_json::to_string_pretty(&v).map_err(|e| e.to_string())? + "\n",
-        )
-        .map_err(|e| format!("{out}: {e}"))?;
+        write_json(out, &v)?;
     }
     Ok(())
+}
+
+/// `threads` shared out among checks of `n[i]` worlds: one each first, then one at a time to
+/// the check with the most worlds per thread so far (ties to the first), never more than a
+/// check's worlds. Every check gets at least one thread, even when that makes more than
+/// `threads`.
+fn split_threads(threads: usize, n: &[usize]) -> Vec<usize> {
+    let mut t = vec![1usize; n.len()];
+    for _ in n.len()..threads {
+        let best = (0..n.len()).filter(|&i| t[i] < n[i]).max_by(|&i, &j| {
+            // n[i] / t[i] against n[j] / t[j], exactly; ties to the first.
+            (n[i] * t[j]).cmp(&(n[j] * t[i])).then(j.cmp(&i))
+        });
+        match best {
+            Some(i) => t[i] += 1,
+            None => break,
+        }
+    }
+    t
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use search::oracle_labels::{HarvestDecision, HarvestJob, position_schedule};
+
+    /// Threads are shared out by worlds, never more than a set's worlds, at most `threads` in
+    /// all (each set at least one).
+    #[test]
+    fn threads_are_shared_by_worlds() {
+        assert_eq!(split_threads(184, &[31, 355]), vec![15, 169]);
+        assert_eq!(split_threads(184, &[31]), vec![31]);
+        assert_eq!(split_threads(4, &[1, 9]), vec![1, 3]);
+        assert_eq!(split_threads(1, &[5, 5]), vec![1, 1]);
+        assert_eq!(split_threads(8, &[2, 2]), vec![2, 2]);
+        assert_eq!(split_threads(3, &[]), Vec::<usize>::new());
+    }
 
     fn decision(position: u8, distinct: u32, evals: u64, rows: u32) -> HarvestDecision {
         HarvestDecision {

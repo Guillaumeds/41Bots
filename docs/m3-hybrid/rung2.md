@@ -139,3 +139,150 @@ check's exact worlds would add about 90 thread-hours.
   labels was not built; it would cost the same 1,280 trick-2 solves, done first.
 - **Machine size.** The proposal keeps `min_cores` 32 (labels about 20 minutes); with 64 or more
   threads on offer the labels take 10 minutes or less.
+
+## 4. Trick-1 checks on the saved exact worlds (spec §3, "Trick-1 checks for O_3 and O_2")
+
+Branch `m3-hybrid-t1check`, 2026-10-16. Once O_3 passes on the trick-2 golden set, the spec asks
+for H_3 on trick-1 worlds: first the known hard world, then every exact trick-1 world earlier runs
+saved. Those worlds cost 10–160×10⁹ solver nodes each, so they are read back, not solved again.
+Nothing was rented and nothing was written to R2 for this.
+
+### What the saved files hold
+
+All four runs used the same decisions file (`decisions-t1.jsonl`, 32 trick-1 decisions, seed 1,
+16,088 bytes, SHA-256 `b23c8b0d…`). Their worlds files are empty or partial: every world is in the
+checkpoint files (`<worlds file>.ckpt`, one line per world: the candidates' exact values, the
+microseconds and, from 2026-10-16, the solver nodes it took).
+
+| run (R2 `runs/<id>/…`) | file | bytes | worlds | values version (burn rule) | how it was solved |
+|---|---|---|---|---|---|
+| `m3-t1-tables-1` | `partial/tt12g/000000/out/measure/exact-t1-n4.jsonl.ckpt` | 10,644 | 26: decisions 0–7 (leader and second seat), worlds 0–3 but six | 2 (searched burn) | one thread a world, 12 GB tables, EPYC 7542; decision 0 world 3: 13,057 s, 79.3×10⁹ nodes |
+| `m3-t1-leader-layouts-1` | `partial/big4x46/…/exact-t1-n4.jsonl.ckpt` and `exact-t1-n4.jsonl` | 6,615 and 2,731 | 15: decisions 0–3 (the file holds decisions 0 and 1 whole) | 2 | 46 threads a world |
+| `m3-t1-leader-layouts-9654` | `partial/big2x192/…` (same names) | 6,616 and 2,731 | the same 15 (its worlds file has the same bytes as layouts-1's) | 2 | 192 threads a world |
+| `m3-agree-t1-ab1` | `out/measure/exact-t1-n80.jsonl.ckpt` | 117,404 | 355: decisions 0 (77), 1 (79), 3 (80), 4 (40), 6 (79) | 1 (rules-v1 burn; binary `56851ce`; no table, nodes or version recorded) | position-aware threads, up to 92 a world |
+
+Joined: **31 distinct worlds valued with the searched burn** (decisions 0–7, worlds 0–3, except
+decision 2 world 2, which no run finished) and **355 with the rules-v1 burn**. Every world that
+two or three runs valued has identical values in each. 19 worlds are in both sets: 17 have the same
+values under both rules, 2 differ (decision 3 world 2 and decision 4 world 2).
+
+### What was built
+
+- **`search::saved`**: reads checkpoint lines and worlds records (both `search::measure`'s own
+  formats, one JSON line each, told apart by their fields; a torn line is skipped and counted),
+  joins a world found in several files (refusing different values), and splits the worlds into one
+  set per burn rule: values version 1 (absent) → `rules_robber_burn = true`, the current version
+  → the searched burn, anything else refused. Each world is checked against the decisions file
+  (decision fingerprint, candidates, world source, equity table where recorded; what is not
+  recorded is listed in the report) and regenerated from (seed, label, decision, world number)
+  exactly as the yardstick draws it.
+- **`search hybrid-check --saved RUN=FILE …`** (`search::hybrid::check_worlds`, the same code as
+  the golden-set check, now for any chosen worlds): the sets run at once, the threads shared out by
+  worlds, one world per thread, the largest saved worlds first. Per world: every candidate's exact
+  and H_k value, the largest error over the four teams, H_k's time, nodes (by trick) and network
+  evaluations, whether another seat robs later in trick 1, and every saved time and node count.
+  Per decision: the choices and the decision loss (a decision with one world has a loss too; the
+  tables below count every decision). Per set: the §3 tables exactly as `hybrid-check` prints them
+  (decision loss with its bootstrap bound, bias per team, SD, 99.9th percentile, largest, overall,
+  by band and by position), the time line and the verdict. Then the `--hard` worlds on their own
+  lines with the saved exact times and the ratio, and the peak memory. `--only D:W,…` restricts
+  the check (the hard world alone: `--only 0:3`); `--plan-only` prints what would run and the
+  verification sample, solving nothing.
+- **Verification** (spec: "after confirming a sample is byte-identical on the current exact solver
+  with that switch"): `--verify-pct P` recomputes P% of the saved worlds (drawn by seed, decision
+  and world, as the golden-set check), `--verify-rule rules-v1` only in the rules-v1 set, each
+  solve on `--verify-solve-threads` threads with a `--verify-tt-mb` table, before the hybrid; a set
+  with any difference is not compared, and the report lists the worlds. Without it (the default,
+  0) the report says "NOT re-verified" for the set, and for the rules-v1 set that the identity on
+  the current solver is not confirmed.
+- **Runner**: a format-2 chunk kind `hybrid_t1check` (`crates/runner/src/t1check.rs`). The network,
+  the decisions file and the saved files are the manifest's `inputs` (content-addressed
+  `inputs/sha256/<hex>`, fetched with `remote::fetch_input` and SHA-256 checked before the chunk
+  starts; the launcher checks they exist before renting), named in the params. Outputs:
+  `out/hybrid/t1check.txt` and `t1check.json` (every world's values in full); each world's line in
+  the chunk's log as it finishes, so a stopped run keeps what finished. `partial_cpu_ok` only in the
+  genuine tail (fewer worlds left than threads). Proposal: `docs/vast/m3-hybrid-t1check.manifest.json`
+  (the O_3 placeholder must be filled in; not run).
+
+**Tests**: the reader on synthetic records (both forms, an old line, a torn line, joins and
+refusals); the real files (small copies in `crates/search/testdata/t1-saved`, 32 KB: the decisions
+file, `m3-t1-tables-1`'s checkpoint, the layouts' worlds file and nine `m3-agree-t1-ab1` lines; the
+hard world reads back with 13,056,957,069 µs and 79,320,348,281 nodes); at trick 3 with the frontier
+at trick 4 the saved-worlds check gives exactly `hybrid-check`'s numbers (stored or recomputed,
+1 and 4 threads, chosen worlds regenerated exactly); the burn rule reaches the hybrid's and the exact
+solves (at trick 1, frontier at trick 2, worlds where a later seat robs: values follow the switch and
+differ between the rules); with the production table (`FORTYONE_EQUITY`), `m3-agree-t1-ab1`'s
+decision 6 world 25 (seat 2 robs later) is byte-identical on this solver with `rules_robber_burn` and
+differs without it; the runner chunk with a fake `search`, its settings, and the committed manifest.
+
+### Measured on this VM
+
+Small timing network (512-256-64, 120,000 labels, 63% outcome accuracy, `dc5a406f…`; its values are
+not a candidate), one thread a world, 64 MB tables. The VM was shared with another session's jobs,
+so some times may be up to about twice too long.
+
+**Verification sample (rules-v1 set):** five `m3-agree-t1-ab1` worlds (6:25, 3:73, 4:33, 6:4, 6:63,
+the cheapest by their saved time; three with a later robber) recomputed on this binary with
+`rules_robber_burn`: all byte-identical (0.2–10 s each). With the switch off, 6:25 differs. This is
+a cheap, not a random, sample; the rental should still draw one (below).
+
+**H_3 time per trick-1 world, searched-burn set** (24 of the 31 worlds; the saved exact time is
+`m3-t1-tables-1`'s, one thread):
+
+| world | exact (s) | H_3 (s) | world | exact (s) | H_3 (s) |
+|---|---|---|---|---|---|
+| 6:1 | 11 | 0.5 | 7:1 | 1,287 | 37 |
+| 4:0 | 62 | 1.6 | 3:1 | 1,315 | 63 |
+| 3:3 (robber) | 67 | 21–26 | 2:1 | 1,458 | 99 |
+| 3:0 | 129 | 4.5–6 | 5:0 | 1,518 | 30 |
+| 4:3 | 214 | 6.1 | 5:1 | 1,820 | 45 |
+| 7:3 | 230 | 5.5 | 1:3 | 2,009 | 93 |
+| 2:0 (robber) | 249 | 14–16 | 7:0 | 2,072 | 67 |
+| 6:0 | 285 | 20 | 0:1 | 2,310 | 76 |
+| 6:2 | 527 | 16 | 5:2 | 2,684 | 70 |
+| 6:3 | 586 | 22 | 5:3 | 3,078 | 168 |
+| 7:2 | 662 | 11 | 2:3 | 3,701 | 146 |
+| 4:2 | 1,072 | 24 | 0:2 | 4,483 | 64 |
+
+Together 1,103 s against 31,785 s exact: about 29 times faster (3 to 70 times by world; slowest
+relative to exact where a later seat robs). The other seven did not finish within the 5-minute
+limit: **the hard world 0:3** (exact 13,057 s), 4:1 (12,648 s) and the five largest (0:0, 1:0, 1:1,
+1:2, 3:2: 1.5–1.6×10¹¹ nodes, solved only on 46–192 threads). At about 29 times the hard world
+should take 5–15 minutes on one thread; the five largest perhaps 10–30 minutes each.
+
+**Rules-v1 set sample** (decisions 0, 1, 3 worlds 5/25/45/65 and 4, 6 worlds 5/25/35): leaders
+8–162 s (11 finished, mean 75 s; 1:65 over 250 s), second seat 0.02–20 s (mean 7 s).
+
+**Time goes to the network**: about 90% of H_3's time at trick 1 is its network evaluations (from
+a few thousand to 17 million a world, 8–14 µs each here); the solver's nodes are 10⁴–5×10⁷ a
+world. A 1024-512-128 O_3
+is about four times slower per evaluation (`nn-speed.md`), so H_3 with it about 3.5–4 times slower.
+
+**Memory per world**: about 70 MB a thread (its 64 MB table, which the large worlds fill, and a few
+MB of network caches), plus about 60 MB for the process (the equity table, 26 MB): 184 threads
+about 13 GB. A larger table barely helps (64 → 512 MB: 3–7% faster).
+
+### Cost of the full check (estimate, not measured on a rented machine)
+
+Work, small network: the searched-burn set about 1.5–3 thread-hours (1,103 s measured + the seven
+largest), the rules-v1 set about 5–10 (236 leader worlds at about 75 s, 119 others at about 7 s,
+with a long tail): **7–13 thread-hours**; with a 1024-512-128 O_3, 25–50. On a 184-thread machine
+that is 3–5 minutes of full load (10–20 with the large network), but every world runs on one thread,
+so the wall time is set by the largest single worlds: about 0.5 hour with the small network, 1.5–2.5
+hours with the large one, plus about 10 minutes of start-up. At about $1.1/h: **$0.5–1 (small
+network), $2–3 (large)**.
+
+**Verification sample** (proposed: 3% of the rules-v1 set, `--plan-only` lists it): 8 worlds
+(0:31, 0:54, 0:64, 1:3, 1:24, 4:18, 6:24, 6:54), which took 7–739 s on the old run's many threads
+a world. Solved first, three at a time on 46 threads each with 8 GB tables, they should take about
+half an hour (0:64 sets it), before the rules-v1 set's hybrid starts: about $0.5 more. The
+searched-burn set has the current values version and is not re-verified in the proposal
+(`verify_rule` `rules-v1`); its 31 worlds were each solved by up to three runs with identical bytes.
+
+**To run it** (owner's approval first; nothing was rented): train or pick the O_3 network, then
+upload the inputs (`python launch.py put-input FILE` for the network and for each saved file,
+downloaded from the R2 paths above; the decisions file and the saved files are already named by
+their SHA-256 in the manifest), put the network's SHA-256 in place of the placeholder, and launch
+`docs/vast/m3-hybrid-t1check.manifest.json`. The known hard world alone first, if wanted: the same
+manifest with `"only": "0:3"` and `"verify_pct": 0` (one world, one thread: a small machine
+suffices).
