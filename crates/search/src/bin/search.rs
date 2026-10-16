@@ -1241,8 +1241,9 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         let _finish = Finish(finished);
         label_rows(&job, &starts, &*leaf, Some(done))
     });
-    let shard: Vec<nn::shard::Row> = rows.iter().map(|r| r.0).collect();
-    let bytes = nn::shard::to_npy(&shard);
+    let rows_s = t1.elapsed().as_secs_f64();
+    let shard: Vec<nn::shard::Row> = rows.iter().map(|r| r.0.clone()).collect();
+    let bytes = nn::shard::to_npy(&shard, nn::outcome::vocab(trick));
     std::fs::write(&out, &bytes).map_err(|e| format!("{}: {e}", out.display()))?;
     let mut by_stratum = [0u64; 4];
     let mut by_root = [0u64; 6];
@@ -1261,7 +1262,8 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         "n_binary": nn::encode::N_BINARY,
         "n_dense": nn::encode::N_DENSE,
         "max_active": nn::encode::MAX_ACTIVE,
-        "record": nn::shard::descr(),
+        "record": nn::shard::descr(nn::outcome::vocab(trick)),
+        "outcomes": nn::outcome::vocab(trick),
         "value_order": "rotated: the leader is seat 0 (as the encoder's outputs)",
         "trick": trick,
         "source": job.source.name(),
@@ -1289,8 +1291,8 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
     eprintln!(
         "labels: {} rows in {:.1} s ({:.3} ms a row on {} threads; {secs:.1} s in all); shard sha256 {}",
         rows.len(),
-        t1.elapsed().as_secs_f64(),
-        t1.elapsed().as_secs_f64() * 1000.0 / rows.len().max(1) as f64,
+        rows_s,
+        rows_s * 1000.0 / rows.len().max(1) as f64,
         job.threads,
         side["shard_sha256"].as_str().unwrap_or("")
     );
@@ -1426,7 +1428,7 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
         }
     );
     println!(
-        "{:<9} {:>5} {:>10} {:>10} {:>7} {:>7} {:>8} {:>10} {:>9} {:>10} {:>9}",
+        "{:<9} {:>5} {:>10} {:>10} {:>7} {:>7} {:>8} {:>38} {:>9} {:>10} {:>9}",
         "group",
         "dec",
         "mean loss",
@@ -1434,14 +1436,14 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
         "<=0.01%",
         "agree",
         "values",
-        "bias",
+        "bias: own / next / opposite / previous",
         "SD",
         "p99.9|e|",
         "max|e|"
     );
     for (name, s) in groups.iter().filter(|(_, s)| s.decisions > 0) {
         println!(
-            "{:<9} {:>5} {:>10} {:>10} {:>7} {:>6.1}% {:>8} {:>10} {:>9} {:>10} {:>9}",
+            "{:<9} {:>5} {:>10} {:>10} {:>7} {:>6.1}% {:>8} {:>38} {:>9} {:>10} {:>9}",
             name,
             s.decisions,
             pct(s.mean_loss),
@@ -1449,12 +1451,17 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             if s.loss_pass { "yes" } else { "no" },
             100.0 * s.agreement,
             s.values,
-            spct(s.bias),
+            s.bias.map(spct).join(" "),
             pct(s.sd),
             pct(s.p999_abs),
             pct(s.max_abs)
         );
     }
+    println!(
+        "(value error over all four teams' chances; bias per team relative to the decider; the decider's team alone: SD {}, p99.9|e| {})",
+        pct(groups[0].1.decider_sd),
+        pct(groups[0].1.decider_p999_abs)
+    );
     let nw = (run.decisions.len() as u64 * job.to).max(1) as f64;
     let ne = run
         .decisions
@@ -1481,11 +1488,12 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
     let loss_pass = groups.iter().take(4).all(|(_, s)| s.loss_pass);
     let bias_pass = groups[0].1.bias_pass;
     let pass = loss_pass && bias_pass;
+    let worst_bias = groups[0].1.bias.iter().fold(0.0f64, |m, b| m.max(b.abs()));
     println!(
-        "standard: decision loss 95% upper bound <= 0.01% overall and in every band: {}; |bias| <= 0.01%: {} ({}); {}",
+        "standard: decision loss 95% upper bound <= 0.01% overall and in every band: {}; every team's |bias| <= 0.01%: {} (largest {}); {}",
         if loss_pass { "yes" } else { "no" },
         if bias_pass { "yes" } else { "no" },
-        spct(groups[0].1.bias),
+        pct(worst_bias),
         if pass { "PASS" } else { "FAIL" }
     );
     if let Some(out) = a.get("--json") {

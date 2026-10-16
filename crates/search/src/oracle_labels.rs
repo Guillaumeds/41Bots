@@ -15,7 +15,10 @@
 //!
 //! **Target**: the exact value of the position (`solver::solve_fast`, the documented tie rule:
 //! the first strictly best card in increasing card index), the same value the solver would give
-//! that position inside any search, in the encoder's rotated team order.
+//! that position inside any search, in the encoder's rotated team order; and for the outcome
+//! head (spec §6a, `nn::outcome`) the position's possible outcomes, their exact money vectors and
+//! the label, the first possible outcome whose vector is the exact value. A position with no such
+//! outcome would disprove the vocabulary's completeness: the run stops on it.
 //!
 //! **Determinism**: row `i` depends only on (seed, source, trick, `i`) through
 //! `Rng::derive(seed, &[NN_LABEL, source, trick, i])`; rows are computed on any number of
@@ -29,6 +32,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use engine::game::{HandStartState, Match, Phase, Rules};
 use engine::rng::Rng;
 use nn::encode::encode;
+use nn::outcome::outcomes;
 use nn::shard::{Row, SOURCE_RANDOM, SOURCE_RULES};
 use solver::{FastOptions, MatchCtx, Position, SolveMem, canonical, from_match, solve_fast_with};
 
@@ -238,12 +242,24 @@ pub fn label_rows(
             let sol = solve_fast_with(&pos, ctx, &crate::pimc::DynLeaf(leaf), opts, &mut mem);
             info.nodes = sol.stats.nodes;
             let v = sol.value.expect("no time cap");
-            let (features, r) = encode(&canonical(&pos), &ctx, leaf);
+            let c = canonical(&pos);
+            let (features, r) = encode(&c, &ctx, leaf);
+            let value = v.rotate(r % 4);
+            let o = outcomes(&c, &ctx, leaf);
+            let label = o.label(&value).unwrap_or_else(|| {
+                panic!(
+                    "row {i}: no possible outcome has the exact value (the outcome vocabulary \
+                     is incomplete): {pos:?}"
+                )
+            });
             let row = Row {
                 features,
-                value: v.rotate(r % 4),
+                value,
                 source: job.source.tag(),
                 trick: job.trick,
+                label,
+                mask: o.mask,
+                outcomes: o.vecs,
             };
             slots.lock().unwrap_or_else(|e| e.into_inner())[i] = Some((row, info));
             if let Some(p) = progress {
@@ -299,8 +315,8 @@ mod tests {
             };
             let a = label_rows(&job(1), &starts, &*l, None);
             let b = label_rows(&job(3), &starts, &*l, None);
-            let ra: Vec<Row> = a.iter().map(|x| x.0).collect();
-            let rb: Vec<Row> = b.iter().map(|x| x.0).collect();
+            let ra: Vec<Row> = a.iter().map(|x| x.0.clone()).collect();
+            let rb: Vec<Row> = b.iter().map(|x| x.0.clone()).collect();
             assert_eq!(ra, rb, "trick {trick} {source:?}");
             for (i, (row, info)) in a.iter().enumerate() {
                 assert_eq!(row.trick, trick);
@@ -316,6 +332,10 @@ mod tests {
                 assert_eq!(row.value, exact.rotate(r % 4));
                 let (dc, dctx) = decode(&row.features).expect("decodes");
                 assert_eq!((dc, dctx), rotate_canon(&c, &ctx, r));
+                // The label's outcome is possible and carries exactly the target.
+                assert_eq!(row.mask >> row.label & 1, 1);
+                assert_eq!(row.outcomes[usize::from(row.label)], row.value);
+                assert_eq!(row.outcomes.len(), nn::outcome::vocab(trick));
             }
         }
     }

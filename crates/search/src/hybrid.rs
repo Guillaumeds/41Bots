@@ -12,9 +12,12 @@
 //!    seed 1; the convention of `crate::curves`, and the stricter reading), overall and per
 //!    position band (1–2, 3–4, 5–8; each band resampled on its own). Pass: upper bound ≤ 0.01%
 //!    everywhere.
-//! 2. **Value error** (diagnostic): per candidate and world, H_k minus exact in the decider's
-//!    team's entry: mean (bias), SD, 99.9th percentile of the absolute error, largest; overall,
-//!    per band and per position. Bias must be within ±0.01%.
+//! 2. **Value error** (diagnostic): per candidate, world and team, H_k minus exact: for each
+//!    team relative to the decider (its own, the next, the opposite, the previous), the mean
+//!    (bias), and over all four teams together the SD, the 99.9th percentile of the absolute
+//!    error and the largest (other seats choose by their own team's entry inside the search, so
+//!    every team's error matters); overall, per band and per position. Every team's bias must be
+//!    within ±0.01%.
 //! 3. **Agreement** (diagnostic): the share of decisions whose hybrid choice is the exact choice
 //!    or ties it exactly (zero loss).
 //!
@@ -127,7 +130,8 @@ pub struct DecisionCheck {
     pub loss: u64,
     /// The hybrid's choice is exact's or ties it exactly.
     pub agree: bool,
-    /// Per world and candidate: hybrid minus exact, decider's team, units of 2^-32.
+    /// Per world, candidate and team relative to the decider (`(team − decider) mod 4`, the
+    /// innermost index): hybrid minus exact, units of 2^-32.
     #[serde(skip)]
     pub errors: Vec<i64>,
     /// Worlds whose exact values this run computed (all of them unless stored values were
@@ -304,10 +308,13 @@ pub fn run_check(
         let (hm, _, _) = aggregate(&hy, p.cands.len(), team);
         let hc = best_index(&hm, team);
         let loss = em[ec].get(team) - em[hc].get(team);
-        let mut errors = Vec::with_capacity(per * p.cands.len());
+        let mut errors = Vec::with_capacity(4 * per * p.cands.len());
         for o in ws {
             for (e, h) in o.exact.iter().zip(&o.hybrid) {
-                errors.push(h.get(team) as i64 - e.get(team) as i64);
+                for rel in 0..4u8 {
+                    let t = (team + rel) % 4;
+                    errors.push(h.get(t) as i64 - e.get(t) as i64);
+                }
             }
             if let Some(ok) = o.verified {
                 verified.0 += 1;
@@ -358,19 +365,24 @@ pub struct Summary {
     pub loss_upper95: f64,
     /// Agreement: share of decisions with zero loss.
     pub agreement: f64,
-    /// Values compared (candidate × world).
+    /// Values compared (candidate × world × team).
     pub values: usize,
-    /// Value error: mean (bias), as a fraction.
-    pub bias: f64,
-    /// Value error: standard deviation.
+    /// Value error: mean (bias) of each team, relative to the decider (its own team, the next,
+    /// the opposite, the previous), as fractions.
+    pub bias: [f64; 4],
+    /// Value error over all four teams: standard deviation.
     pub sd: f64,
-    /// Value error: 99.9th percentile of the absolute error.
+    /// Value error over all four teams: 99.9th percentile of the absolute error.
     pub p999_abs: f64,
-    /// Value error: the largest absolute error.
+    /// Value error over all four teams: the largest absolute error.
     pub max_abs: f64,
+    /// The decider's team alone: SD and 99.9th percentile of the absolute error.
+    pub decider_sd: f64,
+    /// See `decider_sd`.
+    pub decider_p999_abs: f64,
     /// Decision loss within the standard at the 95% upper bound.
     pub loss_pass: bool,
-    /// Bias within ±0.01%.
+    /// Every team's bias within ±0.01%.
     pub bias_pass: bool,
 }
 
@@ -396,32 +408,46 @@ pub fn summarise(ds: &[&DecisionCheck], boots: u64, boot_seed: u64, tag: u64) ->
     } else {
         reps[((reps.len() as f64 * 0.975).ceil() as usize).clamp(1, reps.len()) - 1]
     };
-    let mut errs: Vec<i64> = ds.iter().flat_map(|d| d.errors.iter().copied()).collect();
-    let m = errs.len().max(1) as f64;
-    let mean = errs.iter().map(|&e| e as f64).sum::<f64>() / m;
-    let var = errs.iter().map(|&e| (e as f64 - mean).powi(2)).sum::<f64>() / m;
-    let mut abs: Vec<u64> = errs.iter().map(|e| e.unsigned_abs()).collect();
-    abs.sort_unstable();
-    let q = |p: f64| {
-        if abs.is_empty() {
+    let errs: Vec<i64> = ds.iter().flat_map(|d| d.errors.iter().copied()).collect();
+    let stats = |e: &[i64]| -> (f64, f64, f64, f64) {
+        let m = e.len().max(1) as f64;
+        let mean = e.iter().map(|&x| x as f64).sum::<f64>() / m;
+        let var = e.iter().map(|&x| (x as f64 - mean).powi(2)).sum::<f64>() / m;
+        let mut abs: Vec<u64> = e.iter().map(|x| x.unsigned_abs()).collect();
+        abs.sort_unstable();
+        let p999 = if abs.is_empty() {
             0
         } else {
-            abs[((abs.len() as f64 * p).ceil() as usize).clamp(1, abs.len()) - 1]
-        }
+            abs[((abs.len() as f64 * 0.999).ceil() as usize).clamp(1, abs.len()) - 1]
+        };
+        let max = abs.last().copied().unwrap_or(0);
+        (
+            mean / unit,
+            var.sqrt() / unit,
+            p999 as f64 / unit,
+            max as f64 / unit,
+        )
     };
-    errs.clear();
+    let rel: Vec<Vec<i64>> = (0..4)
+        .map(|k| errs.iter().skip(k).step_by(4).copied().collect())
+        .collect();
+    let bias: [f64; 4] = core::array::from_fn(|k| stats(&rel[k]).0);
+    let (_, sd, p999_abs, max_abs) = stats(&errs);
+    let (_, decider_sd, decider_p999_abs, _) = stats(&rel[0]);
     Summary {
         decisions: n,
         mean_loss,
         loss_upper95: upper,
         agreement: ds.iter().filter(|d| d.agree).count() as f64 / n.max(1) as f64,
-        values: abs.len(),
-        bias: mean / unit,
-        sd: var.sqrt() / unit,
-        p999_abs: q(0.999) as f64 / unit,
-        max_abs: abs.last().copied().unwrap_or(0) as f64 / unit,
+        values: errs.len(),
+        bias,
+        sd,
+        p999_abs,
+        max_abs,
+        decider_sd,
+        decider_p999_abs,
         loss_pass: upper <= STANDARD,
-        bias_pass: (mean / unit).abs() <= STANDARD,
+        bias_pass: bias.iter().all(|b| b.abs() <= STANDARD),
     }
 }
 
