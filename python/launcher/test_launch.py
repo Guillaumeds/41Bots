@@ -13,6 +13,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 import unittest
 
@@ -20,6 +21,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import launch  # noqa: E402
 
 RUN = "t-run"
+# The settings the older tests were written for: machines of 16+ threads, no price cap to speak of, no price steps,
+# and no waiting when nothing matches. Tests of the new behaviour pass their own values after these.
+LEGACY = ["--min-cores", "16", "--max-dph", "1000", "--price-steps", "off", "--wait-for-offer-min", "0"]
 
 
 class World:
@@ -62,6 +66,8 @@ class World:
         self.listing_times: list[float] = []  # the clock at each `show instances` call
         self.status_times: list[float] = []  # ...and at each `show instance` call
         self.status_msg_fn = None  # f(instance, minutes since it was rented) -> the status_msg `show instance` answers
+        self.search_empty_until = 0.0  # full searches answer an empty list while the clock is below this (no machine on offer)
+        self.offer_appears = []  # [(clock, offer)]: an offer that is added to the market once the clock reaches `clock`
 
     # ---- clock
     def time(self) -> float:
@@ -160,11 +166,21 @@ class World:
                 raise AssertionError("a search was made")
             if self.search_fails:
                 raise RuntimeError("vastai search offers failed: 429 Too Many Requests")
+            for when, o in list(self.offer_appears):
+                if self.t >= when:
+                    self.offers.append(o)
+                    self.offer_appears.remove((when, o))
             rows = [dict(o) for o in self.offers]
+            if self.t < self.search_empty_until:
+                rows = []
             for tok in args[2].split():
                 if tok.startswith("inet_down>="):
                     # vast filters on the download speed; an offer that reports none is kept here.
                     rows = [o for o in rows if o.get("inet_down") is None or o["inet_down"] >= float(tok[11:])]
+                elif tok.startswith("dph_total<="):
+                    rows = [o for o in rows if o["dph_total"] <= float(tok[11:])]
+                elif tok.startswith("cpu_cores_effective>="):
+                    rows = [o for o in rows if o["cpu_cores_effective"] >= float(tok[21:])]
             if "verified=true" in args[2].split():
                 # vast's search then returns only verified hosts; `verified=any` lifts that.
                 rows = [o for o in rows if o.get("verification", "verified") == "verified"]
@@ -290,6 +306,38 @@ def offer(i: int, machine: int, dph: float, **kw) -> dict:
     return o
 
 
+def big(i: int, machine: int, dph: float, **kw) -> dict:
+    """An offer that meets the launcher's thread floor (190): 224 threads."""
+    return offer(i, machine, dph, **{"cpu_cores_effective": 224, **kw})
+
+
+# The launcher's own defaults, spelled out (the older tests override them with LEGACY): 190 threads, $1.70 cap with
+# the price steps below it, three attempts per step, a wait of two hours with a search every minute.
+NEW = ["--min-cores", "190", "--max-dph", "1.7", "--price-steps", "1.2,1.45,1.7", "--tries-per-step", "3",
+       "--wait-for-offer-min", "120", "--offer-poll-s", "60"]
+
+
+def workflow_inputs(path: str) -> dict[str, dict]:
+    """The `workflow_dispatch` inputs of a workflow file: name -> {field: value}, read as plain text (no YAML library)."""
+    with open(path, encoding="utf-8") as f:
+        lines = f.read().split("\n")
+    start = next(i for i, ln in enumerate(lines) if ln.strip() == "inputs:")
+    out, cur = {}, None
+    for ln in lines[start + 1:]:
+        if ln.strip() and not ln.startswith(" "):
+            break
+        m = re.match(r"^      ([A-Za-z0-9_]+):\s*$", ln)
+        if m:
+            cur = out[m.group(1)] = {}
+            continue
+        m = re.match(r"^        ([a-z_]+):\s*(.*)$", ln)
+        if m and cur is not None:
+            cur[m.group(1)] = m.group(2).strip().strip('"').strip("'")
+        elif ln.strip() and not ln.startswith("        "):
+            break
+    return out
+
+
 def pull_msgs(until: float | None = None, start: float | None = None):
     """What vast's status_msg says over time for a machine pulling the image: a docker layer line
     whose byte count grows each minute until minute `until` (then it freezes; None = never), and
@@ -329,7 +377,8 @@ class LauncherTest(unittest.TestCase):
             for n, v in saved.items():
                 setattr(launch, n, v)
 
-    def run_launch(self, world: World, manifest: dict, *extra: str, time_limit: bool = True) -> tuple[int, dict]:
+    def run_launch(self, world: World, manifest: dict, *extra: str, time_limit: bool = True,
+                   legacy: bool = True) -> tuple[int, dict]:
         saved = {n: getattr(launch, n) for n in ("vast", "r2_get", "r2_put", "r2_list", "r2_list_sized", "r2_exists",
                                                  "r2_delete", "time")}
         launch.vast = world.vast
@@ -343,7 +392,7 @@ class LauncherTest(unittest.TestCase):
         try:
             with contextlib.redirect_stdout(out):
                 code = launch.main(["run", "--manifest", json.dumps(manifest), "--image", "img:1", "--bin-sha", "abc",
-                                    *limit, "--startup-minutes", "5", *extra])
+                                    *limit, "--startup-minutes", "5", *(LEGACY if legacy else []), *extra])
         finally:
             for n, v in saved.items():
                 setattr(launch, n, v)
@@ -504,8 +553,8 @@ class LauncherTest(unittest.TestCase):
 
     def test_plan_prints_the_host_status_of_the_offers(self):
         w = World([offer(1, 11, 1.0, verification="unverified")], [])
-        saved = {n: getattr(launch, n) for n in ("vast", "r2_get", "r2_list", "time")}
-        launch.vast, launch.r2_get, launch.r2_list, launch.time = w.vast, w.r2_get, w.r2_list, w
+        saved = {n: getattr(launch, n) for n in ("vast", "r2_get", "r2_list", "r2_exists", "time")}
+        launch.vast, launch.r2_get, launch.r2_list, launch.r2_exists, launch.time = w.vast, w.r2_get, w.r2_list, w.r2_exists, w
         out = io.StringIO()
         try:
             with contextlib.redirect_stdout(out):
@@ -800,6 +849,283 @@ class LauncherTest(unittest.TestCase):
             times[poll] = report["attempts"][0]["minutes"]
         self.assertAlmostEqual(times[60] - times[30], 1.0, places=1)
 
+    # ---- waiting for an offer, the price ladder, floors that are never relaxed (owner, 2026-10-16, 18:10-18:20)
+
+    def run_cli(self, world: World, argv: list[str]) -> tuple[int, str]:
+        """launch.main(argv) against `world`; returns (exit code, what it printed)."""
+        names = ("vast", "r2_get", "r2_put", "r2_list", "r2_list_sized", "r2_exists", "r2_delete", "time")
+        saved = {n: getattr(launch, n) for n in names}
+        launch.vast = world.vast
+        launch.r2_get, launch.r2_put, launch.r2_list = world.r2_get, world.r2_put, world.r2_list
+        launch.r2_list_sized, launch.r2_exists, launch.r2_delete = world.r2_list_sized, world.r2_exists, world.r2_delete
+        launch.time = world
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                code = launch.main(argv)
+        finally:
+            for n, v in saved.items():
+                setattr(launch, n, v)
+        return code, out.getvalue()
+
+    def rungs(self, world: World) -> list[float]:
+        """The price limit (dph_total<=X) of each verified search, in order: one per waiting attempt."""
+        return [float(re.search(r"dph_total<=([0-9.]+)", q).group(1)) for q in world.queries if "verified=true" in q.split()]
+
+    def test_defaults_of_the_waiting_search(self):
+        a = launch.build_parser().parse_args(["run", "--manifest", "{}", "--image", "x", "--bin-sha", "y"])
+        self.assertEqual((a.min_cores, a.max_dph, a.price_steps, a.wait_for_offer_min), (190, None, None, None))
+        launch.finalize_settings(a)
+        self.assertEqual((a.max_dph, a.price_steps, a.tries_per_step, a.wait_for_offer_min, a.offer_poll_s),
+                         (1.7, [1.2, 1.45, 1.7], 3, 120, 60))
+        self.assertEqual(launch.price_ladder(a), [1.2, 1.45, 1.7])
+        self.assertEqual(launch.MIN_CORES, 190)
+        # The last rung is always the cap; steps at or above it are dropped; 0 = no cap; "off" = the cap alone.
+        for argv, ladder in ((["--max-dph", "1.3"], [1.2, 1.3]), (["--max-dph", "3"], [1.2, 1.45, 1.7, 3.0]),
+                             (["--max-dph", "0"], [1.2, 1.45, 1.7, 0.0]), (["--price-steps", "off"], [1.7]),
+                             (["--price-steps", "1.5,1.0"], [1.0, 1.5, 1.7]), (["--max-dph", "0.9"], [0.9])):
+            b = launch.build_parser().parse_args(["plan", *argv])
+            launch.finalize_settings(b)
+            self.assertEqual(launch.price_ladder(b), ladder, argv)
+        self.assertEqual(launch.rung_text(0), "no price limit")
+        for argv in (["--price-steps", "a,b"], ["--price-steps", "0"], ["--tries-per-step", "0"], ["--offer-poll-s", "0"],
+                     ["--wait-for-offer-min", "-1"], ["--max-dph", "-1"]):
+            with self.assertRaises(SystemExit, msg=argv):
+                launch.finalize_settings(launch.build_parser().parse_args(["plan", *argv]))
+
+    def test_the_workflow_asks_for_190_threads_and_ranks_by_cost_per_work_by_default(self):
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                            ".github", "workflows", "vast-run.yml")
+        inputs = workflow_inputs(path)
+        self.assertEqual(inputs["min_cores"]["default"], "190")
+        self.assertEqual(inputs["cheapest"]["default"], "false")
+        self.assertIn("cost per unit", inputs["cheapest"]["description"])
+        self.assertIn("lowest $/hour", inputs["cheapest"]["description"])
+        self.assertLessEqual(len(inputs), 25)  # GitHub's limit; the wait and the price steps go through the manifest, not inputs
+        self.assertFalse({"wait_for_offer_min", "offer_poll_s", "price_steps", "tries_per_step", "max_dph"} & set(inputs))
+        self.assertEqual(launch.build_parser().parse_args(["run", "--manifest", "{}", "--image", "x", "--bin-sha", "y"]).cheapest, False)
+
+    def test_no_offer_waits_and_rents_when_one_comes(self):
+        # Nothing on offer for 3.5 minutes: attempts at 0, 1, 2, 3 minutes find nothing, the one at 4 minutes rents.
+        w = World([big(1, 11, 1.0)], ["done:2"])
+        w.search_empty_until = w.t + 3.5 * 60
+        code, report = self.run_launch(w, self.FORMAT1, *NEW, "--wait-for-offer-min", "10")
+        self.assertEqual((code, report["outcome"], w.created_on), (0, "DONE", [1]))
+        self.assertEqual(w.instances_created_at(100) - 1_000_000.0, 240)
+        self.assertIn("no offer matches now; waiting up to 10 min for one, searching every 60 s (3 attempts per price step, "
+                      "steps $1.20/h, $1.45/h, $1.70/h); floors: >= 190 threads, >= 32 GB RAM, reliability >= 0.9, "
+                      "download >= 100 Mbps, price cap $1.70/h", self.log)
+        self.assertIn("waiting for an offer: price step 1/3 ($1.20/h), attempt 1, 0.0 of 10 min; no match; closest miss: none", self.log)
+        self.assertIn("waiting for an offer: price step 2/3 ($1.45/h), attempt 4, 3.0 of 10 min; no match", self.log)
+        self.assertIn("offer found at price step 2/3 ($1.45/h) after waiting 4.0 min (attempt 5)", self.log)
+
+    def test_the_wait_gives_up_at_the_limit_with_the_old_message(self):
+        w = World([big(1, 11, 1.0)], ["done:1"])
+        w.search_empty_until = w.t + 10_000_000
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, self.FORMAT1, *NEW, "--wait-for-offer-min", "8")
+        self.assertEqual(str(e.exception), "launch: no offer matches the filters")
+        self.assertEqual(w.created_on, [])
+        self.assertIn("gave up waiting for an offer after 8 min (9 attempts; limit: 8 min)", self.log)
+        self.assertEqual(self.rungs(w), [1.2] * 3 + [1.45] * 3 + [1.7] * 3)   # the ladder: 1.2 x3, 1.45 x3, then the cap
+        # --wait-for-offer-min 0 is the old behaviour: one search, at the cap, then the same exit.
+        w = World([big(1, 11, 1.0)], ["done:1"])
+        w.search_empty_until = w.t + 10_000_000
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, self.FORMAT1, *NEW, "--wait-for-offer-min", "0")
+        self.assertEqual((str(e.exception), self.rungs(w), w.t), ("launch: no offer matches the filters", [1.7], 1_000_000.0))
+
+    def test_the_price_ladder_rents_a_1_40_offer_on_attempt_4_and_never_a_1_90_one(self):
+        w = World([big(1, 11, 1.40)], ["done:2"])
+        code, report = self.run_launch(w, self.FORMAT1, *NEW)
+        self.assertEqual((code, w.created_on), (0, [1]))
+        self.assertEqual(self.rungs(w), [1.2] * 3 + [1.45])             # not before attempt 4
+        self.assertEqual(w.instances_created_at(100) - 1_000_000.0, 180)
+        self.assertIn("offer found at price step 2/3 ($1.45/h) after waiting 3.0 min (attempt 4)", self.log)
+        self.assertIn("closest miss: offer 1 has 224 threads but costs $1.40/h, above this step's $1.20/h "
+                      "(the ladder reaches it at attempt 4)", self.log)
+        # $1.90 is above the cap: waited for until the limit, never rented, whatever the step.
+        w = World([big(1, 11, 1.90)], ["done:1"])
+        with self.assertRaises(SystemExit):
+            self.run_launch(w, self.FORMAT1, *NEW, "--wait-for-offer-min", "12")
+        self.assertEqual(w.created_on, [])
+        self.assertEqual(set(self.rungs(w)), {1.2, 1.45, 1.7})
+        # ...unless the cap is raised: the ladder then goes on to it (here at attempt 10, after 9 minutes).
+        w = World([big(1, 11, 1.90)], ["done:2"])
+        code, _ = self.run_launch(w, self.FORMAT1, *NEW, "--max-dph", "2.5")
+        self.assertEqual((code, w.created_on), (0, [1]))
+        self.assertEqual(self.rungs(w), [1.2] * 3 + [1.45] * 3 + [1.7] * 3 + [2.5])
+        self.assertEqual(w.instances_created_at(100) - 1_000_000.0, 540)
+        # Among the offers that match at the current step, the launcher's own ranking decides: cost per unit of work, not
+        # price per hour (offer 2 costs more per hour but gives twice the threads); --cheapest is the hourly price.
+        offers = [big(1, 11, 1.00, cpu_cores_effective=200), big(2, 12, 1.19, cpu_cores_effective=400)]
+        w = World(offers, ["done:2"])
+        self.run_launch(w, self.FORMAT1, *NEW)
+        self.assertEqual((w.created_on, self.rungs(w)), ([2], [1.2]))
+        w = World(offers, ["done:2"])
+        self.run_launch(w, self.FORMAT1, *NEW, "--cheapest")
+        self.assertEqual(w.created_on, [1])
+
+    def test_a_replacement_search_keeps_every_floor_and_waits_instead_of_taking_a_small_machine(self):
+        # The first machine (224 threads) dies. Only a 120-thread machine is left: below the 190 floor, so it is not
+        # rented; the launcher waits (the ladder starts again at its first step) and takes the big one that appears.
+        m = {"format": 2, "run_id": RUN, "run_seed": 1, "streams": []}
+        w = World([big(1, 11, 1.0), offer(2, 12, 0.5, cpu_cores_effective=120)], ["die:2", "done:1"])
+        w.offer_appears = [(w.t + 9 * 60, big(3, 13, 1.1))]
+        code, report = self.run_launch(w, m, *NEW)
+        self.assertEqual((code, report["outcome"], w.created_on, report["replacements"]), (0, "DONE", [1, 3], 1))
+        self.assertIn("closest miss: offer 2 costs $0.50/h but has only 120 threads (floor 190)", self.log)
+        rungs = self.rungs(w)
+        self.assertEqual(rungs[0], 1.2)                      # the first search
+        self.assertEqual(rungs[1:4], [1.2, 1.2, 1.2])        # the replacement's ladder starts again from the first step
+        # Nothing ever comes: the run ends with "no offer could be rented", and the 120-thread machine is never rented.
+        w = World([big(1, 11, 1.0), offer(2, 12, 0.5, cpu_cores_effective=120)], ["die:2", "done:1"])
+        code, report = self.run_launch(w, m, *NEW, "--wait-for-offer-min", "5")
+        self.assertEqual((code, w.created_on, report["outcome"]), (1, [1], "KILLED"))
+        self.assertIn("no offer could be rented", report["reason"])
+        # Whatever vast returns, the launcher itself drops an offer under a floor (threads, RAM, link).
+        rows = [offer(1, 11, 1.0, cpu_cores_effective=100), offer(2, 12, 1.0, cpu_cores_effective=224, cpu_ram=16_000),
+                offer(3, 13, 1.0, cpu_cores_effective=224, inet_down=50.0), big(4, 14, 1.0, cpu_ram=64_000, inet_down=300.0)]
+        a = launch.build_parser().parse_args(["plan"])
+        launch.finalize_settings(a)
+        saved = launch.vast
+        launch.vast = lambda *args, **kw: [dict(r) for r in rows]
+        try:
+            self.assertEqual([o["id"] for o in launch.search_offers(a)], [4])
+        finally:
+            launch.vast = saved
+
+    def test_plan_and_dry_run_say_what_they_would_wait_for_and_do_not_wait(self):
+        # Only a 96-thread machine at $0.80: below the floor. Plan does not sleep; it prints what a run would wait for.
+        w = World([offer(5, 15, 0.8, cpu_cores_effective=96)], [])
+        code, out = self.run_cli(w, ["plan"])
+        self.assertEqual((code, w.t), (0, 1_000_000.0))
+        self.assertIn("no offer matches at the first price step ($1.20/h); a run would wait up to 120 min for one, searching "
+                      "every 60 s, 3 attempts per price step ($1.20/h, $1.45/h, $1.70/h); floors: >= 190 threads", out)
+        self.assertIn("closest miss: offer 5 costs $0.80/h but has only 96 threads (floor 190)", out)
+        self.assertIn("nothing matches even at the price cap right now", out)
+        # A machine at $1.50: the first step finds nothing, the cap finds it, and the ladder reaches it at attempt 7... here 4.
+        w = World([big(6, 16, 1.40)], [])
+        code, out = self.run_cli(w, ["plan"])
+        self.assertEqual(code, 0)
+        self.assertIn("at the price cap the best offer is offer 6", out)
+        self.assertIn("a run would reach it at attempt 4 (about 3 min from the start)", out)
+        self.assertEqual(w.t, 1_000_000.0)
+        # --wait-for-offer-min 0: plan says a run would stop, and exits 1 as before.
+        w = World([offer(5, 15, 0.8, cpu_cores_effective=96)], [])
+        code, out = self.run_cli(w, ["plan", "--wait-for-offer-min", "0"])
+        self.assertEqual(code, 1)
+        self.assertIn("with --wait-for-offer-min 0 a run stops here", out)
+        # run --dry-run: the same text, nothing waited for or rented, exit 0.
+        w = World([offer(5, 15, 0.8, cpu_cores_effective=96)], ["done:1"])
+        code, out = self.run_cli(w, ["run", "--manifest", json.dumps(self.FORMAT1), "--image", "img:1", "--bin-sha", "abc", "--dry-run"])
+        self.assertEqual((code, w.created_on, w.t), (0, [], 1_000_000.0))
+        self.assertIn("dry run: no offer to rent right now; a real run would wait as described above", out)
+
+    def test_a_named_offer_is_not_waited_for_and_the_price_cap_holds_for_it(self):
+        w = World([big(500, 50, 1.90)], ["done:1"])
+        w.forbid_search = True
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, self.FORMAT1, *NEW, "--offer-id", "500")
+        self.assertIn("price $1.90/h above the cap $1.70/h (--max-dph raises it)", str(e.exception))
+        self.assertEqual(w.created_on, [])
+        code, _ = self.run_launch(w, self.FORMAT1, *NEW, "--offer-id", "500", "--max-dph", "2")
+        self.assertEqual((code, w.created_on, w.t >= 1_000_000.0), (0, [500], True))
+        # Gone: stops at once, no waiting.
+        w = World([big(1, 11, 1.0)], ["done:1"])
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, self.FORMAT1, *NEW, "--offer-id", "500")
+        self.assertIn("not on offer", str(e.exception))
+
+    # ---- machines that did not start are remembered for 24 hours (R2 launcher/bad-machines.json)
+
+    BAD = "launcher/bad-machines.json"
+
+    def bad_entry(self, w: World, machine: int, hours_ago: float, host: int = 60400, reason: str = "container failed to start"):
+        return {"machine_id": machine, "host_id": host, "offer_id": 1, "instance_id": 5, "run_id": "old", "reason": reason,
+                "detail": "x", "utc": launch.epoch_to_utc(w.t - hours_ago * 3600)}
+
+    def test_a_machine_whose_container_did_not_start_is_recorded(self):
+        w = World([offer(1, 11, 1.0, host_id=60400), offer(2, 12, 1.5, host_id=60500)], ["broken:0", "done:2"])
+        code, report = self.run_launch(w, self.FORMAT1)
+        self.assertEqual((code, w.created_on), (0, [1, 2]))
+        d = json.loads(w.store[self.BAD])
+        self.assertEqual([e["machine_id"] for e in d["machines"]], [11])
+        e = d["machines"][0]
+        self.assertEqual((e["host_id"], e["offer_id"], e["instance_id"], e["run_id"], e["reason"]),
+                         (60400, 1, 100, RUN, "container failed to start"))
+        self.assertTrue(w.instances_created_at(100) + 60 <= launch.utc_to_epoch(e["utc"]) <= w.instances_created_at(100) + 300)
+        self.assertNotIn("sk-test-secret-3", e["detail"])
+        self.assertIn("remembered machine 11 (host 60400) as bad for 24 h: container failed to start", self.log)
+        # A machine that never heartbeated is recorded too (its old entry, 30 hours old, is replaced); one that failed later is not.
+        w = World([offer(1, 11, 1.0, host_id=60400), offer(2, 12, 1.5, host_id=60500), offer(3, 13, 2.0, host_id=60600)],
+                  ["never:0", "die:2", "done:1"])
+        w.store[self.BAD] = json.dumps({"format": 1, "machines": [self.bad_entry(w, 99, 2), self.bad_entry(w, 11, 30, host=1)]}).encode()
+        code, report = self.run_launch(w, {"format": 2, "run_id": RUN, "run_seed": 1, "streams": []})
+        self.assertEqual((code, w.created_on), (0, [1, 2, 3]))
+        d = json.loads(w.store[self.BAD])
+        by = {e["machine_id"]: e for e in d["machines"]}
+        self.assertEqual(sorted(by), [11, 99])                       # 99 kept, 11 replaced (not duplicated), 12 (died later) not added
+        self.assertEqual((by[11]["reason"], by[11]["host_id"]), ("never heartbeated", 60400))
+        self.assertEqual(by[99]["host_id"], 60400)
+
+    def test_listed_machines_are_left_out_of_every_search(self):
+        entry = None
+        w = World([offer(1, 11, 0.5), offer(2, 12, 1.0)], ["done:2"])
+        entry = self.bad_entry(w, 11, 1)
+        w.store[self.BAD] = json.dumps({"format": 1, "machines": [entry]}).encode()
+        code, _ = self.run_launch(w, self.FORMAT1)
+        self.assertEqual((code, w.created_on), (0, [2]))
+        self.assertIn(f"excluding machine 11 (host 60400): container failed to start at {entry['utc']}", self.log)
+        self.assertEqual(self.log.count("excluding machine 11"), 1)
+        # Plan mode leaves it out too.
+        w = World([offer(1, 11, 0.5), offer(2, 12, 1.0)], [])
+        w.store[self.BAD] = json.dumps({"format": 1, "machines": [self.bad_entry(w, 11, 1)]}).encode()
+        code, out = self.run_cli(w, ["plan", "--min-cores", "16"])
+        self.assertEqual(code, 0)
+        self.assertIn("excluding machine 11 (host 60400): container failed to start at", out)
+        self.assertIn("chosen (", out)
+        self.assertNotIn("offer 1:", out.split("excluding machine 11")[1])
+        # A replacement search leaves it out as well (listed by another run after this one started renting).
+        w = World([offer(1, 11, 1.0), offer(2, 12, 2.0), offer(3, 13, 3.0)], ["die:2", "done:1"])
+        orig = w.vast
+
+        def listing_machine_12_after_the_first_rental(*args, **kw):
+            if args[:2] == ("create", "instance"):
+                w.store[self.BAD] = json.dumps({"format": 1, "machines": [self.bad_entry(w, 12, 0.1, host=7)]}).encode()
+            return orig(*args, **kw)
+
+        w.vast = listing_machine_12_after_the_first_rental
+        code, report = self.run_launch(w, {"format": 2, "run_id": RUN, "run_seed": 1, "streams": []})
+        self.assertEqual((code, w.created_on), (0, [1, 3]))
+
+    def test_an_old_entry_is_ignored_and_an_unreadable_file_is_left_alone(self):
+        w = World([offer(1, 11, 0.5), offer(2, 12, 1.0)], ["done:1"])
+        w.store[self.BAD] = json.dumps({"format": 1, "machines": [self.bad_entry(w, 11, 25)]}).encode()
+        code, _ = self.run_launch(w, self.FORMAT1)
+        self.assertEqual((code, w.created_on), (0, [1]))
+        self.assertNotIn("excluding machine", self.log)
+        # Just inside 24 hours still counts.
+        w = World([offer(1, 11, 0.5), offer(2, 12, 1.0)], ["done:1"])
+        w.store[self.BAD] = json.dumps({"format": 1, "machines": [self.bad_entry(w, 11, 23.9)]}).encode()
+        self.run_launch(w, self.FORMAT1)
+        self.assertEqual(w.created_on, [2])
+        # A file that is not JSON: warned about, nothing excluded, and a new failure does not overwrite it.
+        w = World([offer(1, 11, 1.0), offer(2, 12, 1.5)], ["broken:0", "done:2"])
+        w.store[self.BAD] = b"not json"
+        code, _ = self.run_launch(w, self.FORMAT1)
+        self.assertEqual((code, w.created_on, w.store[self.BAD]), (0, [1, 2], b"not json"))
+        self.assertIn("could not be read, so machine 11 is not recorded", self.log)
+
+    def test_a_named_offer_on_a_listed_machine_is_rented_with_a_warning(self):
+        w = World([offer(500, 50, 1.0, host_id=60400)], ["done:1"])
+        w.forbid_search = True
+        w.store[self.BAD] = json.dumps({"format": 1, "machines": [self.bad_entry(w, 50, 1)]}).encode()
+        code, _ = self.run_launch(w, self.FORMAT1, "--offer-id", "500")
+        self.assertEqual((code, w.created_on), (0, [500]))
+        self.assertIn("offer 500 is on machine 50 (host 60400), which did not start a run (container failed to start at", self.log)
+        self.assertIn("going ahead, because the owner named it", self.log)
+
     def test_container_error_is_replaced_at_once(self):
         # The container cannot start: destroyed at the first poll (not after --startup-minutes)
         # and the next offer is rented, for a format-1 run too (nothing ran on the first).
@@ -870,7 +1196,7 @@ class LauncherTest(unittest.TestCase):
         self.assertTrue(8.5 <= report["attempts"][0]["minutes"] <= 10.5, report["attempts"][0]["minutes"])
 
     def test_the_pull_ceiling_ends_a_pull_that_keeps_changing(self):
-        self.assertEqual((launch.PULL_CEILING_MIN, launch.PULL_STALL_MIN, launch.MIN_INET_DOWN), (40, 10, 500))
+        self.assertEqual((launch.PULL_CEILING_MIN, launch.PULL_STALL_MIN, launch.MIN_INET_DOWN), (40, 10, 100))
         w = World([offer(1, 11, 1.0)], ["never:0"])
         w.status_msg_fn = pull_msgs()
         code, report = self.run_launch(w, self.FORMAT1, "--pull-ceiling-min", "12")
@@ -947,7 +1273,7 @@ class LauncherTest(unittest.TestCase):
     def test_every_search_asks_for_a_fast_downlink(self):
         w = World([offer(1, 11, 1.0)], ["done:1"])
         self.run_launch(w, self.FORMAT1)
-        self.assertIn("inet_down>=500", w.queries[0].split())
+        self.assertIn("inet_down>=100", w.queries[0].split())
         # The fallback search (unverified hosts allowed) and a replacement's search carry it too.
         w = World([offer(1, 11, 1.0, verification="unverified")], ["done:1"])
         self.run_launch(w, self.FORMAT1, "--min-inet-down", "800")
@@ -957,8 +1283,8 @@ class LauncherTest(unittest.TestCase):
         w = World([offer(1, 11, 1.0)], ["done:1"])
         self.run_launch(w, self.FORMAT1, "--min-inet-down", "0")
         self.assertNotIn("inet_down", w.queries[0].replace("inet_down_cost", ""))
-        # An offer reporting a slower link is not returned by the (simulated) search.
-        w = World([offer(1, 11, 0.5, inet_down=120.0), offer(2, 12, 2.0, inet_down=900.0)], ["done:1"])
+        # An offer reporting a link under the floor (100 Mbps) is not returned by the (simulated) search.
+        w = World([offer(1, 11, 0.5, inet_down=80.0), offer(2, 12, 2.0, inet_down=900.0)], ["done:1"])
         code, report = self.run_launch(w, self.FORMAT1)
         self.assertEqual((code, w.created_on), (0, [2]))
 
@@ -993,7 +1319,7 @@ class LauncherTest(unittest.TestCase):
         w.forbid_search = True
         code, report = self.run_launch(w, self.FORMAT1, "--offer-id", "500")
         self.assertEqual((code, w.created_on, w.searches, w.id_lookups), (0, [500], 0, 1))
-        self.assertIn("offer 500 reports a download link of 80 Mbps, below --min-inet-down 500", self.log)
+        self.assertIn("offer 500 reports a download link of 80 Mbps, below --min-inet-down 100", self.log)
         self.assertIn("accepted, because the owner named it", self.log)
         # A fast link: nothing to report. --min-inet-down 0: nothing to report either.
         w = World([offer(500, 50, 1.0, inet_down=900.0)], ["done:1"])
@@ -1282,11 +1608,14 @@ class LauncherTest(unittest.TestCase):
             min_reliability=0.90, min_cores=128, min_ram_gb=64, disk_gb=80, max_net_cost=0.1, max_dph=None,
             cpu_only=True, gpus=1, min_gpu_ram_gb=4, min_compute_cap=600)
         q = launch.offer_query(a).split()
-        for want in ("num_gpus=1", "gpu_ram>=4", "compute_cap>=600", "compute_cap<1000", "cuda_vers>=12.6",
+        for want in ("num_gpus>=1", "gpu_ram>=4", "compute_cap>=600", "compute_cap<1000", "cuda_vers>=12.6",
                      "gpu_frac=1", "verified=true", "rentable=true", "reliability>0.9", "cpu_cores_effective>=128",
                      "cpu_ram>=64", "disk_space>=80"):
             self.assertIn(want, q)
-        self.assertNotIn("num_gpus>=1", q)
+        self.assertFalse([x for x in q if x.startswith("num_gpus=")], q)   # at least N, never exactly N (owner, 2026-10-16)
+        a.gpus = 2
+        self.assertIn("num_gpus>=2", launch.offer_query(a).split())
+        a.gpus = 1
         # A higher capability floor is kept; one below the build's 6.0 is raised to it.
         a.min_compute_cap = 860
         self.assertIn("compute_cap>=860", launch.offer_query(a).split())
@@ -1303,8 +1632,9 @@ class LauncherTest(unittest.TestCase):
     def test_manifest_machine_needs_rent_one_gpu_machine(self):
         # The hybrid rung's manifest asks for 1 GPU with 4 GB, 128 cores and 80 GB of disk. Under the
         # workflow's default --cpu-only the GPU filters still apply; offers without a usable GPU
-        # (too little memory, a Blackwell card the cu126 build cannot run, an old driver, two GPUs)
-        # are skipped even though the search returned them, and the cheapest one that fits is rented.
+        # (too little memory, a Blackwell card the cu126 build cannot run, an old driver) are skipped
+        # even though the search returned them, and the cheapest one that fits is rented. A machine with
+        # two GPUs fits a one-GPU job (owner, 2026-10-16: the price is per machine; the trainer uses cuda:0).
         a2000 = dict(num_gpus=1, gpu_name="RTX A2000", gpu_ram=6138, compute_cap=860, cuda_max_good=12.8,
                      cpu_cores_effective=384, cpu_name="AMD EPYC 9654 96-Core Processor")
         offers = [offer(1, 11, 0.4, **{**a2000, "gpu_ram": 2048}),
@@ -1320,14 +1650,14 @@ class LauncherTest(unittest.TestCase):
                           "params": {"threads": "all"}}]}
         code, report = self.run_launch(w, m, "--cpu-only", "--cheapest")
         self.assertEqual((code, report["outcome"]), (0, "DONE"))
-        self.assertEqual(w.created_on, [5])
+        self.assertEqual(w.created_on, [4])    # the two-GPU box at $0.70, cheaper than the one-GPU machines
         self.assertEqual(w.disks, ["80"])
         q = w.queries[0].split()
-        for want in ("num_gpus=1", "gpu_ram>=4", "compute_cap>=600", "compute_cap<1000", "cuda_vers>=12.6",
+        for want in ("num_gpus>=1", "gpu_ram>=4", "compute_cap>=600", "compute_cap<1000", "cuda_vers>=12.6",
                      "cpu_cores_effective>=128", "disk_space>=80", "gpu_frac=1", "verified=true"):
             self.assertIn(want, q)
         self.assertIn("--cpu-only is ignored", self.log)
-        self.assertIn("RTX A2000 (6138 MB, cc 860, CUDA 12.8)", self.log)
+        self.assertIn("2x RTX A2000 (6138 MB, cc 860, CUDA 12.8)", self.log)
 
     def test_offer_chosen_by_id_must_meet_the_gpu_needs(self):
         a2000 = dict(num_gpus=1, gpu_name="RTX A2000", gpu_ram=6138, compute_cap=860, cuda_max_good=12.8)
@@ -1336,7 +1666,7 @@ class LauncherTest(unittest.TestCase):
         cases = [({"compute_cap": 1200}, "compute capability 1200 outside 600..999"),
                  ({"compute_cap": 520}, "compute capability 520"),
                  ({"gpu_ram": 3000}, "GPU memory 3000 MB, below --min-gpu-ram-gb 4"),
-                 ({"num_gpus": 4}, "4 GPUs, not the 1 asked for"),
+                 ({"num_gpus": 0}, "0 GPUs, fewer than the 1 asked for"),
                  ({"cuda_max_good": 12.2}, "driver supports CUDA 12.2, below 12.6")]
         for kw, word in cases:
             w = World([offer(500, 50, 1.0, **{**a2000, **kw})], ["done:1"])
@@ -1349,6 +1679,16 @@ class LauncherTest(unittest.TestCase):
         w.forbid_search = True
         code, _ = self.run_launch(w, m, "--offer-id", "500")
         self.assertEqual((code, w.created_on), (0, [500]))
+        # At least the GPUs asked for: a 4-GPU machine is fine for a 1-GPU job, a 1-GPU one is refused for 2.
+        w = World([offer(500, 50, 1.0, **{**a2000, "num_gpus": 4})], ["done:1"])
+        w.forbid_search = True
+        code, _ = self.run_launch(w, m, "--offer-id", "500")
+        self.assertEqual((code, w.created_on), (0, [500]))
+        w = World([offer(500, 50, 1.0, **a2000)], ["done:1"])
+        w.forbid_search = True
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, {**m, "machine": {"gpus": 2, "min_gpu_ram_gb": 4}}, "--offer-id", "500")
+        self.assertIn("1 GPUs, fewer than the 2 asked for", str(e.exception))
         # The same needs from the command line.
         w = World([offer(500, 50, 1.0, **{**a2000, "gpu_ram": 3000})], ["done:1"])
         w.forbid_search = True
@@ -1380,13 +1720,13 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual((a.gpus, a.min_gpu_ram_gb, a.min_cores, a.min_ram_gb, a.disk_gb), (1, 8, 256, 64, 80))
 
     def test_manifest_machine_min_inet_down_sets_the_download_floor(self):
-        # machine.min_inet_down (Mbps) replaces the default floor of 500; 0 turns the filter off; with
+        # machine.min_inet_down (Mbps) replaces the default floor of 100; 0 turns the filter off; with
         # --min-inet-down given too the larger wins; a negative number is refused before any search.
         base = {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}}
         for machine, extra, want in (({"min_inet_down": 300}, [], "inet_down>=300"),
                                      ({"min_inet_down": 800}, ["--min-inet-down", "600"], "inet_down>=800"),
                                      ({"min_inet_down": 300}, ["--min-inet-down", "600"], "inet_down>=600"),
-                                     ({"min_inet_down": 0}, [], None), ({"disk_gb": 20}, [], "inet_down>=500")):
+                                     ({"min_inet_down": 0}, [], None), ({"disk_gb": 20}, [], "inet_down>=100")):
             w = World([offer(1, 11, 1.0)], ["done:1"])
             code, _ = self.run_launch(w, {**base, "machine": machine}, *extra)
             self.assertEqual((code, w.created_on), (0, [1]), machine)
@@ -1395,7 +1735,7 @@ class LauncherTest(unittest.TestCase):
         # No machine object at all: the default.
         w = World([offer(1, 11, 1.0)], ["done:1"])
         self.run_launch(w, base)
-        self.assertIn("inet_down>=500", w.queries[0].split())
+        self.assertIn("inet_down>=100", w.queries[0].split())
         # A negative floor, or something that is not a number, is refused; nothing is searched or rented.
         for bad in (-1, -0.5, "fast", True):
             w = World([offer(1, 11, 1.0)], ["done:1"])
@@ -1409,7 +1749,7 @@ class LauncherTest(unittest.TestCase):
         launch.apply_machine(a, {"machine": {"min_inet_down": 250}})
         self.assertEqual(a.min_inet_down, 250.0)
         self.assertEqual(launch.inet_floor(a), 250.0)
-        self.assertEqual(launch.inet_floor(argparse.Namespace()), 500.0)
+        self.assertEqual(launch.inet_floor(argparse.Namespace()), 100.0)
         self.assertEqual(launch.inet_floor(argparse.Namespace(min_inet_down=0)), 0.0)
 
     def test_offer_chosen_by_id_with_a_slower_link_than_the_manifest_asks_is_accepted_and_reported(self):
@@ -1419,6 +1759,52 @@ class LauncherTest(unittest.TestCase):
         code, _ = self.run_launch(w, m, "--offer-id", "500")
         self.assertEqual((code, w.created_on), (0, [500]))
         self.assertIn("offer 500 reports a download link of 700 Mbps, below --min-inet-down 900", self.log)
+
+    def test_manifest_machine_block_sets_the_price_cap_and_the_wait(self):
+        base = {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}}
+        # The manifest raises the price cap to 3.00: the ladder climbs to it (attempt 10) and rents the $1.90 machine.
+        w = World([big(1, 11, 1.90)], ["done:2"])
+        code, _ = self.run_launch(w, {**base, "machine": {"max_dph": 3.0}}, "--min-cores", "190", legacy=False)
+        self.assertEqual((code, w.created_on), (0, [1]))
+        self.assertEqual(self.rungs(w), [1.2] * 3 + [1.45] * 3 + [1.7] * 3 + [3.0])
+        # Without it the cap is $1.70 and the same machine is never rented; the command line wins over the manifest.
+        for machine, extra in ((None, []), ({"max_dph": 3.0}, ["--max-dph", "1.7"])):
+            w = World([big(1, 11, 1.90)], ["done:1"])
+            with self.assertRaises(SystemExit):
+                self.run_launch(w, {**base, **({"machine": machine} if machine else {})}, "--min-cores", "190",
+                                "--wait-for-offer-min", "5", *extra, legacy=False)
+            self.assertEqual(w.created_on, [], machine)
+        # The manifest sets the wait, the poll interval, the steps and the tries per step (the cap is its last rung).
+        machine = {"wait_for_offer_min": 4, "offer_poll_s": 30, "price_steps": [1.3, 1.0], "tries_per_step": 2, "max_dph": 1.6}
+        w = World([big(1, 11, 5.0)], ["done:1"])
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, {**base, "machine": machine}, "--min-cores", "190", legacy=False)
+        self.assertEqual(str(e.exception), "launch: no offer matches the filters")
+        self.assertEqual(self.rungs(w), [1.0, 1.0, 1.3, 1.3, 1.6, 1.6, 1.6, 1.6, 1.6])
+        self.assertIn("waiting up to 4 min for one, searching every 30 s (2 attempts per price step, steps $1.00/h, $1.30/h, "
+                      "$1.60/h)", self.log)
+        # Bad values are refused before anything is searched or rented.
+        for machine, word in (({"max_dph": -1}, "machine.max_dph must be a number"),
+                              ({"wait_for_offer_min": "x"}, "machine.wait_for_offer_min must be a number"),
+                              ({"price_steps": [1.2, "x"]}, "machine.price_steps must be a list"),
+                              ({"price_steps": []}, "machine.price_steps must be a list"),
+                              ({"price_steps": [0]}, "machine.price_steps must be a list"),
+                              ({"tries_per_step": 1.5}, "machine.tries_per_step must be a whole number"),
+                              ({"tries_per_step": 0}, "machine.tries_per_step must be a whole number"),
+                              ({"offer_poll_s": 0.5}, "machine.offer_poll_s must be at least 1 second")):
+            w = World([big(1, 11, 1.0)], ["done:1"])
+            with self.assertRaises(SystemExit) as e:
+                self.run_launch(w, {**base, "machine": machine}, legacy=False)
+            self.assertIn(word, str(e.exception), machine)
+            self.assertEqual((w.created_on, w.searches), ([], 0), machine)
+
+    def test_manifest_min_cores_can_raise_the_floor_but_not_lower_it(self):
+        a = argparse.Namespace(gpus=0, min_gpu_ram_gb=0, min_compute_cap=600, min_cores=190, min_ram_gb=32, disk_gb=20,
+                               cpu_only=True)
+        launch.apply_machine(a, {"machine": {"min_cores": 32}})
+        self.assertEqual(a.min_cores, 190)
+        launch.apply_machine(a, {"machine": {"min_cores": 256}})
+        self.assertEqual(a.min_cores, 256)
 
     def test_poll_line_shows_each_chunks_step(self):
         hb = {"seq": 7, "phase": "chunks", "progress": {"chunk_steps": {
@@ -1753,7 +2139,7 @@ class LauncherTest(unittest.TestCase):
         try:
             with contextlib.redirect_stdout(io.StringIO()):
                 code = launch.main(["run", "--manifest", json.dumps(manifest), "--image", "img:1", "--bin-sha", "abc",
-                                    "--max-minutes", str(minutes), "--startup-minutes", "5"])
+                                    "--max-minutes", str(minutes), "--startup-minutes", "5", *LEGACY])
         finally:
             for n, v in saved.items():
                 setattr(launch, n, v)

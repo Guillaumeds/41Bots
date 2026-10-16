@@ -58,18 +58,33 @@ would rent), then without:
 | cheapest | as the owner prefers (blank offer_id only) | same |
 | everything else | defaults | defaults |
 
-The manifests carry the machine's needs in a `machine` object: one GPU (`gpus` 1) with at least
-4 GB, compute capability 6.0 or newer (and below 10.0: the cu126 build has no Blackwell), at least
-32 CPU threads, 32 GB of RAM and 80 GB of disk (lowered from 128 threads and 64 GB on
-2026-10-16: no 128-thread GPU machine was on offer, and a trick-4 or trick-3 rung needs the GPU, not
-the threads; raise `min_cores` for trick-2 labels). These apply even with the workflow's default
-`cpu_only` box ticked; the `gpus`, `min_gpu_ram_gb` and `disk_gb` inputs can raise them. An offer
-picked by `offer_id` is checked against the same needs. The image is several GB, so every search also
-asks for a download speed of at least 500 Mbps (`machine.min_inet_down` in the manifest changes it for
-one run; 0 turns it off; an offer picked by `offer_id` with a slower link is rented and the log says
-so), and a machine still pulling the image after 15 minutes is waited for while vast's status shows
-the pull advancing (40 minutes at most, 10 minutes without change ends it). The run ids are `m3-hybrid-smoke-1` and
-`m3-hybrid-rung1b-1`; a second run of the same file needs a new `run_id` in it.
+The manifests carry the machine's needs in a `machine` object: at least one GPU (`gpus` 1; a machine with
+two GPUs is fine, the price is per machine, and the trainer uses one, `cuda:0`) with at least 4 GB,
+compute capability 6.0 or newer (and below 10.0: the cu126 build has no Blackwell), 32 GB of RAM and
+80 GB of disk. These apply even with the workflow's default `cpu_only` box ticked; the `gpus`,
+`min_gpu_ram_gb` and `disk_gb` inputs can raise them. An offer picked by `offer_id` is checked against
+the same needs.
+
+**Floors and waiting (owner rules of 2026-10-16, 18:10-18:30 Mauritius).** The launcher wants at least 190
+CPU threads (`min_cores`, workflow input default "190"; a manifest's `min_cores` can raise it but not
+lower it, so to run a smoke test on a smaller machine lower the `min_cores` input), at most $1.70 an hour
+(`machine.max_dph` in the manifest can raise or lower the cap; an offer picked by `offer_id` is held to
+it too), and a download link of at least 100 Mbps (`machine.min_inet_down`; the 5-6 GB image pulls in
+about 7 minutes at 100 Mbps; an offer picked by `offer_id` with a slower link is rented and the log says
+so). A machine still pulling the image after 15 minutes is waited for while vast's status shows the pull
+advancing (40 minutes at most, 10 minutes without change ends it). When no machine fits, the launcher
+does not fail: it searches again every minute for up to two hours and logs one line per attempt with the
+price step, the attempt, the elapsed minutes and the closest miss. It looks for the cheapest first: three
+searches at $1.20 an hour, three at $1.45, then at the $1.70 cap, renting the first offer that fits at the
+current step (the best cost per unit of CPU work among those), and a replacement search after a start
+failure waits the same way, with the same floors, starting again at $1.20. The workflow has no inputs for
+the wait (it is near GitHub's limit of 25); put it in the manifest's `machine` object when it needs
+changing: `wait_for_offer_min` (120; 0 = fail at once, as before), `offer_poll_s` (60), `price_steps`
+(a list, default `[1.2, 1.45, 1.7]`), `tries_per_step` (3) and `max_dph`. A machine whose container did
+not start, or that never sent a heartbeat, is remembered in R2 (`launcher/bad-machines.json`) and left
+out of every search for 24 hours (an `offer_id` pointing at it is rented anyway, with a warning). The
+run ids are `m3-hybrid-smoke-1` and `m3-hybrid-rung1b-1`; a second run of the same file needs a new
+`run_id` in it.
 
 The launcher's log shows one line per minute with the step, e.g. `rung/0: labels random (1 of 3)
 (250,000/3,200,000 rows)` or `rung/0: train (epoch 4/60, 1,200/3,907 batches, on cuda)`.

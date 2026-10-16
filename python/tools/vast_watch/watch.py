@@ -75,8 +75,8 @@ class Watcher:
 
     def __init__(self, a):
         self.a = a
-        self.model = M.Model(a.measured, a.speed_file,
-                             rules=None if a.min_inet_down is None else {"min_inet_down": a.min_inet_down})
+        self.model = M.Model(a.measured, a.speed_file, rules={k: v for k, v in (
+            ("min_inet_down", a.min_inet_down), ("max_dph", a.max_dph)) if v is not None})
         self.history = M.History(os.path.join(a.data_dir, "history.json") if a.data_dir else None)
         self.series_path = os.path.join(a.data_dir, "series.jsonl") if a.data_dir else None
         self.lock = threading.Lock()
@@ -245,8 +245,11 @@ def main(argv=None) -> int:
     ap.add_argument("--data-dir", default="vast-watch-data", help="where the all-time records are saved ('' = do not save)")
     ap.add_argument("--min-threads", type=float, default=64, help="smallest machine the three categories rank")
     ap.add_argument("--min-inet-down", type=float, default=None,
-                    help="the launcher's minimum download speed in Mbps for the 'can rent' label (default 500, as in the "
+                    help="the launcher's minimum download speed in Mbps for the 'can rent' label (default 100, as in the "
                          "launcher; 0 = no filter)")
+    ap.add_argument("--max-dph", type=float, default=None,
+                    help="the launcher's price cap in $/hour for the 'can rent' label (default 1.70, as in the launcher; "
+                         "0 = no cap)")
     ap.add_argument("--fast-gn", type=float, default=1.0, help="billion nodes per second a machine needs to count as fast")
     ap.add_argument("--measured", default=M.DEFAULT_MEASURED, help="docs/vast/measured-speeds.json")
     ap.add_argument("--speed-file", default=M.DEFAULT_SPEED, help="docs/vast/speed-factors.json")

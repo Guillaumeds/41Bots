@@ -18,7 +18,7 @@ R2_SECRET_ACCESS_KEY, the same as the launcher) and searches vast.ai offers (no 
 Read-only: it never rents or destroys anything. Standard library only.
 
 "Comparable" = a whole machine our launcher can rent (its own rules, python/launcher/offer_rules.py:
-reliability at least 0.90, a download link of at least --min-inet-down Mbps, default 500; a verified host
+reliability at least 0.90, a download link of at least --min-inet-down Mbps, default 100, a price of at most --max-dph, default $1.70/h; a verified host
 is preferred and listed first, an unverified or deverified one is allowed and flagged) whose estimated cost
 per 10^12 solver nodes is at most --max-cost-ratio (default 1.3) times this run's machine and whose
 estimated speed is at least --min-speed-ratio (default 0.7) times. Estimates come from our own benchmark runs
@@ -319,11 +319,13 @@ def main(argv=None) -> int:
     ap.add_argument("--ref-cost", type=float, default=0.285, help="with --market-only: the running machine's $ per 10^12 nodes (default 0.285, the 9995WX)")
     ap.add_argument("--ref-gn", type=float, default=1.24, help="with --market-only: its speed in billion nodes/s (default 1.24)")
     ap.add_argument("--min-inet-down", type=float, default=None,
-                    help="the launcher's minimum download speed in Mbps (default 500, offer_rules.MIN_INET_DOWN; 0 = no filter)")
+                    help="the launcher's minimum download speed in Mbps (default 100, offer_rules.MIN_INET_DOWN; 0 = no filter)")
+    ap.add_argument("--max-dph", type=float, default=None,
+                    help="the launcher's price cap in $/hour (default 1.70, offer_rules.MAX_DPH; 0 = no cap)")
     ap.add_argument("--color", choices=["auto", "on", "off"], default="auto")
     a = ap.parse_args(argv)
     c = C(a.color == "on" or (a.color == "auto" and sys.stdout.isatty()))
-    model = M.Model(rules=None if a.min_inet_down is None else {"min_inet_down": a.min_inet_down})
+    model = M.Model(rules={k: v for k, v in (("min_inet_down", a.min_inet_down), ("max_dph", a.max_dph)) if v is not None})
     if a.market_only:
         ref = {"cost": a.ref_cost, "nps": a.ref_gn * 1e9, "source": "given reference"}
         last_yes = None

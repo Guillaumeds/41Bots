@@ -4,8 +4,8 @@
 docs/M1-SPEC.md section 7 and docs/PLAN.md section 12. Standard library only; vast.ai is driven
 through the `vastai` CLI (pip package `vastai`) and R2 through the `aws` CLI (S3 API).
 
-    launch.py plan --min-cores 16                      # dry run: rank offers, print the choice
-    launch.py run --manifest m.json --min-cores 16 --max-dollars 20 \
+    launch.py plan --min-cores 190                     # dry run: rank offers, print the choice and what it would wait for
+    launch.py run --manifest m.json --min-cores 190 --max-dollars 20 \
                   --image ghcr.io/guillaumeds/41bots-base:<tag> --bin-sha <git sha>
     launch.py put-input data/equity-v0.npy             # upload a manifest input by content hash
 
@@ -53,12 +53,39 @@ Rules applied:
   status stops changing for that long, or --pull-ceiling-min (40) minutes after renting. A
   machine that never showed pull progress is destroyed at 15 minutes as before; nothing is ever
   destroyed earlier than before. Each poll logs "still pulling the image (N min): <status_msg>".
-- Fast downlinks are preferred: every search carries inet_down>=--min-inet-down (default 500,
-  Mbps; 0 = no filter; vast's offer field `inet_down` is in Mb/s, vastai 1.8.3 `search offers`).
-  Unless --cheapest, an offer whose link is under 200 Mbps (SLOW_LINK_MBPS) has its cost per
-  unit of work multiplied by 1 + (200 - Mbps) / 200 (x1.5 at 100 Mbps, x2 at 0), so the ranking
-  avoids it; an offer that reports no link speed gets no penalty. --offer-id reports a link slower
-  than --min-inet-down in the log and rents it anyway (the owner named it).
+- Fast downlinks are preferred: every search carries inet_down>=--min-inet-down (default 100 Mbps,
+  owner 2026-10-16: the 5-6 GB image pulls in about 7 minutes at 100 Mbps; 0 = no filter; vast's offer
+  field `inet_down` is in Mb/s, vastai 1.8.3 `search offers`). Unless --cheapest, an offer whose link is
+  under 200 Mbps (SLOW_LINK_MBPS) has its cost per unit of work multiplied by 1 + (200 - Mbps) / 200
+  (x1.5 at 100 Mbps, x2 at 0), so the ranking avoids it; an offer that reports no link speed gets no
+  penalty. --offer-id reports a link slower than --min-inet-down in the log and rents it anyway (the
+  owner named it).
+- Floors (owner, 2026-10-16): at least --min-cores threads (default 190), at most --max-dph dollars per
+  hour (default 1.70; 0 = no cap; the cap holds for --offer-id too), a GPU job at least --gpus GPUs (a
+  2-GPU box is fine, the price is per machine; the trainer uses cuda:0), always the whole machine. The
+  search asks vast for all of them and the launcher checks them again on what comes back, so nothing below
+  a floor is ever rented, in a replacement search either; no floor is relaxed to find a machine.
+- Waiting instead of failing (owner, 2026-10-16: "the launcher must wait until it gets a cheap 190+ thread
+  machine; there are many, they come every few minutes"): when no offer matches (the verified search and
+  the verified=any fallback both empty) the launcher does not exit. It searches again every
+  --offer-poll-s (60) seconds for up to --wait-for-offer-min (120; 0 = the old behaviour: one search, at
+  the cap, then "no offer matches the filters"), and logs one line per attempt: the price step, the
+  attempt, the elapsed minutes and the closest miss (an offer that fits but costs more than this step,
+  or the biggest one under the thread floor). The same waiting applies to every replacement search after
+  a start failure. The waiting search is a price ladder, so that the cheapest is looked for first:
+  --price-steps (default 1.2,1.45,1.7 $/h) with --tries-per-step (3) attempts at each step, then the cap
+  (--max-dph) until the wait runs out; steps above the cap are dropped and the last rung is always the
+  cap. The first offer that matches at the current rung is rented (ranked by cost per unit of work among
+  the matches at that rung); a replacement search starts the ladder again from the first step. The wait
+  also stops at --max-minutes and at the hand-over time. plan and --dry-run do not wait: they search at
+  the first step and print what a real run would wait for, with the closest miss and what the cap holds.
+  The workflow has no inputs for these settings (GitHub allows 25 inputs); the defaults apply.
+- Machines that did not start are remembered: an instance that ends as "container failed to start" or that
+  never heartbeats within the start timeout is recorded (machine id, host, offer, reason, time) in R2
+  launcher/bad-machines.json, and every search (first, replacement, plan) leaves the machines listed in
+  the last 24 hours out, logging "excluding machine M (host H): <reason> at <utc>". --offer-id on such a
+  machine warns and goes ahead (the owner's explicit choice). A missing file is fine; an unreadable one
+  is left alone.
 - The thresholds and checks (reliability floor, download floor, network cost cap, GPU limits, what counts
   as a verified host) live in offer_rules.py, next to this file; the market tools import the same
   module for their "can the launcher rent it" labels, so the two cannot drift apart.
@@ -97,17 +124,21 @@ Rules applied:
   the run's cores and RAM, and the GPU needs below); an offer that fails any of them, or that
   cannot be checked, is not rented. An unverified or deverified host is accepted (and logged)
   unless --verified-only.
-- GPU jobs (network training, docs/m3-hybrid/vast.md): --gpus N (exactly N GPUs on the machine),
+- GPU jobs (network training, docs/m3-hybrid/vast.md): --gpus N (at least N GPUs on the machine; the price is
+  per machine, a 2-GPU box is fine, the trainer uses cuda:0),
   --min-gpu-ram-gb, --min-compute-cap (vast's units: 600 = compute capability 6.0, the lowest the
   PyTorch 2.14.1+cu126 build supports), always with compute_cap<1000 and cuda_vers>=12.6 (the
   driver must support CUDA 12.6; no Blackwell). A manifest may carry the same needs, and the
   machine's, in a top-level "machine" object: {"gpus": 1, "min_gpu_ram_gb": 4,
   "min_compute_cap": 600, "min_cores": 128, "min_ram_gb": 64, "disk_gb": 80,
-  "min_inet_down": 500}; each minimum is the larger of the manifest's and the command line's
-  (except min_inet_down, in Mbps: the manifest's value replaces the default of 500, 0 = no
-  filter, and the larger wins only if --min-inet-down is given too), a GPU count given both ways
-  must agree, a GPU need overrides --cpu-only, and any other key is refused before anything is
-  rented. Every other rule (the preference for verified hosts above, reliability, whole machine,
+  "min_inet_down": 100}; each minimum is the larger of the manifest's and the command line's, so a
+  manifest can raise min_cores above the 190 default but not lower it (to run on smaller machines lower
+  the min_cores input; except min_inet_down, in Mbps: the manifest's value replaces the default of 100,
+  0 = no filter, and the larger wins only if --min-inet-down is given too). Also "max_dph" (the price cap
+  of 1.70: a manifest can raise or lower it), "wait_for_offer_min", "offer_poll_s", "price_steps" (a list
+  of $/h) and "tries_per_step": the command line wins when it gave one, else the manifest, else the
+  default. A GPU count given both ways must agree, a GPU need overrides --cpu-only, and any other key is
+  refused before anything is rented. Every other rule (the preference for verified hosts above, reliability, whole machine,
   on-demand only, dollar cap) is unchanged.
 - Destroying is verified: "destroyed (verified)" only once a later status call shows the instance
   exited, offline or absent, in two readings 10 s apart (one reading, such as an empty instance
@@ -144,6 +175,7 @@ from __future__ import annotations
 import argparse
 import ast
 import contextlib
+import copy
 import hashlib
 import json
 import os
@@ -158,7 +190,7 @@ from datetime import datetime, timedelta, timezone
 # The thresholds and checks for which offers may be rented live in offer_rules.py (next to this file),
 # shared with the market tools so that their "the launcher can rent it" labels cannot drift.
 from offer_rules import (  # noqa: E402,F401  (some names are re-exported for the tests)
-    MAX_COMPUTE_CAP, MAX_NET_COST, MIN_COMPUTE_CAP, MIN_CUDA, MIN_INET_DOWN, MIN_RELIABILITY, SLOW_LINK_MBPS,
+    MAX_COMPUTE_CAP, MAX_DPH, MAX_NET_COST, MIN_COMPUTE_CAP, MIN_CUDA, MIN_INET_DOWN, MIN_RELIABILITY, SLOW_LINK_MBPS,
     check_failures, gpu_failures, host_status, inet_down_of, is_verified, link_factor)
 
 POLL_S = 60  # default; --poll-s overrides
@@ -175,6 +207,14 @@ GONE_CONFIRMATIONS = 3  # readings showing an instance exited/offline/absent bef
 GONE_SPAN_S = 90  # ...spanning at least this long
 DESTROY_RECHECK_S = 10  # destroy(): a "dead" reading counts only when a second one this much later agrees
 ADOPT_READINGS = 2  # readable instance listings without the run's label before a failed create counts as "nothing rented"
+MIN_CORES = 190  # default --min-cores (owner, 2026-10-16: "at least 190+"; many such machines come up every few minutes)
+WAIT_FOR_OFFER_MIN = 120  # default --wait-for-offer-min: how long to look for an offer before giving up (0 = do not wait)
+OFFER_POLL_S = 60  # default --offer-poll-s: seconds between two searches while waiting
+PRICE_STEPS = (1.2, 1.45, 1.7)  # default --price-steps ($/h): look for the cheapest first, then raise the price (the last is the cap)
+TRIES_PER_STEP = 3  # default --tries-per-step: searches at one price step before the next
+BAD_MACHINES_KEY = "launcher/bad-machines.json"  # R2: machines whose container did not start (or never heartbeated)
+BAD_MACHINE_HOURS = 24  # a listed machine is left out of every search for this long
+BAD_MACHINE_KEEP_DAYS = 7  # entries older than this are dropped when the file is rewritten
 PULL_CEILING_MIN = 40  # default; --pull-ceiling-min overrides: the latest an image pull is allowed to end, from renting
 PULL_STALL_MIN = 10  # default; --pull-stall-min overrides: vast's status unchanged this long while pulling = dead
 MAX_DOLLARS = 20.0  # the default dollar cap of a run (owner, 2026-10-16)
@@ -260,7 +300,7 @@ def offer_query(a, verified: bool = True) -> str:
     gpus = int(getattr(a, "gpus", 0) or 0)
     if gpus:
         cc = max(MIN_COMPUTE_CAP, int(getattr(a, "min_compute_cap", MIN_COMPUTE_CAP) or MIN_COMPUTE_CAP))
-        gpu = [f"num_gpus={gpus}", f"compute_cap>={cc}", f"compute_cap<{MAX_COMPUTE_CAP}", f"cuda_vers>={MIN_CUDA}"]
+        gpu = [f"num_gpus>={gpus}", f"compute_cap>={cc}", f"compute_cap<{MAX_COMPUTE_CAP}", f"cuda_vers>={MIN_CUDA}"]
         if getattr(a, "min_gpu_ram_gb", 0):
             gpu.append(f"gpu_ram>={a.min_gpu_ram_gb}")
     else:
@@ -299,15 +339,18 @@ def gpu_check_failures(o: dict, a) -> list[str]:
 
 
 # The keys of a manifest's "machine" object (what the launcher rents for it).
-MACHINE_KEYS = ("gpus", "min_gpu_ram_gb", "min_compute_cap", "min_cores", "min_ram_gb", "disk_gb", "min_inet_down")
+MACHINE_KEYS = ("gpus", "min_gpu_ram_gb", "min_compute_cap", "min_cores", "min_ram_gb", "disk_gb", "min_inet_down",
+                "max_dph", "wait_for_offer_min", "offer_poll_s", "price_steps", "tries_per_step")
 
 
 def apply_machine(a, manifest: dict) -> None:
     """Merges a manifest's "machine" needs into the offer settings `a` (see the module notes):
     minimums take the larger value, a GPU count given both ways must agree, and a GPU need turns
     the GPU filters on even with --cpu-only. machine.min_inet_down (Mbps) replaces the default
-    floor of 500, and is the larger of the two when --min-inet-down is given too. Exits (nothing
-    rented) on an unknown key or a bad value (negative numbers included)."""
+    floor of 100, and is the larger of the two when --min-inet-down is given too. The settings that
+    are not minimums (max_dph, wait_for_offer_min, offer_poll_s, price_steps, tries_per_step) are the
+    command line's when it gave one, else the manifest's, else the default (finalize_settings).
+    Exits (nothing rented) on an unknown key or a bad value (negative numbers included)."""
     m = manifest.get("machine")
     if m is None:
         return
@@ -316,9 +359,20 @@ def apply_machine(a, manifest: dict) -> None:
     bad = [k for k in m if k not in MACHINE_KEYS]
     if bad:
         sys.exit(f"launch: the manifest's \"machine\" has unknown keys {bad}; it takes only {', '.join(MACHINE_KEYS)}")
+    steps = m.get("price_steps")
+    if "price_steps" in m:
+        if (not isinstance(steps, list) or not steps
+                or any(isinstance(x, bool) or not isinstance(x, (int, float)) or x <= 0 for x in steps)):
+            sys.exit(f"launch: machine.price_steps must be a list of dollars per hour above 0, like [1.2, 1.45, 1.7] (got {steps!r})")
     for k, v in m.items():
+        if k == "price_steps":
+            continue
         if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
             sys.exit(f"launch: machine.{k} must be a number, 0 or more (got {v!r})")
+    if "tries_per_step" in m and (not float(m["tries_per_step"]).is_integer() or m["tries_per_step"] < 1):
+        sys.exit(f"launch: machine.tries_per_step must be a whole number, 1 or more (got {m['tries_per_step']!r})")
+    if "offer_poll_s" in m and m["offer_poll_s"] < 1:
+        sys.exit(f"launch: machine.offer_poll_s must be at least 1 second (got {m['offer_poll_s']!r})")
     if not float(m.get("gpus", 0)).is_integer():
         sys.exit(f"launch: machine.gpus must be a whole number (got {m['gpus']!r})")
     gpus = int(m.get("gpus", 0))
@@ -330,10 +384,17 @@ def apply_machine(a, manifest: dict) -> None:
         if k in m:
             setattr(a, k, max(m[k], getattr(a, k, 0) or 0))
     if "min_inet_down" in m:
-        # The command line's default (500) is not a choice: the manifest's value replaces it (0 = no
+        # The command line's default (100) is not a choice: the manifest's value replaces it (0 = no
         # filter, a lower value lets slower hosts in); a --min-inet-down given too makes the larger win.
         given = getattr(a, "min_inet_down", None)
         a.min_inet_down = float(m["min_inet_down"]) if given is None else max(float(m["min_inet_down"]), float(given))
+    # max_dph (the price cap: a manifest can raise it, or lower it), the wait and the price steps: the command line
+    # wins when it was given, else the manifest's value is used; whatever is still unset gets its default later.
+    for k in ("max_dph", "wait_for_offer_min", "offer_poll_s", "tries_per_step"):
+        if k in m and getattr(a, k, None) is None:
+            setattr(a, k, m[k])
+    if "price_steps" in m and getattr(a, "price_steps", None) is None:
+        a.price_steps = sorted({float(x) for x in steps})
     if gpu_job(a) and a.cpu_only:
         log(f"the run needs {a.gpus} GPU(s): the GPU filters apply (--cpu-only is ignored)")
         a.cpu_only = False
@@ -342,11 +403,18 @@ def apply_machine(a, manifest: dict) -> None:
 def search_offers(a, verified: bool = True) -> list[dict]:
     # --type on-demand: fixed-price rental only. Interruptible (bid) machines are never used.
     rows = vast("search", "offers", offer_query(a, verified), "--type", "on-demand", "--order", "dph_total", "--limit", "200")
+    # The query asks vast for every floor, and the launcher checks them again here: whatever vast returns, an offer
+    # below a floor (threads, RAM, download link, price) is never rented, in a replacement search either.
+    floor = inet_floor(a)
     return [o for o in (rows or []) if not o.get("is_bid") and o.get("dph_total") and o.get("cpu_cores_effective")
             and (not a.max_dph or float(o["dph_total"]) <= a.max_dph)
+            and float(o["cpu_cores_effective"]) >= a.min_cores
+            and (o.get("cpu_ram") is None or float(o["cpu_ram"]) >= a.min_ram_gb * 1000)
+            and (floor <= 0 or inet_down_of(o) is None or inet_down_of(o) >= floor)
             and (not a.cpu_match or re.search(a.cpu_match, o.get("cpu_name") or "", re.I))
             and o.get("id") not in getattr(a, "exclude_offers", set())
             and o.get("machine_id", o.get("id")) not in getattr(a, "exclude_machines", set())
+            and o.get("machine_id", o.get("id")) not in getattr(a, "bad_machines", {})
             and not gpu_check_failures(o, a)]
 
 
@@ -518,12 +586,22 @@ def lookup_offer(a) -> dict:
         cores = None
     if cores is not None and cores < a.min_cores:
         failed.append(f"{cores:.0f} effective cores, below --min-cores {a.min_cores}")
+    # The price cap holds for a named offer too (owner, 2026-10-16); --max-dph (or the manifest) raises it.
+    cap = MAX_DPH if getattr(a, "max_dph", None) is None else float(a.max_dph)
+    price = float(row.get("dph_total") or 0)
+    if cap > 0 and price > cap:
+        failed.append(f"price ${price:.2f}/h above the cap ${cap:.2f}/h (--max-dph raises it)")
     failed += gpu_check_failures(row, a)
     if failed:
         sys.exit(f"launch: offer {oid} fails the launcher's checks: {'; '.join(failed)}; nothing was rented")
     if not is_verified(row):
         log(f"offer {oid} is on a host that is {host_status(row)}, not verified: accepted, because the owner named it "
             f"(owner rule 2026-10-16: unverified or deverified hosts are acceptable; every other check passed)")
+    load_bad_machines(a)
+    bad = getattr(a, "bad_machines", {}).get(row.get("machine_id", row.get("id")))
+    if bad:
+        log(f"::warning::offer {oid} is on machine {row.get('machine_id')} (host {bad.get('host_id')}), which did not start a run "
+            f"({bad.get('reason')} at {bad.get('utc')}); going ahead, because the owner named it")
     link = inet_down_of(row)
     floor = inet_floor(a)
     if link is not None and floor > 0 and link < floor:
@@ -548,7 +626,9 @@ def lookup_offer(a) -> dict:
     return best
 
 
-def choose(a) -> dict | None:
+def choose(a, quiet: bool = False) -> dict | None:
+    """The best offer for the run's filters, or None. `quiet` (repeat searches while waiting for an offer)
+    leaves out the log lines about the verified/unverified fallback and the empty list when nothing matches."""
     if getattr(a, "offer_id", None):
         # An offer the owner picked on vast's own website (2026-10-15): one search by its id checks it
         # like any other (reliability, whole machine; a verified host only with --verified-only), nothing else is searched. It is offered
@@ -571,15 +651,17 @@ def choose(a) -> dict | None:
         # verified offer fits. Same filters, only `verified` lifted; a replacement machine
         # (rent() calls choose() again) starts from the verified search again.
         if getattr(a, "verified_only", False):
-            log("no verified offer matches (--verified-only: unverified and deverified hosts are not searched)")
+            if not quiet:
+                log("no verified offer matches (--verified-only: unverified and deverified hosts are not searched)")
         else:
-            log("no verified offer matches; searching again with unverified/deverified hosts allowed (owner rule 2026-10-16)")
+            if not quiet:
+                log("no verified offer matches; searching again with unverified/deverified hosts allowed (owner rule 2026-10-16)")
             offers = search_offers(a, verified=False)
             if offers:
                 n = sum(1 for o in offers if not is_verified(o))
                 log(f"no verified offer matches; using unverified/deverified offers (owner rule 2026-10-16): "
                     f"{len(offers)} offers found, {n} on unverified or deverified hosts")
-            else:
+            elif not quiet:
                 log("no offer matches even with unverified/deverified hosts allowed")
     have_r2 = all(os.environ.get(n) for n in ("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET", "R2_S3_ENDPOINT"))
     bench = load_bench(have_r2)
@@ -587,6 +669,8 @@ def choose(a) -> dict | None:
     if a.cheapest and ranked:
         # Test runs: the lowest hourly price, whatever its speed.
         best = min(ranked, key=lambda o: (float(o["dph_total"]), o["id"]))
+    if quiet and not ranked:
+        return None
     log(f"{len(ranked)} on-demand offers with >= {a.min_cores} effective cores; {len(bench)} CPU models benchmarked")
     for o in ranked[:10]:
         log(("  * " if o is best else "    ") + describe(o) + link_note(o))
@@ -594,6 +678,300 @@ def choose(a) -> dict | None:
         how = "cheapest per hour (--cheapest)" if a.cheapest else f"within {a.premium:.0%} of cheapest cost per work, fastest"
         log(f"chosen ({how}): {describe(best)}{link_note(best)}")
     return best
+
+
+# ------------------------------------------------------------------ waiting for an offer, the price ladder
+
+def parse_price_steps(text) -> list[float]:
+    """--price-steps "1.2,1.45,1.7" as ascending dollars per hour; "" / "off" / "none" = no steps."""
+    t = str(text).strip().lower()
+    if t in ("", "off", "none"):
+        return []
+    try:
+        steps = sorted({float(x) for x in t.split(",") if x.strip()})
+    except ValueError:
+        sys.exit(f"launch: --price-steps must be dollars per hour separated by commas, like 1.2,1.45,1.7 (got {text!r})")
+    if any(x <= 0 for x in steps):
+        sys.exit(f"launch: --price-steps must all be above 0 (got {text!r})")
+    return steps
+
+
+def finalize_settings(a) -> None:
+    """Turns the settings left unset on the command line (None) into their defaults, once the manifest has had its
+    say: price cap 1.70 $/h (0 = no cap), price steps, tries per step, how long to wait for an offer (minutes) and
+    how often to search (seconds). Exits on a value that makes no sense."""
+    cap = getattr(a, "max_dph", None)
+    a.max_dph = MAX_DPH if cap is None else float(cap)
+    steps = getattr(a, "price_steps", None)
+    a.price_steps = list(PRICE_STEPS) if steps is None else (list(steps) if isinstance(steps, (list, tuple)) else parse_price_steps(steps))
+    for name, default in (("tries_per_step", TRIES_PER_STEP), ("wait_for_offer_min", WAIT_FOR_OFFER_MIN), ("offer_poll_s", OFFER_POLL_S)):
+        v = getattr(a, name, None)
+        setattr(a, name, default if v is None else v)
+    if a.max_dph < 0:
+        sys.exit(f"launch: --max-dph must be 0 (no cap) or more (got {a.max_dph})")
+    if int(a.tries_per_step) < 1:
+        sys.exit(f"launch: --tries-per-step must be at least 1 (got {a.tries_per_step})")
+    if float(a.offer_poll_s) < 1:
+        sys.exit(f"launch: --offer-poll-s must be at least 1 second (got {a.offer_poll_s})")
+    if float(a.wait_for_offer_min) < 0:
+        sys.exit(f"launch: --wait-for-offer-min must be 0 (do not wait) or more (got {a.wait_for_offer_min})")
+
+
+def price_ladder(a) -> list[float]:
+    """The price limits a waiting search goes through, cheapest first: the steps below the cap, then the cap itself
+    (--max-dph, 1.70 by default; 0 = no cap, shown as the last rung 0). With no steps, the cap alone."""
+    cap = float(a.max_dph or 0)
+    return [x for x in a.price_steps if not cap or x < cap] + [cap]
+
+
+def rung_text(price: float) -> str:
+    return f"${price:.2f}/h" if price else "no price limit"
+
+
+def with_price(a, price: float):
+    """A copy of the settings whose price limit is `price` (0 = none): one rung of the ladder."""
+    b = copy.copy(a)
+    b.max_dph = price
+    return b
+
+
+def floors_text(a) -> str:
+    """The floors a search holds to, for the log: threads, RAM, link, price cap, GPUs, CPU name."""
+    cap = float(a.max_dph or 0)
+    parts = [f">= {a.min_cores} threads", f">= {a.min_ram_gb} GB RAM", f"reliability >= {a.min_reliability}"]
+    link = inet_floor(a)
+    parts.append(f"download >= {link:g} Mbps" if link > 0 else "any download speed")
+    parts.append(f"price cap {rung_text(cap)}")
+    if getattr(a, "gpus", 0):
+        parts.append(f">= {a.gpus} GPU(s)")
+    if a.cpu_match:
+        parts.append(f"CPU matching {a.cpu_match!r}")
+    return ", ".join(parts)
+
+
+def attempt_reaching(a, price: float, tries: int | None = None) -> int | None:
+    """The attempt of a waiting search at which the price limit first reaches `price`, or None above the cap."""
+    tries = int(tries if tries is not None else a.tries_per_step)
+    for i, rung in enumerate(price_ladder(a)):
+        if not rung or price <= rung:
+            return i * tries + 1
+    return None
+
+
+def closest_miss(a, rung: float) -> str:
+    """One log phrase about the nearest thing to a match, from one extra search that keeps every filter except that it
+    lifts the price to the cap and halves the thread floor (so the cheapest 200 offers are not all small machines):
+    the cheapest offer that meets everything but this step's price, and the biggest one under the thread floor."""
+    b = copy.copy(a)
+    floor = int(a.min_cores)
+    b.min_cores = max(1, floor // 2)
+    b.max_dph = float(a.max_dph or 0)
+    try:
+        rows = search_offers(b, verified=False)
+    except RuntimeError as e:
+        return f"closest miss unknown (the search failed: {redact(str(e))[:120]})"
+    cores = lambda o: float(o["cpu_cores_effective"])  # noqa: E731
+    dph = lambda o: float(o["dph_total"])  # noqa: E731
+    over_price = [o for o in rows if cores(o) >= floor and rung and dph(o) > rung]
+    under_floor = [o for o in rows if cores(o) < floor and (not rung or dph(o) <= rung)]
+    parts = []
+    if over_price:
+        o = min(over_price, key=lambda o: (dph(o), o["id"]))
+        n = attempt_reaching(a, dph(o))
+        parts.append(f"offer {o['id']} has {cores(o):.0f} threads but costs ${dph(o):.2f}/h, above this step's {rung_text(rung)}"
+                     + (f" (the ladder reaches it at attempt {n})" if n else ""))
+    if under_floor:
+        o = max(under_floor, key=lambda o: (cores(o), -dph(o)))
+        parts.append(f"offer {o['id']} costs ${dph(o):.2f}/h but has only {cores(o):.0f} threads (floor {floor})")
+    if not parts:
+        return (f"closest miss: none (no offer meets the other filters even with the price at the cap and "
+                f"the thread floor halved to {b.min_cores})")
+    return "closest miss: " + "; ".join(parts)
+
+
+def choose_or_wait(a) -> dict | None:
+    """`choose`, and when no offer matches, wait and search again instead of giving up (owner, 2026-10-16: "the launcher
+    must wait until it gets a cheap 190+ thread machine; there are many, they come every few minutes").
+
+    Every attempt is one search at one rung of the price ladder: --tries-per-step (3) attempts at each price step
+    (--price-steps 1.2,1.45,1.7 $/h), --offer-poll-s (60) seconds apart, then the cap (--max-dph, 1.70) until
+    --wait-for-offer-min (120) minutes are used up; the first offer that matches at the current rung is rented
+    (ranked by cost per unit of work among the matches at that rung). Every floor of the first search (threads, RAM,
+    GPU, link, reliability, the price cap) holds for every later one, a replacement search included: nothing is
+    relaxed to find a machine, and each replacement search starts the ladder again from the first step.
+    --wait-for-offer-min 0 is the old behaviour: one search, at the cap. A named offer (--offer-id) is looked at once.
+    Returns None when the wait is used up (or the run's own time limit comes first)."""
+    if getattr(a, "offer_id", None):
+        return choose(a)
+    load_bad_machines(a)
+    ladder = price_ladder(a)
+    wait_min, poll, tries = float(a.wait_for_offer_min), float(a.offer_poll_s), int(a.tries_per_step)
+    if wait_min <= 0:
+        return choose(with_price(a, ladder[-1]))
+    start = time.time()
+    end, why_end = start + wait_min * 60, f"{wait_min:g} min"
+    rs = getattr(a, "run_start", None)
+    if rs is not None:
+        for label, t in (("the run's time limit (--max-minutes)", a.max_minutes * 60 if getattr(a, "max_minutes", 0) > 0 else None),
+                         ("the hand-over time", a.handover_min * 60 if getattr(a, "handover_min", 0) else None)):
+            if t is not None and rs + t < end:
+                end, why_end = rs + t, label
+    attempt, failures = 0, 0
+    while True:
+        attempt += 1
+        step = min((attempt - 1) // tries, len(ladder) - 1)
+        rung = ladder[step]
+        elapsed = (time.time() - start) / 60
+        try:
+            best = choose(with_price(a, rung), quiet=attempt > 1)
+            failures = 0
+        except RuntimeError as e:
+            failures += 1
+            if attempt == 1 or failures >= 5:
+                raise
+            log(f"::warning::search failed at attempt {attempt} ({redact(str(e))[:200]}); counted as no offer")
+            best = None
+        if best:
+            if attempt > 1:
+                log(f"offer found at price step {step + 1}/{len(ladder)} ({rung_text(rung)}) after waiting {elapsed:.1f} min "
+                    f"(attempt {attempt})")
+            return best
+        now = time.time()
+        if now >= end:
+            log(f"gave up waiting for an offer after {(now - start) / 60:.0f} min ({attempt} attempts; limit: {why_end})")
+            return None
+        if attempt == 1:
+            log(f"no offer matches now; waiting up to {wait_min:g} min for one, searching every {poll:g} s "
+                f"({tries} attempts per price step, steps {', '.join(rung_text(x) for x in ladder)}); floors: {floors_text(a)}")
+        log(f"waiting for an offer: price step {step + 1}/{len(ladder)} ({rung_text(rung)}), attempt {attempt}, "
+            f"{elapsed:.1f} of {wait_min:g} min; no match; {closest_miss(a, rung)}")
+        time.sleep(min(poll, end - now))
+
+
+def plan_search(a) -> dict | None:
+    """What a run would do first, without waiting or renting (plan and --dry-run): the search at the first price step;
+    if that finds nothing, say what a real run would wait for, with the closest miss, and look once at the price cap to
+    show whether a real run would rent something after climbing the ladder. Returns the offer found, if any."""
+    load_bad_machines(a)
+    ladder = price_ladder(a)
+    wait_min = float(a.wait_for_offer_min)
+    first = ladder[0] if wait_min > 0 else ladder[-1]
+    best = choose(with_price(a, first))
+    if best or getattr(a, "offer_id", None):
+        return best
+    if wait_min <= 0:
+        log(f"no offer matches (floors: {floors_text(a)}); with --wait-for-offer-min 0 a run stops here")
+        return None
+    log(f"no offer matches at the first price step ({rung_text(first)}); a run would wait up to {wait_min:g} min for one, "
+        f"searching every {float(a.offer_poll_s):g} s, {int(a.tries_per_step)} attempts per price step "
+        f"({', '.join(rung_text(x) for x in ladder)}); floors: {floors_text(a)}; {closest_miss(a, first)}")
+    if len(ladder) > 1:
+        log(f"looking at the price cap {rung_text(ladder[-1])} to see what the ladder would reach")
+        best = choose(with_price(a, ladder[-1]), quiet=True)
+        if best:
+            n = attempt_reaching(a, float(best["dph_total"]))
+            log(f"at the price cap the best offer is {describe(best)}; a run would reach it at attempt {n} "
+                f"(about {(n - 1) * float(a.offer_poll_s) / 60:.0f} min from the start)")
+        else:
+            log("nothing matches even at the price cap right now")
+    return best
+
+
+# ------------------------------------------------------------------ machines that did not start
+
+def have_r2_env() -> bool:
+    return all(os.environ.get(n) for n in ("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET", "R2_S3_ENDPOINT"))
+
+
+def utc_to_epoch(text) -> float | None:
+    try:
+        return datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def epoch_to_utc(t: float) -> str:
+    return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def read_bad_machines() -> tuple[list[dict], bool]:
+    """(entries, readable) of R2 launcher/bad-machines.json. A missing file is readable and empty; a file that is
+    there but cannot be read (R2 error, not JSON) is not readable, and nothing is written over it."""
+    if not have_r2_env():
+        return [], False
+    try:
+        raw = r2_get(BAD_MACHINES_KEY)
+        if raw is None:
+            return [], not r2_exists(BAD_MACHINES_KEY)
+        d = json.loads(raw)
+    except (RuntimeError, OSError, ValueError) as e:
+        log(f"::warning::could not read {BAD_MACHINES_KEY} ({redact(str(e))[:150]}); no machine is excluded on its account")
+        return [], False
+    ms = d.get("machines") if isinstance(d, dict) else None
+    if not isinstance(ms, list):
+        log(f"::warning::{BAD_MACHINES_KEY} has no machine list; ignored")
+        return [], False
+    return [m for m in ms if isinstance(m, dict) and m.get("machine_id") is not None], True
+
+
+def load_bad_machines(a) -> None:
+    """Puts the machines listed in launcher/bad-machines.json in the last 24 hours into `a.bad_machines` (machine id ->
+    entry), which every search leaves out (the first, the replacements, plan); each is logged once per run."""
+    entries, _ = read_bad_machines()
+    now = time.time()
+    bad = {}
+    for e in entries:
+        t = utc_to_epoch(e.get("utc"))
+        if t is not None and now - t <= BAD_MACHINE_HOURS * 3600:
+            bad[e["machine_id"]] = e
+    a.bad_machines = bad
+    logged = getattr(a, "_bad_logged", None)
+    if logged is None:
+        logged = a._bad_logged = set()
+    for mid, e in bad.items():
+        if mid not in logged:
+            logged.add(mid)
+            log(f"excluding machine {mid} (host {e.get('host_id')}): {e.get('reason')} at {e.get('utc')}")
+
+
+NO_START_PREFIX = "no heartbeat within"  # the reasons watch() gives when the first heartbeat never came
+
+
+def start_failure_kind(reason: str) -> str | None:
+    """"container failed to start" or "never heartbeated" for the reasons of a machine that did not get going,
+    else None (a machine that failed later, or finished)."""
+    if reason.startswith(START_FAILED):
+        return "container failed to start"
+    if reason.startswith(NO_START_PREFIX):
+        return "never heartbeated"
+    return None
+
+
+def record_bad_machine(run_id: str, instance_id: int, best: dict, kind: str, detail: str) -> None:
+    """Remembers a machine whose container did not start (or that never heartbeated) in R2
+    launcher/bad-machines.json, so that no search leaves it in for 24 hours (read, add, write; a missing file is
+    fine, an unreadable one is left alone). A failed write is only logged."""
+    if not have_r2_env():
+        return
+    entries, readable = read_bad_machines()
+    if not readable:
+        log(f"::warning::{BAD_MACHINES_KEY} could not be read, so machine {best.get('machine_id')} is not recorded")
+        return
+    mid = best.get("machine_id", best.get("id"))
+    now = time.time()
+    keep = []
+    for e in entries:
+        t = utc_to_epoch(e.get("utc"))
+        if e.get("machine_id") != mid and t is not None and now - t <= BAD_MACHINE_KEEP_DAYS * 86400:
+            keep.append(e)
+    keep.append({"machine_id": mid, "host_id": best.get("host_id"), "offer_id": best.get("id"), "instance_id": instance_id,
+                 "run_id": run_id, "reason": kind, "detail": redact(detail)[:300], "utc": epoch_to_utc(now)})
+    try:
+        r2_put(BAD_MACHINES_KEY, json.dumps({"format": 1, "machines": keep}, indent=2).encode())
+    except (RuntimeError, OSError) as e:
+        log(f"::warning::could not write {BAD_MACHINES_KEY}: {redact(str(e))[:150]}")
+        return
+    log(f"remembered machine {mid} (host {best.get('host_id')}) as bad for {BAD_MACHINE_HOURS} h: {kind}")
 
 
 # ------------------------------------------------------------------ run
@@ -1211,12 +1589,20 @@ def cmd_run(a) -> int:
     a.deadline_utc = manifest.get("deadline_utc")
     a.exclude_machines = set()
     a.exclude_offers = set()
-    best = choose(a)
-    if not best:
-        sys.exit("launch: no offer matches the filters")
+    a.run_start = time.time()
+    finalize_settings(a)
     if a.dry_run:
+        # Nothing is waited for or rented: say what a real run would do.
+        best = plan_search(a)
+        if not best:
+            if float(a.wait_for_offer_min) <= 0:
+                sys.exit("launch: no offer matches the filters")
+            log("dry run: no offer to rent right now; a real run would wait as described above")
         log("dry run: would upload manifest and create the instance:\n" + json.dumps(manifest, indent=2))
         return 0
+    best = choose_or_wait(a)
+    if not best:
+        sys.exit("launch: no offer matches the filters")
     r2_put(f"runs/{run_id}/manifest.json", json.dumps(manifest, indent=2).encode())
     run_start = time.time()
     attempts: list[dict] = []
@@ -1321,6 +1707,10 @@ def rent_and_watch(a, run_id: str, best: dict | None, resumable: bool, run_start
             log(f"instance {instance_id} keeps working; the vast-cleanup workflow watches it from now on")
             break
         log(f"instance {instance_id} ended: {reason}")
+        kind = None if final else start_failure_kind(reason)
+        if kind:
+            # Its container did not start, or it never heartbeated: no search takes this machine again for 24 hours.
+            record_bad_machine(run_id, instance_id, best, kind, reason)
         # A container that never started ran nothing, so even a format-1 run is safe to retry.
         start_failed = reason.startswith(START_FAILED)
         if final or not ((resumable and replaceable) or start_failed):
@@ -1518,7 +1908,7 @@ def rent(a, run_id: str, first: dict | None = None) -> tuple[dict | None, int | 
     best from a fresh search, up to MAX_CREATE_TRIES offers."""
     for attempt in range(1, MAX_CREATE_TRIES + 1):
         try:
-            best = first if attempt == 1 and first else choose(a)
+            best = first if attempt == 1 and first else choose_or_wait(a)
         except RuntimeError as e:
             # e.g. vast's daily search quota (429): nothing more is rented; the run's report is
             # still written (before, the exception skipped it).
@@ -1777,10 +2167,13 @@ def cmd_plan(a) -> int:
     if a.manifest:
         text = a.manifest if a.manifest.lstrip().startswith("{") else open(a.manifest, encoding="utf-8").read()
         apply_machine(a, json.loads(text))
-    log("query: " + offer_query(a) + " (type on-demand)")
+    a.exclude_machines = set()
+    a.exclude_offers = set()
+    finalize_settings(a)
+    log("query: " + offer_query(with_price(a, price_ladder(a)[0])) + " (type on-demand; the first price step)")
     if not getattr(a, "verified_only", False) and not getattr(a, "offer_id", None):
         log("if no verified offer matches, the search is repeated with verified=any (owner rule 2026-10-16; --verified-only turns that off)")
-    return 0 if choose(a) else 1
+    return 0 if plan_search(a) or float(a.wait_for_offer_min) > 0 else 1
 
 
 def cmd_put_input(a) -> int:
@@ -1825,12 +2218,14 @@ def cmd_delete_key(a) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def offer_args(s):
-        s.add_argument("--min-cores", type=int, default=16)
+        s.add_argument("--min-cores", type=int, default=MIN_CORES,
+                       help=f"effective cores (threads) the machine must have (default {MIN_CORES}, owner 2026-10-16); the launcher "
+                            "waits for such a machine rather than take a smaller one, a replacement search included")
         s.add_argument("--min-ram-gb", type=int, default=32)
         s.add_argument("--min-reliability", type=float, default=MIN_RELIABILITY,
                        help="the host reliability floor (default 0.90, the owner's rule of 2026-10-16); raise it for a run that wants a steadier host")
@@ -1842,13 +2237,26 @@ def main(argv: list[str] | None = None) -> int:
                             "or the larger of the two wins when both are given). Under 200 Mbps the ranking adds a "
                             "penalty (without --cheapest); --offer-id only reports a slower link")
         s.add_argument("--premium", type=float, default=0.20, help="speed premium margin (owner's 20%% rule)")
-        s.add_argument("--max-dph", type=float, default=None, help="max total $/hour for the offer")
+        s.add_argument("--max-dph", type=float, default=None,
+                       help=f"price cap in $/hour for every search and for --offer-id (default {MAX_DPH:.2f}, owner 2026-10-16; "
+                            "0 = no cap); the price steps below it are tried first")
+        s.add_argument("--price-steps", default=None,
+                       help="look for the cheapest first: the price limits ($/h, ascending, comma-separated) of the waiting "
+                            "search, --tries-per-step attempts at each, then the cap (--max-dph) until the wait runs out "
+                            f"(default {','.join(f'{x:g}' for x in PRICE_STEPS)}; 'off' = the cap alone)")
+        s.add_argument("--tries-per-step", type=int, default=None,
+                       help=f"attempts at each price step before the next (default {TRIES_PER_STEP}), --offer-poll-s apart")
+        s.add_argument("--wait-for-offer-min", type=float, default=None,
+                       help=f"when no offer matches, wait and search again for up to this many minutes (default {WAIT_FOR_OFFER_MIN}; "
+                            "0 = do not wait: one search at the cap, then stop). Also applies to every replacement search")
+        s.add_argument("--offer-poll-s", type=float, default=None,
+                       help=f"seconds between two searches while waiting for an offer (default {OFFER_POLL_S})")
         s.add_argument("--cpu-match", default="", help="regex the offer's CPU name must match (e.g. EPYC)")
         s.add_argument("--cheapest", action="store_true", help="test runs: take the cheapest $/hour offer, not the best cost per work")
         s.add_argument("--cpu-only", action="store_true",
                        help="CPU-only job: drop the GPU compute-capability/CUDA filters (they only matter for PyTorch training)")
         s.add_argument("--gpus", type=int, default=0,
-                       help="GPU job: exactly this many GPUs on the machine (0 = no GPU need; the manifest's machine.gpus also sets it)")
+                       help="GPU job: at least this many GPUs on the machine (0 = no GPU need; the manifest's machine.gpus also sets it)")
         s.add_argument("--min-gpu-ram-gb", type=int, default=0, help="GPU job: memory per GPU, in GB")
         s.add_argument("--min-compute-cap", type=int, default=MIN_COMPUTE_CAP,
                        help="GPU job: lowest compute capability x 100 (default 600 = 6.0, Pascal; below 1000 always)")
@@ -1929,7 +2337,11 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("delete-key", help="delete one API key by id (a run's destroy-only key)")
     s.add_argument("key_id")
     s.set_defaults(fn=cmd_delete_key)
-    a = p.parse_args(argv)
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    a = build_parser().parse_args(argv)
     return a.fn(a)
 
 

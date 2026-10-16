@@ -60,19 +60,24 @@ class VastMarketTest(unittest.TestCase):
         q = vm.queries(16, 32)
         e = q["eligible"]
         self.assertNotIn("verified", e)                      # every host is asked for; unverified ones are flagged
-        self.assertEqual(e["inet_down"], {"gte": 500.0})     # the launcher's inet_down>=500 (offer_rules.MIN_INET_DOWN)
+        self.assertEqual(e["inet_down"], {"gte": 100.0})     # the launcher's inet_down>=100 (offer_rules.MIN_INET_DOWN)
+        self.assertEqual(e["dph_total"], {"lte": 1.7})       # and its price cap (offer_rules.MAX_DPH)
         self.assertEqual(e["reliability"], {"gt": 0.9})
         self.assertEqual(e["inet_down_cost"], {"lte": 0.10})
         self.assertEqual(e["num_gpus"], {"gte": 1})
         self.assertEqual(e["gpu_frac"], {"eq": 1})
         self.assertNotIn("unverified", q)                    # no longer a reason to leave an offer out
-        self.assertEqual(q["slow_link"]["inet_down"], {"lt": 500.0})
+        self.assertEqual(q["slow_link"]["inet_down"], {"lt": 100.0})
         self.assertEqual({k: v for k, v in q["slow_link"].items() if k != "inet_down"},
                          {k: v for k, v in e.items() if k != "inet_down"})
+        self.assertEqual(q["price_over_cap"]["dph_total"], {"gt": 1.7})     # kept visible as "not rentable"
         # The value passed on the command line replaces the default; 0 removes the filter (and the "slow" search).
         self.assertEqual(vm.queries(16, 32, 300)["eligible"]["inet_down"], {"gte": 300.0})
         self.assertNotIn("inet_down", vm.queries(16, 32, 0)["eligible"])
         self.assertNotIn("slow_link", vm.queries(16, 32, 0))
+        self.assertEqual(vm.queries(16, 32, None, 2.5)["eligible"]["dph_total"], {"lte": 2.5})
+        self.assertNotIn("dph_total", vm.queries(16, 32, None, 0)["eligible"])
+        self.assertNotIn("price_over_cap", vm.queries(16, 32, None, 0))
 
     def test_thresholds_are_the_launchers_own(self):
         import offer_rules
@@ -81,7 +86,7 @@ class VastMarketTest(unittest.TestCase):
                          (offer_rules.MIN_RELIABILITY, offer_rules.MAX_NET_COST, offer_rules.MIN_INET_DOWN))
 
     def test_unverified_eligible_offers_are_flagged_in_the_report(self):
-        eligible = {"reliability": {"gt": 0.9}, "inet_down": {"gte": 500.0}, "cpu_cores_effective": {"gte": 16}}
+        eligible = {"reliability": {"gt": 0.9}, "inet_down": {"gte": 100.0}, "dph_total": {"lte": 1.7}, "cpu_cores_effective": {"gte": 16}}
         offers = [dict(offer(1, "Fast", 128, 1.0), verification="verified", inet_down=900.0),
                   dict(offer(2, "Fast", 128, 1.2), verification="unverified", inet_down=900.0)]
         snap = {"utc": "t", "queries": {"eligible": eligible}, "offers": offers}
@@ -90,7 +95,7 @@ class VastMarketTest(unittest.TestCase):
                                t1_table_gb=64, include_other=False))()
         text = vm.report(snap, self.sp, a)
         self.assertIn("any host (verified preferred, unverified ones flagged)", text)
-        self.assertIn("download >= 500 Mbps", text)
+        self.assertIn("download >= 100 Mbps, price <= $1.70/h", text)
         flagged = [ln for ln in text.splitlines() if "unverified host" in ln and ln.lstrip().startswith("2 ")]
         self.assertTrue(flagged, text)
         self.assertFalse([ln for ln in text.splitlines() if ln.lstrip().startswith("1 ") and "unverified host" in ln])
