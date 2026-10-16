@@ -39,7 +39,8 @@
 //!
 //! The chunk work itself is done by the sibling release binaries (`difftest`, `equity`,
 //! `solver-spike`, `solver-identity`, `search`) found next to this executable; `arena_blocks`
-//! chunks play in-process through `arena` and `search` (the bot registry).
+//! chunks play in-process through `arena` and `search` (the bot registry); `hybrid_rung` chunks
+//! also train a network in Python through `uv` (`hybrid.rs`).
 
 use std::fs;
 use std::io::Write;
@@ -51,6 +52,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 
 mod bundle;
+mod hybrid;
 mod machine;
 mod measure;
 mod mem;
@@ -732,8 +734,22 @@ impl Ctx {
     /// update `progress` from the child's own progress file.
     fn run_child_with(
         &mut self,
+        cmd: Command,
+        log: &str,
+        poll: &mut dyn FnMut(&mut Ctx),
+    ) -> Result<(), String> {
+        self.run_child_io(cmd, log, None, None, poll)
+    }
+
+    /// [`Ctx::run_child_with`], with the child's stdout written to `stdout` (replaced) instead of
+    /// the log when given (a report the child prints, e.g. `search hybrid-check`'s tables), and
+    /// the child killed (an error) if it runs longer than `limit`.
+    fn run_child_io(
+        &mut self,
         mut cmd: Command,
         log: &str,
+        stdout: Option<&Path>,
+        limit: Option<Duration>,
         poll: &mut dyn FnMut(&mut Ctx),
     ) -> Result<(), String> {
         if let Some(why) = stop::requested() {
@@ -749,14 +765,23 @@ impl Ctx {
             .open(&log_path)
             .map_err(|e| format!("open {}: {e}", log_path.display()))?;
         let f2 = f.try_clone().map_err(|e| e.to_string())?;
-        cmd.stdin(Stdio::null()).stdout(f).stderr(f2);
+        let out = match stdout {
+            Some(p) => {
+                if let Some(d) = p.parent() {
+                    fs::create_dir_all(d).map_err(|e| e.to_string())?;
+                }
+                fs::File::create(p).map_err(|e| format!("create {}: {e}", p.display()))?
+            }
+            None => f,
+        };
+        cmd.stdin(Stdio::null()).stdout(out).stderr(f2);
         cmd.env("RAYON_NUM_THREADS", self.threads.to_string());
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("cannot start {cmd:?}: {e}"))?;
         self.child = Some(child.id());
         self.cpu.prime_tree(child.id());
-        let outcome = self.wait_child(&mut child, &cmd, log, poll);
+        let outcome = self.wait_child(&mut child, &cmd, log, limit, poll);
         self.child = None;
         outcome
     }
@@ -766,10 +791,20 @@ impl Ctx {
         child: &mut std::process::Child,
         cmd: &Command,
         log: &str,
+        limit: Option<Duration>,
         poll: &mut dyn FnMut(&mut Ctx),
     ) -> Result<(), String> {
+        let started = Instant::now();
         loop {
             poll(self);
+            if let Some(l) = limit.filter(|&l| started.elapsed() > l) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "{log}: still running after its time limit of {:.0} min; killed",
+                    l.as_secs_f64() / 60.0
+                ));
+            }
             if let Some(why) = stop::requested() {
                 // Whatever the child finished is already in its files (they are written as each
                 // piece finishes); the run uploads them next.
@@ -1369,6 +1404,7 @@ fn run_kind(ctx: &mut Ctx, kind: &str, params: &Value) -> Result<Value, String> 
         "solver_spike" => spike::chunk(ctx, params)?,
         "search_measure" => measure::chunk(ctx, params)?,
         "t1bench" => t1bench::chunk(ctx, params)?,
+        "hybrid_rung" => hybrid::chunk(ctx, params)?,
         "arena_block" => {
             return Err("arena_block chunks need the arena binary (not built yet)".into());
         }
@@ -1568,6 +1604,45 @@ mod tests {
             );
         }
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A child past its time limit is killed and the step fails (`hybrid_rung`'s download, GPU
+    /// check and training limits); a child within it, and one with no limit, run to the end.
+    #[cfg(unix)]
+    #[test]
+    fn child_past_its_time_limit_is_killed() {
+        let root = std::env::temp_dir().join(format!("runner-limit-{}", std::process::id()));
+        let mut ctx = Ctx::local("limit", &root, 1);
+        let t0 = Instant::now();
+        let mut c = Command::new("sleep");
+        c.arg("30");
+        let e = ctx
+            .run_child_io(
+                c,
+                "sleep.log",
+                None,
+                Some(Duration::from_millis(500)),
+                &mut |_| {},
+            )
+            .expect_err("killed");
+        assert!(
+            e.contains("sleep.log: still running after its time limit"),
+            "{e}"
+        );
+        assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
+        let mut c = Command::new("sh");
+        c.args(["-c", "echo report"]);
+        let out = root.join("out.txt");
+        ctx.run_child_io(
+            c,
+            "sh.log",
+            Some(&out),
+            Some(Duration::from_secs(20)),
+            &mut |_| {},
+        )
+        .expect("within its limit");
+        assert_eq!(fs::read_to_string(&out).expect("stdout file"), "report\n");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

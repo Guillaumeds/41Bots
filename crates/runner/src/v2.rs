@@ -29,7 +29,8 @@
 //! remote call runs beside the heartbeat (`Run::net_call`), each with hard limits (`remote.rs`).
 //! Heartbeats carry `upload_failures`, `other_net_failures` and `last_upload_ok_s`, and the
 //! running chunks' progress estimates (`progress.chunk_eta`; with one chunk running also
-//! `progress.eta`, priced over the whole run).
+//! `progress.eta`, priced over the whole run) and, for kinds that name their steps, each running
+//! chunk's step and counts (`progress.chunk_steps`, e.g. a `hybrid_rung`'s label rows or epoch).
 //!
 //! Warnings a running chunk puts in its own heartbeat (`progress.warnings`, e.g. a transposition
 //! table size lowered to fit memory) appear in the run's heartbeat as `<stream>/<index>: …`
@@ -48,8 +49,10 @@
 //! - `suitability`, `agree`, `belief_bench`: `search <kind with - for _> --seed <seed>
 //!   [--hands <params.hands_per_chunk>] [--equity <input>] [params.args…] --out out/`;
 //! - `difftest`, `equity_sweep`: as in format 1 with `seed` = the chunk seed;
-//! - `benchmark`, `solver_spike`, `search_measure`: as in format 1, params unchanged, except
-//!   that `search_measure`'s `params.ids_input` names an input whose path becomes `params.ids`.
+//! - `benchmark`, `solver_spike`, `search_measure`, `t1bench`, `hybrid_rung`: as in format 1,
+//!   params unchanged, except that `search_measure`'s `params.ids_input` names an input whose
+//!   path becomes `params.ids`; `hybrid_rung` (`hybrid.rs`) trains in Python and keeps its label
+//!   shards outside `out/` (uploaded content-addressed when `params.upload_shards`).
 //!
 //! The equity input is `inputs.equity` (or the input named by `params.equity_input`).
 //!
@@ -223,7 +226,7 @@ fn worker_inner(spec_path: &Path) -> Result<(), String> {
             }
             // A prebuilt equity table among the inputs (`params.equity_input`, default
             // `equity`) replaces building it; its hash is still checked against the record.
-            if ["search_measure", "t1bench"].contains(&kind.as_str())
+            if ["search_measure", "t1bench", "hybrid_rung"].contains(&kind.as_str())
                 && let Ok(path) = equity()
                 && let Some(o) = p.as_object_mut()
             {
@@ -378,6 +381,8 @@ struct Run {
     last_partial: Instant,
     /// The progress estimates of the running chunks (`<stream>/<index>`: their `progress.eta`).
     chunk_etas: BTreeMap<String, Value>,
+    /// The steps of the running chunks that name one (`<stream>/<index>`: `chunk_step`).
+    chunk_steps: BTreeMap<String, Value>,
     /// The container's memory, for the check that chunks running together fit in it.
     limit: crate::mem::Limit,
     /// Chunks whose wait for memory has been logged.
@@ -450,6 +455,7 @@ pub fn run(manifest: &Value, work: &Path) -> ExitCode {
         phase: "start".into(),
         last_partial: Instant::now(),
         chunk_etas: BTreeMap::new(),
+        chunk_steps: BTreeMap::new(),
         limit: crate::mem::Sys::host().limit(),
         mem_waits: BTreeSet::new(),
     };
@@ -1043,6 +1049,13 @@ impl Run {
                     chunk_eta(&r.dir).map(|e| (format!("{name}/{}", r.index), e))
                 })
                 .collect();
+            self.chunk_steps = running
+                .iter()
+                .filter_map(|r| {
+                    let name = &self.m.streams[r.stream].name;
+                    chunk_step(&r.dir).map(|e| (format!("{name}/{}", r.index), e))
+                })
+                .collect();
             // Every upload_every_s, the running chunks' changed files go to their live prefixes
             // in the background (checkpoints first), so a replacement machine can continue them.
             if !stopped
@@ -1105,6 +1118,7 @@ impl Run {
         self.partial_ok = false;
         self.warnings.clear();
         self.chunk_etas.clear();
+        self.chunk_steps.clear();
         match error {
             Some(e) => Err(e),
             None => Ok(()),
@@ -1189,6 +1203,9 @@ impl Run {
                                    "partial_cpu_ok": self.partial_ok, "warnings": self.warnings });
         if !self.chunk_etas.is_empty() {
             progress["chunk_eta"] = json!(self.chunk_etas);
+        }
+        if !self.chunk_steps.is_empty() {
+            progress["chunk_steps"] = json!(self.chunk_steps);
         }
         if let [(_, e)] = self.chunk_etas.iter().collect::<Vec<_>>()[..] {
             // One chunk running: its estimate is the run's, priced over the whole run.
@@ -1336,6 +1353,31 @@ fn chunk_eta(dir: &Path) -> Option<Value> {
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .map(|v| v["progress"]["eta"].clone())
         .filter(Value::is_object)
+}
+
+/// The step a running chunk's own heartbeat names (`progress.step`, e.g. a `hybrid_rung`'s
+/// `labels random (1 of 3)`), with its counts and its training progress, for the run's heartbeat
+/// (`progress.chunk_steps`); `None` for kinds that name no step.
+fn chunk_step(dir: &Path) -> Option<Value> {
+    let v: Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("heartbeat.json")).ok()?).ok()?;
+    let p = &v["progress"];
+    let step = p["step"].as_str()?;
+    let mut out = json!({ "step": step });
+    let keep = |k: &str| {
+        k.ends_with("_done")
+            || k.ends_with("_total")
+            || k.starts_with("train_")
+            || ["device", "rows_done", "rows_total", "verdict"].contains(&k)
+    };
+    if let Some(o) = p.as_object() {
+        for (k, x) in o {
+            if keep(k) && k != "steps_done" && !x.is_object() {
+                out[k.as_str()] = x.clone();
+            }
+        }
+    }
+    Some(out)
 }
 
 /// The warnings a running chunk's own heartbeat lists (`progress.warnings`).

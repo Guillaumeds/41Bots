@@ -14,6 +14,9 @@
 //!   *`chunk_sizes` (one per chunk: longest first), *`est_seconds` (the duration assumed by the
 //!   deadline rule until a chunk of the kind has finished), `blocks_per_chunk`, `sprt` (`s0`,
 //!   `s1`, `alpha`, `beta`, `max_blocks`, *`reject_only`); the rest goes to the chunk kind.
+//! - *`machine` (top level): what the launcher rents (`python/launcher/launch.py`, e.g.
+//!   `{"gpus": 1, "min_gpu_ram_gb": 4, "min_cores": 128, "disk_gb": 80}`); the runner ignores it
+//!   (it is kept in the final manifest with the rest).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -22,7 +25,7 @@ use engine::rng::Rng;
 use serde_json::{Value, json};
 
 /// Kinds a format-2 stream may run.
-pub const KINDS: [&str; 11] = [
+pub const KINDS: [&str; 12] = [
     "difftest",
     "equity_sweep",
     "benchmark",
@@ -34,6 +37,7 @@ pub const KINDS: [&str; 11] = [
     "suitability",
     "agree",
     "belief_bench",
+    "hybrid_rung",
 ];
 
 /// The keys of a stream object; everything else goes in `params`.
@@ -358,6 +362,10 @@ pub fn parse_v2(v: &Value) -> Result<Manifest2, String> {
             return Err(format!(
                 "stream `{name}`: until_decided needs kind arena_blocks with sprt params"
             ));
+        }
+        // A hybrid rung's settings are checked here, so a typo stops the run before it starts.
+        if kind == "hybrid_rung" {
+            crate::hybrid::parse(&params).map_err(|e| format!("stream `{name}`: {e}"))?;
         }
         if kind == "arena_blocks" {
             for k in ["a", "b"] {
