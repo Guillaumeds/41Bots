@@ -136,6 +136,39 @@ launcher checks they are in R2 before renting. A generated golden set is now als
 `inputs/sha256/<hex>`, and `rung.json`'s `golden.reuse_params` gives the settings that reuse it.
 Proposal: `docs/vast/m3-hybrid-t3-round2.manifest.json` (placeholders to fill in first).
 
+## The race harvest (lead-4)
+
+Why: `docs/m3-hybrid/rung1.md`, "Why seats 3-4 fail: the race for the money". A fourth optional
+label source, made after the harvest shard and trained on after it: `labels_race` (rows; default 0,
+none), `labels_race_seed` (default 105; never 1 and never another shard's seed), `race_classes`
+(default `"2,4"`: the race classes whose reached positions are all kept), `race_cap` (default 256
+of them per decision), `race_strata` (default `"4"`; `"2,4"` also works: the strata the decisions'
+match states are drawn from), `race_positions` (the shares of decisions by the decider's seat band,
+default the harvest's `harvest_positions`) and `race_other_cap` (default 0: positions of the other
+classes kept per decision, so the shard holds race positions only). It is `search labels --source
+harvest --harvest-cap <race_other_cap> --harvest-positions <race_positions> --harvest-strata
+<race_strata> --harvest-race-classes <race_classes> --harvest-race-cap <race_cap>`, with
+`--harvest-net` when `harvest_net` is given (then a race harvest alone may use it). The race
+settings are refused when `labels_race` is 0. `rung.json` records them under `params.race`, and
+each shard's rows by race class (from its sidecar's `rows_by_race_class`) under `labels`; the
+training report gives the validation error by race class (`float.error_by_race_class`,
+`int.error_by_race_class`, and each epoch's `val_sd_by_race_class` in the history).
+
+Cost: 1M race rows at trick 4 take 0.08 thread-seconds per 1,000 rows (27 s on the 4 threads of
+the build VM; about 2 s for 10M on 384 threads plus writing the 10.8 GB shard): cheaper than the
+plain harvest per row, because race-rich stratum-4 decisions give 43 rows each. They are 52% class
+4 and 48% class 2.
+
+Proposal `docs/vast/m3-hybrid-lead-4.manifest.json` (not run): 16M random play (seed 151), 4M
+rules-v1 (152), 10M harvest (154, cap 64, seats 0.3/0.55/0.15), 10M race (155, classes 2 and 4,
+cap 256, stratum 4, the same seat shares, no other classes), 100,000 validation (201),
+1024-512-128, patience 6, the trick-3 golden set (400 x 320, seed 1) generated as before. Same
+size, time and machine as lead-3c (40M rows). The golden set is byte-identical when regenerated;
+to reuse lead-3c's files instead, upload them (`put-input`) and add `golden_decisions_input`
+`inputs/sha256/e195e7739ce257d0fdaf99cfb6780e9d7b1954a922f22771c721ea62cff6e3b4` and
+`golden_worlds_input` `inputs/sha256/c1404d874352b6d46546322891033e87b23c6a2218f55b4af10b98d37fd13911`
+(`decisions-t3.jsonl` and `exact-t3-n320.jsonl` of lead-3c's bundle).
+
 ## Train only (O_2), and the trained network shared
 
 `"check": false` makes a train-only rung: labels and training as above, but no golden set and no

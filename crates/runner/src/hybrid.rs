@@ -21,7 +21,16 @@
 //! `harvest_net` (none): a stored integer network (`int.safetensors` of an earlier run, the
 //! previous round's O_cut) whose values drive the harvest's search instead of exact ones (`search
 //! labels --harvest-net`: only the sampled positions are solved exactly, the way to harvest at
-//! trick 3), given by its key `inputs/sha256/<hex>` (or `sha256:<hex>`). `golden_decisions_input`
+//! trick 3), given by its key `inputs/sha256/<hex>` (or `sha256:<hex>`); it drives the race
+//! harvest's search too.
+//! The race harvest (docs/m3-hybrid/rung1.md, "Why seats 3-4 fail"; `search labels --source
+//! harvest --harvest-race-classes …`): `labels_race` (rows, default 0: none), `labels_race_seed`
+//! (105), `race_classes` (`"2,4"`: the race classes whose reached positions are kept, up to
+//! `race_cap`, 256, per decision), `race_strata` (`"4"`: the strata its decisions are drawn
+//! from), `race_positions` (the shares of decisions by the decider's position band, default the
+//! harvest's `harvest_positions`) and `race_other_cap` (0: the other classes' positions kept per
+//! decision, so by default the shard holds race positions only); the shard joins the training set
+//! after the harvest shard, and its settings are refused when `labels_race` is 0. `golden_decisions_input`
 //! and `golden_worlds_input` (none; both or neither): a stored golden set (a decisions file and its
 //! exact worlds file, by key) reused instead of generated (step 5); `verify_pct` must then be at
 //! least 1 (spec §4: reuse after a byte-identical recheck).
@@ -58,9 +67,9 @@
 //!    usable threads, said in the heartbeat's warnings, on stderr and in `rung.json` (never in
 //!    silence); with `cuda` the chunk fails. Writes `out/hybrid/device.json` (GPU name, driver,
 //!    PyTorch, CUDA and cuDNN versions).
-//! 4. **Labels** (`search labels`, all usable threads): the random-play, rules-v1 and harvested
-//!    training shards (a count of 0 skips one) and the validation shard (random play), at the
-//!    start of trick `cut`. The shards (about 1 KB a row: 4 GB for 4M) stay outside `out/`; their sidecars
+//! 4. **Labels** (`search labels`, all usable threads): the random-play, rules-v1, harvested and
+//!    race-harvested training shards (a count of 0 skips one) and the validation shard (random
+//!    play), at the start of trick `cut`; `rung.json` records each shard's rows by race class. The shards (about 1 KB a row: 4 GB for 4M) stay outside `out/`; their sidecars
 //!    (with the shard's SHA-256) go to `out/hybrid/labels/`. With `upload_shards`, each shard is
 //!    hashed (it must match its sidecar) and uploaded content-addressed to `inputs/sha256/<hex>`
 //!    (skipped when already there; checked by size), and `out/hybrid/shards.json` lists them in
@@ -111,7 +120,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
-use search::oracle_labels::{HARVEST_CAP, HARVEST_SHARES, parse_band_shares};
+use search::oracle_labels::{
+    HARVEST_CAP, HARVEST_SHARES, RACE_CAP, RACE_CLASSES, RaceKeep, parse_band_shares,
+    parse_race_classes, parse_strata,
+};
 
 use crate::bundle::sha256_file;
 use crate::remote::{Remote, fetch_input, input_hex, input_key, put_input};
@@ -119,7 +131,7 @@ use crate::spike::build_table_from;
 use crate::{Ctx, sibling};
 
 /// The settings a `hybrid_rung` chunk takes; any other key is refused.
-pub(crate) const KEYS: [&str; 39] = [
+pub(crate) const KEYS: [&str; 46] = [
     "cut",
     "check",
     "labels_random",
@@ -131,6 +143,13 @@ pub(crate) const KEYS: [&str; 39] = [
     "harvest_cap_per_decision",
     "harvest_positions",
     "harvest_net",
+    "labels_race",
+    "labels_race_seed",
+    "race_classes",
+    "race_cap",
+    "race_strata",
+    "race_positions",
+    "race_other_cap",
     "val_count",
     "val_seed",
     "golden_trick",
@@ -201,7 +220,7 @@ impl Device {
 /// One label shard to make.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct LabelSet {
-    /// `random`, `rules`, `harvest` or `val` (the file is `t<cut>-<name>-s<seed>.npy`).
+    /// `random`, `rules`, `harvest`, `race` or `val` (the file is `t<cut>-<name>-s<seed>.npy`).
     pub name: &'static str,
     /// `search labels --source`.
     pub source: &'static str,
@@ -209,6 +228,23 @@ pub(crate) struct LabelSet {
     pub seed: u64,
     /// More `search labels` arguments (the harvest's settings).
     pub args: Vec<String>,
+}
+
+/// The race harvest's settings (`labels_race`; docs/m3-hybrid/rung1.md, "Why seats 3-4 fail"),
+/// as given to `search labels --source harvest`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RaceSettings {
+    /// `race_classes`: the race classes kept up to `cap` (ascending).
+    pub classes: Vec<u8>,
+    /// `race_cap`: at most this many positions of the race classes per decision.
+    pub cap: u64,
+    /// `race_strata`: the strata the decisions are drawn from (ascending).
+    pub strata: Vec<u8>,
+    /// `race_positions`: the shares of decisions by the decider's position band.
+    pub positions: String,
+    /// `race_other_cap`: at most this many positions of the other classes per decision (0:
+    /// race positions only).
+    pub other_cap: u64,
 }
 
 /// A `hybrid_rung` chunk's settings, checked.
@@ -243,9 +279,11 @@ pub(crate) struct Params {
     pub compare_cpu: bool,
     pub upload_shards: bool,
     /// `harvest_net`: the SHA-256 of the integer network (`int.safetensors` of an earlier run,
-    /// stored at `inputs/sha256/<hex>`) whose values drive the harvest's search; `None`: exact
-    /// values at the frontier.
+    /// stored at `inputs/sha256/<hex>`) whose values drive the harvest's search (and the race
+    /// harvest's); `None`: exact values at the frontier.
     pub harvest_net: Option<String>,
+    /// The race harvest's settings, when `labels_race` is above 0.
+    pub race: Option<RaceSettings>,
     /// `golden_decisions_input` and `golden_worlds_input`: the SHA-256 of a stored golden set's
     /// decisions and exact worlds files, reused instead of generated; `None`: generated.
     pub golden_inputs: Option<(String, String)>,
@@ -274,6 +312,10 @@ impl Params {
             "val": set(&self.val),
             "golden": golden,
             "harvest_net": self.harvest_net.as_deref().map(input_key),
+            "race": self.race.as_ref().map(|r| json!({
+                "classes": r.classes, "cap": r.cap, "strata": r.strata,
+                "positions": r.positions, "other_cap": r.other_cap,
+            })),
             "start_hands": self.start_hands, "tt_mb": self.tt_mb, "verify_pct": self.verify_pct,
             "net": { "widths": self.widths, "head": self.head, "epochs": self.epochs,
                      "batch": self.batch, "lr": self.lr, "patience": self.patience,
@@ -422,10 +464,18 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
             )),
         }
     };
+    let mut race = set(
+        "race",
+        "harvest",
+        "labels_race",
+        "labels_race_seed",
+        (0, 105),
+    )?;
     let harvest_net = input("harvest_net")?;
-    if harvest_net.is_some() && harvest.count == 0 {
+    if harvest_net.is_some() && harvest.count == 0 && race.count == 0 {
         return Err(
-            "hybrid_rung: harvest_net drives the harvest's search: it needs labels_harvest above 0"
+            "hybrid_rung: harvest_net drives the harvest's search: it needs labels_harvest or \
+             labels_race above 0"
                 .into(),
         );
     }
@@ -459,17 +509,85 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         "--harvest-cap".into(),
         cap.to_string(),
         "--harvest-positions".into(),
-        shares,
+        shares.clone(),
     ];
+    // The race harvest (`labels_race`): its settings are refused without it, not ignored.
+    let race_keys = [
+        "labels_race_seed",
+        "race_classes",
+        "race_cap",
+        "race_strata",
+        "race_positions",
+        "race_other_cap",
+    ];
+    let race_settings = if race.count == 0 {
+        if let Some(k) = race_keys.iter().find(|k| o.contains_key(**k)) {
+            return Err(format!(
+                "hybrid_rung: {k} is set but labels_race is 0: the race harvest's settings need \
+                 labels_race above 0"
+            ));
+        }
+        None
+    } else {
+        let classes = s("race_classes", RACE_CLASSES)?;
+        let classes = RaceKeep {
+            classes: parse_race_classes(&classes)
+                .map_err(|e| format!("hybrid_rung: race_classes: {e}"))?,
+            cap: 1,
+        }
+        .list();
+        let race_cap = u("race_cap", u64::from(RACE_CAP))?;
+        if !(1..=u64::from(u32::MAX)).contains(&race_cap) {
+            return Err("hybrid_rung: race_cap must be at least 1".into());
+        }
+        let strata = parse_strata(&s("race_strata", "4")?)
+            .map_err(|e| format!("hybrid_rung: race_strata: {e}"))?;
+        let positions = s("race_positions", &shares)?;
+        parse_band_shares(&positions)
+            .map_err(|e| format!("hybrid_rung: race_positions: {e}"))
+            .and_then(|w| {
+                if w.iter().sum::<u64>() > 1 << 24 {
+                    Err(format!(
+                        "hybrid_rung: race_positions {positions:?}: use fewer decimals"
+                    ))
+                } else {
+                    Ok(())
+                }
+            })?;
+        let other_cap = u("race_other_cap", 0)?;
+        if other_cap > u64::from(u32::MAX) {
+            return Err("hybrid_rung: race_other_cap is too large".into());
+        }
+        let list = |v: &[u8]| v.iter().map(u8::to_string).collect::<Vec<_>>().join(",");
+        race.args = vec![
+            "--harvest-cap".into(),
+            other_cap.to_string(),
+            "--harvest-positions".into(),
+            positions.clone(),
+            "--harvest-strata".into(),
+            list(&strata),
+            "--harvest-race-classes".into(),
+            list(&classes),
+            "--harvest-race-cap".into(),
+            race_cap.to_string(),
+        ];
+        Some(RaceSettings {
+            classes,
+            cap: race_cap,
+            strata,
+            positions,
+            other_cap,
+        })
+    };
     let val = set("val", "random", "val_count", "val_seed", (100_000, 201))?;
-    let train: Vec<LabelSet> = [random, rules, harvest]
+    let train: Vec<LabelSet> = [random, rules, harvest, race]
         .into_iter()
         .filter(|s| s.count > 0)
         .collect();
     if train.is_empty() {
         return Err(
-            "hybrid_rung: labels_random, labels_rules and labels_harvest are all 0: no training \
-             labels"
+            "hybrid_rung: labels_random, labels_rules, labels_harvest and labels_race are all 0: \
+             no training labels"
                 .into(),
         );
     }
@@ -582,6 +700,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         compare_cpu: b("compare_cpu")?,
         upload_shards: b("upload_shards")?,
         harvest_net,
+        race: race_settings,
         golden_inputs,
     })
 }
@@ -1150,6 +1269,9 @@ impl Rung<'_> {
             if net.is_some() {
                 rec["harvest_net_sha256"] = json!(self.p.harvest_net);
                 rec["harvest_driver"] = side["harvest"]["frontier_driver"].clone();
+            }
+            if let Some(c) = side.get("rows_by_race_class") {
+                rec["rows_by_race_class"] = c.clone();
             }
             recs.push(rec);
             self.rec.insert("labels".into(), json!(recs));
@@ -1739,6 +1861,92 @@ mod tests {
         assert_eq!(j["harvest_net"], format!("inputs/sha256/{n}"));
         assert_eq!(j["golden"]["decisions_input"], format!("inputs/sha256/{d}"));
         assert_eq!(j["golden"]["worlds_input"], format!("inputs/sha256/{w}"));
+        // The race harvest: after the harvest shard, with its settings (defaults: classes 2 and
+        // 4 up to 256 a decision, stratum 4, the harvest's position shares, no other classes).
+        let p = parse(&json!({
+            "labels_harvest": 10, "harvest_positions": "0.3,0.55,0.15",
+            "labels_race": 20, "labels_race_seed": 155,
+        }))
+        .expect("race settings");
+        let names: Vec<&str> = p.train.iter().map(|s| s.name).collect();
+        assert_eq!(names, ["random", "rules", "harvest", "race"]);
+        assert_eq!(
+            p.train[3],
+            LabelSet {
+                name: "race",
+                source: "harvest",
+                count: 20,
+                seed: 155,
+                args: [
+                    "--harvest-cap",
+                    "0",
+                    "--harvest-positions",
+                    "0.3,0.55,0.15",
+                    "--harvest-strata",
+                    "4",
+                    "--harvest-race-classes",
+                    "2,4",
+                    "--harvest-race-cap",
+                    "256"
+                ]
+                .map(String::from)
+                .to_vec(),
+            }
+        );
+        let j = p.to_json();
+        assert_eq!(
+            j["race"],
+            json!({ "classes": [2, 4], "cap": 256, "strata": [4],
+                    "positions": "0.3,0.55,0.15", "other_cap": 0 })
+        );
+        assert_eq!(j["train"]["race"]["seed"], 155);
+        let p = parse(&json!({
+            "labels_race": 20, "race_classes": "4, 2,3", "race_cap": 64, "race_strata": "4,2",
+            "race_positions": "0.5,0.5,0", "race_other_cap": 8,
+        }))
+        .expect("race settings given");
+        let r = p.race.as_ref().expect("race");
+        assert_eq!(
+            (
+                r.classes.as_slice(),
+                r.cap,
+                r.strata.as_slice(),
+                r.other_cap
+            ),
+            ([2, 3, 4].as_slice(), 64, [2, 4].as_slice(), 8)
+        );
+        assert_eq!(
+            p.train.last().expect("race").args,
+            [
+                "--harvest-cap",
+                "8",
+                "--harvest-positions",
+                "0.5,0.5,0",
+                "--harvest-strata",
+                "2,4",
+                "--harvest-race-classes",
+                "2,3,4",
+                "--harvest-race-cap",
+                "64"
+            ]
+        );
+        assert_eq!(p.train.last().expect("race").seed, 105);
+        assert_eq!(parse(&json!({})).expect("defaults").race, None);
+        assert_eq!(
+            parse(&json!({})).expect("defaults").to_json()["race"],
+            Value::Null
+        );
+        // A race harvest alone is a training set, and takes the harvest's network.
+        let n = "d4".repeat(32);
+        let p = parse(
+            &json!({ "labels_random": 0, "labels_rules": 0, "labels_race": 5,
+                               "harvest_net": format!("inputs/sha256/{n}") }),
+        )
+        .expect("race only");
+        assert_eq!(
+            (p.train.len(), p.harvest_net.as_deref()),
+            (1, Some(n.as_str()))
+        );
         // Defaults of the harvest's settings; a harvest alone is a training set.
         let p = parse(&json!({ "labels_random": 0, "labels_rules": 0, "labels_harvest": 10 }))
             .expect("harvest only");
@@ -1835,7 +2043,7 @@ mod tests {
         let key = format!("inputs/sha256/{}", "ab".repeat(32));
         bad(
             json!({ "harvest_net": key }),
-            "harvest_net drives the harvest's search: it needs labels_harvest above 0",
+            "harvest_net drives the harvest's search: it needs labels_harvest or labels_race above 0",
         );
         bad(
             json!({ "labels_harvest": 5, "harvest_net": "o3/int.safetensors" }),
@@ -1849,6 +2057,58 @@ mod tests {
         bad(
             json!({ "labels_harvest": 5, "harvest_net": 7 }),
             "harvest_net must be a string",
+        );
+        bad(
+            json!({ "race_classes": "2,4" }),
+            "race_classes is set but labels_race is 0",
+        );
+        bad(
+            json!({ "labels_race_seed": 155 }),
+            "labels_race_seed is set but labels_race is 0",
+        );
+        bad(
+            json!({ "labels_race": 5, "race_classes": "2,5" }),
+            "race_classes",
+        );
+        bad(
+            json!({ "labels_race": 5, "race_classes": "2,2" }),
+            "given twice",
+        );
+        bad(
+            json!({ "labels_race": 5, "race_classes": 4 }),
+            "race_classes must be a string",
+        );
+        bad(
+            json!({ "labels_race": 5, "race_cap": 0 }),
+            "race_cap must be at least 1",
+        );
+        bad(
+            json!({ "labels_race": 5, "race_strata": "0" }),
+            "race_strata",
+        );
+        bad(
+            json!({ "labels_race": 5, "race_strata": "4,4" }),
+            "given twice",
+        );
+        bad(
+            json!({ "labels_race": 5, "race_positions": "0,0,0" }),
+            "race_positions",
+        );
+        bad(
+            json!({ "labels_race": 5, "race_other_cap": -1 }),
+            "race_other_cap must be a whole number",
+        );
+        bad(
+            json!({ "labels_race": 5, "labels_race_seed": 103, "labels_harvest": 5 }),
+            "share seed 103",
+        );
+        bad(
+            json!({ "labels_race": 5, "labels_race_seed": 1 }),
+            "golden sets' seed",
+        );
+        bad(
+            json!({ "labels_random": 0, "labels_rules": 0, "labels_race": 0 }),
+            "no training labels",
         );
         bad(
             json!({ "golden_decisions_input": key }),
@@ -1924,6 +2184,69 @@ mod tests {
                 );
             }
         }
+        // The lead-4 proposal (docs/m3-hybrid/rung1.md, "Why seats 3-4 fail"): the lead-3c mix
+        // with half of the harvest replaced by a race harvest, generated golden set.
+        let path = dir.join("m3-hybrid-lead-4.manifest.json");
+        let v: Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("json");
+        let m = crate::sched::parse_v2(&v).expect("runnable");
+        let s = &m.streams[0];
+        assert_eq!((s.kind.as_str(), s.threads_all), ("hybrid_rung", true));
+        let p = parse(&s.params).expect("settings");
+        assert_eq!((p.cut, p.check, p.patience), (4, true, 6));
+        assert_eq!(
+            p.train
+                .iter()
+                .map(|s| (s.name, s.count, s.seed))
+                .collect::<Vec<_>>(),
+            [
+                ("random", 16_000_000, 151),
+                ("rules", 4_000_000, 152),
+                ("harvest", 10_000_000, 154),
+                ("race", 10_000_000, 155)
+            ]
+        );
+        assert_eq!(
+            p.train[2].args,
+            [
+                "--harvest-cap",
+                "64",
+                "--harvest-positions",
+                "0.3,0.55,0.15"
+            ]
+        );
+        assert_eq!(
+            p.train[3].args,
+            [
+                "--harvest-cap",
+                "0",
+                "--harvest-positions",
+                "0.3,0.55,0.15",
+                "--harvest-strata",
+                "4",
+                "--harvest-race-classes",
+                "2,4",
+                "--harvest-race-cap",
+                "256"
+            ]
+        );
+        assert_eq!(
+            (
+                p.golden_trick,
+                p.golden_count,
+                p.golden_worlds,
+                p.golden_seed,
+                p.golden_inputs.is_none()
+            ),
+            (3, 400, 320, 1, true)
+        );
+        assert_eq!((p.val.count, p.val.seed), (100_000, 201));
+        assert_eq!(
+            (p.widths_arg().as_str(), p.head.as_str()),
+            ("1024,512,128", "outcome")
+        );
+        assert_eq!(v["machine"]["gpus"], 1);
+        assert!(v.get("bin_sha").is_none());
         // The trick-2 (O_2) round-1 proposal: train only (its check is the trick-1 check on the
         // saved worlds, `hybrid_t1check`), runnable as it is.
         let path = dir.join("m3-hybrid-t2-round1.manifest.json");
@@ -2712,6 +3035,117 @@ esac
             "",
             "nothing ran"
         );
+        let _ = fs::remove_dir_all(&f.base);
+    }
+
+    /// The race harvest with fake programs ([`fakes`]): its labels come after the harvest's and
+    /// before the validation shard, with its settings and the harvest's network, the shard joins
+    /// the training set after the harvest shard, and `rung.json` records its settings and both
+    /// harvests' rows by race class (from their sidecars).
+    #[cfg(unix)]
+    #[test]
+    fn race_labels_join_the_training_set() {
+        let f = fakes("race");
+        let remote: Arc<dyn Remote> = Arc::new(crate::remote::DirRemote {
+            root: f.base.join("remote"),
+        });
+        let p = f.base.join("int.safetensors");
+        fs::write(&p, b"an integer O_4").expect("write");
+        let net = put_input(&*remote, &p, None).expect("stored").0;
+        // The fake `search labels` writes no class counts; this one adds them to its sidecars.
+        let search = fake_script(
+            &f.bin,
+            "search-race",
+            &format!(
+                r#"'{search}' "$@"
+if [ "$1" = labels ]; then
+  out=""; prev=""; for a in "$@"; do [ "$prev" = --out ] && out=$a; prev=$a; done
+  echo '{{"shard_sha256": "{sha}", "count": 7, "rows_by_race_class": [0, 0, 3, 0, 4]}}' > "$out.json"
+fi
+"#,
+                search = f.search.display(),
+                sha = f.sha
+            ),
+        );
+        let params = parse(&json!({
+            "labels_random": 7, "labels_rules": 0, "labels_harvest": 9,
+            "harvest_cap_per_decision": 64, "harvest_positions": "0.3,0.55,0.15",
+            "labels_race": 6, "labels_race_seed": 155, "race_strata": "2,4",
+            "harvest_net": format!("inputs/sha256/{net}"),
+            "val_count": 3, "golden_count": 2, "golden_worlds": 4, "widths": "16,8", "epochs": 1,
+        }))
+        .expect("params");
+        let tools = Tools {
+            search,
+            uv: f.uv.clone(),
+            python_dir: f.py.clone(),
+            nvidia_smi: f.base.join("no-such-nvidia-smi"),
+            remote: Some(Arc::clone(&remote)),
+        };
+        let root = f.base.join("run");
+        let mut ctx = Ctx::local("hybrid-test", &root, 4);
+        let r = chunk_with(&mut ctx, &params, &tools, &f.table, json!({})).expect("the chunk runs");
+        assert_eq!(r["verdict"], "FAIL");
+        let log = fs::read_to_string(&f.calls).expect("calls");
+        let lines: Vec<&str> = log.lines().collect();
+        let first = |p: &str| {
+            lines
+                .iter()
+                .position(|l| l.starts_with(p))
+                .unwrap_or_else(|| panic!("no call {p:?} in\n{log}"))
+        };
+        let order = [
+            "search labels --trick 4 --count 7 --seed 101 --source random",
+            "search labels --trick 4 --count 9 --seed 103 --source harvest",
+            "search labels --trick 4 --count 6 --seed 155 --source harvest",
+            "search labels --trick 4 --count 3 --seed 201 --source random",
+            "python -m fortyone_nn.train --train",
+        ];
+        let at: Vec<usize> = order.iter().map(|p| first(p)).collect();
+        assert!(at.windows(2).all(|w| w[0] < w[1]), "order {at:?} in\n{log}");
+        let inputs = std::path::absolute(root.join("hybrid-work").join("inputs")).expect("abs");
+        let race = lines[first("search labels --trick 4 --count 6 --seed 155")];
+        assert!(
+            race.ends_with(&format!(
+                "--threads 4 --start-hands 20000 --harvest-cap 0 --harvest-positions 0.3,0.55,0.15 \
+                 --harvest-strata 2,4 --harvest-race-classes 2,4 --harvest-race-cap 256 \
+                 --harvest-net {}",
+                inputs.join(&net).display()
+            )),
+            "{race}"
+        );
+        let harvest = lines[first("search labels --trick 4 --count 9 --seed 103")];
+        assert!(harvest.contains("--harvest-net"), "{harvest}");
+        assert!(!lines[first("search labels --trick 4 --count 7")].contains("--harvest-net"));
+        let train = lines[first("python -m fortyone_nn.train")];
+        assert!(
+            train.contains("t4-harvest-s103.npy") && train.contains("t4-race-s155.npy --val"),
+            "{train}"
+        );
+        let out = root.join("out").join("hybrid");
+        assert!(out.join("labels/t4-race-s155.npy.json").is_file());
+        let rung = read_json(&out.join("rung.json")).expect("rung.json");
+        let names: Vec<&str> = rung["labels"]
+            .as_array()
+            .expect("labels")
+            .iter()
+            .filter_map(|l| l["name"].as_str())
+            .collect();
+        assert_eq!(names, ["random", "harvest", "race", "val"]);
+        assert_eq!(
+            rung["labels"][2]["rows_by_race_class"],
+            json!([0, 0, 3, 0, 4])
+        );
+        assert_eq!(rung["labels"][2]["harvest_net_sha256"], net.as_str());
+        assert_eq!(rung["params"]["race"]["strata"], json!([2, 4]));
+        assert_eq!(rung["params"]["train"]["race"]["seed"], 155);
+        let steps: Vec<&str> = rung["steps"]
+            .as_array()
+            .expect("steps")
+            .iter()
+            .filter_map(|s| s["step"].as_str())
+            .collect();
+        assert!(steps.contains(&"labels race (3 of 4)"), "{steps:?}");
         let _ = fs::remove_dir_all(&f.base);
     }
 }

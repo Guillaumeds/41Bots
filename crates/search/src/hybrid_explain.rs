@@ -173,51 +173,30 @@ pub fn err_stats(e: &[i64]) -> ErrStats {
 }
 
 /// Race classes ([`race_class`]).
-pub const N_CLASSES: usize = 5;
+pub const N_CLASSES: usize = nn::outcome::N_RACE_CLASSES;
 
-/// The race class of a frontier position: what can be decided in this hand. A team can win the
-/// game in this hand when it can still reach 41 or make a jink (the outcome head's own exact
-/// mask, `nn::outcome`); a team that has already won a game would win the match (the money)
-/// with it.
-/// - 0: no team can win the game in this hand;
-/// - 1: one team can win the game, and it would not win the match;
-/// - 2: two or more teams can win the game, none of them would win the match (a race for the
-///   game: the others choose whom to let through);
-/// - 3: one team can win the match in this hand and no other team can win the game ("public
-///   enemy number one", PLAN §5.3: every other team only tries to stop it);
-/// - 4: a team can win the match in this hand and another team can win the game (a race for the
-///   money: the others prefer the other winner, kingmaking).
+/// The race class of a frontier position ([`nn::outcome::race_class`]): what can be decided in
+/// this hand, from nobody being able to win the game (0) to a team able to win the match while
+/// another can win the game (4).
 pub fn race_class(c: &CanonPos, ctx: &MatchCtx, leaf: &SharedLeaf) -> u8 {
     race_info(c, ctx, leaf).0
 }
 
 /// [`race_class`] and the teams (absolute order) that can win the match in this hand.
 pub fn race_info(c: &CanonPos, ctx: &MatchCtx, leaf: &SharedLeaf) -> (u8, [bool; 4]) {
-    let mask = outcomes(c, ctx, leaf).mask & ((1 << GAME_WON) - 1);
+    let mask = outcomes(c, ctx, leaf).mask;
     let r = usize::from(nn::encode::rotation(c) % 4);
-    let mut game = [false; 4];
-    for u in (0..GAME_WON).filter(|&u| mask >> u & 1 == 1) {
-        game[(u + 4 - r) % 4] = true;
-    }
-    let money: [bool; 4] = core::array::from_fn(|t| game[t] && ctx.games[t] >= 1);
-    let class = match (game.iter().filter(|&&g| g).count(), money.contains(&true)) {
-        (0, _) => 0,
-        (1, false) => 1,
-        (_, false) => 2,
-        (1, true) => 3,
-        _ => 4,
-    };
-    (class, money)
+    // The outcomes are in the encoder's rotated order: rotated team u is real team u − r.
+    let rotated_games: [bool; 4] = core::array::from_fn(|u| ctx.games[(u + 4 - r) % 4] >= 1);
+    let money: [bool; 4] = core::array::from_fn(|t| {
+        let u = (t + r) % 4;
+        mask >> u & 1 == 1 && ctx.games[t] >= 1
+    });
+    (nn::outcome::race_class(mask, rotated_games), money)
 }
 
 /// Names of the race classes.
-pub const RACE_CLASSES: [&str; N_CLASSES] = [
-    "no game can end this hand",
-    "one team can win the game, not the match",
-    "two or more teams can win the game, not the match",
-    "one team can win the match, nobody else the game",
-    "a team can win the match and another the game",
-];
+pub const RACE_CLASSES: [&str; N_CLASSES] = nn::outcome::RACE_CLASS_NAMES;
 
 /// Network error at frontier positions: all four teams, and the decider's team alone; over every
 /// position, over the tie-decided ones and over the others, and per race class (all teams).

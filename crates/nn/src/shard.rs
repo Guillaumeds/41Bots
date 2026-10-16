@@ -60,6 +60,18 @@ pub struct Row {
     pub outcomes: Vec<MoneyChance>,
 }
 
+impl Row {
+    /// The row's race class ([`crate::outcome::race_class`]) from what the row holds: its
+    /// possible outcomes (`mask`) and the binary features of the teams with a game won, both in
+    /// the encoder's rotated team order (the trainer computes it the same way, `python/nn`).
+    pub fn race_class(&self) -> u8 {
+        let active = self.features.active();
+        let has_game =
+            core::array::from_fn(|t| active.contains(&((crate::encode::OFF_GAMES + t) as u16)));
+        crate::outcome::race_class(self.mask, has_game)
+    }
+}
+
 /// The record type with `v` outcomes, as NumPy writes it.
 pub fn descr(v: usize) -> String {
     format!(

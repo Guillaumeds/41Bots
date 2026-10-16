@@ -441,3 +441,128 @@ the network.
     labels (40M in all), cap 64, with 55% of the harvested decisions at seats 3-4 (30% at seats 1-2,
     15% at seats 5-8), to see whether the seats 3-4 band and seat 4 finally pass; its result will be
     added here.
+
+## Why seats 3-4 fail: the race for the money (2026-10-16)
+
+**In one paragraph.** The seats 3-4 failure is not a shortage of data and not a quirk of the golden
+set. It comes from one kind of position: at the start of trick 4 a team that already has a game
+can win the match in this hand while another team can still win the game. There every other team
+prefers the other winner (PLAN §5.3, "public enemy number one" and kingmaking), and who actually
+gets through depends on whether the others hold the cards to steer each of the last two tricks.
+The network is 7 to 9 times less accurate in these positions than elsewhere, on fresh training-type
+positions as much as on the golden set's. They are 7% of the positions the hybrid asks the network
+about, yet carry 75% of all the decision loss and 86% of the seats 3-4 loss of lead-3c; with exact
+values there and the network everywhere else, every band passes with room to spare.
+
+**How it was found.** `search hybrid-check … --explain IDS` (commit `5d69cd4`,
+`crates/search/src/hybrid_explain.rs`) re-runs chosen golden decisions on the check's own worlds and
+shows, for every world and candidate, the frontier position [the start-of-trick-4 position where the
+search hands over to the network] whose value each search copied up to the root, the network's
+error there, and the exact values under the reversed tie rule. Run on every lossy decision of
+lead-2 and lead-3c (320 worlds each) and on golden decisions 0-99 as the typical case.
+
+**Race classes** [what can be decided in the hand, from the outcome head's own exact mask:
+`nn::outcome::race_class`]:
+
+| class | meaning |
+|---|---|
+| 0 | no team can win the game in this hand |
+| 1 | one team can win the game (reach 41 or make a jink), and it would not win the match |
+| 2 | two or more teams can win the game, none of them would win the match (a race for the game) |
+| 3 | one team can win the match in this hand and nobody else the game (public enemy number one) |
+| 4 | a team can win the match in this hand and another team can win the game (a race for the money) |
+
+**1. The loss is in class 4.** Share of the decision loss by the race class of the positions on the
+two choices' principal lines:
+
+| network | all decisions: class 4 | seats 3-4: class 4 | tie-rule worlds (all / seats 3-4) |
+|---|---|---|---|
+| lead-3c | 75% | 86% | 7% / 12% |
+| lead-2 | 58% | 83% | 13% / 20% |
+
+**2. The network is weak there everywhere.** Error of the network's money chances (all four teams)
+at the frontier positions the hybrid reached in golden decisions 0-99 (lead-3c, 18.6M values), and
+on a fresh harvest shard never trained on (seed 9144, lead-3c's harvest settings, 300,000 rows):
+
+| class | share of frontier positions | SD [typical spread], golden frontier | 99.9th percentile, golden frontier | SD, fresh shard (lead-3c / lead-2) |
+|---|---|---|---|---|
+| 0 | 54% | 0.33% | 4.8% | 0.32% / 0.33% |
+| 1 | 27% | 0.28% | 4.5% | 0.39% / 0.43% |
+| 2 | 9% | 1.65% | 29.7% | 1.27% / 1.28% |
+| 3 | 3% | 0.62% | 10.0% | 0.62% / 0.66% |
+| 4 | 7% | 2.46% | 31.1% | 2.74% / 3.04% |
+| all | | 0.88% | 11.4% | 0.87% / 0.95% |
+
+On the fresh shard 1.05% of the class-4 values are off by more than 10 points (lead-2: 1.12%).
+Lead-3c's 8M more harvested rows improved class 4 by only about 10%.
+
+**3. Not for lack of such positions.** A census of the first 28,640 of lead-3c's 457,562 harvest
+decisions (1.25M rows, 6.25%): 7.0% of its rows are class 4 (about 1.40M of the 20M), 8.0% class 2
+(about 1.59M); 30% of the rows from stratum-4 decisions are class 4, while strata 1 and 3 give
+almost none. The cap of 64 keeps only 38% of the class-4 positions the harvest's own searches reach.
+The golden frontier has the same mix (class 4: 7.3%). Rows with exactly decision 143's score and
+games state: about 240 in the 20M; decision 139's: about 800.
+
+**4. The decisions** (money chance of the decider's team, 320 worlds):
+
+| decision | situation | candidates: exact mean | lead-3c hybrid | lead-2 hybrid | loss |
+|---|---|---|---|---|---|
+| 143 (seat 4) | hearts trumps; team 1 has a game and stands on 26 with the Joker in hand, team 2 on 36 | 7S 52.6414%, **JK 52.8948%** | 7S 53.1494%, JK 52.7019% (picks 7S) | 7S 52.9542%, JK 52.6749% (7S) | 0.2533% (both) |
+| 335 (seat 4) | clubs trumps; teams 0 and 1 have a game (36 and 40), team 2 on 36 | AD 41.4265%, 7D 41.4265%, **JD 41.5237%** | 40.6729%, 40.6815%, 40.4794% (7D) | 40.8114%, 40.8410%, 40.8231% (7D) | 0.0972% (both) |
+| 139 (seat 3) | diamonds trumps; teams 2 and 3 have a game, team 1 (no game) on 36 | 10D 18.3305%, **6H 18.6574%** | 10D 18.6134%, 6H 18.5905% (10D) | 10D 18.6054%, 6H 18.7232% (6H) | 0.3269% (lead-3c) |
+
+- 143: many worlds; 95 push towards 7S, 77 against, the top 10 carry 93% of the misranking (lead-2:
+  132%), 5 of the top 10 are the same for both networks. In world 270, after 7S the partner wins
+  trick 3 and team 1 leads on 31: the network gives team 1 the game 93.8%; exact search has team 2
+  win it (team 1's chance 40.4%), because QS beats AS in a black plain suit (rule 10) and teams 0
+  and 3 throw low rather than let team 1 win the match. The network's error in 143's class-4
+  positions: SD 3.1%, and team 1's entries are biased +0.62% (lead-2: +0.81%): it overrates the
+  public enemy, i.e. it underrates the blocking.
+- 139: the top 10 worlds carry 105%, all class 4; for example the network gives team 1 the game
+  98.7% where teams 0 and 3, holding the 5 and the ace of trumps, shut it out.
+- 335: one world (216) carries 104% of the misranking (lead-2: 93%); see 5.
+
+**5. Decision 335 is decided by the tie rule.** In world 216, after JD, team 3 gets nothing
+whoever wins (team 0 or team 1 would win the match), so seat 3 is indifferent between its cards.
+The solver's documented tie rule [first strictly best card by card index] makes seat 3 throw 10D
+under seat 7's lead of the 7C, so seat 0's 7D takes the last trick: team 0 wins. With the reverse
+order seat 3 keeps 10D, team 3 takes both tricks and team 1 wins at the end of the hand with its
+first best-trump bonus (the Joker in trick 1: 40 + 6 = 46, rules 28, 30, 32). The network says
+team 1 wins 98.4%. Under the reverse tie order exact search picks AD and the hybrid's 7D loses
+nothing. Such tie-decided positions are 0.015% of the frontier, and the network's error there has
+an SD of 59%. They need no fix for the standard (below).
+
+**6. Ceiling.** The full check (400 decisions x 320 worlds, lead-3c) with exact values at the
+frontier positions of some classes and the network everywhere else (95% upper bounds):
+
+| exact at | overall | seats 1-2 | seats 3-4 | seats 5-8 |
+|---|---|---|---|---|
+| nothing (as checked) | 0.0057% | 0.0097% | **0.0159%** | 0.0007% |
+| class 4 | 0.0016% | 0.0041% | 0.0023% | 0.0007% |
+| classes 2 and 4 | 0.0015% | 0.0041% | 0.0015% | 0.0007% |
+| classes 1-4 and tie-decided positions | 0.0005% | 0.0002% | 0.0013% | 0.0007% |
+
+**7. The statistic.** The bootstrap's upper bound counts a single outlier about three times: in the
+104-decision band, 143 alone contributes 0.0073% of the 0.0100% budget, and any single miss of
+about 0.35% or more fails the band by itself (139 alone: 0.0094%). With 143 and 335 fixed lead-2's
+seats 3-4 bound would be 0.0018% (only 143: 0.0039%); lead-3c's would be 0.0108% (139 still
+missed), 0.0022% with 139 fixed too, and 0.0043% with 139 and 143 fixed but 335 still missed.
+
+**What follows: the race harvest** (branch `m3-hybrid-race`). `search labels --source harvest`
+gains `--harvest-strata` (the decisions' strata: decision `j` from stratum `strata[j mod s]`, its
+decider at `schedule[(j div s) mod cycle]`, so rows stay a pure function of (seed, `j`); all four
+strata is the old harvest, byte for byte) and `--harvest-race-classes 2,4` (every reached position
+of those classes kept up to `--harvest-race-cap`, 256 a decision, the others up to `--harvest-cap`,
+which may then be 0), with either driver; every shard's sidecar counts its rows by race class. The
+runner takes it as a fourth source (`labels_race`, `docs/m3-hybrid/vast.md`), and every training
+report now gives the validation error by race class. Measured on this VM: 1M race rows at trick 4
+(stratum 4, classes 2 and 4, no other classes, seat shares 0.3/0.55/0.15) in 27 s on 4 threads,
+0.08 thread-seconds per 1,000 rows (23,111 decisions, 58 race positions reached per decision);
+52.2% class 4 and 47.8% class 2. Proposal `docs/vast/m3-hybrid-lead-4.manifest.json`: lead-3c's
+mix with half of the harvest replaced by race rows (16M random play s151, 4M rules-v1 s152, 10M
+harvest s154 cap 64, 10M race s155), which takes the class-4 rows of the 40M from about 3.0M (7.5%;
+random play and rules-v1 self-play are 8.0% and 8.2% class 4) to about 7.5M (19%), and class 2 from
+about 3.2M to about 7.2M. Whether
+three times the class-4 data is enough is not proven: the one comparison we have (lead-2 to lead-3c)
+improved class 4 slowly. If it falls short, the next lever traceable to the plan is the per-team
+"can clinch this hand" inputs of PLAN §6.5 (an encoder change), then a larger network.

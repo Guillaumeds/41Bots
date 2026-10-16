@@ -63,7 +63,9 @@ Writes to DIR ``float.safetensors``,
 ``int.safetensors`` (the quantised network ``crates/nn`` loads, with its head) and
 ``report.json`` (settings, data hashes, per-epoch losses, and validation metrics of the float and
 the integer network: outcome accuracy, and the error of every team's money chance: bias per
-team, SD, 99.9th percentile of the absolute error, max; wall-clock seconds of loading, of each
+team, SD, 99.9th percentile of the absolute error, max, and the SD and 99.9th percentile by race
+class 0-4 (``formats.race_classes``; also each epoch's SD by class in the history, and printed at
+the end: class 4 is the race for the money, where the hybrid's seats 3-4 lose); wall-clock seconds of loading, of each
 epoch's training loop and of the integer check, each epoch's milliseconds a batch, and a profile
 of a few batches (``BatchProfile``: on a GPU by default, ``--profile-batches``; with the CUDA graph
 also of a few replayed batches, under ``graphed``); and the device facts of ``device.probe``: GPU
@@ -90,9 +92,11 @@ from .formats import (
     N_DENSE,
     ONE,
     PAD,
+    RACE_CLASS_NAMES,
     VALUE_FAULTS,
     load_shard,
     mask_bits,
+    race_classes,
     sha256_file,
     value_fault,
     write_safetensors,
@@ -682,6 +686,23 @@ def error_stats(pred, target):
     }
 
 
+def error_by_race_class(pred, target, classes):
+    """The value error (every team's money chance, fractions) by race class 0-4
+    (``formats.race_classes``): rows, SD and the 99.9th percentile of the absolute error; ``None``
+    for a class without rows. The class-4 number (a team can win the match and another the game)
+    is the one the hybrid's seats 3-4 depend on (docs/m3-hybrid/rung1.md)."""
+    e = (pred.astype(np.float64) - target.astype(np.float64)) / ONE
+    out = []
+    for k, name in enumerate(RACE_CLASS_NAMES):
+        x = e[classes == k]
+        if len(x) == 0:
+            out.append({"class": k, "name": name, "rows": 0, "sd": None, "p999_abs": None})
+            continue
+        out.append({"class": k, "name": name, "rows": int(len(x)), "sd": float(x.std()),
+                    "p999_abs": float(np.quantile(np.abs(x), 0.999))})
+    return out
+
+
 def evaluate(model, head, data, mix_weight, batch=8192, device=None):
     """(mean loss, money values [n, 4] in units of 2^-32, outcome accuracy) on ``data`` (CPU
     tensors, moved to ``device`` a batch at a time)."""
@@ -787,6 +808,7 @@ def main(argv=None):
     hashes = {"train": [f.result() for f in train_sha], "val": val_sha.result()}
     hashing.shutdown()
     va = tensors(val)
+    val_classes = race_classes(val)
     feed = Feed(comp, device, args.batch, args.feed)
     del comp
     facts["feed"] = feed.facts
@@ -868,8 +890,10 @@ def main(argv=None):
         vloss, vv, acc = evaluate(model, args.head, va, args.mix_weight, device=device)
         sched.step(vloss)
         sd = float(((vv - val["value"].astype(np.float64)) / ONE).std())
+        sd_race = [c["sd"] for c in error_by_race_class(vv, val["value"], val_classes)]
         history.append({"epoch": epoch, "train_loss": total / n, "val_loss": vloss, "val_acc": acc,
-                        "val_sd": sd, "lr": opt.param_groups[0]["lr"], "minutes": (time.time() - t0) / 60})
+                        "val_sd": sd, "val_sd_by_race_class": sd_race, "lr": opt.param_groups[0]["lr"],
+                        "minutes": (time.time() - t0) / 60})
         print(json.dumps(history[-1]), flush=True)
         progress(step="train", epoch=epoch, epochs=args.epochs, batches_done=steps, batches=steps,
                  last=history[-1], best_epoch=best[2] if vloss >= best[0] else epoch, step_mode=step.describe())
@@ -925,10 +949,12 @@ def main(argv=None):
         "data": hashes,
         "history": history,
         "best_epoch": best[2],
-        "float": {"val_loss": vloss, "outcome_accuracy": acc, "error": error_stats(pf, val["value"])},
+        "float": {"val_loss": vloss, "outcome_accuracy": acc, "error": error_stats(pf, val["value"]),
+                  "error_by_race_class": error_by_race_class(pf, val["value"], val_classes)},
         "int": {
             "rows": m,
             "error": error_stats(pi, val["value"][:m]),
+            "error_by_race_class": error_by_race_class(pi, val["value"][:m], val_classes[:m]),
             "vs_float": error_stats(pi, pf[:m]),
             "sha256": sha256_file(int_path),
             "shifts": [int(s) for _, _, s in ints],
@@ -940,6 +966,10 @@ def main(argv=None):
     with open(os.path.join(args.out, "report.json"), "w") as f:
         json.dump(report, f, indent=1)
     progress(step="done", best_epoch=best[2], int_sha256=report["int"]["sha256"])
+    for c in report["float"]["error_by_race_class"]:
+        if c["rows"]:
+            print(f"validation, race class {c['class']} ({c['name']}): {c['rows']} rows, "
+                  f"SD {100 * c['sd']:.3f}%, p99.9 |e| {100 * c['p999_abs']:.2f}%", flush=True)
     print(json.dumps({k: report[k] for k in ("float", "int", "minutes")}, indent=1))
 
 

@@ -21,8 +21,21 @@ MAX_ACTIVE = 96
 PAD = 0xFFFF
 INPUT_SHIFT = 24  # a binary feature that is on, and a dense value of 1, are 2^24
 
+# The binary feature of "team t (rotated order) has won a game" is OFF_GAMES + t
+# (crates/nn/src/encode.rs).
+OFF_GAMES = 801
+
 # Outcome-head vocabulary size by frontier trick (crates/nn/src/outcome.rs).
 VOCAB = {5: 8, 4: 14, 3: 24, 2: 39}
+
+# Race classes (crates/nn/src/outcome.rs `race_class`): what can be decided in the hand.
+RACE_CLASS_NAMES = (
+    "no game can end this hand",
+    "one team can win the game, not the match",
+    "two or more teams can win the game, not the match",
+    "one team can win the match, nobody else the game",
+    "a team can win the match and another the game",
+)
 
 
 def shard_dtype(v):
@@ -65,6 +78,21 @@ def mask_bits(mask, v):
     """The possible-outcome bits as a boolean array [n, v]."""
     m = np.asarray(mask).astype(np.uint64)
     return ((m[:, None] >> np.arange(v, dtype=np.uint64)[None, :]) & np.uint64(1)).astype(bool)
+
+
+def race_classes(rows):
+    """The race class (0-4) of every row, as ``nn::shard::Row::race_class`` computes it: from the
+    possible game-won outcomes (mask bits 0-3) and the teams with a game won (binary features
+    ``OFF_GAMES + t``), both in the rotated team order. 0: no team can win the game this hand;
+    1: one can, not the match; 2: two or more can, none the match; 3: one team can win the match
+    and nobody else the game; 4: a team can win the match and another the game."""
+    mask = np.asarray(rows["mask"]).astype(np.uint64)
+    act = np.asarray(rows["active"])
+    win = np.stack([(mask >> np.uint64(t)) & np.uint64(1) for t in range(4)], axis=1).astype(bool)
+    game = np.stack([(act == OFF_GAMES + t).any(axis=1) for t in range(4)], axis=1)
+    k = win.sum(axis=1)
+    money = (win & game).any(axis=1)
+    return np.where(k == 0, 0, np.where(~money, np.where(k == 1, 1, 2), np.where(k == 1, 3, 4))).astype(np.int64)
 
 
 # What ``check_values`` checks, in its order.

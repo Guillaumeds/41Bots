@@ -31,6 +31,7 @@
 //!                  --equity TABLE [--threads T] [--start-hands 20000] [--chunk-rows 32]
 //!                  harvest only: [--harvest-cap 16] [--harvest-positions 0.25,0.25,0.5]
 //!                  [--harvest-tricks K-1 | --harvest-tricks 2,3] [--harvest-net WEIGHTS]
+//!                  [--harvest-strata 1,2,3,4] [--harvest-race-classes 2,4 [--harvest-race-cap 256]]
 //! search hybrid-check --trick T --cut K --net WEIGHTS --equity TABLE
 //!                  [--decisions FILE | --count N] [--seed 1] [--start-hands 20000]
 //!                  [--first I] [--last J] [--ids …] [--to 320] [--label 1]
@@ -65,7 +66,16 @@
 //! of exact ones, and only the sampled positions are solved exactly, for their labels: the way to
 //! harvest at trick 3, where solving every reached position is too dear. The sidecar adds the
 //! harvest's settings, the driver (and the network's SHA-256) and counts per position, stratum
-//! and decision trick.
+//! and decision trick. `--harvest-strata 4` (or `2,4`) draws the decisions from those strata
+//! only: decision `j` from stratum `strata[j mod s]`, its decider at `schedule[(j div s) mod
+//! cycle]` (`s` strata; all four, the default, is the yardstick's `j mod 4 + 1`), so the rows stay
+//! a pure function of (seed, `j`) and the settings. `--harvest-race-classes 2,4` makes a race
+//! harvest (docs/m3-hybrid/rung1.md, "Why seats 3-4 fail"): the reached positions of those race
+//! classes (`nn::outcome::race_class`: 0 no game can end, 1 one team can win the game, 2 several
+//! can, 3 one team can win the match, 4 a team can win the match and another the game) are a
+//! seeded sample of at most `--harvest-race-cap` (256) per decision, the other classes' of at most
+//! `--harvest-cap` (which may then be 0: race positions only). Every shard's sidecar counts its
+//! rows by race class (`rows_by_race_class`); a harvest's records its strata and race settings.
 //! `hybrid-check` measures the hybrid H_K (exact to the start of trick K, the oracle network
 //! there) against exact search on the same worlds (docs/M3-HYBRID-SPEC.md §3, `search::hybrid`):
 //! decision loss with its bootstrap 95% upper bound, value error and agreement, overall, per
@@ -1226,8 +1236,9 @@ fn binary_sha256() -> String {
 /// `search labels`: a label shard for the oracle network O_K and its sidecar.
 fn labels_cmd(a: &Args) -> Result<(), String> {
     use search::oracle_labels::{
-        CHUNK_ROWS, Driver, GOLDEN_SEED, HARVEST_CAP, HARVEST_SHARES, HARVEST_TT_MB, HarvestJob,
-        LabelJob, Source, parse_band_shares, position_schedule, write_harvest_shard,
+        CHUNK_ROWS, Driver, GOLDEN_SEED, HARVEST_CAP, HARVEST_SHARES, HARVEST_STRATA,
+        HARVEST_TT_MB, HarvestJob, LabelJob, RACE_CAP, RaceKeep, Source, parse_band_shares,
+        parse_race_classes, parse_strata, position_schedule, write_harvest_shard,
         write_label_shard,
     };
     let trick = a.num("--trick", 4)? as u8;
@@ -1253,12 +1264,43 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         "--harvest-positions",
         "--harvest-tricks",
         "--harvest-net",
+        "--harvest-strata",
+        "--harvest-race-classes",
+        "--harvest-race-cap",
     ];
     let harvest = if job.source == Source::Harvest {
+        let race = match a.get("--harvest-race-classes") {
+            None => {
+                if a.has("--harvest-race-cap") {
+                    return Err("--harvest-race-cap is for a race harvest: give --harvest-race-classes (e.g. 2,4)"
+                        .into());
+                }
+                None
+            }
+            Some(c) => {
+                let classes =
+                    parse_race_classes(c).map_err(|e| format!("--harvest-race-classes: {e}"))?;
+                let cap = a.num("--harvest-race-cap", u64::from(RACE_CAP))?;
+                if !(1..=u64::from(u32::MAX)).contains(&cap) {
+                    return Err("--harvest-race-cap is at least 1".into());
+                }
+                Some(RaceKeep {
+                    classes,
+                    cap: cap as u32,
+                })
+            }
+        };
         let cap = a.num("--harvest-cap", u64::from(HARVEST_CAP))?;
-        if !(1..=u64::from(u32::MAX)).contains(&cap) {
-            return Err("--harvest-cap is at least 1".into());
+        if cap > u64::from(u32::MAX) || (cap == 0 && race.is_none()) {
+            return Err(
+                "--harvest-cap is at least 1 (0, keeping only the race classes, in a race harvest)"
+                    .into(),
+            );
         }
+        let strata = match a.get("--harvest-strata") {
+            None => HARVEST_STRATA.to_vec(),
+            Some(x) => parse_strata(x).map_err(|e| format!("--harvest-strata: {e}"))?,
+        };
         let shares = a.get("--harvest-positions").unwrap_or(HARVEST_SHARES);
         let weights = parse_band_shares(shares).map_err(|e| format!("--harvest-positions: {e}"))?;
         let tricks: Vec<u8> = match a.get("--harvest-tricks") {
@@ -1297,6 +1339,8 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
                 cap: cap as u32,
                 tricks,
                 schedule: position_schedule(weights),
+                strata,
+                race,
             },
             shares.to_string(),
             weights,
@@ -1427,6 +1471,8 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         "equity_sha256": table_sha,
         "shard_sha256": shard.sha256,
         "rows_by_stratum": by_stratum,
+        "rows_by_race_class": c.by_class,
+        "race_classes": nn::outcome::RACE_CLASS_NAMES,
         "rows_by_root_trick": &by_root[1..trick as usize],
         "replayed_lines": retries,
         "solver_nodes": nodes,
@@ -1448,13 +1494,32 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         let distinct: u64 = decisions.iter().map(|d| u64::from(d.distinct)).sum();
         eprintln!(
             "labels: harvest: {} decisions (by position 1-8: {}), {:.1} distinct frontier \
-             positions a decision ({:.1} frontier evaluations), {} decisions capped at {}",
+             positions a decision ({:.1} frontier evaluations), {}; rows by race class 0-4: {:?}",
             decisions.len(),
             side["harvest"]["decisions_by_position"],
             distinct as f64 / n,
             decisions.iter().map(|d| d.evals).sum::<u64>() as f64 / n,
-            decisions.iter().filter(|d| d.distinct > h.cap).count(),
-            h.cap
+            match h.race {
+                None => format!(
+                    "{} decisions capped at {}",
+                    decisions.iter().filter(|d| d.distinct > h.cap).count(),
+                    h.cap
+                ),
+                Some(r) => format!(
+                    "{:.1} positions of race classes {:?} a decision, {} decisions capped at {} \
+                     of them (other classes: at most {} a decision)",
+                    decisions
+                        .iter()
+                        .map(|d| u64::from(d.race_distinct))
+                        .sum::<u64>() as f64
+                        / n,
+                    r.list(),
+                    decisions.iter().filter(|d| d.race_distinct > r.cap).count(),
+                    r.cap,
+                    h.cap
+                ),
+            },
+            c.by_class
         );
         eprintln!(
             "labels: harvest: frontier driven by {}; searches {search_s:.1} thread-s, labelling \
@@ -1528,6 +1593,18 @@ fn harvest_record(
             .unwrap_or(0)
     };
     let n = ds.len().max(1) as f64;
+    let race = h.race.map(|r| {
+        serde_json::json!({
+            "classes": r.list(),
+            "cap_per_decision": r.cap,
+            "other_classes_cap_per_decision": h.cap,
+            "what": "frontier positions of the race classes (nn::outcome::race_class) are a \
+                     seeded sample of at most cap_per_decision of them, the other classes' of at \
+                     most other_classes_cap_per_decision (drawn after them on the same stream)",
+            "race_positions_reached": ds.iter().map(|d| u64::from(d.race_distinct)).sum::<u64>(),
+            "decisions_race_capped": ds.iter().filter(|d| d.race_distinct > r.cap).count(),
+        })
+    });
     let shares_given: Vec<f64> = shares
         .split(',')
         .map(|x| x.trim().parse().unwrap_or(f64::NAN))
@@ -1568,8 +1645,12 @@ fn harvest_record(
     };
     serde_json::json!({
         "what": what,
-        "decision_generator": "search::measure::build_decision (the yardstick's): stratum j mod 4 + 1, \
-                               decider position from the schedule, decision trick uniform over decision_tricks",
+        "decision_generator": "search::measure::build_decision (the yardstick's): stratum strata[j mod s] \
+                               and decider position schedule[(j div s) mod position_cycle], s = the number \
+                               of strata (all four: stratum j mod 4 + 1, as the yardstick), decision trick \
+                               uniform over decision_tricks",
+        "strata": h.strata,
+        "race": race,
         "decision_seed": "Rng::derive(seed, [NN_LABEL, SOURCE_HARVEST, trick, j]); the same stream \
                           then draws the world (belief sampler) and the sample",
         "search": format!("pimc::exact_world, sequential solver, table {tt_mb} MB, frontier at the start of trick {}", h.trick),
@@ -1585,7 +1666,7 @@ fn harvest_record(
         "rows_by_position": rows_by_pos,
         "decisions_by_stratum": by_stratum,
         "decisions_by_trick": &by_trick[1..usize::from(h.trick)],
-        "decisions_capped": ds.iter().filter(|d| d.distinct > h.cap).count(),
+        "decisions_capped": ds.iter().filter(|d| d.distinct > h.cap && h.race.is_none()).count(),
         "frontier_evaluations": ds.iter().map(|d| d.evals).sum::<u64>(),
         "distinct_positions": distinct.iter().map(|&x| u64::from(x)).sum::<u64>(),
         "distinct_mean_by_position": mean_by_pos(&distinct_by_pos),
@@ -2618,6 +2699,7 @@ mod tests {
             distinct,
             rows,
             search_nodes: 10,
+            race_distinct: distinct / 4,
         }
     }
 
@@ -2634,6 +2716,8 @@ mod tests {
             cap: 16,
             tricks: vec![2],
             schedule: position_schedule([1; 8]),
+            strata: vec![1, 2, 3, 4],
+            race: None,
         };
         let ds = [
             decision(1, 2000, 2500, 16),
@@ -2705,6 +2789,32 @@ mod tests {
         assert_eq!(
             e["distinct_mean_by_position"],
             r["distinct_mean_by_position"]
+        );
+        assert_eq!(e["strata"], serde_json::json!([1, 2, 3, 4]));
+        assert_eq!(e["race"], serde_json::Value::Null);
+        assert_eq!(e["decisions_capped"], 3);
+        // A race harvest from stratum 4: its settings and the race positions reached.
+        let race = HarvestJob {
+            strata: vec![4],
+            race: Some(search::oracle_labels::RaceKeep {
+                classes: 0b10100,
+                cap: 256,
+            }),
+            cap: 0,
+            ..h
+        };
+        let x = harvest_record(&race, shares, &w, &ds, 64, None);
+        assert_eq!(x["strata"], serde_json::json!([4]));
+        assert_eq!(x["race"]["classes"], serde_json::json!([2, 4]));
+        assert_eq!(x["race"]["cap_per_decision"], 256);
+        assert_eq!(x["race"]["other_classes_cap_per_decision"], 0);
+        assert_eq!(x["race"]["race_positions_reached"], 500 + 250 + 75);
+        assert_eq!(x["race"]["decisions_race_capped"], 1);
+        assert_eq!(x["decisions_capped"], 0);
+        assert!(
+            x["decision_generator"]
+                .as_str()
+                .is_some_and(|g| g.contains("strata[j mod s]"))
         );
     }
 }

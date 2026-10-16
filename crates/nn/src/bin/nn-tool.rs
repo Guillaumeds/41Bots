@@ -3,6 +3,7 @@
 //! ```text
 //! nn-tool fixture --trick K --count N --seed S --out FILE.npy
 //! nn-tool eval    --net WEIGHTS.safetensors --shard FILE.npy --out OUT.npy [--reps R]
+//! nn-tool classes --shard FILE.npy --out OUT.npy
 //! nn-tool golden  --out FILE.json [--seed 41] [--count 200]
 //! nn-tool random  --trick K --widths 512,256,64 --out FILE.safetensors [--seed 17] [--head outcome-v1|money4]
 //! nn-tool bench   --equity TABLE --trick K [--worlds 4] [--max 20000] [--seed 5]
@@ -14,6 +15,10 @@
 //! - `eval`: the integer network's money chance of every record of a shard, in the shard's
 //!   (rotated) team order, as a `uint64` `.npy` of shape `[N, 4]`; prints the time per
 //!   evaluation (forward pass and softmax, best of `R` passes over the shard).
+//! - `classes`: the race class (`nn::outcome::race_class_of`) of every record of a shard, from
+//!   its position decoded from the binary features (`nn::encode::decode`), not from the record's
+//!   mask: a `uint64` `.npy` of shape `[N]`, and the count per class on stderr. For the Python
+//!   parity check of the trainer's per-class report (`python/nn`).
 //! - `golden`: the golden network's outputs on the golden inputs (`nn::synthetic`), as JSON.
 //! - `random`: a random integer network for frontier trick `K` (`nn::synthetic::random_net`,
 //!   the outcome head by default), for benchmarks only: never for a yardstick value.
@@ -70,10 +75,14 @@ fn main() -> ExitCode {
     let r = match a.0.first().map(String::as_str) {
         Some("fixture") => fixture(&a),
         Some("eval") => eval(&a),
+        Some("classes") => classes(&a),
         Some("golden") => golden(&a),
         Some("bench") => bench(&a),
         Some("random") => random(&a),
-        _ => Err("usage: nn-tool fixture|eval|golden|random|bench … (see the source docs)".into()),
+        _ => Err(
+            "usage: nn-tool fixture|eval|classes|golden|random|bench … (see the source docs)"
+                .into(),
+        ),
     };
     match r {
         Ok(()) => ExitCode::SUCCESS,
@@ -125,6 +134,27 @@ fn row_money(z: &[i64], head: Head, r: &Row) -> equity::MoneyChance {
         Head::Money4 => money_from_logits(z),
         Head::Outcome => mix_outcomes(z, r.outcomes.len(), r.mask, &r.outcomes),
     }
+}
+
+fn classes(a: &Args) -> Result<(), String> {
+    let spath = a.req("--shard")?;
+    let rows = from_npy(&std::fs::read(spath).map_err(|e| format!("{spath}: {e}"))?)?;
+    let mut out = Vec::with_capacity(rows.len());
+    let mut counts = [0u64; nn::outcome::N_RACE_CLASSES];
+    for (i, r) in rows.iter().enumerate() {
+        let (c, ctx) = nn::encode::decode(&r.features)
+            .ok_or_else(|| format!("row {i}: the features are not an encoding"))?;
+        let k = nn::outcome::race_class_of(&c, &ctx, &SyntheticLeaf);
+        counts[usize::from(k)] += 1;
+        out.push(u64::from(k));
+    }
+    let opath = a.req("--out")?;
+    std::fs::write(opath, to_npy_u64(&[out.len()], &out)).map_err(|e| format!("{opath}: {e}"))?;
+    eprintln!(
+        "nn-tool classes: {} records, by race class 0..4: {counts:?}",
+        rows.len()
+    );
+    Ok(())
 }
 
 fn eval(a: &Args) -> Result<(), String> {

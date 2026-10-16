@@ -243,6 +243,14 @@ class TrainTest(unittest.TestCase):
         self.assertEqual(rep["int"]["sha256"], a)
         self.assertEqual((prog["step"], prog["device"], prog["int_sha256"]), ("done", "cpu", a))
         self.assertEqual(len(rep["history"]), 2)
+        # The validation error by race class: five classes, every validation row counted once.
+        for key in ("float", "int"):
+            by = rep[key]["error_by_race_class"]
+            self.assertEqual([c["class"] for c in by], [0, 1, 2, 3, 4])
+            self.assertEqual(sum(c["rows"] for c in by), rep[key].get("rows", 200))
+            for c in by:
+                self.assertEqual(c["sd"] is None, c["rows"] == 0)
+        self.assertEqual(len(rep["history"][0]["val_sd_by_race_class"]), 5)
         if not torch.cuda.is_available():
             c, rep, _ = self.run_train("auto", "--device", "auto")
             self.assertEqual(c, a, "auto falls back to exactly the CPU training")

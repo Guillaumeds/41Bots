@@ -169,6 +169,54 @@ pub fn outcomes_of(k: &DenseKey, top: Option<u8>, leaf: &dyn Leaf) -> Outcomes {
     Outcomes { n, mask, vecs }
 }
 
+/// Race classes ([`race_class`]).
+pub const N_RACE_CLASSES: usize = 5;
+
+/// Names of the race classes ([`race_class`]).
+pub const RACE_CLASS_NAMES: [&str; N_RACE_CLASSES] = [
+    "no game can end this hand",
+    "one team can win the game, not the match",
+    "two or more teams can win the game, not the match",
+    "one team can win the match, nobody else the game",
+    "a team can win the match and another the game",
+];
+
+/// The race class of a position at the start of a trick: what can be decided in this hand
+/// (docs/m3-hybrid/rung1.md, "Why seats 3-4 fail"). A team can win the game in this hand when its
+/// game-won outcome is possible (`mask` bit `t` for `t` < [`GAME_WON`]: it can still reach 41 or
+/// make a jink); a team that already has a game (`has_game[t]`) would win the match, the money,
+/// with it. `mask` and `has_game` are in the same team order (the rotated one of a label row, or
+/// any other: the class does not depend on it).
+/// - 0: no team can win the game in this hand;
+/// - 1: one team can win the game, and it would not win the match;
+/// - 2: two or more teams can win the game, none of them would win the match (a race for the
+///   game: the others choose whom to let through);
+/// - 3: one team can win the match in this hand and no other team can win the game ("public
+///   enemy number one", PLAN §5.3: every other team only tries to stop it);
+/// - 4: a team can win the match in this hand and another team can win the game (a race for the
+///   money: the others prefer the other winner, kingmaking).
+pub fn race_class(mask: u64, has_game: [bool; 4]) -> u8 {
+    let can = |t: usize| mask >> t & 1 == 1;
+    let winners = (0..GAME_WON).filter(|&t| can(t)).count();
+    let money = (0..GAME_WON).any(|t| can(t) && has_game[t]);
+    match (winners, money) {
+        (0, _) => 0,
+        (1, false) => 1,
+        (_, false) => 2,
+        (1, true) => 3,
+        _ => 4,
+    }
+}
+
+/// The race class ([`race_class`]) of a canonical position with its match context.
+pub fn race_class_of(c: &CanonPos, ctx: &MatchCtx, leaf: &dyn Leaf) -> u8 {
+    let o = outcomes(c, ctx, leaf);
+    let r = usize::from(rotation(c) % 4);
+    // The outcomes are in the encoder's rotated order: rotated team u is real team u − r.
+    let has_game = core::array::from_fn(|u| ctx.games[(u + 4 - r) % 4] >= 1);
+    race_class(o.mask, has_game)
+}
+
 /// The value of the outcome head: a softmax over the possible outcomes' logits (the integer rule
 /// of [`crate::money`]: `2^62 · e^(z_o − max z)` with the maximum over possible outcomes), then
 /// the weighted mean of their money vectors in `u128` with largest-remainder rounding
@@ -199,6 +247,21 @@ pub fn mix_outcomes(z: &[i64], n: usize, mask: u64, vecs: &[MoneyChance]) -> Mon
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn race_classes() {
+        let none = [false; 4];
+        // Bits 0..3 are the game-won outcomes; higher bits (hand-over splits) do not count.
+        assert_eq!(race_class(0b1111_0000, none), 0);
+        assert_eq!(race_class(0b0100, none), 1);
+        assert_eq!(race_class(0b0110, none), 2);
+        assert_eq!(race_class(0b0100, [false, false, true, false]), 3);
+        // A team with a game that cannot win the game this hand does not count.
+        assert_eq!(race_class(0b0100, [true, false, false, false]), 1);
+        assert_eq!(race_class(0b0101, [true, false, false, false]), 4);
+        assert_eq!(race_class(0b1111, [true, true, false, false]), 4);
+        assert_eq!(RACE_CLASS_NAMES.len(), N_RACE_CLASSES);
+    }
 
     #[test]
     fn vocabulary_sizes() {

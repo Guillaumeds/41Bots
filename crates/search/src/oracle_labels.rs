@@ -18,7 +18,10 @@
 //!   seeded sample of at most a cap per decision. The search's frontier values come from a
 //!   [`Driver`]: exact values (every reached position solved; the default, cheap at trick 4) or a
 //!   network's (the previous round's O_k, as the hybrid really runs; only the sampled positions
-//!   are solved, which is what makes harvesting at trick 3 affordable).
+//!   are solved, which is what makes harvesting at trick 3 affordable). A harvest may draw its
+//!   decisions from some strata only ([`HarvestJob::strata`]) and keep the positions of chosen
+//!   race classes (`nn::outcome::race_class`) up to a cap of their own ([`RaceKeep`]: the race
+//!   harvest, docs/m3-hybrid/rung1.md "Why seats 3-4 fail").
 //!
 //! A line on which the game ends before trick `k` is replayed with fresh randomness.
 //!
@@ -62,7 +65,7 @@ use engine::game::{HandStartState, Match, Phase, Rules};
 use engine::rng::Rng;
 use equity::MoneyChance;
 use nn::encode::encode;
-use nn::outcome::outcomes;
+use nn::outcome::{N_RACE_CLASSES, outcomes};
 use nn::shard::{Row, SOURCE_HARVEST, SOURCE_RANDOM, SOURCE_RULES, row_bytes, row_bytes_for};
 use serde::Serialize;
 use solver::frontier::{CanonPos, Frontier};
@@ -153,6 +156,8 @@ pub struct RowInfo {
     pub retries: u32,
     /// Solver nodes of the exact value.
     pub nodes: u64,
+    /// The position's race class (`nn::outcome::race_class`, from the row: [`Row::race_class`]).
+    pub class: u8,
 }
 
 /// Rows' facts totalled (the sidecar's counts); the totals do not depend on the order rows are
@@ -171,6 +176,8 @@ pub struct RowCounts {
     pub retries: u64,
     /// Solver nodes of the exact values.
     pub nodes: u64,
+    /// Rows by race class 0–4 (`nn::outcome::race_class`).
+    pub by_class: [u64; N_RACE_CLASSES],
 }
 
 impl RowCounts {
@@ -182,6 +189,7 @@ impl RowCounts {
         self.by_position[usize::from(i.position)] += 1;
         self.retries += u64::from(i.retries);
         self.nodes += i.nodes;
+        self.by_class[usize::from(i.class)] += 1;
     }
 
     /// Add another total.
@@ -198,6 +206,9 @@ impl RowCounts {
         }
         self.retries += o.retries;
         self.nodes += o.nodes;
+        for (a, b) in self.by_class.iter_mut().zip(o.by_class) {
+            *a += b;
+        }
     }
 }
 
@@ -364,7 +375,9 @@ fn make_row(
     let (pos, ctx, mut info) = row_position(job, i, starts, source);
     let (v, nodes) = exact_value(&pos, ctx, leaf, opts, mem);
     info.nodes = nodes;
-    (labelled_row(&pos, &ctx, v, job.source.tag(), leaf), info)
+    let row = labelled_row(&pos, &ctx, v, job.source.tag(), leaf);
+    info.class = row.race_class();
+    (row, info)
 }
 
 fn check_label_job(job: &LabelJob) {
@@ -621,9 +634,85 @@ pub struct HarvestJob {
     pub cap: u32,
     /// The decision tricks (each 1..`trick`), drawn uniformly per decision.
     pub tricks: Vec<u8>,
-    /// The decider position of decision slot `q` (decisions `4q .. 4q + 3`, one per stratum) is
-    /// `schedule[q mod len]` (0-based; [`position_schedule`]).
+    /// The decider position of decision slot `q` (decisions `sq .. sq + s − 1`, one per drawn
+    /// stratum, `s = strata.len()`) is `schedule[q mod len]` (0-based; [`position_schedule`]).
     pub schedule: Vec<u8>,
+    /// The strata (1–4, ascending, distinct) the decisions' match states are drawn from:
+    /// decision `j` is from stratum `strata[j mod s]` (all four, [`HARVEST_STRATA`], is the
+    /// yardstick's `j mod 4 + 1`).
+    pub strata: Vec<u8>,
+    /// The race harvest (`--harvest-race-classes`): positions of these race classes are kept
+    /// up to their own cap, the others up to `cap` (which may then be 0). `None`: every
+    /// position up to `cap`.
+    pub race: Option<RaceKeep>,
+}
+
+/// Every stratum: the yardstick's decisions.
+pub const HARVEST_STRATA: [u8; 4] = [1, 2, 3, 4];
+
+/// The default cap of a race harvest's race-class positions per decision.
+pub const RACE_CAP: u32 = 256;
+
+/// The default race classes of a race harvest: the races for the game (2) and for the money
+/// (4), where the network errs most (docs/m3-hybrid/rung1.md, "Why seats 3-4 fail").
+pub const RACE_CLASSES: &str = "2,4";
+
+/// A race harvest's selection: the frontier positions whose race class
+/// (`nn::outcome::race_class`) is in `classes` (bit `k` for class `k`) are kept, up to `cap` per
+/// decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RaceKeep {
+    /// Bit `k`: class `k` (0–4).
+    pub classes: u8,
+    /// At most this many of them per decision (at least 1).
+    pub cap: u32,
+}
+
+impl RaceKeep {
+    /// Is class `k` one of the race classes?
+    pub fn has(self, k: u8) -> bool {
+        self.classes >> k & 1 == 1
+    }
+
+    /// The classes, ascending.
+    pub fn list(self) -> Vec<u8> {
+        (0..N_RACE_CLASSES as u8).filter(|&k| self.has(k)).collect()
+    }
+}
+
+/// Parse race classes `"2,4"`: distinct whole numbers 0–4, at least one, as a bit set.
+pub fn parse_race_classes(s: &str) -> Result<u8, String> {
+    let mut bits = 0u8;
+    for p in s.split(',').map(str::trim) {
+        let k: u8 = p
+            .parse()
+            .ok()
+            .filter(|&k| usize::from(k) < N_RACE_CLASSES)
+            .ok_or_else(|| format!("race classes {s:?}: {p:?} is not a race class 0-4"))?;
+        if bits >> k & 1 == 1 {
+            return Err(format!("race classes {s:?}: {k} is given twice"));
+        }
+        bits |= 1 << k;
+    }
+    Ok(bits)
+}
+
+/// Parse strata `"4"` or `"2,4"`: distinct whole numbers 1–4, at least one, ascending.
+pub fn parse_strata(s: &str) -> Result<Vec<u8>, String> {
+    let mut v = Vec::new();
+    for p in s.split(',').map(str::trim) {
+        let k: u8 = p
+            .parse()
+            .ok()
+            .filter(|k| (1..=4).contains(k))
+            .ok_or_else(|| format!("strata {s:?}: {p:?} is not a stratum 1-4"))?;
+        if v.contains(&k) {
+            return Err(format!("strata {s:?}: {k} is given twice"));
+        }
+        v.push(k);
+    }
+    v.sort_unstable();
+    Ok(v)
 }
 
 /// Parse band shares `"s12,s34,s58"` (three numbers, 0 or more, at most 6 decimals, not all 0)
@@ -839,6 +928,9 @@ pub struct HarvestDecision {
     pub rows: u32,
     /// Solver nodes of the search from the decision.
     pub search_nodes: u64,
+    /// A race harvest: distinct positions of the race classes among the reached ones (0
+    /// otherwise).
+    pub race_distinct: u32,
 }
 
 /// Everything one harvest decision gives: its facts, its rows (already labelled) in the order
@@ -861,9 +953,10 @@ pub struct DecisionHarvest {
 
 /// Harvest decision `j` before its search: the decision (the yardstick's generator,
 /// [`crate::measure::build_decision`], at a decision trick drawn uniformly from `job.tricks`, the
-/// stratum `j mod 4 + 1` and the scheduled position), its candidates, a world drawn from the
-/// decider's belief rebuilt as a match, and the decision's random stream (which then draws the
-/// sample).
+/// stratum `strata[j mod s]` and the position `schedule[(j div s) mod len]`, `s` the number of
+/// strata: with all four, the stratum `j mod 4 + 1` of the yardstick), its candidates, a world
+/// drawn from the decider's belief rebuilt as a match, and the decision's random stream (which
+/// then draws the sample). A pure function of (seed, trick, `j`) and the job's settings.
 pub fn harvest_root(
     job: &HarvestJob,
     j: u64,
@@ -875,8 +968,9 @@ pub fn harvest_root(
         job.seed,
         &[NN_LABEL, u64::from(SOURCE_HARVEST), u64::from(k), j],
     );
-    let st = (j % 4) as usize;
-    let pos = usize::from(job.schedule[((j / 4) % job.schedule.len() as u64) as usize]);
+    let ns = job.strata.len() as u64;
+    let st = usize::from(job.strata[(j % ns) as usize] - 1);
+    let pos = usize::from(job.schedule[((j / ns) % job.schedule.len() as u64) as usize]);
     let t = job.tricks[rng.bounded(job.tricks.len() as u64) as usize];
     let d = build_decision(t, j, st, pos, &mut rng, starts);
     let (_, view, legal) = d.replay();
@@ -950,14 +1044,37 @@ pub fn harvest_decision(
         evals,
     } = rec.state.into_inner().unwrap_or_else(|e| e.into_inner());
     let n = list.len();
-    let take = n.min(job.cap as usize);
-    let mut idx: Vec<usize> = (0..n).collect();
-    for i in 0..take {
-        let r = i + rng.bounded((n - i) as u64) as usize;
-        idx.swap(i, r);
-    }
-    let mut chosen = idx[..take].to_vec();
+    // A seeded sample of `take` of `idx` (a partial Fisher–Yates shuffle on the decision's
+    // stream).
+    let sample = |mut idx: Vec<usize>, take: usize, rng: &mut Rng| -> Vec<usize> {
+        let take = take.min(idx.len());
+        for i in 0..take {
+            let r = i + rng.bounded((idx.len() - i) as u64) as usize;
+            idx.swap(i, r);
+        }
+        idx.truncate(take);
+        idx
+    };
+    let mut race_distinct = 0;
+    let mut chosen = match job.race {
+        None => sample((0..n).collect(), job.cap as usize, &mut rng),
+        Some(race) => {
+            // The race classes' positions first, up to their cap, then the others up to `cap`.
+            let (hit, other): (Vec<usize>, Vec<usize>) = (0..n).partition(|&i| {
+                race.has(nn::outcome::race_class_of(
+                    &list[i].canon,
+                    &list[i].ctx,
+                    leaf,
+                ))
+            });
+            race_distinct = hit.len() as u32;
+            let mut c = sample(hit, race.cap as usize, &mut rng);
+            c.extend(sample(other, job.cap as usize, &mut rng));
+            c
+        }
+    };
     chosen.sort_unstable();
+    let take = chosen.len();
     let mut rows = Vec::with_capacity(take);
     let mut positions = Vec::with_capacity(take);
     for &i in &chosen {
@@ -966,14 +1083,17 @@ pub fn harvest_decision(
             Driver::Exact => (r.value, r.nodes),
             Driver::Net(_) => exact_value(&r.pos, r.ctx, leaf, opts, &mut label_mem),
         };
+        let row = labelled_row(&r.pos, &r.ctx, value, SOURCE_HARVEST, leaf);
+        let class = row.race_class();
         rows.push((
-            labelled_row(&r.pos, &r.ctx, value, SOURCE_HARVEST, leaf),
+            row,
             RowInfo {
                 stratum: st as u8 + 1,
                 root_trick: t,
                 position: pos as u8 + 1,
                 retries: 0,
                 nodes,
+                class,
             },
         ));
         positions.push((r.pos, r.ctx));
@@ -989,6 +1109,7 @@ pub fn harvest_decision(
             distinct: n as u32,
             rows: take as u32,
             search_nodes: run.stats.nodes,
+            race_distinct,
         },
         rows,
         positions,
@@ -1009,7 +1130,22 @@ fn check_harvest_job(job: &HarvestJob) {
         "harvest decisions are at tricks 1..{} (before the frontier)",
         job.trick
     );
-    assert!(job.cap >= 1, "the cap per decision is at least 1");
+    assert!(
+        job.cap >= 1 || job.race.is_some(),
+        "the cap per decision is at least 1 (0 only in a race harvest)"
+    );
+    if let Some(r) = job.race {
+        assert!(
+            r.cap >= 1 && r.classes != 0 && usize::from(r.classes) < 1 << N_RACE_CLASSES,
+            "a race harvest keeps at least one race class, at least 1 a decision"
+        );
+    }
+    assert!(
+        !job.strata.is_empty()
+            && job.strata.windows(2).all(|w| w[0] < w[1])
+            && job.strata.iter().all(|s| (1..=4).contains(s)),
+        "the strata are 1-4, ascending and distinct"
+    );
     assert!(!job.schedule.is_empty() && job.schedule.iter().all(|&p| p < 8));
 }
 
@@ -1237,6 +1373,8 @@ mod tests {
             cap,
             tricks,
             schedule: position_schedule(weights),
+            strata: HARVEST_STRATA.to_vec(),
+            race: None,
         }
     }
 
@@ -1701,6 +1839,154 @@ mod tests {
 
     /// A random integer network (outcome head) for frontier trick `k`, valued with the synthetic
     /// leaf: a stand-in for the previous round's O_k (tests only).
+    /// A race harvest: decisions from the given strata only (decision `j` from stratum
+    /// `strata[j mod s]` at the scheduled position `(j div s) mod len`); per decision every
+    /// position of the race classes kept up to the race cap and the others up to the cap (0:
+    /// none), in reach order; each row's class is its position's race class
+    /// (`nn::outcome::race_class_of`) and the row's own (`Row::race_class`); the same rows and
+    /// facts on 1 and 4 threads; and with a network driving the search (trick 3) the rows are
+    /// the reached race positions, labelled exactly.
+    #[test]
+    fn race_harvest_keeps_the_race_classes() {
+        let starts = collect_starts(400, 9);
+        let l = leaf();
+        let source = BeliefSource::new();
+        let mut mem = SolveMem::new();
+        let race = RaceKeep {
+            classes: parse_race_classes("2,4").expect("classes"),
+            cap: 5,
+        };
+        assert_eq!(race.list(), [2, 4]);
+        let base = harvest_job(4, vec![3], [1; 8], 2);
+        for (strata, other) in [(vec![4], 0u32), (vec![2, 4], 2)] {
+            let job = HarvestJob {
+                strata: strata.clone(),
+                race: Some(race),
+                cap: other,
+                ..base.clone()
+            };
+            check_harvest_job(&job);
+            let ns = strata.len() as u64;
+            let mut race_rows = 0;
+            for j in 0..24u64 {
+                let (d, _, _, _) = harvest_root(&job, j, &starts, &source);
+                assert_eq!(d.stratum, strata[(j % ns) as usize]);
+                assert_eq!(
+                    usize::from(d.position),
+                    usize::from(job.schedule[((j / ns) % job.schedule.len() as u64) as usize])
+                );
+                let out = harvest_decision(&job, j, &starts, &*l, &source, Driver::Exact, &mut mem);
+                let classes: Vec<u8> = out
+                    .reached
+                    .iter()
+                    .map(|r| nn::outcome::race_class_of(&r.canon, &r.ctx, &*l))
+                    .collect();
+                let hit = classes.iter().filter(|&&k| race.has(k)).count();
+                assert_eq!(out.info.race_distinct as usize, hit);
+                let kept_hit = out.rows.iter().filter(|(_, i)| race.has(i.class)).count();
+                assert_eq!(kept_hit, hit.min(5), "decision {j}");
+                assert_eq!(
+                    out.rows.len() - kept_hit,
+                    (classes.len() - hit).min(other as usize)
+                );
+                // In reach order: the rows' positions are a subsequence of the reached ones.
+                let at: Vec<usize> = out
+                    .positions
+                    .iter()
+                    .map(|(p, _)| {
+                        out.reached
+                            .iter()
+                            .position(|r| r.pos == *p)
+                            .expect("reached")
+                    })
+                    .collect();
+                assert!(at.windows(2).all(|w| w[0] < w[1]));
+                for ((row, info), (pos, ctx)) in out.rows.iter().zip(&out.positions) {
+                    let k = nn::outcome::race_class_of(&canonical(pos), ctx, &*l);
+                    assert_eq!((info.class, row.race_class()), (k, k));
+                    assert_eq!(info.stratum, d.stratum);
+                }
+                race_rows += kept_hit;
+            }
+            assert!(race_rows > 0, "strata {strata:?} give race positions");
+            let j1 = HarvestJob {
+                count: 60,
+                threads: 1,
+                ..job.clone()
+            };
+            let (a, da) = harvest_rows(&j1, &starts, &*l, Driver::Exact, None);
+            let (b, db) = harvest_rows(
+                &HarvestJob { threads: 4, ..j1 },
+                &starts,
+                &*l,
+                Driver::Exact,
+                None,
+            );
+            let bytes = |r: &[(Row, RowInfo)]| {
+                let rows: Vec<Row> = r.iter().map(|x| x.0.clone()).collect();
+                nn::shard::to_npy(&rows, nn::outcome::vocab(4))
+            };
+            assert_eq!(bytes(&a), bytes(&b));
+            let facts = |d: &[HarvestDecision]| serde_json::to_string(d).expect("json");
+            assert_eq!(facts(&da), facts(&db));
+            assert_eq!(counts_of(&a), counts_of(&b));
+            let c = counts_of(&a);
+            assert_eq!(c.by_class.iter().sum::<u64>(), 60);
+            if other == 0 {
+                assert_eq!(c.by_class[2] + c.by_class[4], 60, "{c:?}");
+            }
+        }
+        // Driven by a network at trick 3: the rows are reached race positions, labelled exactly.
+        let net = random_oracle(3, 29);
+        let job = HarvestJob {
+            strata: vec![4],
+            race: Some(RaceKeep {
+                classes: 0b10100,
+                cap: 2,
+            }),
+            cap: 0,
+            ..harvest_job(3, vec![2], [0, 0, 0, 0, 0, 0, 0, 1], 0)
+        };
+        let mut rows = 0;
+        for j in 0..3 {
+            let out = harvest_decision(&job, j, &starts, &*l, &source, Driver::Net(&net), &mut mem);
+            for ((row, info), (pos, ctx)) in out.rows.iter().zip(&out.positions) {
+                assert!(race.has(info.class));
+                let v = solve_fast(pos, *ctx, &SyntheticLeaf, FastOptions::default())
+                    .value
+                    .expect("solved");
+                assert_eq!(
+                    row.value,
+                    v.rotate(nn::encode::rotation(&canonical(pos)) % 4)
+                );
+                rows += 1;
+            }
+        }
+        assert!(rows > 0);
+    }
+
+    #[test]
+    fn race_settings_parse() {
+        assert_eq!(parse_race_classes("2,4"), Ok(0b10100));
+        assert_eq!(parse_race_classes(" 4 , 0"), Ok(0b10001));
+        for bad in ["", "5", "2,2", "x", "2,,4", "-1"] {
+            assert!(parse_race_classes(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(parse_strata("4"), Ok(vec![4]));
+        assert_eq!(parse_strata("4,2"), Ok(vec![2, 4]));
+        for bad in ["", "0", "5", "1,1", "s4"] {
+            assert!(parse_strata(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(
+            RaceKeep {
+                classes: parse_race_classes(RACE_CLASSES).expect("default"),
+                cap: RACE_CAP
+            }
+            .list(),
+            [2, 4]
+        );
+    }
+
     fn random_oracle(k: u8, seed: u64) -> nn::Oracle {
         let net = nn::synthetic::random_net(seed, &[32, 16], nn::outcome::vocab(k), 100);
         let meta = BTreeMap::from([("head".to_string(), "outcome-v1".to_string())]);
