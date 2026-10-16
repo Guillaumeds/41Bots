@@ -12,8 +12,14 @@
 //!     "patience": 5, "train_seed": 1, "max_minutes": 200, "device": "auto" } }
 //! ```
 //! Every setting is optional (the defaults are the ones above, those of the rung-1 workflow); any
-//! other key is refused ([`KEYS`]). Also: `mix_weight` (1.0), `start_hands` (20000, for the label
-//! roots and the golden decisions), `tt_mb` (64, the solver table per thread of the golden worlds
+//! other key is refused ([`KEYS`]). Harvested labels (spec §5 source (c), `search labels --source
+//! harvest`: the frontier positions the hybrid's own search reaches from training decisions):
+//! `labels_harvest` (rows, default 0: none), `labels_harvest_seed` (103),
+//! `harvest_cap_per_decision` (16) and `harvest_positions` (the shares of decisions for the
+//! decider's positions 1–2, 3–4 and 5–8, default `"0.25,0.25,0.5"`, uniform over the eight
+//! positions); the shard joins the training set after the random-play and rules-v1 shards.
+//! Also: `mix_weight` (1.0), `start_hands` (20000, for the label roots and the golden
+//! decisions), `tt_mb` (64, the solver table per thread of the golden worlds
 //! and the check), `verify_pct` (1, the check's recomputed sample of stored exact worlds),
 //! `train_threads` (CPU threads of the trainer: all usable threads on the CPU, at most 8 beside
 //! a GPU), `compare_cpu` (false; after a GPU training, train once more on the CPU with the same
@@ -35,9 +41,9 @@
 //!    usable threads, said in the heartbeat's warnings, on stderr and in `rung.json` (never in
 //!    silence); with `cuda` the chunk fails. Writes `out/hybrid/device.json` (GPU name, driver,
 //!    PyTorch, CUDA and cuDNN versions).
-//! 4. **Labels** (`search labels`, all usable threads): the random-play and rules-v1 training
-//!    shards (a count of 0 skips one) and the validation shard (random play), at the start of
-//!    trick `cut`. The shards (about 1 KB a row: 4 GB for 4M) stay outside `out/`; their sidecars
+//! 4. **Labels** (`search labels`, all usable threads): the random-play, rules-v1 and harvested
+//!    training shards (a count of 0 skips one) and the validation shard (random play), at the
+//!    start of trick `cut`. The shards (about 1 KB a row: 4 GB for 4M) stay outside `out/`; their sidecars
 //!    (with the shard's SHA-256) go to `out/hybrid/labels/`. With `upload_shards`, each shard is
 //!    hashed (it must match its sidecar) and uploaded content-addressed to `inputs/sha256/<hex>`
 //!    (skipped when already there; checked by size), and `out/hybrid/shards.json` lists them in
@@ -75,17 +81,23 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
+use search::oracle_labels::{HARVEST_CAP, HARVEST_SHARES, parse_band_shares};
+
 use crate::bundle::sha256_file;
 use crate::spike::build_table_from;
 use crate::{Ctx, sibling};
 
 /// The settings a `hybrid_rung` chunk takes; any other key is refused.
-pub(crate) const KEYS: [&str; 31] = [
+pub(crate) const KEYS: [&str; 35] = [
     "cut",
     "labels_random",
     "labels_random_seed",
     "labels_rules",
     "labels_rules_seed",
+    "labels_harvest",
+    "labels_harvest_seed",
+    "harvest_cap_per_decision",
+    "harvest_positions",
     "val_count",
     "val_seed",
     "golden_trick",
@@ -151,12 +163,14 @@ impl Device {
 /// One label shard to make.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct LabelSet {
-    /// `random`, `rules` or `val` (the file is `t<cut>-<name>-s<seed>.npy`).
+    /// `random`, `rules`, `harvest` or `val` (the file is `t<cut>-<name>-s<seed>.npy`).
     pub name: &'static str,
     /// `search labels --source`.
     pub source: &'static str,
     pub count: u64,
     pub seed: u64,
+    /// More `search labels` arguments (the harvest's settings).
+    pub args: Vec<String>,
 }
 
 /// A `hybrid_rung` chunk's settings, checked.
@@ -191,7 +205,13 @@ pub(crate) struct Params {
 impl Params {
     /// The settings as recorded in `rung.json`.
     fn to_json(&self) -> Value {
-        let set = |s: &LabelSet| json!({ "source": s.source, "count": s.count, "seed": s.seed });
+        let set = |s: &LabelSet| {
+            let mut v = json!({ "source": s.source, "count": s.count, "seed": s.seed });
+            if !s.args.is_empty() {
+                v["args"] = json!(s.args);
+            }
+            v
+        };
         json!({
             "cut": self.cut,
             "train": self.train.iter().map(|s| (s.name.to_string(), set(s))).collect::<Map<_, _>>(),
@@ -277,6 +297,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
             source,
             count: u(count, d.0)?,
             seed: u(seed, d.1)?,
+            args: Vec::new(),
         })
     };
     let random = set(
@@ -293,14 +314,45 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         "labels_rules_seed",
         (800_000, 102),
     )?;
+    let mut harvest = set(
+        "harvest",
+        "harvest",
+        "labels_harvest",
+        "labels_harvest_seed",
+        (0, 103),
+    )?;
+    let cap = u("harvest_cap_per_decision", u64::from(HARVEST_CAP))?;
+    if !(1..=u64::from(u32::MAX)).contains(&cap) {
+        return Err("hybrid_rung: harvest_cap_per_decision must be at least 1".into());
+    }
+    let shares = s("harvest_positions", HARVEST_SHARES)?;
+    parse_band_shares(&shares)
+        .map_err(|e| format!("hybrid_rung: harvest_positions: {e}"))
+        .and_then(|w| {
+            if w.iter().sum::<u64>() > 1 << 24 {
+                Err(format!(
+                    "hybrid_rung: harvest_positions {shares:?}: use fewer decimals"
+                ))
+            } else {
+                Ok(())
+            }
+        })?;
+    harvest.args = vec![
+        "--harvest-cap".into(),
+        cap.to_string(),
+        "--harvest-positions".into(),
+        shares,
+    ];
     let val = set("val", "random", "val_count", "val_seed", (100_000, 201))?;
-    let train: Vec<LabelSet> = [random, rules]
+    let train: Vec<LabelSet> = [random, rules, harvest]
         .into_iter()
         .filter(|s| s.count > 0)
         .collect();
     if train.is_empty() {
         return Err(
-            "hybrid_rung: labels_random and labels_rules are both 0: no training labels".into(),
+            "hybrid_rung: labels_random, labels_rules and labels_harvest are all 0: no training \
+             labels"
+                .into(),
         );
     }
     if val.count == 0 {
@@ -826,7 +878,8 @@ impl Rung<'_> {
                 .arg("--equity")
                 .arg(&self.table)
                 .args(["--threads", &self.threads().to_string()])
-                .args(["--start-hands", &self.p.start_hands.to_string()]);
+                .args(["--start-hands", &self.p.start_hands.to_string()])
+                .args(&s.args);
             let base = self.progress(&step, json!({ "rows_total": s.count }));
             self.ctx.set_phase("chunk", base.clone());
             let log_path = self.ctx.logs.join(&log);
@@ -1166,15 +1219,18 @@ mod tests {
                     name: "random",
                     source: "random",
                     count: 3_200_000,
-                    seed: 101
+                    seed: 101,
+                    args: vec![],
                 },
                 LabelSet {
                     name: "rules",
                     source: "rules",
                     count: 800_000,
-                    seed: 102
+                    seed: 102,
+                    args: vec![],
                 },
-            ]
+            ],
+            "no harvested labels by default"
         );
         assert_eq!(
             p.val,
@@ -1182,7 +1238,8 @@ mod tests {
                 name: "val",
                 source: "random",
                 count: 100_000,
-                seed: 201
+                seed: 201,
+                args: vec![],
             }
         );
         assert_eq!(
@@ -1234,6 +1291,48 @@ mod tests {
         let j = p.to_json();
         assert_eq!(j["train"]["random"]["seed"], 301);
         assert_eq!(j["net"]["widths"], json!([64, 32]));
+
+        // Harvested labels: after the random-play and rules-v1 shards, with their settings.
+        let p = parse(&json!({
+            "labels_harvest": 4_000_000, "labels_harvest_seed": 104,
+            "harvest_cap_per_decision": 24, "harvest_positions": "0.4,0.4,0.2",
+        }))
+        .expect("harvest settings");
+        let names: Vec<&str> = p.train.iter().map(|s| s.name).collect();
+        assert_eq!(names, ["random", "rules", "harvest"]);
+        assert_eq!(
+            p.train[2],
+            LabelSet {
+                name: "harvest",
+                source: "harvest",
+                count: 4_000_000,
+                seed: 104,
+                args: vec![
+                    "--harvest-cap".into(),
+                    "24".into(),
+                    "--harvest-positions".into(),
+                    "0.4,0.4,0.2".into()
+                ],
+            }
+        );
+        let j = p.to_json();
+        assert_eq!(j["train"]["harvest"]["count"], 4_000_000);
+        assert_eq!(j["train"]["harvest"]["args"][3], "0.4,0.4,0.2");
+        assert!(j["train"]["random"].get("args").is_none());
+        // Defaults of the harvest's settings; a harvest alone is a training set.
+        let p = parse(&json!({ "labels_random": 0, "labels_rules": 0, "labels_harvest": 10 }))
+            .expect("harvest only");
+        assert_eq!(p.train.len(), 1);
+        assert_eq!(p.train[0].seed, 103);
+        assert_eq!(
+            p.train[0].args,
+            [
+                "--harvest-cap",
+                "16",
+                "--harvest-positions",
+                "0.25,0.25,0.5"
+            ]
+        );
     }
 
     #[test]
@@ -1260,6 +1359,36 @@ mod tests {
         bad(
             json!({ "labels_random": 0, "labels_rules": 0 }),
             "no training labels",
+        );
+        bad(
+            json!({ "labels_harvest": 5, "labels_harvest_seed": 1 }),
+            "golden sets' seed",
+        );
+        bad(
+            json!({ "labels_harvest": 5, "labels_harvest_seed": 102 }),
+            "share seed 102",
+        );
+        bad(
+            json!({ "labels_harvest": 5, "val_seed": 103 }),
+            "share seed 103",
+        );
+        bad(
+            json!({ "harvest_cap_per_decision": 0 }),
+            "harvest_cap_per_decision must be at least 1",
+        );
+        bad(json!({ "harvest_positions": "0,0,0" }), "harvest_positions");
+        bad(json!({ "harvest_positions": "0.5,0.5" }), "three numbers");
+        bad(
+            json!({ "harvest_positions": [0.4, 0.4, 0.2] }),
+            "harvest_positions must be a string",
+        );
+        bad(
+            json!({ "labels_harvest": "lots" }),
+            "labels_harvest must be a whole number",
+        );
+        bad(
+            json!({ "harvest_cap": 16 }),
+            "unknown setting \"harvest_cap\"",
         );
         bad(json!({ "val_count": 0 }), "val_count");
         bad(json!({ "widths": "1024,,128" }), "widths");
@@ -1293,6 +1422,7 @@ mod tests {
         for (name, cut, labels, golden) in [
             ("m3-hybrid-rung1b", 4, 4_000_000, (3, 400, 320)),
             ("m3-hybrid-smoke", 4, 500_000, (3, 32, 32)),
+            ("m3-hybrid-harvest", 4, 12_000_000, (3, 400, 320)),
         ] {
             let path = dir.join(format!("{name}.manifest.json"));
             let v: Value = serde_json::from_str(&fs::read_to_string(&path).expect("read"))
@@ -1327,6 +1457,18 @@ mod tests {
                 v.get("bin_sha").is_none(),
                 "{name}: the launcher sets bin_sha"
             );
+            if name == "m3-hybrid-harvest" {
+                let h = p
+                    .train
+                    .iter()
+                    .find(|s| s.name == "harvest")
+                    .expect("harvest");
+                assert_eq!((h.count, h.seed), (4_000_000, 103));
+                assert_eq!(
+                    h.args,
+                    ["--harvest-cap", "16", "--harvest-positions", "0.4,0.4,0.2"]
+                );
+            }
         }
         // A typo in a hybrid stream stops the manifest at once.
         let bad = json!({ "format": 2, "run_id": "x", "run_seed": 1, "streams": [
@@ -1440,6 +1582,7 @@ esac
         let params = parse(&json!({
             "labels_random": 7, "labels_rules": 5, "val_count": 3, "golden_count": 2,
             "golden_worlds": 4, "widths": "16,8", "epochs": 2, "compare_cpu": true,
+            "labels_harvest": 9, "harvest_positions": "0.4,0.4,0.2",
         }))
         .expect("params");
         let table = base.join("equity-v0.npy");
@@ -1491,6 +1634,7 @@ esac
             "python -m fortyone_nn.device --want auto --json",
             "search labels --trick 4 --count 7 --seed 101 --source random",
             "search labels --trick 4 --count 5 --seed 102 --source rules",
+            "search labels --trick 4 --count 9 --seed 103 --source harvest",
             "search labels --trick 4 --count 3 --seed 201 --source random",
             "search decisions --trick 3 --count 2 --seed 1 --allow-uneven",
             "search worlds --decisions",
@@ -1510,7 +1654,8 @@ esac
         let train = lines[first("python -m fortyone_nn.train")];
         for want in [
             "t4-random-s101.npy",
-            "t4-rules-s102.npy --val",
+            "t4-rules-s102.npy",
+            "t4-harvest-s103.npy --val",
             "t4-val-s201.npy --out",
             "--head outcome --widths 16,8 --epochs 2 --batch 1024 --lr 0.001 --patience 5 --seed 1 \
              --threads 4 --max-minutes 200 --mix-weight 1 --device cpu --progress",
@@ -1519,8 +1664,15 @@ esac
         }
         let labels = lines[first("search labels --trick 4 --count 7")];
         assert!(
-            labels.contains("--threads 4 --start-hands 20000"),
+            labels.ends_with("--threads 4 --start-hands 20000"),
             "{labels}"
+        );
+        let harvest = lines[first("search labels --trick 4 --count 9")];
+        assert!(
+            harvest.ends_with(
+                "--threads 4 --start-hands 20000 --harvest-cap 16 --harvest-positions 0.4,0.4,0.2"
+            ),
+            "{harvest}"
         );
         let worlds = lines[first("search worlds")];
         assert!(
@@ -1542,6 +1694,7 @@ esac
             "device.json",
             "labels/t4-random-s101.npy.json",
             "labels/t4-rules-s102.npy.json",
+            "labels/t4-harvest-s103.npy.json",
             "labels/t4-val-s201.npy.json",
             "decisions-t3.jsonl",
             "exact-t3-n4.jsonl",
@@ -1580,9 +1733,10 @@ esac
             [
                 "python environment",
                 "GPU check",
-                "labels random (1 of 3)",
-                "labels rules (2 of 3)",
-                "labels val (3 of 3)",
+                "labels random (1 of 4)",
+                "labels rules (2 of 4)",
+                "labels harvest (3 of 4)",
+                "labels val (4 of 4)",
                 "golden decisions",
                 "golden worlds",
                 "train",

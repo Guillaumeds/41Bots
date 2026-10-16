@@ -212,6 +212,17 @@ pub fn canonical(p: &Position) -> CanonPos {
 pub trait Frontier: Sync {
     /// The money chance of a frontier position.
     fn value(&self, pos: &CanonPos, ctx: &MatchCtx) -> MoneyChance;
+
+    /// The money chance of a frontier position as the solver reached it. Every evaluator but a
+    /// recording one keeps the default, [`Frontier::value`] of the canonical form. The label
+    /// harvester (`search::oracle_labels`) overrides it to record the positions a search reaches
+    /// and to value them with the exact solver, which needs the position itself; whatever an
+    /// override does with `pos`, the value it returns must still depend only on `canon` and
+    /// `ctx` (the module notes: otherwise the optimised solvers would no longer be exact).
+    fn value_at(&self, pos: &Position, canon: &CanonPos, ctx: &MatchCtx) -> MoneyChance {
+        let _ = pos;
+        self.value(canon, ctx)
+    }
 }
 
 /// A closure as a frontier evaluator (tests and synthetic evaluators).
@@ -258,6 +269,6 @@ impl<'a> FrontierCut<'a> {
 
     /// The evaluator's value of a frontier position.
     pub fn value(&self, p: &Position, ctx: &MatchCtx) -> MoneyChance {
-        self.eval.value(&canonical(p), ctx)
+        self.eval.value_at(p, &canonical(p), ctx)
     }
 }

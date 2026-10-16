@@ -83,6 +83,23 @@ attempt, 10 minutes, `max_minutes` + 30 minutes), and the dollar cap bounds ever
   against exact on the golden set. Label shards are not uploaded (4.4 GB; they are remade
   byte-identical in about a minute); set `"upload_shards": true` to keep them.
 
+## Adding harvested labels (spec §5 source (c))
+
+Four optional settings add a shard of positions harvested from the hybrid's own searches to the
+training set (what and why: `docs/m3-hybrid/rung1.md`, "Harvested positions"):
+`labels_harvest` (rows; default 0, none), `labels_harvest_seed` (default 103; never 1 and never
+another shard's seed), `harvest_cap_per_decision` (default 16) and `harvest_positions` (the shares
+of decisions for the decider's positions 1–2, 3–4 and 5–8, as text, default `"0.25,0.25,0.5"`).
+The harvested shard is made after the random-play and rules-v1 shards and trained on with them.
+
+`docs/vast/m3-hybrid-harvest.manifest.json` (a proposal; not run): the full run with 6.4M
+random-play and 1.6M rules-v1 labels (twice rung 1b's) plus 4M harvested labels with positions 1–4
+oversampled (`"0.4,0.4,0.2"`). Expected extra cost against rung 1b: labels about 2 more minutes
+(writing 13 GB of shards), training about three times longer per epoch (12.1M rows; 8 s an epoch
+for 4M on the RTX 4090 of `m3-hybrid-rung1b-1`). The 10.2 GB of compact training rows stay in the
+GPU's memory on a GPU of 12 GB or more; on a smaller one the trainer feeds them from the host
+("staged"), slower. Peak memory of the label step is about 15 GB (the 6.4M random-play shard).
+
 ## Time and money (estimates for the AMD EPYC 9654 (384 threads) + RTX A2000 class at about $1/h)
 
 These are estimates from this VM's and GitHub's measurements, not measurements on that machine;
