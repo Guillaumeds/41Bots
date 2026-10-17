@@ -569,3 +569,158 @@ fn stored_label_shards_are_reused() {
     assert!(!log.contains("fortyone_nn.train"), "{log}");
     let _ = fs::remove_dir_all(&f.base);
 }
+
+/// Tools for the additive loop at trick 2: the audit loop's fakes, with a `python` whose
+/// `fortyone_nn.audit --overall-only` (the paired check) gives round k's network the overall SD in
+/// `sd-k` (round 1: `out/hybrid/net`) on any shard.
+#[cfg(unix)]
+fn tools_with_paired_check(f: &Fakes) -> Tools {
+    let inner = audit_tools(f, false, None);
+    let arg = r#"arg() { n=$1; shift; while [ $# -gt 0 ]; do [ "$1" = "$n" ] && { echo "$2"; return; }; shift; done; }"#;
+    let py = fake_script(
+        &f.bin,
+        "fake-python-paired",
+        &format!(
+            r#"{arg}
+case " $* " in
+  *" --overall-only "*)
+    echo "python $*" >> '{calls}'
+    net=$(arg --net "$@"); k=1
+    case "$net" in */audit/round-*) k=$(echo "$net" | sed 's|.*/audit/round-\([0-9]*\)/net/.*|\1|');; esac
+    out=$(arg --out "$@"); mkdir -p "$out"
+    echo "{{\"overall_only\": true, \"overall\": {{\"rows\": 50, \"sd\": $(cat '{base}/sd-'$k), \"bias\": [0.0, 0.0, 0.0, 0.0]}}}}" > "$out/report.json"
+    exit 0;;
+esac
+exec '{inner}' "$@"
+"#,
+            calls = f.calls.display(),
+            base = f.base.display(),
+            inner = f.bin.join("fake-python-audit").display()
+        ),
+    );
+    let uv = fake_script(
+        &f.bin,
+        "uv-paired",
+        &format!(
+            r#"echo "uv $*" >> '{calls}'
+case $1 in
+  --version) echo "uv 0.13.0";;
+  sync) mkdir -p "$UV_PROJECT_ENVIRONMENT/bin"; cp '{py}' "$UV_PROJECT_ENVIRONMENT/bin/python";;
+esac
+"#,
+            calls = f.calls.display(),
+            py = py.display()
+        ),
+    );
+    Tools { uv, ..inner }
+}
+
+/// The additive loop at trick 2, where no golden set exists: each round's network and the best
+/// so far are compared on the same positions, the round's fresh audit shard (the paired check,
+/// `--overall-only`, before the shard goes). Round 2 is worse there (overall SD 1.2% against the
+/// best's 1.0%): NOT adopted, and round 3 continues round 1 again. Then either round 3 is
+/// better and confirms nothing (flat after round 3, its network kept), or it is worse and
+/// confirms nothing (the loop ends: nothing new to train on; round 1's network kept).
+#[cfg(unix)]
+#[test]
+fn additive_loop_at_trick_2_compares_on_the_same_audit_shard() {
+    for (case, sd3) in [("better", "0.009"), ("worse", "0.011")] {
+        let f = fakes(&format!("additivet2{case}"));
+        for k in 1..=2 {
+            fs::write(f.base.join(format!("audit-{k}.json")), GROUP_ONE).expect("write");
+        }
+        for (k, sd) in [(1, "0.01"), (2, "0.012"), (3, sd3)] {
+            fs::write(f.base.join(format!("sd-{k}")), sd).expect("write");
+        }
+        let tools = tools_with_paired_check(&f);
+        let (i, fl) = (f.base.join("init-int"), f.base.join("init-float"));
+        net_file_at(&i, &[16, 8], true, false, 2);
+        net_file_at(&fl, &[16, 8], false, false, 2);
+        let (int, float) = (store(&f, &i), store(&f, &fl));
+        let decisions: String = (0..32)
+            .map(|i| format!("{{\"id\":{i},\"trick\":1}}\n"))
+            .collect();
+        let dec = f.base.join("decisions-t1.jsonl");
+        fs::write(&dec, decisions).expect("write");
+        let tables = f.base.join("tables.ckpt");
+        fs::write(&tables, b"{\"id\":0,\"w\":3}\n").expect("write");
+        let (dec, tables) = (store(&f, &dec), store(&f, &tables));
+        let params = parse(&json!({
+            "cut": 2, "labels_random": 7, "labels_rules": 0, "val_count": 3, "audit_rounds": 4,
+            "audit_rows": 50, "audit_target_rows": 1000, "train_mode": "additive",
+            "init_net": format!("inputs/sha256/{int}"),
+            "init_net_float": format!("inputs/sha256/{float}"),
+            "t1_decisions_input": format!("inputs/sha256/{dec}"),
+            "t1_saved_inputs": [ { "run": "m3-t1-tables-1", "input": format!("sha256:{tables}") } ] }))
+        .expect("params");
+        let root = f.base.join("run");
+        let mut ctx = Ctx::local("hybrid-test", &root, 4);
+        let r = chunk_steps(&mut ctx, &params, &tools, &f.table, json!({})).expect("the loop runs");
+        let out = std::path::absolute(root.join("out/hybrid")).expect("abs");
+        let stop = r["audit"]["stop"].as_str().expect("stop");
+        let rung = read_json(&out.join("rung.json")).expect("rung.json");
+        if case == "better" {
+            assert!(stop.starts_with("flat after round 3"), "{stop}");
+            assert_eq!(rung["net"]["dir"], "audit/round-3/net");
+        } else {
+            assert_eq!(
+                stop,
+                "round 3 confirmed no group on its audit shard but was not adopted (worse than \
+                 the best on the same positions): nothing new to train on"
+            );
+            assert_eq!(rung["net"]["dir"], "net", "round 1's network is kept");
+            assert_eq!(r["verdict"], "FAIL");
+        }
+        let log = fs::read_to_string(&f.calls).expect("calls");
+        // The paired checks: round 1's network (the best) on rounds 2 and 3's audit shards, and
+        // each round's own (the stand-in auditor gives no overall numbers).
+        let paired: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains("--overall-only"))
+            .collect();
+        assert_eq!(paired.len(), 4, "{log}");
+        assert!(
+            paired[0].contains(&format!(
+                "--net {}",
+                out.join("net/int.safetensors").display()
+            )) && paired[0].contains("t2-audit-r2-"),
+            "{}",
+            paired[0]
+        );
+        let trains: Vec<&str> = log
+            .lines()
+            .filter(|l| l.starts_with("python -m fortyone_nn.train"))
+            .collect();
+        assert_eq!(trains.len(), 3, "{log}");
+        assert!(trains[0].contains("--epochs 0 "), "{}", trains[0]);
+        for t in &trains[1..] {
+            assert!(
+                t.contains(&format!(
+                    "--init {}",
+                    out.join("net/float.safetensors").display()
+                )),
+                "round 2 was not adopted, so round 3 continues round 1 too: {t}"
+            );
+        }
+        let summary = fs::read_to_string(out.join("audit/audit-summary.txt")).expect("summary");
+        assert!(
+            summary.contains(
+                "round 2: NOT adopted (overall SD 1.2000% > the best's 1.0000%); the best stays \
+                 round 1"
+            ),
+            "{summary}"
+        );
+        let r2 = read_json(&out.join("audit/round-2.json")).expect("round 2");
+        assert_eq!(r2["additive"]["adopted"], false);
+        assert_eq!(
+            r2["additive"]["compared_with"]["on_this_shard"]["loss_upper95"],
+            0.01
+        );
+        let t2 = fs::read_to_string(out.join("audit/round-2.txt")).expect("txt");
+        assert!(
+            t2.contains("Additive: NOT adopted, the best stays round 1"),
+            "{t2}"
+        );
+        let _ = fs::remove_dir_all(&f.base);
+    }
+}

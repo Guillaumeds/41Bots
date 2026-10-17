@@ -603,6 +603,28 @@ class CommandLine(unittest.TestCase):
                 self.assertIn("Verdict:", txt)
                 au.load_predicates(Path(outs[0], "predicates.json"))
 
+    def test_overall_only_is_the_full_audits_overall(self):
+        """``--overall-only``: the full audit's ``overall`` numbers of the same network and rows, no
+        groups and no predicates file (the additive loop's paired comparison at trick 2)."""
+        big = np.tile(fixture_rows(), 40)
+        with tempfile.TemporaryDirectory() as d:
+            shard = os.path.join(d, "audit.npy")
+            np.save(shard, big)
+            net = os.path.join(d, "net.safetensors")
+            write_int(net, quantize(random_float_net(9, (32, 16), VOCAB[4])), 4, {"test": "audit"}, head="outcome-v1")
+            full, only = os.path.join(d, "full"), os.path.join(d, "only")
+            with contextlib.redirect_stdout(io.StringIO()):
+                au.main(["--net", net, "--shard", shard, "--out", full, "--gamma", "0.02", "--seed", "7"])
+                au.main(["--net", net, "--shard", shard, "--out", only, "--seed", "7", "--overall-only",
+                         "--workers", "2"])
+            a = json.loads(Path(full, "report.json").read_text())
+            b = json.loads(Path(only, "report.json").read_text())
+            self.assertEqual(b["overall"], a["overall"])
+            self.assertTrue(b["overall_only"])
+            self.assertNotIn("audit", b)
+            self.assertFalse(os.path.exists(os.path.join(only, "predicates.json")))
+            self.assertFalse(os.path.exists(os.path.join(only, "work")))
+
     def test_any_number_of_workers_gives_the_same_files(self):
         """The same predicates.json and report.json (but its timings) for 1 and 4 workers."""
         rows = fixture_rows()

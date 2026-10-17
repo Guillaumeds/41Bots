@@ -176,3 +176,16 @@ approved). The engine swap goes into `main`, on a Monday (UTC).
 - `expectedPoints` at tricks 1–2: the network's expectation beyond the cut, or "unknown" (null)?
   The engine prefers the expectation, labelled by `meanHorizon`.
 - Does the Club need the engine's version in `club_hands` from day one of the swap? (Recommended.)
+
+## 7. Turned partnerships (owner decision, 2026-10-17)
+The engine's own players never act illegally (house rule H1), but the app's Real Life mode lets a human renege and be
+caught, and then rules 39-41 (and 34) apply for the rest of the hand. Decision:
+- The engine and the independent reference implementation take a position in which one or more partnerships have
+  been turned (the app says which, and when) and apply rules 39-41 and 34 exactly: the turned pair's cards no longer
+  count, its won tricks pass with their points to the standing pair that played the strongest card in each, a turned
+  leader's lead passes to the next player still in, the turned pair scores nothing for the hand, and a lone standing
+  pair takes every trick (a jink). Rules 37-38 (when a pair is caught) stay the app's job.
+- The solver skips turned seats; positions after a turn are valued by search (smaller games: 6 or 4 players), not by
+  the networks, which have never seen such a position. A separate network for turned hands, or a "turned" input added
+  to a network with zero-initialised weights and trained additively, only if measurement shows search is not enough.
+- Until this is built and released, the app's own bot plays any hand after a turn.

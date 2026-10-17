@@ -15,9 +15,10 @@
 //! rows, its loss weight (`weight`, a training shard's `NAME.npy.weight`; not for `val`) and its
 //! per-row weights (`rowweights`, the key of its `NAME.npy.rowweights`). A run with
 //! `upload_shards` writes these entries, ready to paste, in `out/hybrid/shards.json`
-//! (`label_inputs`), and in the audit loop also shares every targeted harvest (set `extra`, with
-//! its weight and row weights) and lists it in `out/hybrid/audit/label_inputs.json`: an additive
-//! run trains on old and new data together, so the old targeted data is kept too.
+//! (`label_inputs`), and in the audit loop (additive mode, or trick 2 where the targeted shards are
+//! shared anyway) also shares every targeted harvest (set `extra`, with its sidecar, weight and row
+//! weights) and lists it in `out/hybrid/audit/label_inputs.json`: an additive run trains on old and
+//! new data together, so the old targeted data is kept too.
 //!
 //! **Skipped generation.** A set named here is not generated: its `labels_<set>` and
 //! `labels_<set>_seed` (`val_count` and `val_seed` for `val`) are refused, not ignored; the other
@@ -623,6 +624,12 @@ mod tests {
             assert!(e.contains(want), "{k}: {e}");
         }
         assert!(check_sidecar(&x, &good, 4, 7).is_err(), "another cut");
+        // Trick 2 (the trick-2 loop's stored shards): its own trick and vocabulary.
+        let mut t2 = good.clone();
+        t2["trick"] = json!(2);
+        t2["outcomes"] = json!(nn::outcome::vocab(2));
+        assert_eq!(check_sidecar(&x, &t2, 2, 7), Ok(()));
+        assert!(check_sidecar(&x, &t2, 3, 7).is_err());
         assert!(check_sidecar(&x, &good, 3, 6).is_err(), "the header's rows");
         let extra = LabelInput {
             set: "extra",

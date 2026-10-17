@@ -30,6 +30,18 @@
 //!   still joins the next round's training, the groups the best still fails stay failing whatever
 //!   the rejected network measured, and the round cannot end the loop as flat. The chunk's
 //!   network is the adopted best (not `best_round`'s ranking).
+//! - **At trick 2** (cut 2: no golden set, owner 2026-10-16) the adoption compares the two
+//!   networks on the same positions instead: right after round r's auditor, before its fresh,
+//!   never-trained audit shard of exactly labelled trick-2 positions goes, the best network so far
+//!   is measured on that shard (`python -m fortyone_nn.audit --overall-only`: the full audit's
+//!   `overall` numbers, the same function and rows; round r's own come from its auditor, or the
+//!   same command when the auditor gave none). Round r is adopted when its overall SD and every
+//!   team's |bias| there are each no more than the best's plus `adopt_tolerance`. This is the
+//!   measure the scratch loop ranks its trick-2 rounds by (the overall SD on the audit shard),
+//!   made paired: the rounds' shards differ, so comparing each round on its own shard would let
+//!   the shards' sampling noise decide. There are no seat bands at trick 2 (the shard's rows do
+//!   not record the decider) and no failing groups (the confirmed groups are the targets). A round
+//!   not adopted that confirms no group ends the loop ("nothing new to train on").
 //! - The capacity ladder is off: every round trains `init_net`'s shape (`audit_shapes` refused).
 //!   The rounds run one after another (a training starts from the network adopted after the
 //!   previous round's golden check, so it cannot start beside that check; `overlap` refused): the
@@ -56,7 +68,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
-use super::super::Rung;
+use super::super::{Rung, read_json};
 use super::{Loop, Round, RoundResult, UNFILLED, pct4};
 use crate::remote::{input_hex, input_key};
 
@@ -318,11 +330,16 @@ impl Golden {
 /// best's plus `tol` (a fraction of money chance). Returns whether, and every number that was
 /// worse (empty when adopted).
 pub(crate) fn adopt(new: &Golden, best: &Golden, tol: f64) -> (bool, Vec<String>) {
+    adopt_by(new, best, tol, "overall bound")
+}
+
+/// [`adopt`], its overall number named `what` in the reasons (`overall SD` at trick 2).
+pub(crate) fn adopt_by(new: &Golden, best: &Golden, tol: f64, what: &str) -> (bool, Vec<String>) {
     let mut worse = Vec::new();
     let p = |x: f64| pct4(Some(x));
     if new.overall.is_nan() || new.overall > best.overall + tol {
         worse.push(format!(
-            "overall bound {} > the best's {}",
+            "{what} {} > the best's {}",
             p(new.overall),
             p(best.overall)
         ));
@@ -461,6 +478,9 @@ pub(crate) struct Run {
     pub next: Option<Next>,
     /// Each judged round's adoption record.
     pub records: BTreeMap<u64, Value>,
+    /// Trick 2: each round's paired check ([`Rung::additive_pair`]): the best network's (and,
+    /// without the auditor's, the round's own) overall numbers on the round's audit shard.
+    pub paired: BTreeMap<u64, Value>,
 }
 
 /// A stored network file's facts: hidden widths (from its tensors' shapes), trick, head and its
@@ -642,8 +662,152 @@ impl Rung<'_> {
             None => (true, Vec::new()),
             Some(b) => adopt(&g, &b.golden, s.tolerance / 100.0),
         };
-        let before = a.best.as_ref().map(|b| (b.round, b.golden.clone()));
+        let compared = a
+            .best
+            .as_ref()
+            .map(|b| json!({ "round": b.round, "golden": b.golden.to_json() }));
         a.before = st.groups.iter().map(|g| g.failing_since).collect();
+        let basis = "the golden set: overall, every seat band and every team's bias";
+        self.adoption(st, p, adopted, worse, g, compared, basis);
+    }
+
+    /// Trick 2 (no golden set), after round `r`'s auditor and before its audit shard goes: the
+    /// best network so far measured on the same fresh audit shard (`python -m fortyone_nn.audit
+    /// --overall-only`, the full audit's `overall` numbers), and round `r`'s own network too when
+    /// its auditor gave none (stand-in predicates), for [`Rung::additive_judge_rough`]. Nothing
+    /// in scratch mode, in round 1 or before trick 2.
+    pub(super) fn additive_pair(
+        &mut self,
+        st: &Loop,
+        r: u64,
+        own: &Path,
+        report: &Value,
+        shard: &Path,
+    ) -> Result<(), String> {
+        if self.p.additive.is_none() || st.s.rough.is_none() {
+            return Ok(());
+        }
+        let Some(best) = self.additive.as_ref().and_then(|a| a.best.clone()) else {
+            return Ok(());
+        };
+        let mut nets = vec![("best", best.int.clone())];
+        if report["overall"]["sd"].as_f64().is_none() {
+            nets.push(("own", own.to_path_buf()));
+        }
+        let rdir = st.dir.join(format!("round-{r}"));
+        let mut got = Map::new();
+        for (who, net) in nets {
+            let out = rdir.join(format!("overall-{who}"));
+            let mut c = self.python_cmd("fortyone_nn.audit");
+            c.arg("--net")
+                .arg(&net)
+                .arg("--shard")
+                .arg(shard)
+                .arg("--out")
+                .arg(&out)
+                .args(["--overall-only", "--seed", &st.s.audit_seed(r).to_string()])
+                .args(["--workers", &self.fg_threads().to_string()])
+                .arg("--work")
+                .arg(st.wdir.join(format!("overall-{who}-r{r}")));
+            let step = match who {
+                "best" => format!(
+                    "paired check: round {}'s network on round {r}'s audit shard",
+                    best.round
+                ),
+                _ => format!("paired check: round {r}'s network on its audit shard"),
+            };
+            self.audit_step(
+                &step,
+                c,
+                &format!("hybrid/overall-{who}-r{r}.log"),
+                None,
+                Some(super::audit_limit(st.s.rows)),
+                None,
+            )?;
+            let rep = read_json(&out.join("report.json")).ok_or_else(|| {
+                format!("hybrid_rung: the paired check wrote no {}", out.display())
+            })?;
+            got.insert(who.into(), rep["overall"].clone());
+        }
+        if let Some(a) = self.additive.as_mut() {
+            a.paired.insert(r, Value::Object(got));
+        }
+        Ok(())
+    }
+
+    /// Round `p.r`'s adoption at trick 2 (additive mode): no golden set there, so the best network
+    /// so far and this round's are compared on the same positions, this round's fresh,
+    /// never-trained audit shard of exactly labelled trick-2 positions ([`Rung::additive_pair`]):
+    /// adopted when its overall SD and every team's |bias| are each no more than the best's plus
+    /// `adopt_tolerance` (round 1, the starting network, always).
+    pub(super) fn additive_judge_rough(&mut self, st: &mut Loop, p: &Round) {
+        let Some(s) = self.p.additive.clone() else {
+            return;
+        };
+        let Some(a) = self.additive.as_mut() else {
+            return;
+        };
+        if a.decided.contains_key(&p.r) {
+            return;
+        }
+        let of = |o: &Value| Golden {
+            overall: o["sd"].as_f64().unwrap_or(f64::INFINITY),
+            bands: Vec::new(),
+            bias: o["bias"]
+                .as_array()
+                .map(|b| b.iter().map(|x| x.as_f64().unwrap_or(f64::NAN)).collect())
+                .unwrap_or_default(),
+        };
+        let pair = a.paired.get(&p.r).cloned().unwrap_or(Value::Null);
+        let own = if pair["own"].is_object() {
+            of(&pair["own"])
+        } else {
+            of(&p.report["overall"])
+        };
+        let (adopted, worse, compared) = match (&a.best, pair["best"].is_object()) {
+            (None, _) => (true, Vec::new(), None),
+            (Some(b), true) => {
+                let best = of(&pair["best"]);
+                let (ok, worse) = adopt_by(&own, &best, s.tolerance / 100.0, "overall SD");
+                (
+                    ok,
+                    worse,
+                    Some(json!({ "round": b.round, "on_this_shard": best.to_json() })),
+                )
+            }
+            // A paired check that did not run never adopts.
+            (Some(b), false) => (
+                false,
+                vec!["the best network was not measured on this round's audit shard".to_string()],
+                Some(json!({ "round": b.round })),
+            ),
+        };
+        a.before = st.groups.iter().map(|g| g.failing_since).collect();
+        let basis = "this round's fresh audit shard, both networks on the same positions: overall                      SD and every team's bias";
+        self.adoption(st, p, adopted, worse, own, compared, basis);
+    }
+
+    /// Records round `p.r`'s adoption (`adopted`, the numbers that were `worse`, its own numbers
+    /// `g`, the best's it was `compared` with, on what `basis`): the best so far, the next
+    /// training's start, the summary line, the heartbeat and the round's record.
+    #[allow(clippy::too_many_arguments)]
+    fn adoption(
+        &mut self,
+        st: &mut Loop,
+        p: &Round,
+        adopted: bool,
+        worse: Vec<String>,
+        g: Golden,
+        compared: Option<Value>,
+        basis: &str,
+    ) {
+        let Some(s) = self.p.additive.clone() else {
+            return;
+        };
+        let Some(a) = self.additive.as_mut() else {
+            return;
+        };
+        let before = a.best.as_ref().map(|b| b.round);
         a.decided.insert(p.r, adopted);
         if adopted {
             a.best = Some(Best {
@@ -660,18 +824,18 @@ impl Rung<'_> {
             epochs: s.epochs,
             round: p.r + 1,
         });
-        let line = match (&before, adopted) {
+        let line = match (before, adopted) {
             (None, _) => format!(
                 "round {}: the starting network (init_net) taken as it is: the best so far",
                 p.r
             ),
-            (Some((b, _)), true) => format!(
-                "round {}: adopted (no worse than round {b} on the golden set: overall, every \
-                 seat band and every team's bias); round {} continues from it",
+            (Some(b), true) => format!(
+                "round {}: adopted (no worse than round {b} on {basis}); round {} continues from \
+                 it",
                 p.r,
                 p.r + 1
             ),
-            (Some((b, _)), false) => format!(
+            (Some(b), false) => format!(
                 "round {}: NOT adopted ({}); the best stays round {b}, which round {} continues; \
                  this round's targeted data still joins the training",
                 p.r,
@@ -681,6 +845,15 @@ impl Rung<'_> {
         };
         println!("runner: hybrid_rung: {line}");
         st.lines.push(line);
+        a.records.insert(
+            p.r,
+            json!({ "adopted": adopted, "best_round": best.round, "basis": basis,
+                    "compared_with": compared, "numbers": g.to_json(), "worse": worse,
+                    "tolerance_pct": s.tolerance,
+                    "next_training": { "round": p.r + 1, "from_round": best.round,
+                                       "epochs": s.epochs, "lr": s.lr,
+                                       "shrink_perturb": s.shrink_perturb } }),
+        );
         // The heartbeat: the best so far and the latest round's adoption.
         self.audit_hb.insert(
             "additive".into(),
@@ -690,16 +863,6 @@ impl Rung<'_> {
                 p.r,
                 if adopted { "adopted" } else { "not adopted" }
             )),
-        );
-        let tol_pct = s.tolerance;
-        a.records.insert(
-            p.r,
-            json!({ "adopted": adopted, "best_round": best.round,
-                    "compared_with": before.as_ref().map(|(b, g)| json!({ "round": b, "golden": g.to_json() })),
-                    "golden": g.to_json(), "worse": worse, "tolerance_pct": tol_pct,
-                    "next_training": { "round": p.r + 1, "from_round": best.round,
-                                       "epochs": s.epochs, "lr": s.lr,
-                                       "shrink_perturb": s.shrink_perturb } }),
         );
     }
 
@@ -773,9 +936,11 @@ impl Rung<'_> {
                               best so far.\n"
                     .to_string(),
                 (Some(true), _) => format!(
-                    "Additive: adopted as the best (no worse than round {} on the golden set: \
-                     overall, every seat band and every team's bias, tolerance {}%).\n",
-                    x["compared_with"]["round"], x["tolerance_pct"]
+                    "Additive: adopted as the best (no worse than round {} on {}, tolerance \
+                     {}%).\n",
+                    x["compared_with"]["round"],
+                    x["basis"].as_str().unwrap_or("?"),
+                    x["tolerance_pct"]
                 ),
                 _ => format!(
                     "Additive: NOT adopted, the best stays round {}: {}. Its targeted data still \

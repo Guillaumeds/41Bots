@@ -1,0 +1,84 @@
+{
+  "format": 2,
+  "run_id": "m3-hybrid-t2-mech-1",
+  "run_seed": 1,
+  "threads": null,
+  "benchmark_seconds": 0,
+  "upload_every_s": 300,
+  "heartbeat_every_s": 30,
+  "note": "Trick-2 audit loop, mechanism test on real hardware (2026-10-17) before the long run: the same settings at a tiny size (25,000 base labels, 5,000-row audit and targeted shards, two rounds, a small network), so every cut-2 step runs once: base labels and their upload, training on the GPU, the audit shard driven by round 1's own network, the auditor, the trick-1 rough test with its verification sample (about half an hour), the targeted harvest, uploads before deletion, round 2, the kept round.",
+  "machine": {
+    "gpus": 1,
+    "min_gpu_ram_gb": 16,
+    "min_compute_cap": 600,
+    "min_cores": 120,
+    "min_ram_gb": 96,
+    "disk_gb": 60,
+    "min_inet_down": 100,
+    "max_dph": 2.0
+  },
+  "streams": [
+    {
+      "name": "rung",
+      "priority": 1,
+      "kind": "hybrid_rung",
+      "chunks": 1,
+      "params": {
+        "threads": "all",
+        "cut": 2,
+        "labels_random": 20000,
+        "labels_random_seed": 711,
+        "labels_rules": 5000,
+        "labels_rules_seed": 712,
+        "val_count": 5000,
+        "val_seed": 801,
+        "widths": "1024,512,128",
+        "head": "outcome",
+        "epochs": 10,
+        "patience": 3,
+        "batch": 1024,
+        "lr": 0.001,
+        "train_seed": 1,
+        "max_minutes": 0,
+        "device": "cuda",
+        "overlap": true,
+        "partial_epochs": 2,
+        "upload_shards": true,
+        "audit_rounds": 2,
+        "audit_rows": 5000,
+        "audit_seed": 231,
+        "audit_gamma": 0.01,
+        "audit_target_rows": 5000,
+        "audit_weight": 2,
+        "audit_shapes": "<widths>;2048,1024,256",
+        "t1_decisions_input": "inputs/sha256/b23c8b0d48ea90773adc21290e600eeea290530bdc49d7c1573a62516cbb7e37",
+        "t1_saved_inputs": [
+          {
+            "run": "m3-t1-tables-1",
+            "input": "inputs/sha256/b788224c346692af3e82d021c9564b7e1909a8c0b3924f1a842413eb70e1b832"
+          },
+          {
+            "run": "m3-t1-leader-layouts-1",
+            "input": "inputs/sha256/8a9bd83e8c4dcda2603aefd4d8ab79f7ce85cc1f3123ca12d4b017661292b029"
+          },
+          {
+            "run": "m3-t1-leader-layouts-9654",
+            "input": "inputs/sha256/96420885a545ae17c34cbc5dc1affb146b9ee1c45e764d6d8237e39138eff768"
+          },
+          {
+            "run": "m3-t1-leader-layouts (worlds file)",
+            "input": "inputs/sha256/df3e4d4a1b29a23a80a8af065182aca10c7ccb9e7b947d62e4e1b6d040339df9"
+          },
+          {
+            "run": "m3-agree-t1-ab1",
+            "input": "inputs/sha256/ca74c2acf6fbe189cd46408bbd39e9cfc529ed5f87ca186019246f5264ed476c"
+          }
+        ],
+        "table": {
+          "hands": 1000000,
+          "seed": 1
+        }
+      }
+    }
+  ]
+}

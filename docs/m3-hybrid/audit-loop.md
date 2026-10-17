@@ -389,6 +389,12 @@ What the night showed:
   trick 2 rent for CPU threads with any GPU; trick 4 in scratch mode is the one case that wants a fast GPU.
 - **Trick 2 runs the same design first** (scratch, exact labels, shards stored), and its data then feeds the additive
   phase.
+- **The trick-2 loop, merged** (2026-10-17, branch `m3-hybrid-t2merge`): the trick-2 design (no golden set,
+  position-level stop, the saved trick-1 worlds a rough test) on top of the overnight loops' builds. At trick 2
+  `audit_gamma` applies, the standards and the mini-set settings are refused, the best round is chosen at the
+  position level (flat first, then the lowest overall SD on its own fresh audit shard), diminishing returns read
+  the capacity check, and the audit and targeted shards are stored for later runs (an audit shard is deleted only
+  once shared). Its manifest and cost: `docs/m3-hybrid/vast.md`, "The audit loop at trick 2 (O_2)".
 - **Trick-2 labels from the trick-3 network** (bootstrapping, TreeStrap-style): allowed only through a gate (a trick-2
   network trained on hybrid labels against one on exact labels, same money, same exact checks) and only once trick 3 is
   near 0.005-0.0075%; the audit and every check stay exact. Errors carry forward and add along the chain, and with four
@@ -425,6 +431,16 @@ round, the capacity ladder; every existing test unchanged) or `"additive"`:
   its targeted data still joins the next round, the groups the best fails stay failing whatever the
   rejected network measured, and the round cannot end the loop as flat. The chunk's network is the
   adopted best.
+- **At trick 2** (no golden set) the same rule reads the round's fresh audit shard, with both networks
+  on the same positions: right after round r's auditor, before the shard goes, the best network so far
+  is measured on it (`python -m fortyone_nn.audit --overall-only`, the full audit's `overall` numbers),
+  and round r is adopted when its overall SD and every team's |bias| there are no more than the best's
+  plus `adopt_tolerance`. This is the measure the scratch trick-2 loop keeps its best round by (overall
+  SD on the audit shard), made paired, because each round's shard is a different sample and comparing
+  each network on its own shard would let sampling noise decide. No seat bands there (the shard's rows
+  do not record the decider) and no failing groups. A round not adopted that confirms no group ends
+  the loop ("nothing new to train on"). Cost: one network pass over the audit shard a round (the
+  auditor's first step; minutes).
 - The capacity ladder is off (the shape is `init_net`'s; `audit_shapes` refused), and the rounds run
   one after another (a training starts from the network adopted after the previous round's golden
   check, so it cannot start beside that check; `overlap` refused). Also refused: `epochs`, `lr` (use
@@ -457,8 +473,13 @@ rung's trick and outcomes, the entry's seed, a source that fits the set, and the
 Reused seeds count in the seed-disjointness checks (training, validation, audit, targeted harvests,
 golden). With `upload_shards`, a run now also shares each shard's sidecar (and row weights) and writes
 ready-to-paste entries: `out/hybrid/shards.json` (`label_inputs`: the base shards) and, in the audit
-loop, `out/hybrid/audit/label_inputs.json` (every targeted harvest, set `extra`, with its weight).
-Last night's runs had `upload_shards` false, so their base shards are made again from the same seeds
+loop (additive mode, or trick 2 where the targeted shards are shared anyway), `out/hybrid/audit/label_inputs.json`
+(every targeted harvest, set `extra`, with its weight).
+`label_inputs` works at every cut, trick 2 included (the sidecar must record the rung's trick and its
+outcome vocabulary). A run on a binary before this build (the trick-2 loop m3-hybrid-t2-loop-1 on
+27ccdc2) shares its shards with `upload_shards` but not their sidecars: to reuse them, store each
+sidecar from the run's bundle (`out/hybrid/labels/<file>.json`, `out/hybrid/audit/round-<r>/<file>.json`)
+with `launch.py put-input` and name it in the entry. Last night's runs had `upload_shards` false, so their base shards are made again from the same seeds
 (byte-identical) by the example manifests, which store them this time.
 
 **Leader focus (plan item 2d).** Every round report has a "Leader focus" line and `leader_focus` field:
