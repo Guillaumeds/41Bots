@@ -7,10 +7,12 @@
 //!   `net.int_key` gives it) and `init_net_float` (required; the key of the same network's float
 //!   weights, `float.safetensors`, `rung.json`'s `net.float_key` since this build; for the networks
 //!   of earlier runs, see audit-loop.md §10) are fetched and checked at step 0: the integer network
-//!   was trained for the rung's trick and head, its hidden widths are `widths` when that is given
-//!   (else they become the rung's), and the float file has the same layer shapes and the same
-//!   training record (metadata). Round 1's "training" then proves, byte for byte, that the float
-//!   weights quantise to `init_net` (`train.py --init-int`).
+//!   was trained for the rung's trick and head, takes the encoder's features and gives the head's
+//!   outputs at the cut, its hidden widths are `widths` when that is given (else they become the
+//!   rung's), and the float file has the same layer shapes and the same training record
+//!   (metadata). Then, once the Python environment is installed and before any label is made, the
+//!   init check (`train.py --check-init-only`) proves, byte for byte, that the float weights
+//!   quantise to `init_net`: a wrong pair costs seconds, not hours of labels.
 //! - **Round 1's network is `init_net` as it is** (`train.py --init --epochs 0`: copied and
 //!   measured on the validation shard, nothing trained): its audit shard, audit, golden check, mini
 //!   golden sets and targeted harvest run as in scratch mode. It is the best so far.
@@ -22,27 +24,39 @@
 //!   times the spread of the layer's fresh initialisation (`train.py`'s `SIGMA_RULE`), seeded with
 //!   `train_seed × 1000 + r` (Ash & Adams, "On warm-starting neural network training", NeurIPS
 //!   2020).
-//! - **Never lose a won pass:** round r's network is adopted as the new best only when, on the
-//!   golden set, its overall 95% upper bound of the decision loss, each seat band's (positions 1-2,
-//!   3-4, 5-8) and every team's |bias| on the overall row are each no more than the best's plus
-//!   `adopt_tolerance` (percentage points of money chance; 0 by default). Otherwise the best stays,
-//!   the round is reported "not adopted" with every number that was worse, its targeted harvest
-//!   still joins the next round's training, the groups the best still fails stay failing whatever
-//!   the rejected network measured, and the round cannot end the loop as flat. The chunk's
-//!   network is the adopted best (not `best_round`'s ranking).
+//! - **Never lose a won pass, and no worse overall** ([`adopt_with`]; review of 2026-10-17): on the
+//!   golden set, judged at the standard as `search hybrid-check` judges `loss_pass` and
+//!   `bias_pass`, round r is *worse* than the best when it loses a pass the best had (the overall
+//!   95% upper bound of the decision loss, a seat band's bound for positions 1-2, 3-4, 5-8, or a
+//!   team's |bias| on the overall row), when a band or bias the best already fails gets worse by
+//!   more than `adopt_tolerance`, or when its overall bound is worse than the best's by more than
+//!   `adopt_tolerance` (the noise tolerance, percentage points; default [`NOISE_PCT`], 0.002, about
+//!   the overnight loops' round-to-round moves). Otherwise, ties and improvements included, it is
+//!   adopted: comparing every raw number with no tolerance would let noise reject better rounds.
+//!   A round not adopted leaves the best as it was, is reported "NOT adopted" with every reason,
+//!   its targeted harvest still joins the next round's training, the failing groups are restored
+//!   wholesale to the best's (the rejected network's measurements neither clear nor add any), and
+//!   it cannot end the loop as flat. Every harvest (audit shards, targeted harvests) is driven by
+//!   the adopted best, never by a rejected round's network. The chunk keeps the latest adopted
+//!   round's network, never the scratch ranking: an adopted round gets a provisional result at
+//!   adoption, so a run stopped before its judgement ends still keeps it; before round 1 is judged
+//!   the chunk names `init_net`.
 //! - **At trick 2** (cut 2: no golden set, owner 2026-10-16) the adoption compares the two
 //!   networks on the same positions instead: right after round r's auditor, before its fresh,
 //!   never-trained audit shard of exactly labelled trick-2 positions goes, the best network so far
 //!   is measured on that shard (`python -m fortyone_nn.audit --overall-only`: the full audit's
 //!   `overall` numbers, the same function and rows; round r's own come from its auditor, or the
-//!   same command when the auditor gave none). Round r is adopted when its overall SD and every
-//!   team's |bias| there are each no more than the best's plus `adopt_tolerance`. This is the
+//!   same command when the auditor gave none). The same rule: worse when a team's |bias| loses its
+//!   pass (within the standard) or, where the best already fails it, grows by more than
+//!   `adopt_tolerance`, or when the overall SD (no standard) is worse by more than it. This is the
 //!   measure the scratch loop ranks its trick-2 rounds by (the overall SD on the audit shard),
 //!   made paired: the rounds' shards differ, so comparing each round on its own shard would let
 //!   the shards' sampling noise decide. There are no seat bands at trick 2 (the shard's rows do
 //!   not record the decider) and no failing groups (the confirmed groups are the targets). A round
 //!   not adopted that confirms no group ends the loop ("nothing new to train on").
-//! - The capacity ladder is off: every round trains `init_net`'s shape (`audit_shapes` refused).
+//! - The capacity ladder is off: every round trains `init_net`'s shape (`audit_shapes` refused). A
+//!   step up to a larger network (which starts fresh) is not built in additive mode: run it in
+//!   scratch mode.
 //!   The rounds run one after another (a training starts from the network adopted after the
 //!   previous round's golden check, so it cannot start beside that check; `overlap` refused): the
 //!   additive trainings are short, and the loop's CPU work is the long part.
@@ -94,6 +108,11 @@ const ADDITIVE_ONLY: [&str; 6] = [
     "adopt_tolerance",
 ];
 
+/// The default noise tolerance of the adoption rule (`adopt_tolerance`), in percentage points of
+/// money chance: about the round-to-round moves of the overnight loops' golden bounds while the
+/// networks did not really change (trick 4: 0.0016, 0.0021, 0.0016, 0.0024%; review of 2026-10-17).
+pub(crate) const NOISE_PCT: f64 = 0.002;
+
 /// The seat bands of the golden check (`search hybrid-check`'s groups), the decider's position.
 pub(crate) const BANDS: [&str; 3] = ["pos 1-2", "pos 3-4", "pos 5-8"];
 
@@ -110,7 +129,7 @@ pub(crate) struct Additive {
     pub lr: f64,
     /// `shrink_perturb`: λ, or none.
     pub shrink_perturb: Option<f64>,
-    /// `adopt_tolerance` (0): percentage points of money chance.
+    /// `adopt_tolerance` ([`NOISE_PCT`]): the noise tolerance, percentage points of money chance.
     pub tolerance: f64,
     /// Whether `widths` was given (it must then be `init_net`'s).
     pub widths_given: bool,
@@ -241,7 +260,7 @@ pub(crate) fn parse(
     };
     let tolerance = num(
         "adopt_tolerance",
-        0.0,
+        NOISE_PCT,
         &|x| (0.0..=1.0).contains(&x),
         "percentage points of money chance, from 0 to 1",
     )?;
@@ -325,44 +344,94 @@ impl Golden {
     }
 }
 
-/// The adoption rule ("never lose a won pass"): `new` is adopted over `best` when its overall
-/// bound, each of the best's seat bands' bounds and every team's |bias| are each at most the
-/// best's plus `tol` (a fraction of money chance). Returns whether, and every number that was
-/// worse (empty when adopted).
-pub(crate) fn adopt(new: &Golden, best: &Golden, tol: f64) -> (bool, Vec<String>) {
-    adopt_by(new, best, tol, "overall bound")
+/// The adoption rule ("never lose a won pass", and no worse overall; owner, review of 2026-10-17)
+/// at tricks 3 and later: [`adopt_with`] on the golden set, every number judged at the standard
+/// `std` (a fraction of money chance, as `search hybrid-check` judges `loss_pass` and `bias_pass`)
+/// with the noise tolerance `tol`.
+pub(crate) fn adopt(new: &Golden, best: &Golden, std: f64, tol: f64) -> (bool, Vec<String>) {
+    adopt_with(
+        new,
+        best,
+        &Rule {
+            what: "overall bound",
+            overall_std: Some(std),
+            std,
+            tol,
+        },
+    )
 }
 
-/// [`adopt`], its overall number named `what` in the reasons (`overall SD` at trick 2).
-pub(crate) fn adopt_by(new: &Golden, best: &Golden, tol: f64, what: &str) -> (bool, Vec<String>) {
+/// How [`adopt_with`] judges: the overall number's name, its standard (`None`: none, as the SD at
+/// trick 2), the standard of the bands' bounds and the teams' |bias|, and the noise tolerance (all
+/// fractions of money chance).
+pub(crate) struct Rule {
+    pub what: &'static str,
+    pub overall_std: Option<f64>,
+    pub std: f64,
+    pub tol: f64,
+}
+
+/// The adoption rule: `new` is adopted over `best` unless it is *worse*, which is any of
+/// - a pass the best had and `new` loses: the overall number, a seat band's bound or a team's
+///   |bias|, each passing when it is within its standard;
+/// - a band or a team's |bias| that the best already fails, worse than the best's by more than the
+///   noise tolerance;
+/// - the overall number worse than the best's by more than the noise tolerance.
+///
+/// Ties and improvements adopt, and so do moves within the noise of numbers that pass for both.
+/// A number missing from `new` is worse. Returns whether, and every reason (empty when adopted).
+pub(crate) fn adopt_with(new: &Golden, best: &Golden, rule: &Rule) -> (bool, Vec<String>) {
     let mut worse = Vec::new();
     let p = |x: f64| pct4(Some(x));
-    if new.overall.is_nan() || new.overall > best.overall + tol {
-        worse.push(format!(
-            "{what} {} > the best's {}",
-            p(new.overall),
-            p(best.overall)
-        ));
-    }
+    let tol = rule.tol;
+    // One number: the best's `b`, the new `n`, its standard; `always`: worse beyond the noise
+    // even when both pass (the overall number).
+    let mut judge = |name: String, b: f64, n: f64, std: Option<f64>, always: bool| {
+        if n.is_nan() {
+            worse.push(format!("{name} missing"));
+            return;
+        }
+        let pass = |x: f64| std.is_some_and(|s| x <= s);
+        if pass(b) && !pass(n) {
+            worse.push(format!(
+                "{name} {} over the standard {} (the best's {} passes)",
+                p(n),
+                p(std.unwrap_or(0.0)),
+                p(b)
+            ));
+        } else if (always || !pass(b)) && n > b + tol {
+            worse.push(format!(
+                "{name} {} > the best's {} + {} (noise tolerance)",
+                p(n),
+                p(b),
+                p(tol)
+            ));
+        }
+    };
+    judge(
+        rule.what.to_string(),
+        best.overall,
+        new.overall,
+        rule.overall_std,
+        true,
+    );
     for (band, b) in &best.bands {
         let n = new
             .bands
             .iter()
             .find(|(x, _)| x == band)
-            .map_or(f64::INFINITY, |x| x.1);
-        if n.is_nan() || n > b + tol {
-            worse.push(format!("{band} bound {} > the best's {}", p(n), p(*b)));
-        }
+            .map_or(f64::NAN, |x| x.1);
+        judge(format!("{band} bound"), *b, n, Some(rule.std), false);
     }
     for (t, b) in best.bias.iter().enumerate() {
-        let n = new.bias.get(t).copied().unwrap_or(f64::INFINITY);
-        if n.is_nan() || n.abs() > b.abs() + tol {
-            worse.push(format!(
-                "team {t}'s |bias| {} > the best's {}",
-                p(n.abs()),
-                p(b.abs())
-            ));
-        }
+        let n = new.bias.get(t).copied().unwrap_or(f64::NAN);
+        judge(
+            format!("team {t}'s |bias|"),
+            b.abs(),
+            n.abs(),
+            Some(rule.std),
+            false,
+        );
     }
     (worse.is_empty(), worse)
 }
@@ -483,9 +552,15 @@ pub(crate) struct Run {
     pub paired: BTreeMap<u64, Value>,
 }
 
-/// A stored network file's facts: hidden widths (from its tensors' shapes), trick, head and its
-/// metadata.
-type NetFacts = (Vec<u64>, String, String, BTreeMap<String, String>);
+/// A stored network file's facts: hidden widths (from its tensors' shapes), inputs and outputs
+/// (the first layer's rows, the last layer's columns), trick, head and its metadata.
+type NetFacts = (
+    Vec<u64>,
+    (u64, u64),
+    String,
+    String,
+    BTreeMap<String, String>,
+);
 
 /// The [`NetFacts`] of the network file at `path`.
 fn net_facts(path: &Path) -> Result<NetFacts, String> {
@@ -493,17 +568,24 @@ fn net_facts(path: &Path) -> Result<NetFacts, String> {
     let f = nn::safetensors::read(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
     let layers = f.tensors.keys().filter(|k| k.starts_with('w')).count();
     let mut widths = Vec::new();
+    let (mut inputs, mut outputs) = (0, 0);
     for k in 0..layers {
         let w = f.get(&format!("w{k}"))?;
         if w.shape.len() != 2 {
             return Err(format!("{}: w{k} is not a matrix", path.display()));
         }
+        if k == 0 {
+            inputs = w.shape[0] as u64;
+        }
         if k + 1 < layers {
             widths.push(w.shape[1] as u64);
+        } else {
+            outputs = w.shape[1] as u64;
         }
     }
     Ok((
         widths,
+        (inputs, outputs),
         f.meta("trick").unwrap_or("?").to_string(),
         f.meta("head").unwrap_or("?").to_string(),
         f.meta,
@@ -526,7 +608,8 @@ impl Rung<'_> {
         let (Some(int), Some(float)) = (int, float) else {
             return Err("hybrid_rung: init_net and init_net_float were not fetched".into());
         };
-        let (iw, itrick, ihead, imeta) = net_facts(&int).map_err(|e| format!("init_net: {e}"))?;
+        let (iw, (inputs, outputs), itrick, ihead, imeta) =
+            net_facts(&int).map_err(|e| format!("init_net: {e}"))?;
         if imeta.get("format").map(String::as_str) != Some(nn::oracle::FORMAT) {
             return Err(format!(
                 "hybrid_rung: init_net {} is not an integer network ({})",
@@ -546,6 +629,21 @@ impl Rung<'_> {
                 self.p.cut
             ));
         }
+        // The encoder's features in, the head's outputs at the cut out (`nn::Oracle` loads only
+        // such a network).
+        let want_out = if self.p.head == "outcome" {
+            nn::outcome::vocab(self.p.cut as u8) as u64
+        } else {
+            4
+        };
+        if inputs != nn::encode::N_FEATURES as u64 || outputs != want_out {
+            return Err(format!(
+                "hybrid_rung: init_net takes {inputs} inputs and gives {outputs} outputs, but the \
+                 encoder has {} features and a {head} head at trick {} has {want_out} outputs",
+                nn::encode::N_FEATURES,
+                self.p.cut
+            ));
+        }
         let text = |w: &[u64]| w.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
         if a.widths_given && iw != self.p.widths {
             return Err(format!(
@@ -557,12 +655,13 @@ impl Rung<'_> {
         }
         nn::mlp::check_hidden_widths(&iw.iter().map(|&w| w as usize).collect::<Vec<_>>())
             .map_err(|e| format!("hybrid_rung: init_net: {e}"))?;
-        let (fw, _, _, fmeta) = net_facts(&float).map_err(|e| format!("init_net_float: {e}"))?;
+        let (fw, fio, _, _, fmeta) =
+            net_facts(&float).map_err(|e| format!("init_net_float: {e}"))?;
         let same_record = fmeta
             .iter()
             .filter(|(k, _)| !["trick", "head"].contains(&k.as_str()))
             .all(|(k, v)| imeta.get(k) == Some(v));
-        if fw != iw || !same_record || fmeta.contains_key("format") {
+        if fw != iw || fio != (inputs, outputs) || !same_record || fmeta.contains_key("format") {
             return Err(format!(
                 "hybrid_rung: init_net_float {} is not init_net's float weights (widths {} against \
                  {}, or another training's record)",
@@ -577,8 +676,9 @@ impl Rung<'_> {
                     "init_widths": text(&iw), "init_trick": itrick, "init_head": ihead,
                     "init_record": imeta.iter().filter(|(k, _)| k.as_str() != "train_sha256")
                         .map(|(k, v)| (k.clone(), json!(v))).collect::<Map<_, _>>(),
-                    "check": "same layer shapes and training record; round 1 proves the float \
-                              weights quantise to init_net byte for byte" }),
+                    "check": "the encoder's inputs, the head's outputs, the same layer shapes and \
+                              training record; the init check (train.py --check-init-only) proves \
+                              the float weights quantise to init_net byte for byte" }),
         );
         self.additive = Some(Run {
             init_widths: iw,
@@ -647,7 +747,14 @@ impl Rung<'_> {
     /// when no worse than the best ([`adopt`]; round 1, the starting network, always). Sets the
     /// next training's start (the best), and notes the failing groups so that a round not adopted
     /// cannot clear them ([`Rung::additive_failing`]).
-    pub(super) fn additive_judge(&mut self, st: &mut Loop, p: &Round, hc: &Value, tag: &str) {
+    pub(super) fn additive_judge(
+        &mut self,
+        st: &mut Loop,
+        p: &Round,
+        hc: &Value,
+        files: (&Path, &Path),
+        tag: &str,
+    ) {
         let Some(s) = self.p.additive.clone() else {
             return;
         };
@@ -660,7 +767,7 @@ impl Rung<'_> {
         let g = Golden::of(hc);
         let (adopted, worse) = match &a.best {
             None => (true, Vec::new()),
-            Some(b) => adopt(&g, &b.golden, s.tolerance / 100.0),
+            Some(b) => adopt(&g, &b.golden, st.standard / 100.0, s.tolerance / 100.0),
         };
         let compared = a
             .best
@@ -668,7 +775,8 @@ impl Rung<'_> {
             .map(|b| json!({ "round": b.round, "golden": b.golden.to_json() }));
         a.before = st.groups.iter().map(|g| g.failing_since).collect();
         let basis = "the golden set: overall, every seat band and every team's bias";
-        self.adoption(st, p, adopted, worse, g, compared, basis);
+        let check = Some((hc.clone(), files.0.to_path_buf(), files.1.to_path_buf()));
+        self.adoption(st, p, (adopted, worse), g, compared, basis, check);
     }
 
     /// Trick 2 (no golden set), after round `r`'s auditor and before its audit shard goes: the
@@ -768,7 +876,13 @@ impl Rung<'_> {
             (None, _) => (true, Vec::new(), None),
             (Some(b), true) => {
                 let best = of(&pair["best"]);
-                let (ok, worse) = adopt_by(&own, &best, s.tolerance / 100.0, "overall SD");
+                let rule = Rule {
+                    what: "overall SD",
+                    overall_std: None,
+                    std: st.standard / 100.0,
+                    tol: s.tolerance / 100.0,
+                };
+                let (ok, worse) = adopt_with(&own, &best, &rule);
                 (
                     ok,
                     worse,
@@ -783,8 +897,9 @@ impl Rung<'_> {
             ),
         };
         a.before = st.groups.iter().map(|g| g.failing_since).collect();
-        let basis = "this round's fresh audit shard, both networks on the same positions: overall                      SD and every team's bias";
-        self.adoption(st, p, adopted, worse, own, compared, basis);
+        let basis = "this round's fresh audit shard, both networks on the same positions: overall SD \
+                     and every team's bias";
+        self.adoption(st, p, (adopted, worse), own, compared, basis, None);
     }
 
     /// Records round `p.r`'s adoption (`adopted`, the numbers that were `worse`, its own numbers
@@ -795,11 +910,11 @@ impl Rung<'_> {
         &mut self,
         st: &mut Loop,
         p: &Round,
-        adopted: bool,
-        worse: Vec<String>,
+        (adopted, worse): (bool, Vec<String>),
         g: Golden,
         compared: Option<Value>,
         basis: &str,
+        check: Option<(Value, PathBuf, PathBuf)>,
     ) {
         let Some(s) = self.p.additive.clone() else {
             return;
@@ -809,6 +924,21 @@ impl Rung<'_> {
         };
         let before = a.best.as_ref().map(|b| b.round);
         a.decided.insert(p.r, adopted);
+        if adopted && !st.results.iter().any(|x| x.r == p.r) {
+            // A provisional result, so that the chunk keeps this network even when the run
+            // stops before the round's judgement ends (it is replaced then).
+            let mut net = p.train.clone();
+            net["int_path"] = json!(p.net.display().to_string());
+            st.results.push(RoundResult {
+                r: p.r,
+                net: Some(net),
+                check,
+                level: 0,
+                overall: g.overall,
+                worst: 0.0,
+                rough: None,
+            });
+        }
         if adopted {
             a.best = Some(Best {
                 round: p.r,
@@ -874,6 +1004,15 @@ impl Rung<'_> {
             return;
         };
         a.passed.resize(st.groups.len(), None);
+        if a.decided.get(&r) == Some(&false) {
+            // Not adopted: the failing groups are the best's, as before this round, wholesale
+            // (the rejected network's measurements neither clear nor add any), and the verdicts
+            // stay the best's.
+            for (g, before) in st.groups.iter_mut().zip(&a.before) {
+                g.failing_since = *before;
+            }
+            return;
+        }
         for (i, x) in judged.iter().enumerate().take(st.groups.len()) {
             match x["pass"].as_bool() {
                 Some(b) => a.passed[i] = Some(b),
@@ -881,13 +1020,12 @@ impl Rung<'_> {
                 None => {}
             }
         }
-        if a.decided.get(&r) == Some(&false) {
-            for (g, before) in st.groups.iter_mut().zip(&a.before) {
-                if g.failing_since.is_none() && before.is_some() {
-                    g.failing_since = *before;
-                }
-            }
-        }
+    }
+
+    /// The network that drives the loop's harvests in additive mode: the adopted best (never a
+    /// rejected round's), `None` before round 1 is judged or in scratch mode.
+    pub(super) fn additive_driver(&self) -> Option<PathBuf> {
+        Some(self.additive.as_ref()?.best.as_ref()?.int.clone())
     }
 
     /// Whether round `r` may end the loop as flat: in additive mode only an adopted round.
@@ -912,10 +1050,84 @@ impl Rung<'_> {
         focused(&p.confirmed, &first, &a.passed, p.r)
     }
 
-    /// The round whose network is the chunk's in additive mode: the adopted best.
-    pub(super) fn additive_best<'a>(&self, st: &'a Loop) -> Option<&'a RoundResult> {
-        let b = self.additive.as_ref()?.best.as_ref()?.round;
-        st.results.iter().find(|x| x.r == b)
+    /// The round whose network the chunk keeps: in additive mode the latest adopted round with a
+    /// result (every adopted round has one, provisional until its judgement ends), never the
+    /// scratch ranking; `None` before round 1 is judged (the chunk then names `init_net`,
+    /// [`Rung::additive_init_net`]). In scratch mode `best_round`.
+    pub(super) fn kept_round<'a>(&self, st: &'a Loop) -> Option<&'a RoundResult> {
+        let Some(a) = &self.additive else {
+            return super::best_round(st);
+        };
+        a.decided
+            .iter()
+            .rev()
+            .filter(|(_, adopted)| **adopted)
+            .find_map(|(r, _)| st.results.iter().find(|x| x.r == *r))
+    }
+
+    /// The chunk's network in additive mode when no round was judged: `init_net` itself.
+    pub(super) fn additive_init_net(&self) -> Option<Value> {
+        let s = self.p.additive.as_ref()?;
+        Some(
+            json!({ "dir": "inputs", "int_sha256": s.init_net, "int_key": input_key(&s.init_net),
+                     "float_sha256": s.init_float, "float_key": input_key(&s.init_float),
+                     "note": "init_net, taken as it is: no round of this run was judged" }),
+        )
+    }
+
+    /// Step 0 in additive mode, once the Python environment is installed and before any label is
+    /// made: `train.py --check-init-only` proves that `init_net_float` quantises to `init_net`
+    /// byte for byte (with its shape and head), in seconds rather than after hours of labels.
+    pub(in crate::hybrid) fn additive_prove_init(&mut self) -> Result<(), String> {
+        let Some(a) = &self.additive else {
+            return Ok(());
+        };
+        let (Some(float), Some(int)) = (
+            self.inputs.get("init_net_float").cloned(),
+            self.inputs.get("init_net").cloned(),
+        ) else {
+            return Err("hybrid_rung: init_net and init_net_float were not fetched".into());
+        };
+        let widths = a
+            .init_widths
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let t = std::time::Instant::now();
+        let progress = self.progress("init check", json!({}));
+        self.ctx.set_phase("chunk", progress);
+        let out = self.work.join("init-check");
+        let mut c = self.python_cmd("fortyone_nn.train");
+        c.args(["--check-init-only", "--device", "cpu", "--widths", &widths])
+            .args(["--head", &self.p.head, "--init"])
+            .arg(&float)
+            .arg("--init-int")
+            .arg(&int)
+            .arg("--out")
+            .arg(&out)
+            .arg("--progress")
+            .arg(self.work.join("init-check.progress.json"));
+        self.ctx
+            .run_child_io(
+                c,
+                "hybrid/init-check.log",
+                None,
+                Some(super::super::CHECK_LIMIT),
+                &mut |_| {},
+            )
+            .map_err(|e| {
+                format!(
+                    "hybrid_rung: the init check failed: init_net_float is not proven to be \
+                     init_net's weights (train.py --check-init-only: {e}; hybrid/init-check.log)"
+                )
+            })?;
+        let proof = read_json(&out.join("init-check.json")).unwrap_or(Value::Null);
+        if let Some(x) = self.rec.get_mut("additive") {
+            x["init_check"] = json!({ "passed": true, "record": proof,
+                                      "seconds": super::super::secs(t) });
+        }
+        self.done("init check", t)
     }
 
     /// Round `r`'s report fields: its adoption (additive mode) and the leader focus.
@@ -996,7 +1208,7 @@ mod tests {
                 a.tolerance,
                 a.widths_given
             ),
-            (8, 0.0003, None, 0.0, false)
+            (8, 0.0003, None, NOISE_PCT, false)
         );
         assert_eq!(
             (a.init_net.as_str(), a.init_float.as_str()),
@@ -1121,62 +1333,110 @@ mod tests {
     /// (with the tolerance); the reasons name every number that was worse.
     #[test]
     fn adoption_rule() {
+        // The standard 0.01% (0.0001) and the default noise tolerance 0.002 points (0.00002).
+        let (std, tol) = (0.0001, NOISE_PCT / 100.0);
+        // The overnight O_3: overall passes, seats 1-2 fail (0.0122%), team 0's bias fails.
         let best = golden(
             0.000068,
             [0.000122, 0.000080, 0.000052],
             [-0.000085, 0.000054, 0.000036, -0.000005],
         );
-        assert_eq!(adopt(&best, &best, 0.0), (true, vec![]), "the same numbers");
+        assert_eq!(
+            adopt(&best, &best, std, tol),
+            (true, vec![]),
+            "a tie adopts"
+        );
+        // A better round whose passing numbers wobble inside (and beyond) the noise, and whose
+        // failing ones move inside it: adopted.
         let better = golden(
             0.000060,
-            [0.000100, 0.000080, 0.000050],
-            [0.000040, -0.000054, 0.0, 0.000005],
+            [0.000135, 0.000095, 0.000060],
+            [0.000098, -0.000099, 0.000020, 0.000090],
         );
-        assert!(
-            adopt(&better, &best, 0.0).0,
-            "|bias| is compared, not the sign"
-        );
-        // Better overall, worse on one band: not adopted.
+        assert_eq!(adopt(&better, &best, std, tol), (true, vec![]));
+        // A round that loses a band's pass (seats 3-4: 0.0080% passed, 0.0105% fails): rejected,
+        // although everything else is better.
         let band = golden(
             0.000050,
-            [0.000130, 0.000070, 0.000040],
+            [0.000100, 0.000105, 0.000040],
             [0.0, 0.0, 0.0, 0.0],
         );
-        let (ok, why) = adopt(&band, &best, 0.0);
+        let (ok, why) = adopt(&band, &best, std, tol);
         assert!(!ok);
-        assert_eq!(why.len(), 1, "{why:?}");
-        assert!(
-            why[0].starts_with("pos 1-2 bound 0.0130% > the best's 0.0122%"),
-            "{why:?}"
+        assert_eq!(
+            why,
+            vec![
+                "pos 3-4 bound 0.0105% over the standard 0.0100% (the best's 0.0080% passes)"
+                    .to_string()
+            ]
         );
-        // Within the tolerance (0.001 percentage points = 0.00001): adopted.
-        assert!(adopt(&band, &best, 0.00001).0);
-        // One team's bias worse.
+        // A team's bias that passed and now fails: rejected.
         let bias = golden(
             0.000060,
             [0.000100, 0.000070, 0.000050],
-            [-0.000086, 0.0, 0.0, 0.0],
+            [0.0, 0.000101, 0.0, 0.0],
         );
-        let (ok, why) = adopt(&bias, &best, 0.0);
+        let (ok, why) = adopt(&bias, &best, std, tol);
+        assert!(!ok && why.len() == 1, "{why:?}");
         assert!(
-            !ok && why.len() == 1 && why[0].starts_with("team 0's |bias|"),
+            why[0].starts_with("team 1's |bias| 0.0101% over the standard"),
             "{why:?}"
         );
-        // Everything worse: every number named.
-        let worse = golden(
-            0.0001,
-            [0.0002, 0.0002, 0.0002],
-            [0.001, 0.001, 0.001, 0.001],
+        // A band the best already fails, worse beyond the noise: rejected; inside it: adopted.
+        let failing = |u: f64| golden(0.000060, [u, 0.000070, 0.000050], [0.0; 4]);
+        let (ok, why) = adopt(&failing(0.000145), &best, std, tol);
+        assert!(!ok, "{why:?}");
+        assert_eq!(
+            why,
+            vec![
+                "pos 1-2 bound 0.0145% > the best's 0.0122% + 0.0020% (noise tolerance)"
+                    .to_string()
+            ]
         );
-        assert_eq!(adopt(&worse, &best, 0.0).1.len(), 1 + 3 + 4);
+        assert!(adopt(&failing(0.000140), &best, std, tol).0);
+        // The overall bound: worse beyond the noise, rejected even when it still passes; inside
+        // the noise, adopted; a lost overall pass, rejected.
+        let overall = |u: f64| golden(u, [0.000100, 0.000070, 0.000050], [0.0; 4]);
+        let (ok, why) = adopt(&overall(0.000089), &best, std, tol);
+        assert!(!ok && why[0].starts_with("overall bound 0.0089% > the best's 0.0068% + "));
+        assert!(adopt(&overall(0.000087), &best, std, tol).0);
+        let (ok, why) = adopt(
+            &overall(0.000101),
+            &golden(0.000099, [0.0; 3], [0.0; 4]),
+            std,
+            0.1,
+        );
+        assert!(!ok && why[0].contains("over the standard"), "{why:?}");
         // A missing number is never better.
         let missing = Golden {
             overall: 0.00001,
             bands: vec![],
             bias: vec![],
         };
-        assert_eq!(adopt(&missing, &best, 0.0).1.len(), 3 + 4);
-        assert!(!adopt(&golden(f64::NAN, [0.0; 3], [0.0; 4]), &best, 0.0).0);
+        assert_eq!(adopt(&missing, &best, std, tol).1.len(), 3 + 4);
+        assert!(!adopt(&golden(f64::NAN, [0.0; 3], [0.0; 4]), &best, std, tol).0);
+        // Trick 2 (the paired check): the overall SD has no standard (only the noise), the
+        // teams' |bias| the same rule.
+        let rule = Rule {
+            what: "overall SD",
+            overall_std: None,
+            std,
+            tol,
+        };
+        let sd = |u: f64, b: f64| Golden {
+            overall: u,
+            bands: vec![],
+            bias: vec![b, 0.0, 0.0, 0.0],
+        };
+        assert!(adopt_with(&sd(0.010015, 0.00005), &sd(0.01, 0.0), &rule).0);
+        let (ok, why) = adopt_with(&sd(0.012, 0.0), &sd(0.01, 0.0), &rule);
+        assert!(!ok);
+        assert_eq!(
+            why,
+            vec!["overall SD 1.2000% > the best's 1.0000% + 0.0020% (noise tolerance)".to_string()]
+        );
+        let (ok, why) = adopt_with(&sd(0.009, 0.00011), &sd(0.01, 0.00009), &rule);
+        assert!(!ok && why[0].starts_with("team 0's |bias| 0.0110% over the standard"));
     }
 
     /// The focused harvest: a group confirmed again that passes is left out; new ones, failing

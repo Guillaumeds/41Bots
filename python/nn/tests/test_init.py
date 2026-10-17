@@ -111,6 +111,28 @@ class InitTest(unittest.TestCase):
             self.run_train("lam", "--init", self.float, "--shrink-perturb", "1.0", "--epochs", "1")
         self.assertIn("lambda must be above 0 and below 1", str(e.exception))
 
+    def test_check_init_only(self):
+        """``--check-init-only``: the start checked (shape, head, the quantisation proof) without
+        any data; a mismatch stops it."""
+        out = os.path.join(self.dir.name, "check")
+        with mock.patch.object(train, "load_shard", side_effect=AssertionError("read a shard")):
+            quiet_main(["--out", out, "--widths", "24,12", "--init", self.float, "--init-int", self.int,
+                        "--check-init-only"])
+            with open(os.path.join(out, "init-check.json")) as f:
+                rec = json.load(f)
+            self.assertEqual((rec["int_sha256"], rec["outputs"], rec["inputs"]), (sha256_file(self.int), 14, 909))
+            other = os.path.join(self.dir.name, "other2.safetensors")
+            shutil.copyfile(self.int, other)
+            with open(other, "ab") as f:
+                f.write(b" ")
+            for argv, want in ((["--init-int", other, "--widths", "24,12"], "not that network's weights"),
+                               (["--init-int", self.int, "--widths", "24,8"], "hidden widths are 24,12")):
+                with self.assertRaises(SystemExit) as e:
+                    quiet_main(["--out", out, "--init", self.float, "--check-init-only", *argv])
+                self.assertIn(want, str(e.exception))
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            quiet_main(["--out", out, "--widths", "24,12", "--init", self.float, "--check-init-only"])
+
     def test_epochs_zero_takes_the_network_as_it_is(self):
         with mock.patch.object(train, "load_compact", side_effect=AssertionError("read the training rows")):
             out, rep = self.run_train("as-is", "--init", self.float, "--init-int", self.int, "--epochs", "0")

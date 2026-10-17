@@ -6,7 +6,7 @@
   "benchmark_seconds": 0,
   "upload_every_s": 300,
   "heartbeat_every_s": 30,
-  "note": "Trick-4 audit loop in additive mode, aimed at the race groups (owner, 2026-10-17; docs/m3-hybrid/audit-loop.md §10): round 1 is the adopted O_4 (round 1 of m3-hybrid-t4-loop-3, 1024-1024-512-128) taken as it is and measured; each later round continues the best network so far for 8 epochs at 0.0003 on the base shards (random, rules, harvest, race) and every targeted shard so far, and is kept only if the golden set is no worse overall, in every seat band and in every team's bias. Before launching, store O_4's float weights (runs/m3-hybrid-t4-loop-3/partial/rung/000000/out/hybrid/net/float.safetensors, SHA-256 4b85237e...): launch.py put-input FILE; the launcher refuses the run until init_net_float is there. The base labels are made again from last night's seeds (byte-identical; they were not stored) and stored this time (upload_shards). The stored 4,000-decision trick-3 golden set of m3-hybrid-t4-loop-3. Any GPU: the additive trainings are short. About 4 rounds, cap about $5.",
+  "note": "Trick-4 audit loop in additive mode, aimed at the race groups (owner, 2026-10-17; docs/m3-hybrid/audit-loop.md §10): round 1 is the adopted O_4 (round 1 of m3-hybrid-t4-loop-3, 1024-1024-512-128) taken as it is and measured; each later round continues the best network so far for 8 epochs at 0.0003 on the base shards (random, rules, harvest, race) and every targeted shard so far, and is kept unless it is worse on the golden set: a pass the best had and loses (overall, a seat band, a team's bias), a band or bias the best already fails getting worse by more than the noise, or the overall bound worse by more than the noise (adopt_tolerance 0.002 percentage points: about the round-to-round moves of the overnight loops' golden bounds while the networks did not really change). Before launching, store O_4's float weights (runs/m3-hybrid-t4-loop-3/partial/rung/000000/out/hybrid/net/float.safetensors, SHA-256 4b85237e...): launch.py put-input FILE; the launcher refuses the run until init_net_float is there. The base labels are made again from last night's seeds (byte-identical; they were not stored) and stored this time (upload_shards). The stored 4,000-decision trick-3 golden set of m3-hybrid-t4-loop-3. Any GPU: the additive trainings are short. About 4 rounds, cap about $5.",
   "machine": {
     "gpus": 1,
     "min_gpu_ram_gb": 20,
@@ -36,7 +36,7 @@
         "init_net_float": "inputs/sha256/4b85237ee8e6ca3f925e43336f6a26ef493230889f3ef8a84c85c0d3f99e4046",
         "additive_epochs": 8,
         "additive_lr": 0.0003,
-        "adopt_tolerance": 0,
+        "adopt_tolerance": 0.002,
         "labels_random": 16000000,
         "labels_random_seed": 151,
         "labels_rules": 4000000,

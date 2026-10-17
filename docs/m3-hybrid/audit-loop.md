@@ -410,10 +410,12 @@ The owner's decisions of §9, as run settings of `hybrid_rung` (module notes:
 round, the capacity ladder; every existing test unchanged) or `"additive"`:
 - `init_net` (required): the stored integer network to continue, `inputs/sha256/<hex>` (`rung.json`'s
   `net.int_key`); `init_net_float` (required): the same network's float weights (`net.float_key`).
-  Checked at step 0, before anything is installed: an integer network for the rung's trick and head;
-  its hidden widths are the rung's (`widths`, when given, must agree; otherwise they are taken from
-  it); the float file has the same layer shapes and the same training record. In round 1 the trainer
-  proves, byte for byte, that the float weights quantise to `init_net` (`--init-int`).
+  Checked at step 0, before anything is installed: an integer network for the rung's trick and head,
+  taking the encoder's 909 features and giving the head's outputs at the cut; its hidden widths are the
+  rung's (`widths`, when given, must agree; otherwise they are taken from it); the float file has the
+  same layer shapes and the same training record. Then, once the Python environment is in and before
+  any label is made, the init check (`train.py --check-init-only`) proves, byte for byte, that the
+  float weights quantise to `init_net`: a wrong pair costs seconds, not hours of labels.
 - **Round 1 is `init_net` as it is** (`train.py --init --epochs 0`: copied and measured on the
   validation shard; no training spent on what it already knows). Its audit, golden check, mini sets
   and targeted harvest run as in scratch mode; at trick 3 and earlier its audit shard is driven by
@@ -424,24 +426,36 @@ round, the capacity ladder; every existing test unchanged) or `"additive"`:
   off by default; Ash & Adams, NeurIPS 2020): every weight λ·w + N(0, σ²) first, σ = (1 − λ) times the
   standard deviation of the layer's fresh initialisation (σ = (1 − λ)/√(3·fan_in)), drawn on the CPU
   from the seed `train_seed × 1000 + r`: the same seed gives the same network.
-- **Never lose a won pass.** Round r's network is adopted as the new best only if, on the golden set,
-  its overall 95% upper bound, each seat band's (positions 1-2, 3-4, 5-8) and every team's |bias| are
-  each no more than the best's plus `adopt_tolerance` (percentage points; 0 by default). Otherwise the
-  best stays, the summary and the round's report say "NOT adopted" with every number that was worse,
-  its targeted data still joins the next round, the groups the best fails stay failing whatever the
-  rejected network measured, and the round cannot end the loop as flat. The chunk's network is the
-  adopted best.
+- **Never lose a won pass, and no worse overall** (rule as amended by the review of 2026-10-17). On the
+  golden set, judged at the standard as the check judges `loss_pass` and `bias_pass`, round r is *worse*
+  than the best when (a) it loses a pass the best had: the overall bound, a seat band's bound
+  (positions 1-2, 3-4, 5-8) or a team's |bias| on the overall row; (b) a band or bias the best already
+  fails gets worse by more than the noise tolerance; or (c) its overall bound is worse than the best's by
+  more than the noise tolerance. Otherwise (ties and improvements included) it is adopted. The noise
+  tolerance is `adopt_tolerance`, default 0.002 percentage points of money chance: about the overnight
+  loops' round-to-round moves of the golden bound while the networks did not really change (trick 4:
+  0.0016, 0.0021, 0.0016, 0.0024%). The first form of the rule (every raw number no worse, no
+  tolerance) let noise reject most rounds, better ones included. A round not adopted leaves the best
+  as it was: the summary and the round's report say "NOT adopted" with every reason, its targeted data
+  still joins the next round, the failing groups are restored wholesale to the best's, and it cannot
+  end the loop as flat. Every harvest (audit shards, targeted harvests) is driven by the adopted best,
+  never by a rejected network. The chunk keeps the latest adopted round's network and never the
+  scratch ranking: an adopted round gets a provisional result at adoption, so a run stopped before the
+  round's judgement ends still keeps it; before round 1 is judged the chunk names `init_net`.
 - **At trick 2** (no golden set) the same rule reads the round's fresh audit shard, with both networks
   on the same positions: right after round r's auditor, before the shard goes, the best network so far
   is measured on it (`python -m fortyone_nn.audit --overall-only`, the full audit's `overall` numbers),
-  and round r is adopted when its overall SD and every team's |bias| there are no more than the best's
-  plus `adopt_tolerance`. This is the measure the scratch trick-2 loop keeps its best round by (overall
+  and the same rule reads it: a team's |bias| that loses its pass (within the standard) or, where the
+  best already fails it, grows by more than `adopt_tolerance`, or an overall SD (no standard there)
+  worse by more than `adopt_tolerance`, is worse. This is the measure the scratch trick-2 loop keeps its best round by (overall
   SD on the audit shard), made paired, because each round's shard is a different sample and comparing
   each network on its own shard would let sampling noise decide. No seat bands there (the shard's rows
   do not record the decider) and no failing groups. A round not adopted that confirms no group ends
   the loop ("nothing new to train on"). Cost: one network pass over the audit shard a round (the
   auditor's first step; minutes).
-- The capacity ladder is off (the shape is `init_net`'s; `audit_shapes` refused), and the rounds run
+- The capacity ladder is off (the shape is `init_net`'s; `audit_shapes` refused). A step up to a larger
+  network is not built in additive mode (it would start fresh and is refused at parse): run it in
+  scratch mode. The rounds run
   one after another (a training starts from the network adopted after the previous round's golden
   check, so it cannot start beside that check; `overlap` refused). Also refused: `epochs`, `lr` (use
   the additive ones), `label_parts` above 1; additive mode needs `audit_rounds` above 0.
@@ -451,7 +465,10 @@ round, the capacity ladder; every existing test unchanged) or `"additive"`:
 
 **Float networks.** Until this build only the integer network was stored content-addressed; the float
 weights were only in each run's bundle and partial uploads. From now on every round's float network is
-shared too (`net.float_key`, warning-only like the integer one). Last night's networks: the float
+shared too (`net.float_key`), and `upload_shards` shares every shard's sidecar: in both modes, for the
+owner's "store every label" and later additive starts. Neither can fail a step or stop a paid run:
+each upload is tried three times, and a final failure is a warning in the heartbeat (the files are in
+the run's bundle). Last night's networks: the float
 files are in the partial uploads and quantise, byte for byte, to the adopted integer networks
 (checked 2026-10-17):
 

@@ -380,10 +380,16 @@ impl Rung<'_> {
                 ""
             }
         );
+        // The reused training rows (the audit loop counts them in its training set).
+        let train_rows: u64 = recs
+            .iter()
+            .filter(|r| r["name"] != "val")
+            .filter_map(|r| r["count"].as_u64())
+            .sum();
         self.rec.insert(
             "label_inputs".into(),
             json!({ "entries": list.iter().map(LabelInput::to_json).collect::<Vec<_>>(),
-                    "seconds": secs(t) }),
+                    "train_rows": train_rows, "seconds": secs(t) }),
         );
         self.rec.insert("labels".into(), json!(recs));
         self.done("label inputs", t)?;
@@ -439,6 +445,14 @@ impl Rung<'_> {
 }
 
 impl Rung<'_> {
+    /// The training rows of the reused shards (`label_inputs`), 0 without.
+    pub(super) fn reused_train_rows(&self) -> u64 {
+        self.rec
+            .get("label_inputs")
+            .and_then(|x| x["train_rows"].as_u64())
+            .unwrap_or(0)
+    }
+
     /// `upload_shards` in the audit loop: a targeted harvest's shard (`path`, seed `seed`) shared
     /// content-addressed with its sidecar, weight and row weights, and its `label_inputs` entry
     /// (set `extra`) added to `dir/label_inputs.json`, so that a later run (an additive one)

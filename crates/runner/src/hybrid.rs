@@ -1312,6 +1312,8 @@ pub(crate) fn chunk_with(
     r.fetch_inputs()?;
     r.python_env()?;
     r.device_check()?;
+    // Additive mode: the starting network proven before any label is made.
+    r.additive_prove_init()?;
     // The GPU need not wait for the CPU (owner, 2026-10-16): with label parts it starts on the
     // first ones while the rest are made, and a golden set to generate is made while it trains.
     // Both only on a GPU: on the CPU they would share the same threads.
@@ -2038,14 +2040,22 @@ impl Rung<'_> {
                 file.trim_end_matches(".npy").to_string(),
                 json!(format!("sha256:{sha}")),
             );
-            // What a later run's `label_inputs` names it by (its sidecar shared too).
-            let entry = self
-                .label_input_entry(path, &rec, &sha)
-                .map_err(|e| format!("hybrid_rung: upload_shards: {file}: {e}"))?;
+            // What a later run's `label_inputs` names it by (its sidecar shared too). A failure
+            // is only a warning: the sidecar is in the bundle, and a paid run never stops for it.
+            let entry = match self.label_input_entry(path, &rec, &sha) {
+                Ok(e) => Some(e),
+                Err(e) => {
+                    self.warn(format!(
+                        "upload_shards: {file}: its sidecar was not shared ({e}); it is in this \
+                         run's bundle (out/hybrid/labels/)"
+                    ));
+                    None
+                }
+            };
             list.push(json!({ "file": file, "sha256": sha, "bytes": bytes,
                               "key": input_key(&sha), "status": status,
-                              "sidecar_key": entry["sidecar"] }));
-            label_inputs.push(entry);
+                              "sidecar_key": entry.as_ref().map(|e| e["sidecar"].clone()) }));
+            label_inputs.extend(entry);
         }
         let doc = json!({ "shards": list, "manifest_inputs": inputs,
                           "label_inputs": label_inputs });

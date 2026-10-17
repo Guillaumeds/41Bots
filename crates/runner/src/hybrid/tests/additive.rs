@@ -4,10 +4,10 @@
 use super::*;
 use crate::remote::{DirRemote, put_input};
 
-#[cfg(unix)]
 /// A safetensors network of hidden widths `widths` at trick 4 (outcome head): the integer form
 /// (`int`) with the format and the training record, or the float form with the same record (and
 /// another seed when `other`).
+#[cfg(unix)]
 fn net_file(path: &Path, widths: &[usize], int: bool, other: bool) {
     net_file_at(path, widths, int, other, 4);
 }
@@ -15,14 +15,24 @@ fn net_file(path: &Path, widths: &[usize], int: bool, other: bool) {
 /// [`net_file`] for frontier trick `trick`.
 #[cfg(unix)]
 fn net_file_at(path: &Path, widths: &[usize], int: bool, other: bool, trick: u8) {
+    let io = (nn::encode::N_FEATURES, nn::outcome::vocab(trick));
+    net_file_shaped(path, widths, int, other, trick, io);
+}
+
+/// [`net_file_at`] with `io` inputs and outputs.
+#[cfg(unix)]
+fn net_file_shaped(
+    path: &Path,
+    widths: &[usize],
+    int: bool,
+    other: bool,
+    trick: u8,
+    io: (usize, usize),
+) {
     use nn::safetensors::{Dtype, File, Tensor, write};
     let mut f = File::default();
-    let mut n_in = nn::encode::N_FEATURES;
-    let outs: Vec<usize> = widths
-        .iter()
-        .copied()
-        .chain([nn::outcome::vocab(trick)])
-        .collect();
+    let mut n_in = io.0;
+    let outs: Vec<usize> = widths.iter().copied().chain([io.1]).collect();
     for (k, &n) in outs.iter().enumerate() {
         let (wd, bd, wb, bb) = if int {
             (Dtype::I32, Dtype::I64, 4, 8)
@@ -63,8 +73,8 @@ fn net_file_at(path: &Path, widths: &[usize], int: bool, other: bool, trick: u8)
     fs::write(path, write(&f)).expect("write net");
 }
 
-#[cfg(unix)]
 /// Stores a file in the fake remote; its SHA-256.
+#[cfg(unix)]
 fn store(f: &Fakes, path: &Path) -> String {
     let remote = DirRemote {
         root: f.base.join("remote"),
@@ -72,8 +82,8 @@ fn store(f: &Fakes, path: &Path) -> String {
     put_input(&remote, path, None).expect("put").0
 }
 
-#[cfg(unix)]
 /// The integer and float networks of `init_net`, stored; their SHA-256.
+#[cfg(unix)]
 fn init_nets(f: &Fakes, widths: &[usize], other_float: bool) -> (String, String) {
     let (i, fl) = (f.base.join("init-int"), f.base.join("init-float"));
     net_file(&i, widths, true, false);
@@ -81,10 +91,11 @@ fn init_nets(f: &Fakes, widths: &[usize], other_float: bool) -> (String, String)
     (store(f, &i), store(f, &fl))
 }
 
-#[cfg(unix)]
 /// A fake `search` around the audit loop's: its golden check also gives the overall row's bias
-/// and the band of seats 1-2 (its bound for round k's network in `band-k`).
-fn search_with_bands(f: &Fakes, inner: &Path) -> PathBuf {
+/// and the band of seats 1-2 (its bound for round k's network in `band-k`); a mini golden set's
+/// check of round k's network asks the runner to stop (touches `stop`) when `stop-mini-k` exists.
+#[cfg(unix)]
+fn search_with_bands(f: &Fakes, inner: &Path, stop: Option<&Path>) -> PathBuf {
     let arg = r#"arg() { n=$1; shift; while [ $# -gt 0 ]; do [ "$1" = "$n" ] && { echo "$2"; return; }; shift; done; }"#;
     fake_script(
         &f.bin,
@@ -93,15 +104,16 @@ fn search_with_bands(f: &Fakes, inner: &Path) -> PathBuf {
             r#"{arg}
 '{inner}' "$@" || exit 1
 [ "$1" = hybrid-check ] || exit 0
-case "$(arg --slices "$@")" in */mini/*) exit 0;; esac
 net=$(arg --net "$@"); k=1
 case "$net" in */audit/round-*) k=$(echo "$net" | sed 's|.*/audit/round-\([0-9]*\)/net/.*|\1|');; esac
+case "$(arg --slices "$@")" in */mini/*) [ -f '{base}/stop-mini-'$k ] && touch '{stop}'; exit 0;; esac
 [ -f '{base}/band-'$k ] || exit 0
 b=$(cat '{base}/band-'$k)
 sed -i "s|\"bias_pass\": true}}}}]|\"bias_pass\": true, \"bias\": [0.00001, 0.0, 0.0, 0.0]}}}}, {{\"group\": \"pos 1-2\", \"summary\": {{\"decisions\": 1, \"loss_upper95\": $b, \"bias\": [0.0, 0.0, 0.0, 0.0]}}}}]|" "$(arg --json "$@")"
 "#,
             inner = inner.display(),
-            base = f.base.display()
+            base = f.base.display(),
+            stop = stop.map_or("/dev/null".into(), |p| p.display().to_string())
         ),
     )
 }
@@ -141,7 +153,7 @@ fn additive_loop_keeps_only_rounds_no_worse() {
     }
     let tools = audit_tools(&f, true, None);
     let tools = Tools {
-        search: search_with_bands(&f, &tools.search),
+        search: search_with_bands(&f, &tools.search, None),
         ..tools
     };
     let params = additive_params(&f, json!({ "upload_shards": true }));
@@ -174,9 +186,17 @@ fn additive_loop_keeps_only_rounds_no_worse() {
     // network (round 2 was not adopted), perturbed with their own seeds; never beside the CPU
     // steps, even on the GPU.
     let log = fs::read_to_string(&f.calls).expect("calls");
+    // The init check (the quantisation proof) runs before any label is made.
+    let at = |p: &str| log.lines().position(|l| l.contains(p));
+    assert!(
+        at("--check-init-only").expect("the init check") < at("search labels").expect("labels"),
+        "{log}"
+    );
     let trains: Vec<&str> = log
         .lines()
-        .filter(|l| l.starts_with("python -m fortyone_nn.train"))
+        .filter(|l| {
+            l.starts_with("python -m fortyone_nn.train") && !l.contains("--check-init-only")
+        })
         .collect();
     assert_eq!(trains.len(), 3, "{log}");
     let (int, float) = (
@@ -238,8 +258,8 @@ fn additive_loop_keeps_only_rounds_no_worse() {
     let summary = fs::read_to_string(out.join("audit/audit-summary.txt")).expect("summary");
     for want in [
         "round 1: the starting network (init_net) taken as it is: the best so far",
-        "round 2: NOT adopted (pos 1-2 bound 0.0200% > the best's 0.0100%); the best stays \
-         round 1, which round 3 continues",
+        "round 2: NOT adopted (pos 1-2 bound 0.0200% over the standard 0.0100% (the best's \
+         0.0100% passes)); the best stays round 1, which round 3 continues",
         "round 3: adopted (no worse than round 1",
         "best: round 3",
     ] {
@@ -356,6 +376,26 @@ fn additive_init_is_checked_first() {
     let mut ctx = Ctx::local("hybrid-test", &f.base.join("b"), 4);
     let e = chunk_steps(&mut ctx, &params, &tools, &f.table, json!({})).expect_err("record");
     assert!(e.contains("is not init_net's float weights"), "{e}");
+    // A network of another input width, or with outputs other than the cut's vocabulary.
+    for (k, io, want) in [
+        (1, (908, 14), "takes 908 inputs and gives 14 outputs"),
+        (2, (909, 24), "takes 909 inputs and gives 24 outputs"),
+    ] {
+        let (i, fl) = (
+            f.base.join(format!("io-int-{k}")),
+            f.base.join(format!("io-float-{k}")),
+        );
+        net_file_shaped(&i, &[16, 8], true, false, 4, io);
+        net_file_shaped(&fl, &[16, 8], false, false, 4, io);
+        let mut params = additive_params(&f, json!({}));
+        if let Some(a) = params.additive.as_mut() {
+            a.init_net = store(&f, &i);
+            a.init_float = store(&f, &fl);
+        }
+        let mut ctx = Ctx::local("hybrid-test", &f.base.join(format!("io{k}")), 4);
+        let e = chunk_steps(&mut ctx, &params, &tools, &f.table, json!({})).expect_err("io");
+        assert!(e.contains(want), "{e}");
+    }
     let log = fs::read_to_string(&f.calls).unwrap_or_default();
     assert!(!log.contains("uv sync") && !log.contains("search"), "{log}");
     let _ = fs::remove_dir_all(&f.base);
@@ -440,9 +480,9 @@ fn additive_and_reuse_settings() {
     assert!(e.contains("train_mode"), "{e}");
 }
 
-#[cfg(unix)]
 /// A label shard of `rows` zero records at trick 4 and its sidecar, stored; (shard, sidecar)
 /// SHA-256.
+#[cfg(unix)]
 fn stored_shard(f: &Fakes, name: &str, rows: usize, seed: u64, source: &str) -> (String, String) {
     let v = nn::outcome::vocab(4);
     let path = f.base.join(name);
@@ -515,6 +555,10 @@ fn stored_label_shards_are_reused() {
     let out = root.join("out/hybrid");
     let rung = read_json(&out.join("rung.json")).expect("rung.json");
     assert_eq!(rung["label_inputs"]["entries"][0]["seed"], 321);
+    assert_eq!(
+        rung["label_inputs"]["train_rows"], 7,
+        "the reused training rows counted"
+    );
     assert_eq!(rung["labels"][0]["reused"]["shard"], k(&rs).as_str());
     assert!(out.join("labels/t4-val-s401.npy.json").is_file());
     let steps = steps_of(&rung);
@@ -689,7 +733,9 @@ fn additive_loop_at_trick_2_compares_on_the_same_audit_shard() {
         );
         let trains: Vec<&str> = log
             .lines()
-            .filter(|l| l.starts_with("python -m fortyone_nn.train"))
+            .filter(|l| {
+                l.starts_with("python -m fortyone_nn.train") && !l.contains("--check-init-only")
+            })
             .collect();
         assert_eq!(trains.len(), 3, "{log}");
         assert!(trains[0].contains("--epochs 0 "), "{}", trains[0]);
@@ -702,11 +748,30 @@ fn additive_loop_at_trick_2_compares_on_the_same_audit_shard() {
                 "round 2 was not adopted, so round 3 continues round 1 too: {t}"
             );
         }
+        // Round 2 was not adopted: round 2's targeted harvest and round 3's audit shard are
+        // driven by the best, round 1's network, never by round 2's.
+        let net1 = format!(
+            "--harvest-net {}",
+            out.join("net/int.safetensors").display()
+        );
+        for (what, l) in [
+            (
+                "round 2's targeted harvest",
+                log.lines().find(|l| l.contains("t2-target-r2-")),
+            ),
+            (
+                "round 3's audit shard",
+                log.lines().find(|l| l.contains("t2-audit-r3-")),
+            ),
+        ] {
+            let l = l.unwrap_or_else(|| panic!("no {what} in {log}"));
+            assert!(l.contains(&net1), "{what}: {l}");
+        }
         let summary = fs::read_to_string(out.join("audit/audit-summary.txt")).expect("summary");
         assert!(
             summary.contains(
-                "round 2: NOT adopted (overall SD 1.2000% > the best's 1.0000%); the best stays \
-                 round 1"
+                "round 2: NOT adopted (overall SD 1.2000% > the best's 1.0000% + 0.0020% (noise \
+                 tolerance)); the best stays round 1"
             ),
             "{summary}"
         );
@@ -723,4 +788,119 @@ fn additive_loop_at_trick_2_compares_on_the_same_audit_shard() {
         );
         let _ = fs::remove_dir_all(&f.base);
     }
+}
+
+/// A run stopped after round 3 was adopted but before its judgement ended (its mini golden set's
+/// check asks for the stop; the targeted harvest never starts): the chunk keeps round 3's
+/// network, the adopted one, never round 2's, which was rejected although its overall bound is
+/// the lowest (the scratch ranking would have kept it). Run in a child process: the stop request
+/// is process-wide.
+#[cfg(unix)]
+#[test]
+fn additive_stop_keeps_the_adopted_network() {
+    if std::env::var_os("HYBRID_ADDITIVE_STOP_CHILD").is_none() {
+        let out = Command::new(std::env::current_exe().expect("exe"))
+            .args([
+                "--exact",
+                "hybrid::tests::additive::additive_stop_keeps_the_adopted_network",
+                "--nocapture",
+            ])
+            .env("HYBRID_ADDITIVE_STOP_CHILD", "1")
+            .output()
+            .expect("runs");
+        assert!(
+            out.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stdout).contains("1 passed"));
+        return;
+    }
+    let f = fakes("additivestop");
+    fs::write(f.base.join("audit-1.json"), GROUP_ONE).expect("write");
+    fs::write(f.base.join("mini-fail-all"), "").expect("write");
+    fs::write(f.base.join("overall-bounds"), "0.00005 0.00003 0.00004").expect("write");
+    for (k, b) in [(1, "0.0001"), (2, "0.0002"), (3, "0.00009")] {
+        fs::write(f.base.join(format!("band-{k}")), b).expect("write");
+    }
+    fs::write(f.base.join("stop-mini-3"), "").expect("write");
+    let root = f.base.join("run");
+    let tools = audit_tools(&f, false, None);
+    let tools = Tools {
+        search: search_with_bands(&f, &tools.search, Some(&root.join("STOP"))),
+        ..tools
+    };
+    let params = additive_params(&f, json!({ "audit_rounds": 4 }));
+    let mut ctx = Ctx::local("hybrid-test", &root, 4);
+    let e = chunk_steps(&mut ctx, &params, &tools, &f.table, json!({})).expect_err("stopped");
+    assert!(e.contains("stopped"), "{e}");
+    let log = fs::read_to_string(&f.calls).expect("calls");
+    assert!(
+        !log.contains(&format!(
+            "--seed {}",
+            params.audit.as_ref().expect("audit").target_seed(3)
+        )),
+        "round 3's targeted harvest never started:\n{log}"
+    );
+    let out = root.join("out/hybrid");
+    let summary = fs::read_to_string(out.join("audit/audit-summary.txt")).expect("summary");
+    assert!(summary.contains("round 2: NOT adopted"), "{summary}");
+    assert!(summary.contains("round 3: adopted"), "{summary}");
+    assert!(summary.contains("best: round 3 (not flat"), "{summary}");
+    let rung = read_json(&out.join("rung.json")).expect("rung.json");
+    assert_eq!(
+        rung["net"]["dir"], "audit/round-3/net",
+        "the adopted network"
+    );
+    assert_eq!(rung["audit"]["best_round"], 3);
+    let _ = fs::remove_dir_all(&f.base);
+}
+
+/// `upload_shards`: a shard whose sidecar cannot be shared (here: gone) is a warning, never a
+/// failed step; the shard itself is still shared, and the other entries are written.
+#[cfg(unix)]
+#[test]
+fn a_sidecar_upload_failure_is_only_a_warning() {
+    let f = fakes("sidecarwarn");
+    let params = parse(&json!({ "upload_shards": true })).expect("params");
+    let tools = Tools {
+        search: f.search.clone(),
+        uv: f.uv.clone(),
+        python_dir: f.py.clone(),
+        nvidia_smi: f.base.join("no-such-nvidia-smi"),
+        remote: Some(Arc::new(DirRemote {
+            root: f.base.join("remote"),
+        })),
+    };
+    let root = f.base.join("run");
+    let mut ctx = Ctx::local("hybrid-test", &root, 4);
+    let mut r = test_rung(&mut ctx, &params, &tools, &root);
+    let (a, b) = (
+        root.join("t4-random-s101.npy"),
+        root.join("t4-val-s201.npy"),
+    );
+    for p in [&a, &b] {
+        fs::write(p, "npy\n").expect("write");
+    }
+    fs::write(format!("{}.json", b.display()), r#"{"count": 7}"#).expect("write");
+    r.rec.insert(
+        "labels".into(),
+        json!([{ "name": "random", "seed": 101, "file": "t4-random-s101.npy", "shard_sha256": f.sha },
+               { "name": "val", "seed": 201, "file": "t4-val-s201.npy", "shard_sha256": f.sha }]),
+    );
+    r.upload_shards(&[a, b]).expect("the step succeeds");
+    assert!(
+        r.warnings
+            .iter()
+            .any(|w| w.contains("t4-random-s101.npy: its sidecar was not shared")),
+        "{:?}",
+        r.warnings
+    );
+    let doc = read_json(&root.join("out/hybrid/shards.json")).expect("shards.json");
+    assert_eq!(doc["shards"].as_array().map(Vec::len), Some(2));
+    assert_eq!(doc["shards"][0]["sidecar_key"], Value::Null);
+    assert_eq!(doc["label_inputs"].as_array().map(Vec::len), Some(1));
+    assert_eq!(doc["label_inputs"][0]["set"], "val");
+    let _ = fs::remove_dir_all(&f.base);
 }

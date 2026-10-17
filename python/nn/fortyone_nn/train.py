@@ -30,7 +30,9 @@ byte for byte (the float file is then provably that network's weights). ``--shri
 (Ash & Adams, NeurIPS 2020): every weight ``L*w + N(0, sigma^2)``, sigma by ``SIGMA_RULE``, drawn on
 the CPU from ``--perturb-seed`` (default ``--seed``) before the network moves to a device: a seed
 gives one network. The rest is unchanged (Adam afresh at ``--lr``, the plateau scheduler, early
-stopping), so the run is as repeatable as a fresh one. ``--epochs 0`` (only with ``--init``) takes
+stopping), so the run is as repeatable as a fresh one. ``--check-init-only`` (with ``--init`` and
+``--init-int``; no ``--train`` or ``--val``) runs only those checks and writes ``OUT/init-check.json``: the
+runner's step 0 in additive mode, seconds before any label is made. ``--epochs 0`` (only with ``--init``) takes
 the network as it is: its float file copied, its integer network quantised from it (the same bytes
 as ``--init-int``), both measured on the validation shard; the training shards are not read. The
 report's ``init`` and the network's metadata (``init_float_sha256``, ``init_int_sha256``,
@@ -1242,7 +1244,7 @@ def check_init_trick(args, init, trick, v):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--train", nargs="+", default=[])
-    ap.add_argument("--val", required=True)
+    ap.add_argument("--val", help="the validation shard (required, but with --check-init-only)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--head", choices=["outcome", "money4"], default="outcome")
     ap.add_argument("--mix-weight", type=float, default=1.0, help="outcome head: weight of the mixture loss")
@@ -1279,14 +1281,21 @@ def main(argv=None):
     ap.add_argument("--shrink-perturb", type=float, default=None,
                     help="with --init: shrink and perturb, every weight lambda*w + N(0, sigma^2) (SIGMA_RULE)")
     ap.add_argument("--perturb-seed", type=int, default=None, help="the shrink-and-perturb noise's seed (default --seed)")
+    ap.add_argument("--check-init-only", action="store_true",
+                    help="with --init and --init-int: only check the start (shape, head, the quantisation proof), "
+                         "write OUT/init-check.json and stop; no data is read")
     args = ap.parse_args(argv)
+    if args.check_init_only and not (args.init and args.init_int):
+        ap.error("--check-init-only needs --init and --init-int")
+    if args.val is None and not args.check_init_only:
+        ap.error("--val is required")
     if args.init is None and (args.init_int or args.shrink_perturb is not None or args.perturb_seed is not None):
         ap.error("--init-int, --shrink-perturb and --perturb-seed go with --init")
     if args.epochs < 0 or (args.epochs == 0 and args.init is None):
         ap.error("--epochs must be at least 1 (0 only with --init: the network taken as it is, measured)")
     if args.epochs == 0 and args.shrink_perturb is not None:
         ap.error("--epochs 0 takes the --init network as it is: no --shrink-perturb")
-    if args.watch_dir is None and not args.train:
+    if args.watch_dir is None and not args.train and not args.check_init_only:
         ap.error("--train (or --watch-dir with --expect) is required")
     if args.watch_dir is not None and args.expect < max(1, len(args.train)):
         ap.error("--watch-dir needs --expect: the training shards in all, at least 1 and the --train ones")
@@ -1310,6 +1319,17 @@ def main(argv=None):
                 raise SystemExit(f"--init {args.init} quantises to an integer network with sha256 {got}, not "
                                  f"--init-int {args.init_int} ({want}): the float file is not that network's weights")
             init["record"]["int_sha256"] = want
+        if args.check_init_only:
+            # The runner's step 0 in additive mode: seconds here, before hours of labels.
+            rec = dict(init["record"])
+            rec.update(outputs=n_init, inputs=int(layers[0][0].shape[0]), proof="the float weights quantise to "
+                       "--init-int byte for byte")
+            os.makedirs(args.out, exist_ok=True)
+            with open(os.path.join(args.out, "init-check.json"), "w") as f:
+                json.dump(rec, f, indent=1)
+            print(f"--init {args.init}: widths {args.widths}, head {imeta.get('head')}, {n_init} outputs; quantises "
+                  f"to --init-int {init['record']['int_sha256']} byte for byte", flush=True)
+            return
 
     t0 = time.time()
     torch.manual_seed(args.seed)

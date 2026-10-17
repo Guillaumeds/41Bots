@@ -1740,7 +1740,8 @@ impl Rung<'_> {
             fs::create_dir_all(d).map_err(|e| format!("mkdir {}: {e}", d.display()))?;
         }
         let mut st = Loop {
-            train_rows: self.p.train.iter().map(|x| x.count).sum(),
+            train_rows: self.p.train.iter().map(|x| x.count).sum::<u64>()
+                + self.reused_train_rows(),
             s,
             groups: Vec::new(),
             train: train.to_vec(),
@@ -1784,8 +1785,8 @@ impl Rung<'_> {
         };
         self.audit_hb.insert("audit_stop".into(), json!(stop));
         // The chunk keeps the best round's network and check (`best_round`), also on a stop.
-        // Additive mode: the adopted best (`additive`), else the ranking.
-        let kept = self.additive_best(&st).or_else(|| best_round(&st));
+        // Additive mode: the latest adopted round, never the ranking (`additive`).
+        let kept = self.kept_round(&st);
         let best = kept.map(|b| (b.r, b.level, b.overall, b.net.clone(), b.check.clone()));
         // Trick 2: the kept round's rough test (reported only).
         let best_rough = kept.and_then(|b| b.rough.clone());
@@ -1818,7 +1819,11 @@ impl Rung<'_> {
                 )
             });
         }
-        if let Some(n) = best.as_ref().and_then(|b| b.3.clone()) {
+        if let Some(n) = best
+            .as_ref()
+            .and_then(|b| b.3.clone())
+            .or_else(|| self.additive_init_net())
+        {
             self.rec.insert("net".into(), n);
         }
         let unm = unmeasurable_groups(&st);
@@ -2215,6 +2220,10 @@ impl Rung<'_> {
         if self.p.cut >= 4 {
             return None;
         }
+        // Additive mode: the adopted best, never a rejected round's network.
+        if let Some(best) = self.additive_driver() {
+            return Some(best);
+        }
         latest
             .map(Path::to_path_buf)
             // Additive mode: round 1's network is `init_net` itself.
@@ -2606,7 +2615,7 @@ impl Rung<'_> {
         let hc = read_json(&hc_json)
             .ok_or_else(|| format!("hybrid_rung: hybrid-check wrote no {}", hc_json.display()))?;
         let golden = check_summary(&hc);
-        self.additive_judge(st, p, &hc, tag);
+        self.additive_judge(st, p, &hc, (&hc_json, &hc_txt), tag);
         let overall_pass = golden["overall_pass"].as_bool().unwrap_or(false);
         let big = st.s.mini_decisions;
         // The mini golden sets of earlier rounds, re-measured with this network.
