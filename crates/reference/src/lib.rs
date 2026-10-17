@@ -16,4 +16,4 @@ pub mod order;
 pub(crate) mod test_support;
 
 pub use card::{Card, Rank, Suit, index_of_name, name_of_index};
-pub use game::{Action, Match, Phase, Public, Rules};
+pub use game::{Action, Lapse, Match, Phase, Public, Rules};

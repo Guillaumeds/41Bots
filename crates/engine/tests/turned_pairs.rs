@@ -1,17 +1,18 @@
-//! Turned partnerships (rules 34, 39, 40 and 41; the owner's decision of 2026-10-17 in
-//! docs/APP-ENGINE-CONTRACT.md §7): the app tells the engine which pair it has caught and when
-//! (`Match::turn_team`), and the hand goes on exactly as the rules say. The engine's own players
-//! never act illegally (H1), so nothing here is ever caused by a play.
+//! Turned partnerships (rules 34 and 37–41; the owner's decisions of 2026-10-17 in
+//! docs/APP-ENGINE-CONTRACT.md §7): the app turns a pair (`Match::turn_team`), turns one right
+//! after a card (`Match::play_then_turn`), or lets a renege through (`Match::let_through`) and the
+//! engine catches it when the app would; the hand goes on exactly as the app plays it. The
+//! engine's own players never act illegally (H1): none of this is among `legal_actions`.
 //!
-//! One test per rule (named after it), the edge cases the owner's decision lists, the three
-//! cases the rules leave open (refused, not guessed), and properties over random hands with
-//! random turns: records replay exactly, every seat's view and the hand-start state stay right,
-//! and a hand where nobody is turned is exactly what it always was.
+//! One test per rule (named after it), one per ruling of 2026-10-17 (Q1 to Q3, "play, then
+//! turn", a turn while a rob is due), the catches, and properties over random hands with random
+//! turns and lapses: records replay exactly, every seat's view and the hand-start state stay
+//! right, and a refusal changes nothing.
 
 use engine::cards::{Bits, Card, DECK_SIZE, bit, parse};
 use engine::game::{
-    Action, Event, GameEndReason, HandStartState, Match, Phase, Rules, TurnRefusal, build_deck,
-    current_hand_start_of,
+    Action, Event, Extra, GameEndReason, HandStartState, Lapse, LapseRefusal, Match, Phase,
+    RenegeKind, Rules, TurnCause, TurnRefusal, build_deck, current_hand_start_of,
 };
 use engine::rng::Rng;
 use engine::{SEATS, team_of};
@@ -80,6 +81,40 @@ fn rule_hand() -> Match {
     Match::with_decks(7, vec![deck(7, HANDS, "7S AS")], 1, Rules::HOUSE)
 }
 
+/// The rule hand with a chosen pack (the turned card first).
+fn rule_hand_pack(pack: &str) -> Match {
+    Match::with_decks(7, vec![deck(7, HANDS, pack)], 1, Rules::HOUSE)
+}
+
+/// The rule hand with seat 5 holding the ace of trumps (A♠ for its 9♣): at its turn in trick 1
+/// the engine takes the turned 7♠ for it and waits for its burn.
+const ROB_HANDS: [&str; 8] = [
+    "KC 5S AD 2D 3D",
+    "4C QC KH QH KD",
+    "2C JC JH 10H QD",
+    "5C 9S 9H 8H JD",
+    "3C AC 4D 5D 6D",
+    "6C AS 7H 6H 10D",
+    "7C KS 5H 4H 9D",
+    "8C 10C 3H 2H 8D",
+];
+
+fn rob_hand() -> Match {
+    Match::with_decks(7, vec![deck(7, ROB_HANDS, "7S 9C")], 1, Rules::HOUSE)
+}
+
+fn lapse(m: &mut Match, l: Lapse) {
+    if let Err(e) = m.let_through(l) {
+        panic!("{e}");
+    }
+}
+
+fn play_turn(m: &mut Match, card: &str, team: u8) {
+    if let Err(e) = m.play_then_turn(c(card), team) {
+        panic!("{e}");
+    }
+}
+
 /// The rule hand from a chosen start of hand (scores, games, bonus flags).
 fn rule_hand_from(scores: [u8; 4], hands: [&str; 8]) -> Match {
     let s = HandStartState {
@@ -141,7 +176,7 @@ fn rule_39_turned_tricks_pass_and_the_bonus_follows_the_best_trump_in_play() {
     assert_eq!(
         log_from(&m, from),
         [
-            "PairTurned team=0 score=0",
+            "PairTurned team=0 score=0 cause=before_play",
             "TrickPassed trick=1 team=2 points=5",
             "TrickPassed trick=2 team=2 points=5",
         ]
@@ -226,8 +261,8 @@ fn rule_40_turned_cards_leave_the_trick_and_the_lead_passes_on() {
     // Trick 2 among six: the 5 of trumps wins with its bonus.
     plays(&mut m, "5S JC 9S AC KS 10C");
     assert_eq!(m.scores(), [16, 0, 0, 0]);
-    // The seat to lead (seat 0) is turned: the lead passes to seat 1's left, seat 2 (seat 1 is
-    // turned too).
+    // The seat to lead (seat 0) is turned: the lead passes to seat 1, then (seat 1 turned too)
+    // to seat 2.
     let mut n = rule_hand();
     plays(&mut n, TRICK1);
     plays(&mut n, TRICK2);
@@ -247,8 +282,9 @@ fn rule_40_turned_cards_leave_the_trick_and_the_lead_passes_on() {
 /// every trick of the hand, the turned partnerships' tricks included under rule 39, and that is
 /// a jink: it wins the game."
 ///
-/// After two tricks, teams 0, 1 and 3 are turned: team 2 alone is in play and wins the game at
-/// once with a jink, with tricks 1 and 2 passed to it; the rest of the hand is not played.
+/// As the app plays it: the last partnership in play plays the hand out alone, takes every trick
+/// (tricks 1 and 2 passed to it, tricks 3 to 5 won), takes the bonus (the K♠, its 11) and wins
+/// the game with a jink at the end of the hand.
 #[test]
 fn rule_34_the_last_partnership_in_play_takes_every_trick_and_wins_the_game() {
     let mut m = rule_hand();
@@ -259,21 +295,37 @@ fn rule_34_the_last_partnership_in_play_takes_every_trick_and_wins_the_game() {
     turn(&mut m, 1);
     turn(&mut m, 3);
     assert_eq!(
-        log_from(&m, from)[..7],
+        log_from(&m, from),
         [
-            "PairTurned team=0 score=0",
+            "PairTurned team=0 score=0 cause=before_play",
             "TrickPassed trick=1 team=2 points=5",
             "TrickPassed trick=2 team=2 points=5",
-            "PairTurned team=1 score=0",
-            "PairTurned team=3 score=0",
-            "GameWon team=2 reason=jink scores=0,0,10,0",
-            "HandEnd hand=0 aborted=true",
+            "PairTurned team=1 score=0 cause=before_play",
+            "PairTurned team=3 score=0 cause=before_play",
+        ]
+    );
+    assert_eq!(
+        m.phase(),
+        Phase::AwaitPlay(2),
+        "seat 2 leads, alone with seat 6"
+    );
+    plays(&mut m, "JH 5H 10H 4H QD");
+    let from = m.events().len();
+    play(&mut m, "9D");
+    assert_eq!(
+        log_from(&m, from)[..5],
+        [
+            "Played seat=6 card=9D",
+            "TrickWon trick=5 seat=2 team=2 points=5",
+            "Bonus team=2 points=6 kind=end card=KS",
+            "GameWon team=2 reason=jink scores=0,0,31,0",
+            "HandEnd hand=0 aborted=false",
         ]
     );
     assert_eq!(m.games_won(), [0, 0, 1, 0]);
     assert_eq!(m.scores(), [0; 4], "a new game");
     // Team 1 wins trick 3 among six and is turned: trick 3 passes (rule 39) to seat 2's J♥, the
-    // highest heart left; then team 3 is turned and team 2, alone in play, wins the game.
+    // highest heart left; then team 3 is turned and team 2 plays tricks 4 and 5 alone.
     let mut m = rule_hand();
     plays(&mut m, TRICK1);
     plays(&mut m, TRICK2);
@@ -283,17 +335,464 @@ fn rule_34_the_last_partnership_in_play_takes_every_trick_and_wins_the_game() {
     turn(&mut m, 1);
     turn(&mut m, 3);
     assert_eq!(
+        log_from(&m, from),
+        [
+            "PairTurned team=1 score=0 cause=before_play",
+            "TrickPassed trick=3 team=2 points=5",
+            "PairTurned team=3 score=0 cause=before_play",
+        ]
+    );
+    plays(&mut m, "10H 4H QD 9D");
+    assert_eq!(m.games_won(), [0, 0, 1, 0]);
+}
+
+// ===== the owner's rulings of 2026-10-17 =====
+
+/// Q1, "ask the pros first": a partnership turned while the trick it led is still in progress
+/// is refused (the app keeps the turned card as the card led), whatever turns it: a turn, a play
+/// then a turn, or a card that proves its own renege. The match is unchanged.
+#[test]
+fn q1_leader_turned_mid_trick_is_refused_as_an_open_question() {
+    let mut m = rule_hand();
+    plays(&mut m, "KC 4C");
+    let before = m.clone();
+    let e = m.turn_team(0).expect_err("refused");
+    assert_eq!(e.why, TurnRefusal::LedTrickInProgress);
+    assert_eq!(m, before);
+    // Its partner's seat (4) is not the leader, but its card would be the trick's lead card all
+    // the same: still refused.
+    plays(&mut m, "2C 5C");
+    assert_eq!(
+        m.turn_team(0).map_err(|e| e.why),
+        Err(TurnRefusal::LedTrickInProgress)
+    );
+    // Even when the card that turns it is the trick's last: against which card is it won?
+    plays(&mut m, "3C 6C 7C");
+    let before = m.clone();
+    assert_eq!(
+        m.play_then_turn(c("8C"), 0).map_err(|e| e.why),
+        Err(TurnRefusal::LedTrickInProgress)
+    );
+    assert_eq!(m, before);
+    // Another partnership mid-trick is fine.
+    assert!(m.turn_team(3).is_ok());
+    // A legal card that proves a renege of the partnership that led the trick: the same
+    // question, refused. Seat 3 holds the J♦ and plays the 9♥ to seat 0's 2♦ in trick 3 (let
+    // through); teams 1 and 2 are turned, so seat 3 leads trick 4, and its J♦ lead proves the
+    // renege while seats 4 and 0 still have to play.
+    let mut m = rule_hand();
+    plays(&mut m, TRICK1);
+    plays(&mut m, TRICK2);
+    plays(&mut m, "2D KD QD");
+    lapse(&mut m, Lapse::Play(c("9H")));
+    plays(&mut m, "4D 10D 9D 8D");
+    turn(&mut m, 1);
+    turn(&mut m, 2);
+    assert_eq!(m.to_act(), Some(3));
+    let before = m.clone();
+    let e = m.apply(Action::Play(c("JD"))).expect_err("refused");
+    assert_eq!(e.reason, TurnRefusal::LedTrickInProgress.reason());
+    assert_eq!(m, before);
+}
+
+/// Q2, "first card played takes it" (as the app's `standingWinnerIndex`): a trick to pass in
+/// which no card of a partnership still in play is a trump or of the suit led goes to the first
+/// of their cards played. Seat 0 leads the K♣ and only its partner follows; turned, its trick
+/// goes to seat 1's 2♦ (the first card of the others), then, seat 1 turned, to seat 2's 6♦.
+#[test]
+fn q2_a_trick_with_no_card_that_can_win_goes_to_the_first_card_played() {
+    let hands = [
+        "KC QC JC AC 2C",
+        "2D 3D 4D 5D 2S",
+        "6D 7D 8D 9D 3S",
+        "10D JD QD KD 4S",
+        "3C 4C 5C 6C 7C",
+        "AD 2H 3H 4H 6S",
+        "5H 6H 7H 8H 8S",
+        "9H 10H JH QH KH",
+    ];
+    let mut m = Match::with_decks(7, vec![deck(7, hands, "7S AS")], 1, Rules::HOUSE);
+    plays(&mut m, "KC 2D 6D 10D 3C AD 5H 9H");
+    assert_eq!(m.public().trick_winners, [0]);
+    let from = m.events().len();
+    turn(&mut m, 0);
+    turn(&mut m, 1);
+    assert_eq!(
+        log_from(&m, from),
+        [
+            "PairTurned team=0 score=0 cause=before_play",
+            "TrickPassed trick=1 team=1 points=5",
+            "PairTurned team=1 score=0 cause=before_play",
+            "TrickPassed trick=1 team=2 points=5",
+        ]
+    );
+    assert_eq!(m.scores(), [0, 0, 5, 0]);
+    // Every partnership turned: nobody played a card that still counts, the trick stays with
+    // nobody and the hand ends with nobody scoring.
+    turn(&mut m, 2);
+    let from = m.events().len();
+    turn(&mut m, 3);
+    assert_eq!(
+        log_from(&m, from)[..3],
+        [
+            "PairTurned team=3 score=0 cause=before_play",
+            "HandEnd hand=0 aborted=true",
+            "HandStart hand=1 game=0 dealer=0",
+        ]
+    );
+    assert_eq!(m.scores(), [0; 4]);
+}
+
+/// Q3, "same as the app": passed tricks are credited one at a time in trick order, and the game
+/// ends at the first partnership to reach 41 (rule 32); later passes are not credited.
+#[test]
+fn q3_passed_tricks_are_credited_in_order_and_the_first_to_41_wins() {
+    let mut m = rule_hand_from([10, 5, 36, 0], HANDS);
+    plays(&mut m, TRICK1);
+    plays(&mut m, TRICK2);
+    let from = m.events().len();
+    turn(&mut m, 0);
+    assert_eq!(
         log_from(&m, from)[..4],
         [
-            "PairTurned team=1 score=0",
-            "TrickPassed trick=3 team=2 points=5",
-            "PairTurned team=3 score=0",
-            "GameWon team=2 reason=jink scores=0,0,15,0",
+            "PairTurned team=0 score=10 cause=before_play",
+            "TrickPassed trick=1 team=2 points=5",
+            "GameWon team=2 reason=passed_trick scores=10,5,41,0",
+            "HandEnd hand=3 aborted=true",
+        ]
+    );
+    assert_eq!(m.games_won(), [0, 0, 1, 0]);
+    // Trick 2 passes to team 3 when seat 3 holds the K♠ and seat 6 the 9♠: both teams on 36
+    // would reach 41, and team 2's trick 1 comes first.
+    let mut swapped = HANDS;
+    swapped[3] = "5C KS 9H 8H JD";
+    swapped[6] = "7C 9S 5H 4H 9D";
+    let mut m = rule_hand_from([10, 5, 36, 36], swapped);
+    plays(&mut m, TRICK1);
+    plays(&mut m, "5S QC JC KS AC 9C 9S 10C");
+    let from = m.events().len();
+    turn(&mut m, 0);
+    assert_eq!(
+        log_from(&m, from)[..3],
+        [
+            "PairTurned team=0 score=10 cause=before_play",
+            "TrickPassed trick=1 team=2 points=5",
+            "GameWon team=2 reason=passed_trick scores=10,5,41,36",
+        ]
+    );
+    // Team 2 on 31 reaches only 36 with trick 1; team 3 then reaches 41 with trick 2.
+    let mut m = rule_hand_from([10, 5, 31, 36], swapped);
+    plays(&mut m, TRICK1);
+    plays(&mut m, "5S QC JC KS AC 9C 9S 10C");
+    let from = m.events().len();
+    turn(&mut m, 0);
+    assert_eq!(
+        log_from(&m, from)[..4],
+        [
+            "PairTurned team=0 score=10 cause=before_play",
+            "TrickPassed trick=1 team=2 points=5",
+            "TrickPassed trick=2 team=3 points=5",
+            "GameWon team=3 reason=passed_trick scores=10,5,36,41",
         ]
     );
 }
 
-// ===== edge cases =====
+/// "Play, then turn": the card is placed, the partnership is turned, then the trick goes on or
+/// is resolved. Seat 7's 8♦ completes trick 3 and team 1 is turned with it: seat 1's K♦ and
+/// seat 5's 10♦ no longer count, and seat 2's Q♦ wins the trick.
+#[test]
+fn play_then_turn_resolves_the_trick_without_the_turned_cards() {
+    let mut m = rule_hand();
+    plays(&mut m, TRICK1);
+    plays(&mut m, TRICK2);
+    plays(&mut m, "2D KD QD JD 4D 10D 9D");
+    // An illegal card is refused (seat 7 holds the 8♦).
+    let before = m.clone();
+    assert_eq!(
+        m.play_then_turn(c("3H"), 1).map_err(|e| e.why),
+        Err(TurnRefusal::IllegalCard)
+    );
+    assert_eq!(m, before);
+    let from = m.events().len();
+    play_turn(&mut m, "8D", 1);
+    assert_eq!(
+        log_from(&m, from),
+        [
+            "Played seat=7 card=8D",
+            "PairTurned team=1 score=0 cause=with_play",
+            "TrickWon trick=3 seat=2 team=2 points=5",
+        ]
+    );
+    assert_eq!(m.phase(), Phase::AwaitPlay(2));
+    assert_eq!(m.extras(), [(23, Extra::PlayThenTurn(c("8D"), 1))]);
+    // Mid-trick, the seat's own partnership: its card leaves the trick at once.
+    let mut m = rule_hand();
+    plays(&mut m, "KC 4C");
+    play_turn(&mut m, "2C", 2);
+    assert_eq!(m.public().trick_cards, [(0, c("KC")), (1, c("4C"))]);
+    assert_eq!(m.phase(), Phase::AwaitPlay(3));
+}
+
+/// A turn while a rob is due (the app's Guide: the robber plays without robbing and is turned
+/// before its card): the engine's automatic take is undone, the turned card stays on the table,
+/// and the play goes on from the next seat in play.
+#[test]
+fn turn_while_a_rob_is_due_undoes_the_take_no_rob() {
+    let mut m = rob_hand();
+    plays(&mut m, "KC 4C 2C 5C");
+    let from = m.events().len();
+    play(&mut m, "3C");
+    assert_eq!(m.phase(), Phase::AwaitBurn(5));
+    turn(&mut m, 1);
+    assert_eq!(
+        log_from(&m, from),
+        [
+            "ProvedNoAce seat=4",
+            "Played seat=4 card=3C",
+            "PairTurned team=1 score=0 cause=no_rob"
+        ]
+    );
+    assert!(
+        !m.events()
+            .iter()
+            .any(|(_, e)| matches!(e, Event::Took { .. })),
+        "the take never happened"
+    );
+    let p = m.public();
+    assert_eq!(p.table_card, Some(c("7S")));
+    assert_eq!(p.robber, None);
+    assert_eq!(p.hand_sizes[5], 5);
+    assert_eq!(m.phase(), Phase::AwaitPlay(6));
+    plays(&mut m, "7C 8C");
+    assert_eq!(m.public().trick_winners, [0]);
+}
+
+/// The dealer refuses a turned ace (the app's `declineRob`): its partnership is turned, the ace
+/// stays on the table, out of play, and trick 1 starts as usual.
+#[test]
+fn turn_while_a_rob_is_due_declined_rob() {
+    let mut m = rule_hand_pack("AS 7S");
+    assert_eq!(m.phase(), Phase::AwaitBurn(7));
+    turn(&mut m, 3);
+    let l = log_from(&m, 0);
+    assert_eq!(
+        l[l.len() - 2..],
+        [
+            "Turned card=AS",
+            "PairTurned team=3 score=0 cause=declined_rob"
+        ]
+    );
+    let p = m.public();
+    assert_eq!(p.table_card, Some(c("AS")));
+    assert_eq!(p.robber, None);
+    assert_eq!(p.hand_sizes[7], 5);
+    assert_eq!(m.phase(), Phase::AwaitPlay(0));
+    plays(&mut m, "KC 4C 2C 3C 6C 7C");
+    assert_eq!(m.public().trick_winners, [0]);
+    assert!(!m.public().ace_undealt);
+}
+
+/// The dealer leaves a turned Joker (the app's `leaveJoker`): its partnership is turned, the
+/// Joker stays face up on the deck and the next card is turned; an ace turned next stays on the
+/// pack unrobbed (the app's `afterTurn`).
+#[test]
+fn turn_while_a_rob_is_due_left_joker() {
+    let mut m = rule_hand_pack("JK 7S AS");
+    assert_eq!(m.phase(), Phase::AwaitBurn(7));
+    turn(&mut m, 3);
+    let l = log_from(&m, 0);
+    assert_eq!(
+        l[l.len() - 3..],
+        [
+            "Turned card=JK",
+            "PairTurned team=3 score=0 cause=left_joker",
+            "Turned card=7S"
+        ]
+    );
+    assert_eq!(m.phase(), Phase::AwaitPlay(0));
+    let p = m.public();
+    assert_eq!(p.trump, Some(engine::cards::Suit::Spades));
+    assert_eq!(p.turned, [(c("JK"), None), (c("7S"), None)]);
+    assert_eq!(p.hand_sizes[7], 5);
+    // An ace turned after the left Joker stays on the pack: the dealer's partnership is out.
+    let mut m = rule_hand_pack("JK AS 7S");
+    turn(&mut m, 3);
+    assert_eq!(m.phase(), Phase::AwaitPlay(0));
+    let p = m.public();
+    assert_eq!(p.table_card, Some(c("AS")));
+    assert_eq!(p.robber, None);
+    assert_eq!(p.turned, [(c("JK"), None), (c("AS"), None)]);
+    // Another partnership cannot be turned while the dealer's burn is due.
+    let mut m = rule_hand_pack("JK 7S AS");
+    assert_eq!(
+        m.turn_team(0).map_err(|e| e.why),
+        Err(TurnRefusal::NotBeforeAPlay)
+    );
+}
+
+// ===== the referee: reneges let through and caught when the app catches them =====
+
+/// Rule 37, a card proves the renege: seat 1 plays the K♥ to seat 0's club lead holding two
+/// clubs (let through); its Q♣ in trick 2 proves it, and its partnership is turned with that
+/// card, which leaves the trick.
+#[test]
+fn rule_37_a_later_card_proves_the_renege() {
+    let mut m = rule_hand();
+    play(&mut m, "KC");
+    let before = m.clone();
+    assert_eq!(
+        m.let_through(Lapse::Play(c("4C"))).map_err(|e| e.why),
+        Err(LapseRefusal::Legal)
+    );
+    assert_eq!(
+        m.let_through(Lapse::Play(c("JH"))).map_err(|e| e.why),
+        Err(LapseRefusal::NotInHand)
+    );
+    assert_eq!(m, before);
+    lapse(&mut m, Lapse::Play(c("KH")));
+    assert_eq!(m.reneges().len(), 1);
+    assert_eq!(
+        m.reneges()[0].kind,
+        RenegeKind::Follow(engine::cards::Suit::Clubs)
+    );
+    plays(&mut m, "2C 5C 3C 6C 7C 8C");
+    assert_eq!(m.turned_teams(), [false; 4], "nobody has seen it yet");
+    play(&mut m, "5S");
+    let from = m.events().len();
+    play(&mut m, "QC");
+    assert_eq!(
+        log_from(&m, from),
+        [
+            "Played seat=1 card=QC",
+            "PairTurned team=1 score=0 cause=proved"
+        ]
+    );
+    assert!(m.reneges()[0].caught);
+    assert_eq!(m.public().trick_cards, [(0, c("5S"))]);
+    plays(&mut m, "JC 9S AC KS 10C");
+    assert_eq!(m.scores(), [16, 0, 0, 0]);
+    // Seat 5, the robber, plays without robbing (let through): playing the ace proves it.
+    let mut m = rob_hand();
+    plays(&mut m, "KC 4C 2C 5C 3C");
+    lapse(&mut m, Lapse::PlayWithoutRob(c("6C")));
+    assert_eq!(m.public().table_card, Some(c("7S")));
+    plays(&mut m, "7C 8C 5S QC JC 9S AC");
+    let from = m.events().len();
+    play(&mut m, "AS");
+    assert_eq!(
+        log_from(&m, from),
+        [
+            "Played seat=5 card=AS",
+            "PairTurned team=1 score=0 cause=proved"
+        ]
+    );
+}
+
+/// Rule 38, the ace shows from another hand: seat 2 takes the turned 7♠ without the ace (let
+/// through); seat 5 plays the A♠ in trick 2 and seat 2's partnership is turned with that card.
+#[test]
+fn rule_38_the_ace_from_another_hand_catches_a_rob_without_it() {
+    let mut m = rob_hand();
+    plays(&mut m, "KC 4C");
+    let before = m.clone();
+    assert_eq!(
+        m.let_through(Lapse::BurnAce).map_err(|e| e.why),
+        Err(LapseRefusal::NotNow)
+    );
+    assert_eq!(m, before);
+    lapse(&mut m, Lapse::FalseRob(c("JH")));
+    assert_eq!(m.phase(), Phase::AwaitPlay(2));
+    assert_eq!(m.public().robber, Some(2));
+    plays(&mut m, "2C 5C 3C");
+    assert_eq!(m.phase(), Phase::AwaitPlay(5), "seat 5 robs no more");
+    plays(&mut m, "6C 7C 8C 5S QC 7S 9S AC");
+    let from = m.events().len();
+    play(&mut m, "AS");
+    assert_eq!(
+        log_from(&m, from),
+        [
+            "Played seat=5 card=AS",
+            "PairTurned team=2 score=0 cause=ace_shown"
+        ]
+    );
+    assert_eq!(m.phase(), Phase::AwaitPlay(7), "seat 6 is skipped");
+}
+
+/// Rule 38, the pair tries to claim the game: team 2 on 36 robbed without the ace and wins
+/// trick 1 with the 7♠ it took: instead of 41 it is turned, the trick passes to seat 0's K♣,
+/// and the next trick is led by the seat on the winner's left still in play.
+#[test]
+fn rule_38_a_claim_catches_a_rob_without_the_ace() {
+    let mut m = rule_hand_from([0, 0, 36, 0], HANDS);
+    plays(&mut m, "KC 4C");
+    lapse(&mut m, Lapse::FalseRob(c("JH")));
+    let from = m.events().len();
+    plays(&mut m, "7S 5C 3C 6C 7C 8C");
+    let l = log_from(&m, from);
+    assert_eq!(
+        l[l.len() - 4..],
+        [
+            "Played seat=7 card=8C",
+            "TrickWon trick=1 seat=2 team=2 points=0",
+            "PairTurned team=2 score=36 cause=claim",
+            "TrickPassed trick=1 team=0 points=5",
+        ]
+    );
+    assert_eq!(m.scores(), [5, 0, 36, 0]);
+    assert_eq!(m.phase(), Phase::AwaitPlay(3));
+}
+
+/// Rule 38, the hand ends without the ace: seat 5 burns the A♠ when it robs (let through); at
+/// the end of the hand its partnership is turned and its three tricks pass to team 2.
+#[test]
+fn rule_38_the_hand_ending_without_the_ace_catches_a_burned_ace() {
+    let mut m = rob_hand();
+    plays(&mut m, "KC 4C 2C 5C 3C");
+    lapse(&mut m, Lapse::BurnAce);
+    plays(&mut m, "6C 7C 8C");
+    plays(&mut m, "5S QC JC 9S AC 7S KS 10C");
+    plays(&mut m, "AD KD QD JD 4D 10D 9D 8D");
+    plays(&mut m, "KH JH 9H 5D 7H 5H 3H 2D");
+    let from = m.events().len();
+    plays(&mut m, "QH 10H 8H 6D 6H 4H 2H 3D");
+    let l = log_from(&m, from);
+    assert_eq!(
+        l[8..14],
+        [
+            "TrickWon trick=5 seat=1 team=1 points=5",
+            "PairTurned team=1 score=0 cause=hand_end",
+            "TrickPassed trick=3 team=2 points=5",
+            "TrickPassed trick=4 team=2 points=5",
+            "TrickPassed trick=5 team=2 points=5",
+            "HandEnd hand=0 aborted=false",
+        ]
+    );
+    assert_eq!(m.scores(), [16, 0, 15, 0]);
+}
+
+/// Every partnership turned in the middle of a trick: the trick goes to its best card for no
+/// points (as the app's `resolveTrick`), the hand ends, and nobody scores it.
+#[test]
+fn every_partnership_turned_ends_the_hand_with_nobody_scoring() {
+    let mut m = rule_hand();
+    plays(&mut m, TRICK1);
+    plays(&mut m, "5S QC");
+    turn(&mut m, 2);
+    turn(&mut m, 3);
+    turn(&mut m, 1);
+    let from = m.events().len();
+    turn(&mut m, 0);
+    assert_eq!(
+        log_from(&m, from)[..3],
+        [
+            "PairTurned team=0 score=0 cause=before_play",
+            "TrickWon trick=2 seat=0 team=0 points=0",
+            "HandEnd hand=0 aborted=true",
+        ]
+    );
+    assert_eq!(m.scores(), [0; 4]);
+    assert_eq!(m.hand_index(), 1);
+}
 
 /// The turned pair played the 5 of trumps in the trick in progress (not as its lead): the 5
 /// leaves the trick, so no immediate bonus is paid, and the bonus waits for the end of the hand.
@@ -335,27 +834,6 @@ fn turned_five_in_the_trick_in_progress_pays_no_bonus() {
     assert_eq!(m.scores(), [0, 0, 5, 0]);
 }
 
-/// The leader's partnership turned after the lead (the trick in progress was led by a turned
-/// card) is a case the rules leave open: refused, and the match is unchanged.
-#[test]
-fn leader_turned_mid_trick_is_refused_as_an_open_question() {
-    let mut m = rule_hand();
-    plays(&mut m, "KC 4C");
-    let before = m.clone();
-    let e = m.turn_team(0).expect_err("refused");
-    assert_eq!(e.why, TurnRefusal::LedTrickInProgress);
-    assert_eq!(m, before);
-    // Its partner's seat (4) is not the leader, but its card would be the trick's lead card all
-    // the same: still refused.
-    plays(&mut m, "2C 5C");
-    assert_eq!(
-        m.turn_team(0).map_err(|e| e.why),
-        Err(TurnRefusal::LedTrickInProgress)
-    );
-    // Another partnership mid-trick is fine.
-    assert!(m.turn_team(3).is_ok());
-}
-
 /// Two partnerships turned, the hand played out by the four players left.
 #[test]
 fn two_partnerships_turned_the_hand_goes_on_with_four() {
@@ -378,99 +856,29 @@ fn two_partnerships_turned_the_hand_goes_on_with_four() {
     assert_eq!(m.scores(), [0, 15, 16, 0]);
 }
 
-/// Passed tricks take a partnership to 41: the game ends at once (rule 32, a passed trick
-/// included). With two partnerships reaching 41 at the same moment the rules do not say who wins:
-/// refused.
+/// The record (actions and extras) replays to exactly the same match, and every seat's view
+/// shows the turn events. The bots' actions never include a turn or a lapse.
 #[test]
-fn passed_tricks_can_win_the_game_and_two_at_41_is_refused() {
-    let mut m = rule_hand_from([10, 5, 36, 0], HANDS);
-    plays(&mut m, TRICK1);
-    plays(&mut m, TRICK2);
-    let from = m.events().len();
-    turn(&mut m, 0);
-    assert_eq!(
-        log_from(&m, from)[..5],
-        [
-            "PairTurned team=0 score=10",
-            "TrickPassed trick=1 team=2 points=5",
-            "TrickPassed trick=2 team=2 points=5",
-            "GameWon team=2 reason=passed_trick scores=10,5,46,0",
-            "HandEnd hand=3 aborted=true",
-        ]
-    );
-    assert_eq!(m.games_won(), [0, 0, 1, 0]);
-    // Trick 2 passes to team 3 instead when seat 3 holds the K♠ and seat 6 the 9♠.
-    let mut swapped = HANDS;
-    swapped[3] = "5C KS 9H 8H JD";
-    swapped[6] = "7C 9S 5H 4H 9D";
-    let mut m = rule_hand_from([10, 5, 36, 36], swapped);
-    plays(&mut m, TRICK1);
-    plays(&mut m, "5S QC JC KS AC 9C 9S 10C");
-    let before = m.clone();
-    let e = m.turn_team(0).expect_err("two partnerships at 41 at once");
-    assert_eq!(e.why, TurnRefusal::SeveralReachFortyOne);
-    assert_eq!(m, before);
-    // One of them reaching 41 is fine.
-    let mut m = rule_hand_from([10, 5, 36, 30], swapped);
-    plays(&mut m, TRICK1);
-    plays(&mut m, "5S QC JC KS AC 9C 9S 10C");
-    turn(&mut m, 0);
-    assert_eq!(m.games_won(), [0, 0, 1, 0]);
-}
-
-/// A trick the turned partnership holds in which no card of the partnerships still in play is a
-/// trump or of the suit led, with two or more of them in play: "the strongest card in that trick"
-/// is not defined by the rules: refused. With one partnership left in play, rule 34 decides.
-#[test]
-fn a_trick_with_no_card_that_can_win_is_refused_unless_one_pair_is_left() {
-    // Seat 0 leads the K♣; seats 1, 2, 3, 5, 6 and 7 hold no club and discard a plain card.
-    let hands = [
-        "KC QC JC AC 2C",
-        "2D 3D 4D 5D 2S",
-        "6D 7D 8D 9D 3S",
-        "10D JD QD KD 4S",
-        "3C 4C 5C 6C 7C",
-        "AD 2H 3H 4H 6S",
-        "5H 6H 7H 8H 8S",
-        "9H 10H JH QH KH",
-    ];
-    let mut m = Match::with_decks(7, vec![deck(7, hands, "7S AS")], 1, Rules::HOUSE);
-    plays(&mut m, "KC 2D 6D 10D 3C AD 5H 9H");
-    assert_eq!(m.public().trick_winners, [0]);
-    let before = m.clone();
-    let e = m.turn_team(0).expect_err("no card in play can win trick 1");
-    assert_eq!(e.why, TurnRefusal::NoStandingWinner { trick: 1 });
-    assert_eq!(m, before);
-    // With teams 1 and 3 turned first, team 2 is the only one left when team 0 is turned: it
-    // takes trick 1 (rule 34) and wins the game with a jink.
-    turn(&mut m, 1);
+fn a_record_with_turns_and_lapses_replays_exactly() {
+    let mut m = rob_hand();
+    plays(&mut m, "KC 4C");
+    lapse(&mut m, Lapse::FalseRob(c("JH")));
+    plays(&mut m, "2C");
     turn(&mut m, 3);
-    let from = m.events().len();
-    turn(&mut m, 0);
-    assert_eq!(
-        log_from(&m, from)[..3],
-        [
-            "PairTurned team=0 score=0",
-            "TrickPassed trick=1 team=2 points=5",
-            "GameWon team=2 reason=jink scores=0,0,5,0",
-        ]
-    );
-}
-
-/// The record (actions and turns) replays to exactly the same match, and every seat's view
-/// shows the turn events.
-#[test]
-fn a_record_with_turns_replays_exactly() {
-    let mut m = rule_hand();
-    plays(&mut m, "KC 4C 2C");
-    turn(&mut m, 1);
-    plays(&mut m, "5C 3C 7C 8C");
-    turn(&mut m, 3);
-    let deck0 = deck(7, HANDS, "7S AS");
+    plays(&mut m, "3C 6C 7C");
+    play_turn(&mut m, "5S", 1);
+    let deck0 = deck(7, ROB_HANDS, "7S 9C");
     let mut r = Match::with_decks(7, vec![deck0], 1, Rules::HOUSE);
-    r.apply_record(m.actions(), m.turns()).expect("replays");
+    r.apply_record(m.actions(), m.extras()).expect("replays");
     assert_eq!(r, m);
-    assert_eq!(m.turns(), [(3, 1), (7, 3)]);
+    assert_eq!(
+        m.extras(),
+        [
+            (2, Extra::Lapse(Lapse::FalseRob(c("JH")))),
+            (3, Extra::Turn(3)),
+            (6, Extra::PlayThenTurn(c("5S"), 1)),
+        ]
+    );
     for seat in 0..8 {
         let v = m.view(seat);
         assert!(
@@ -479,58 +887,116 @@ fn a_record_with_turns_replays_exactly() {
                 .any(|e| matches!(e, Event::PairTurned { team: 3, .. }))
         );
     }
+    // Out of order or past the end: refused.
+    let mut r = rob_hand();
+    assert!(r.apply_record(&m.actions()[..1], m.extras()).is_err());
 }
 
-// ===== properties over random hands with random turns =====
-
-/// Plays random matches, turning a random partnership now and then (sometimes two or three in
-/// a hand), and checks after every step: the record replays exactly; a turned partnership's
-/// score is its hand-start score and it never acts; the tricks held add up; the hand-start state
-/// is recovered from any seat's view; a refusal changes nothing.
+/// For rebuilding a world from a seat's view (the search), never for a record: `observe_play`
+/// places a card as the table saw it, legal or not, with nothing recorded as a renege, undoing a
+/// rob the engine would have made, and turns the partnerships named with it (a proof before the
+/// engine's own catches). It is not among the bots' actions and adds nothing to `extras()`.
 #[test]
-fn random_turns_keep_every_invariant() {
-    let mut turned_seen = [0u32; 4];
+fn observe_play_places_a_card_as_the_table_saw_it() {
+    // An illegal card: seat 1 holds two clubs and plays the K♥ to a club lead.
+    let mut m = rule_hand();
+    play(&mut m, "KC");
+    assert!(!m.legal_actions().contains(&Action::Play(c("KH"))));
+    m.observe_play(c("KH"), &[]).expect("placed");
+    assert!(m.reneges().is_empty() && m.extras().is_empty());
+    assert_eq!(m.phase(), Phase::AwaitPlay(2));
+    // With a proof named: seat 1's Q♣ in trick 2 turns its pair there and then.
+    plays(&mut m, "2C 5C 3C 6C 7C 8C 5S");
+    let from = m.events().len();
+    m.observe_play(c("QC"), &[(1, TurnCause::Proved)])
+        .expect("placed");
+    assert_eq!(
+        log_from(&m, from),
+        [
+            "Played seat=1 card=QC",
+            "PairTurned team=1 score=0 cause=proved"
+        ]
+    );
+    // A rob the engine would make is undone: seat 5 holds the ace and plays without robbing.
+    let mut m = rob_hand();
+    plays(&mut m, "KC 4C 2C 5C 3C");
+    assert_eq!(m.phase(), Phase::AwaitBurn(5));
+    assert_eq!(
+        m.observe_play(c("7S"), &[]),
+        Err(TurnRefusal::IllegalCard),
+        "the card it was given cannot be played so"
+    );
+    m.observe_play(c("6C"), &[]).expect("placed");
+    assert_eq!(m.public().table_card, Some(c("7S")));
+    assert_eq!(m.public().robber, None);
+    assert!(m.reneges().is_empty());
+    // The open question is refused here too: seat 0's partnership led the trick.
+    let mut m = rule_hand();
+    plays(&mut m, "KC 4C");
+    let before = m.clone();
+    assert_eq!(
+        m.observe_play(c("2C"), &[(0, TurnCause::WithPlay)]),
+        Err(TurnRefusal::LedTrickInProgress)
+    );
+    assert_eq!(m, before);
+}
+
+// ===== properties over random hands with random turns and lapses =====
+
+/// Plays random matches, turning random partnerships now and then (before a play, with a play,
+/// while a rob is due) and letting random reneges through, and checks after every step: the
+/// record replays exactly; a turned partnership's score is its hand-start score and it never
+/// acts; the tricks held add up; the hand-start state is recovered from any seat's view; a
+/// refusal changes nothing.
+#[test]
+fn random_turns_and_lapses_keep_every_invariant() {
+    let mut causes = [0u32; 9];
     let mut refusals = 0u32;
     let mut games_by_pass = 0u32;
     let mut jinks_by_turns = 0u32;
-    for seed in 0..120u64 {
+    let mut stuck = 0u32;
+    for seed in 0..160u64 {
         let mut rng = Rng::new(seed ^ 0x7E57);
         let mut m = Match::new(seed, Rules::HOUSE);
         let mut start = m.current_hand_start();
         let mut steps = 0;
-        while m.phase() != Phase::MatchOver && steps < 3000 {
+        let mut turned_this_hand = false;
+        while m.phase() != Phase::MatchOver && steps < 4000 {
             steps += 1;
             let h = m.hand_index();
-            if matches!(m.phase(), Phase::AwaitPlay(_)) && rng.bounded(14) == 0 {
-                let team = rng.bounded(4) as u8;
-                let before = m.clone();
-                let n_turned = m.turned_teams().iter().filter(|&&t| t).count();
-                match m.turn_team(team) {
-                    Ok(()) => {
-                        turned_seen[n_turned] += 1;
-                        if let Some((_, Event::GameWon { reason, .. })) = m
-                            .events()
-                            .iter()
-                            .rev()
-                            .find(|(_, e)| matches!(e, Event::GameWon { .. }))
-                            && m.hand_index() != h
-                        {
-                            match reason {
-                                GameEndReason::FortyOneByPassedTrick => games_by_pass += 1,
-                                GameEndReason::Jink => jinks_by_turns += 1,
-                                _ => {}
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        refusals += 1;
-                        assert_eq!(m, before, "a refusal changes nothing");
-                    }
+            // A turn or lapse while a rob is due undoes the take (the last event).
+            let events_before =
+                m.events().len() - usize::from(matches!(m.phase(), Phase::AwaitBurn(_)));
+            let before = m.clone();
+            let done = match random_extra(&mut m, &mut rng) {
+                Some(Ok(())) => true,
+                Some(Err(())) => {
+                    refusals += 1;
+                    assert_eq!(m, before, "a refusal changes nothing");
+                    false
                 }
-            } else {
-                let acts = m.legal_actions();
-                let a = acts[rng.bounded(acts.len() as u64) as usize];
-                m.apply(a).expect("legal");
+                None => false,
+            };
+            if !done && !play_some_legal_action(&mut m, &mut rng) {
+                // Every card the seat holds proves a renege of the partnership that led the
+                // trick (the open question): the engine stops here.
+                stuck += 1;
+                break;
+            }
+            for (_, e) in &m.events()[events_before..] {
+                match e {
+                    Event::PairTurned { cause, .. } => {
+                        causes[*cause as usize] += 1;
+                        turned_this_hand = true;
+                    }
+                    Event::GameWon { reason, .. } => match reason {
+                        GameEndReason::FortyOneByPassedTrick => games_by_pass += 1,
+                        GameEndReason::Jink if turned_this_hand => jinks_by_turns += 1,
+                        _ => {}
+                    },
+                    Event::HandStart { .. } => turned_this_hand = false,
+                    _ => {}
+                }
             }
             if m.phase() == Phase::MatchOver {
                 break;
@@ -540,14 +1006,72 @@ fn random_turns_keep_every_invariant() {
             }
             check_hand(&m, &start);
         }
-        let r = Match::replay_record(seed, Rules::HOUSE, m.actions(), m.turns()).expect("replay");
+        let r = Match::replay_record(seed, Rules::HOUSE, m.actions(), m.extras()).expect("replay");
         assert_eq!(r, m, "seed {seed}");
     }
-    assert!(
-        turned_seen.iter().take(3).all(|&n| n > 0),
-        "{turned_seen:?}"
+    println!(
+        "causes {causes:?} refusals {refusals} by pass {games_by_pass} jinks {jinks_by_turns} \
+         stuck {stuck}"
     );
+    // before_play, with_play, proved, ace_shown, claim, hand_end, no_rob, declined_rob,
+    // left_joker: every one is seen.
+    assert!(causes.iter().all(|&n| n > 0), "{causes:?}");
     assert!(refusals > 0 && games_by_pass > 0 && jinks_by_turns > 0);
+    assert!(stuck < 80, "most matches are played to the end");
+}
+
+/// One random turn or lapse now and then: `None` when none was tried.
+fn random_extra(m: &mut Match, rng: &mut Rng) -> Option<Result<(), ()>> {
+    let team = rng.bounded(4) as u8;
+    match m.phase() {
+        Phase::AwaitBurn(s) => {
+            let hand = m.truth().hands[usize::from(s)];
+            match rng.bounded(10) {
+                0 | 1 => Some(m.turn_team(engine::team_of(s)).map_err(|_| ())),
+                2 => Some(m.let_through(Lapse::BurnAce).map_err(|_| ())),
+                3 => {
+                    let cards: Vec<Card> = engine::cards::cards(hand).collect();
+                    let card = cards[rng.bounded(cards.len() as u64) as usize];
+                    Some(m.let_through(Lapse::PlayWithoutRob(card)).map_err(|_| ()))
+                }
+                4 => Some(m.turn_team(team).map_err(|_| ())),
+                _ => None,
+            }
+        }
+        Phase::AwaitPlay(s) => {
+            let hand = m.truth().hands[usize::from(s)];
+            let cards: Vec<Card> = engine::cards::cards(hand).collect();
+            let card = cards[rng.bounded(cards.len() as u64) as usize];
+            match rng.bounded(40) {
+                0 => Some(m.turn_team(team).map_err(|_| ())),
+                1 => Some(m.play_then_turn(card, team).map_err(|_| ())),
+                2..=5 if !engine::cards::has(m.legal_mask(), card) => {
+                    Some(m.let_through(Lapse::Play(card)).map_err(|_| ()))
+                }
+                6 | 7 => Some(m.let_through(Lapse::FalseRob(card)).map_err(|_| ())),
+                _ => None,
+            }
+        }
+        Phase::MatchOver => None,
+    }
+}
+
+/// Apply a random legal action, trying the others when one is refused (a legal card that
+/// proves a renege of the partnership that led the trick: the open question); when every one
+/// is refused, the app catches the seat's partnership before its card, or the seat plays an
+/// illegal card. `false` when nothing can be done (the engine stops: the app's own bot plays on).
+fn play_some_legal_action(m: &mut Match, rng: &mut Rng) -> bool {
+    let acts = m.legal_actions();
+    let first = rng.bounded(acts.len() as u64) as usize;
+    if (0..acts.len()).any(|i| m.apply(acts[(first + i) % acts.len()]).is_ok()) {
+        return true;
+    }
+    let Some(seat) = m.to_act() else { return false };
+    if m.turn_team(team_of(seat)).is_ok() {
+        return true;
+    }
+    let hand = m.truth().hands[usize::from(seat)];
+    engine::cards::cards(hand).any(|c| m.let_through(Lapse::Play(c)).is_ok())
 }
 
 fn check_hand(m: &Match, start: &HandStartState) {
@@ -568,10 +1092,12 @@ fn check_hand(m: &Match, start: &HandStartState) {
             .iter()
             .all(|&(s, _)| !turned[usize::from(team_of(s))])
     );
-    assert_eq!(
-        p.tricks_won.iter().map(|&x| usize::from(x)).sum::<usize>(),
-        p.trick_winners.len()
-    );
+    let held = p.tricks_won.iter().map(|&x| usize::from(x)).sum::<usize>();
+    if turned.iter().any(|&t| t) {
+        assert!(held <= p.trick_winners.len());
+    } else {
+        assert_eq!(held, p.trick_winners.len());
+    }
     if let Some((_, seat)) = p.best_trump {
         assert!(!turned[usize::from(team_of(seat))]);
     }

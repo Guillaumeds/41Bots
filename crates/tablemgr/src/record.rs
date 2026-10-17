@@ -201,11 +201,11 @@ impl MatchRecord {
         start: Option<(HandStartState, [Card; DECK_SIZE])>,
     ) -> Result<MatchRecord, RecordError> {
         let money = m.money().ok_or(RecordError::NotOver)?;
-        if !m.turns().is_empty() {
-            // The table's bots never act illegally (H1), so nobody is ever turned at a table;
-            // a record holds actions only and could not replay a turn.
+        if !m.extras().is_empty() {
+            // The table's bots never act illegally (H1), so nobody is ever turned and nothing is
+            // let through at a table; a record holds actions only and could not replay either.
             return Err(RecordError::Mismatch {
-                field: "turns (a table record holds no turned partnership)",
+                field: "extras (a table record holds no turn and no renege let through)",
             });
         }
         let mut first_dealer = 0;

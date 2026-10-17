@@ -255,10 +255,11 @@ fn coverage_minimums_are_enforced() {
 // Turned partnerships (docs/APP-ENGINE-CONTRACT.md §7)
 // --------------------------------------------------------------------------------------------
 
-/// Random hands with random turns (any partnership, any moment before a play, sometimes two or
-/// three at once, the last pair left), through both implementations: every attempt is accepted
-/// or refused alike, the full snapshot (state and every seat's events) agrees after each, and
-/// every match replays from its record.
+/// Random hands with random steps of the app's referee (turns before a play, with a play and
+/// while a rob is due; illegal cards, plays without robbing, robs without the ace and burned
+/// aces let through and caught later), through both implementations: every step is accepted or
+/// refused alike, the full snapshot (state, hidden reneges and every seat's events) agrees after
+/// each, and every match replays from its record.
 #[test]
 fn turned_partnerships_agree_in_300_matches() {
     let r = run_turns_threads(41, 300, HOUSE, TURN_EVERY, 4).unwrap_or_else(|d| panic!("{d}"));
@@ -274,14 +275,17 @@ fn turned_partnerships_agree_in_300_matches() {
     );
     assert_eq!(r.money.iter().sum::<i64>(), 0);
     assert!(r.pairs_turned > 1000, "{r:?}");
-    assert!(r.last_pair_left > 20, "{r:?}");
-    assert!(r.tricks_passed > 200, "{r:?}");
+    assert!(r.last_pair_left > 20 && r.all_pairs_turned > 5, "{r:?}");
+    assert!(r.tricks_passed > 200 && r.no_point_tricks > 5, "{r:?}");
     assert!(r.won_by_passed_trick > 5, "{r:?}");
-    // `no_such_team` is never asked and `not_before_a_play` never met (turns are tried only
-    // before a play); the other refusals happen (`several_reach_41` is rarer: the unit tests and
-    // longer runs cover it).
-    assert_eq!(r.turn_refusals[0] + r.turn_refusals[1], 0);
-    assert!(r.turn_refusals[2..5].iter().all(|&n| n > 0), "{r:?}");
+    // Every cause of a turn, every lapse and every refusal the driver can meet happens
+    // (`no_such_team` is never asked, and `play_then_turn` is only asked with legal cards).
+    assert!(r.turn_causes.iter().all(|&n| n > 0), "{r:?}");
+    assert!(r.lapses.iter().all(|&n| n > 0), "{r:?}");
+    assert_eq!(r.turn_refusals[0] + r.turn_refusals[3], 0);
+    assert!([1, 2, 4].iter().all(|&i| r.turn_refusals[i] > 0), "{r:?}");
+    assert!(r.lapse_refusals.iter().all(|&n| n > 0), "{r:?}");
+    assert!(r.refused_plays > 0 && r.stuck_matches < 60, "{r:?}");
     assert!(r.coverage_problems(false).is_empty());
     // The same with one thread, and one match alone.
     let one = run_turns(41, 24, HOUSE, TURN_EVERY).unwrap_or_else(|d| panic!("{d}"));
@@ -302,5 +306,8 @@ fn frequent_turns_agree() {
 #[test]
 fn runs_without_turns_are_unchanged() {
     let r = run(7, 12, HOUSE).unwrap_or_else(|d| panic!("{d}"));
-    assert_eq!(r.turn_attempts + r.pairs_turned + r.tricks_passed, 0);
+    assert_eq!(
+        r.turn_attempts + r.lapse_attempts + r.pairs_turned + r.tricks_passed,
+        0
+    );
 }

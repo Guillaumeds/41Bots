@@ -4,7 +4,7 @@
 //! checked against the reference's after every action. All arithmetic is in whole numbers.
 
 use engine::cards::{ACE, Card, JOKER, rank_of, suit_of};
-use engine::game::{BonusKind, Event, GameEndReason, Match as EMatch};
+use engine::game::{BonusKind, Event, GameEndReason, Lapse, Match as EMatch, TurnCause};
 use engine::rules::{ACE_HEARTS, is_trump};
 
 /// Counts for a differential run. Branch counts are per hand unless noted.
@@ -64,39 +64,101 @@ pub struct Report {
     /// Money won (positive) or lost by each team over all matches.
     pub money: [i64; 4],
     /// Runs with turned partnerships only (`--turns`; docs/APP-ENGINE-CONTRACT.md §7): turns
-    /// attempted (both implementations asked to turn the same partnership at the same moment).
+    /// attempted (both implementations asked to turn the same partnership at the same moment,
+    /// before a play, with a play, or while a rob is due).
     pub turn_attempts: u64,
     /// Turns refused by both implementations, by refusal code ([`TURN_REFUSALS`] order).
-    pub turn_refusals: [u64; 6],
+    pub turn_refusals: [u64; 5],
+    /// Lapses attempted (both asked to let the same thing through).
+    pub lapse_attempts: u64,
+    /// Lapses let through by both, by kind ([`LAPSE_LABELS`] order).
+    pub lapses: [u64; 4],
+    /// Lapses refused by both, by refusal code ([`LAPSE_REFUSALS`] order).
+    pub lapse_refusals: [u64; 4],
+    /// Legal cards both refused (a renege they prove would turn the partnership that led the
+    /// trick: the open question).
+    pub refused_plays: u64,
+    /// Matches stopped because every card of the seat to act was refused that way and nothing
+    /// else applied (per match).
+    pub stuck_matches: u64,
     /// Partnerships turned (applied by both).
     pub pairs_turned: u64,
+    /// Partnerships turned, by cause ([`CAUSE_LABELS`] order).
+    pub turn_causes: [u64; 9],
     /// Hands in which a third partnership was turned, leaving one in play (rule 34).
     pub last_pair_left: u64,
+    /// Hands in which every partnership was turned (nobody scores).
+    pub all_pairs_turned: u64,
     /// Tricks passed from a turned partnership (rule 39).
     pub tricks_passed: u64,
+    /// Tricks or passed tricks credited for no points: the winner caught at the claim, or only
+    /// turned cards in the trick.
+    pub no_point_tricks: u64,
     /// Games won by reaching 41 with passed tricks (per game).
     pub won_by_passed_trick: u64,
 }
 
 /// The printed names of the turn refusals, in [`TURN_REFUSALS`] order.
-const TURN_LABELS: [&str; 6] = [
+const TURN_LABELS: [&str; 5] = [
     "turn refused: no such team",
-    "turn refused: no play awaited",
+    "turn refused: not now",
     "turn refused: already turned",
+    "turn refused: illegal card",
     "turn refused: led trick (open)",
-    "turn refused: no card can win (open)",
-    "turn refused: two at 41 (open)",
 ];
 
-/// The refusal codes of [`Match::turn_team`](engine::game::Match::turn_team), in the order of
+/// The refusal codes of [`Match::turn_team`](engine::game::Match::turn_team) and
+/// [`Match::play_then_turn`](engine::game::Match::play_then_turn), in the order of
 /// [`Report::turn_refusals`].
-pub const TURN_REFUSALS: [&str; 6] = [
+pub const TURN_REFUSALS: [&str; 5] = [
     "no_such_team",
     "not_before_a_play",
     "already_turned",
+    "illegal_card",
     "led_trick_in_progress",
-    "no_standing_winner",
-    "several_reach_41",
+];
+
+/// The printed names of the lapses, in [`Report::lapses`] order ([`lapse_index`]).
+const LAPSE_LABELS: [&str; 4] = [
+    "let through: illegal card",
+    "let through: play without robbing",
+    "let through: rob without the ace",
+    "let through: burned ace",
+];
+
+/// The index of a lapse's kind in [`Report::lapses`].
+pub fn lapse_index(l: Lapse) -> usize {
+    match l {
+        Lapse::Play(_) => 0,
+        Lapse::PlayWithoutRob(_) => 1,
+        Lapse::FalseRob(_) => 2,
+        Lapse::BurnAce => 3,
+    }
+}
+
+/// The printed names of the lapse refusals, in [`LAPSE_REFUSALS`] order.
+const LAPSE_REFUSAL_LABELS: [&str; 4] = [
+    "lapse refused: not now",
+    "lapse refused: not in hand",
+    "lapse refused: legal card",
+    "lapse refused: led trick (open)",
+];
+
+/// The refusal codes of [`Match::let_through`](engine::game::Match::let_through), in the order
+/// of [`Report::lapse_refusals`].
+pub const LAPSE_REFUSALS: [&str; 4] = ["not_now", "not_in_hand", "legal", "led_trick_in_progress"];
+
+/// The printed names of the turn causes, in [`Report::turn_causes`] order (`TurnCause as usize`).
+const CAUSE_LABELS: [&str; 9] = [
+    "turned before a play",
+    "turned with a play",
+    "turned: renege proved (rule 37)",
+    "turned: ace shown (rule 38)",
+    "turned: claim (rule 38)",
+    "turned: hand end (rule 38)",
+    "turned: no rob",
+    "turned: declined rob",
+    "turned: left Joker",
 ];
 
 /// What a branch count is a fraction of.
@@ -166,9 +228,23 @@ impl Report {
         for (a, b) in self.turn_refusals.iter_mut().zip(&o.turn_refusals) {
             *a += b;
         }
+        self.lapse_attempts += o.lapse_attempts;
+        for (a, b) in self.lapses.iter_mut().zip(&o.lapses) {
+            *a += b;
+        }
+        for (a, b) in self.lapse_refusals.iter_mut().zip(&o.lapse_refusals) {
+            *a += b;
+        }
+        self.refused_plays += o.refused_plays;
+        self.stuck_matches += o.stuck_matches;
         self.pairs_turned += o.pairs_turned;
+        for (a, b) in self.turn_causes.iter_mut().zip(&o.turn_causes) {
+            *a += b;
+        }
         self.last_pair_left += o.last_pair_left;
+        self.all_pairs_turned += o.all_pairs_turned;
         self.tricks_passed += o.tricks_passed;
+        self.no_point_tricks += o.no_point_tricks;
         self.won_by_passed_trick += o.won_by_passed_trick;
     }
 
@@ -201,7 +277,12 @@ impl Report {
                         hand.trump_played = true;
                     }
                 }
-                Event::TrickWon { .. } => hand.tricks += 1,
+                Event::TrickWon { points, .. } => {
+                    hand.tricks += 1;
+                    if points == 0 {
+                        self.no_point_tricks += 1;
+                    }
+                }
                 Event::Bonus { kind, .. } => match kind {
                     BonusKind::Immediate => self.immediate_bonus += 1,
                     BonusKind::EndOfHand => self.end_of_hand_bonus += 1,
@@ -240,14 +321,23 @@ impl Report {
                         self.ace_burned += 1;
                     }
                 }
-                Event::PairTurned { .. } => {
+                Event::PairTurned { cause, .. } => {
                     self.pairs_turned += 1;
+                    self.turn_causes[cause_index(cause)] += 1;
                     hand.pairs_out += 1;
                     if hand.pairs_out == 3 {
                         self.last_pair_left += 1;
                     }
+                    if hand.pairs_out == 4 {
+                        self.all_pairs_turned += 1;
+                    }
                 }
-                Event::TrickPassed { .. } => self.tricks_passed += 1,
+                Event::TrickPassed { points, .. } => {
+                    self.tricks_passed += 1;
+                    if points == 0 {
+                        self.no_point_tricks += 1;
+                    }
+                }
                 Event::MatchStart { .. }
                 | Event::Dealt { .. }
                 | Event::BurnDone { .. }
@@ -359,7 +449,7 @@ impl Report {
             line("five-game match", self.five_game_match, Per::Match, m, None),
             line("ace burned", self.ace_burned, Per::Hand, h, None),
         ];
-        if self.turn_attempts > 0 {
+        if self.turn_attempts + self.lapse_attempts > 0 {
             lines.extend([
                 line("pair turned", self.pairs_turned, Per::Hand, h, None),
                 line(
@@ -369,7 +459,21 @@ impl Report {
                     h,
                     None,
                 ),
+                line(
+                    "every pair turned",
+                    self.all_pairs_turned,
+                    Per::Hand,
+                    h,
+                    None,
+                ),
                 line("trick passed", self.tricks_passed, Per::Hand, h, None),
+                line(
+                    "trick for no points",
+                    self.no_point_tricks,
+                    Per::Hand,
+                    h,
+                    None,
+                ),
                 line(
                     "41 by passed tricks",
                     self.won_by_passed_trick,
@@ -377,8 +481,31 @@ impl Report {
                     g,
                     None,
                 ),
+                line(
+                    "legal card refused (open)",
+                    self.refused_plays,
+                    Per::Hand,
+                    h,
+                    None,
+                ),
+                line(
+                    "match stopped (open)",
+                    self.stuck_matches,
+                    Per::Match,
+                    m,
+                    None,
+                ),
             ]);
+            for (label, &n) in CAUSE_LABELS.iter().zip(&self.turn_causes) {
+                lines.push(line(label, n, Per::Hand, h, None));
+            }
+            for (label, &n) in LAPSE_LABELS.iter().zip(&self.lapses) {
+                lines.push(line(label, n, Per::Hand, h, None));
+            }
             for (label, &n) in TURN_LABELS.iter().zip(&self.turn_refusals) {
+                lines.push(line(label, n, Per::Hand, h, None));
+            }
+            for (label, &n) in LAPSE_REFUSAL_LABELS.iter().zip(&self.lapse_refusals) {
                 lines.push(line(label, n, Per::Hand, h, None));
             }
         }
@@ -469,5 +596,20 @@ impl HandTally {
         if self.tricks == 5 && !self.trump_played && self.pairs_out == 0 {
             r.no_trump_hand += 1;
         }
+    }
+}
+
+/// The index of a turn cause in [`Report::turn_causes`].
+fn cause_index(c: TurnCause) -> usize {
+    match c {
+        TurnCause::BeforePlay => 0,
+        TurnCause::WithPlay => 1,
+        TurnCause::Proved => 2,
+        TurnCause::AceShown => 3,
+        TurnCause::Claim => 4,
+        TurnCause::HandEnd => 5,
+        TurnCause::NoRob => 6,
+        TurnCause::DeclinedRob => 7,
+        TurnCause::LeftJoker => 8,
     }
 }

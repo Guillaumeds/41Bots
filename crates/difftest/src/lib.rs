@@ -25,13 +25,18 @@
 //! action generator [`action_rng`]`(s, i)`, so any match can be rerun alone with [`run_match`],
 //! and a run split over threads gives exactly the same report as a single thread.
 //!
-//! **Turned partnerships** ([`run_turns`], docs/APP-ENGINE-CONTRACT.md §7): the same, and before
-//! a play, now and then (one chance in `turn_every`, drawn from [`turn_rng`]), both
-//! implementations are asked to turn the same random partnership (0..=3, already turned or not):
-//! both must accept, or both refuse with the same reason code, and the full snapshot is compared
-//! after every attempt. Several attempts can follow one another at the same moment (two or three
-//! partnerships turned at once, the last pair left), and the match record (actions and turns)
-//! must replay exactly.
+//! **Turned partnerships and the app's referee** ([`run_turns`], docs/APP-ENGINE-CONTRACT.md §7):
+//! the same, and now and then (before a play, one chance in `turn_every`; while a rob is due, one
+//! in three; drawn from [`turn_rng`]) both implementations are asked to do the same random step
+//! the app can ask for: turn a random partnership, play a random legal card then turn one, let a
+//! random card through (an illegal card, a play without robbing, a rob without the ace, a burned
+//! ace). Both must accept, or both refuse with the same reason code, and the full snapshot (the
+//! hidden reneges included) is compared after every step. Several steps can follow one another
+//! at the same moment. A legal card may then be refused by both (a renege it proves would turn
+//! the partnership that led the trick: the open question); another is tried, and when every one
+//! is refused the app's catch of the seat's partnership or an illegal card is tried, and failing
+//! those the match stops there (counted as stuck). The match record (actions and extras) must
+//! replay exactly.
 
 pub mod report;
 pub mod snapshot;
@@ -40,7 +45,10 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use engine::cards::Card;
-use engine::game::{Action as EAction, Event, Match as EMatch, Phase as EPhase, Rules, Visibility};
+use engine::game::{
+    Action as EAction, Event, Extra, Lapse, Match as EMatch, Phase as EPhase, Rules, TurnRefusal,
+    Visibility,
+};
 use engine::rng::Rng;
 
 pub use report::{COVERAGE_MIN_MATCHES, Line, Per, Report};
@@ -78,6 +86,98 @@ fn reference_action(a: EAction) -> reference::Action {
     match a {
         EAction::Burn(c) => reference::Action::Burn(c),
         EAction::Play(c) => reference::Action::Play(c),
+    }
+}
+
+fn reference_lapse(l: Lapse) -> reference::Lapse {
+    match l {
+        Lapse::Play(c) => reference::Lapse::Play(c),
+        Lapse::PlayWithoutRob(c) => reference::Lapse::PlayWithoutRob(c),
+        Lapse::FalseRob(c) => reference::Lapse::FalseRob(c),
+        Lapse::BurnAce => reference::Lapse::BurnAce,
+    }
+}
+
+/// Asks both implementations for the same step: `Ok(true)` when both applied it, `Ok(false)`
+/// when both refused it with the same code (counted in `tally`), else the two answers.
+fn both_extra(
+    step: Extra,
+    engine: &mut EMatch,
+    reference: &mut reference::Match,
+    tally: &mut TurnTally,
+) -> Result<bool, String> {
+    let (e, r): (Result<(), &'static str>, Result<(), String>) = match step {
+        Extra::Turn(t) => (
+            engine.turn_team(t).map_err(|x| x.why.code()),
+            reference.turn_team(t),
+        ),
+        Extra::PlayThenTurn(c, t) => (
+            engine.play_then_turn(c, t).map_err(|x| x.why.code()),
+            reference.play_then_turn(c, t),
+        ),
+        Extra::Lapse(l) => (
+            engine.let_through(l).map_err(|x| x.why.code()),
+            reference.let_through(reference_lapse(l)),
+        ),
+    };
+    let lapse = matches!(step, Extra::Lapse(_));
+    if lapse {
+        tally.lapse_attempts += 1;
+    } else {
+        tally.attempts += 1;
+    }
+    match (&e, &r) {
+        (Ok(()), Ok(())) => {
+            if let Extra::Lapse(l) = step {
+                tally.lapses[report::lapse_index(l)] += 1;
+            }
+            Ok(true)
+        }
+        (Err(code), Err(text)) if text.split(':').next() == Some(code) => {
+            let (codes, counts): (&[&str], &mut [u64]) = if lapse {
+                (&report::LAPSE_REFUSALS, &mut tally.lapse_refused)
+            } else {
+                (&report::TURN_REFUSALS, &mut tally.refused)
+            };
+            if let Some(i) = codes.iter().position(|c| c == code) {
+                counts[i] += 1;
+            }
+            Ok(false)
+        }
+        _ => Err(format!(
+            "{step:?}: the engine says {e:?}, the reference says {r:?}"
+        )),
+    }
+}
+
+/// A random step the app can ask for now (see the module notes).
+fn random_extra(turns: &mut Rng, engine: &EMatch) -> Option<Extra> {
+    let seat = engine.to_act()?;
+    let hand: Vec<Card> = engine::cards::cards(engine.truth().hands[usize::from(seat)]).collect();
+    let card = |turns: &mut Rng| hand[turns.bounded(hand.len() as u64) as usize];
+    let team = |turns: &mut Rng| turns.bounded(4) as u8;
+    match engine.phase() {
+        EPhase::AwaitBurn(_) => Some(match turns.bounded(4) {
+            0 => Extra::Turn(engine::team_of(seat)),
+            1 => Extra::Turn(team(turns)),
+            2 => Extra::Lapse(Lapse::PlayWithoutRob(card(turns))),
+            _ => Extra::Lapse(Lapse::BurnAce),
+        }),
+        EPhase::AwaitPlay(_) => Some(match turns.bounded(10) {
+            0..=3 => Extra::Turn(team(turns)),
+            4 | 5 => {
+                let legal = engine.legal_actions();
+                let c = legal[turns.bounded(legal.len() as u64) as usize].card();
+                Extra::PlayThenTurn(c, team(turns))
+            }
+            6..=8 => Extra::Lapse(Lapse::Play(card(turns))),
+            // A rob without the ace burns a card it holds or the card it takes (H3).
+            _ => match engine.public().table_card {
+                Some(t) if turns.bounded(4) == 0 => Extra::Lapse(Lapse::FalseRob(t)),
+                _ => Extra::Lapse(Lapse::FalseRob(card(turns))),
+            },
+        }),
+        EPhase::MatchOver => None,
     }
 }
 
@@ -197,11 +297,18 @@ struct Ctx<'a> {
     turn_every: Option<u64>,
 }
 
-/// The turn attempts of one match: attempts, and refusals by code ([`report::TURN_REFUSALS`]).
+/// The app's steps tried in one match: turn attempts and refusals by code
+/// ([`report::TURN_REFUSALS`]), lapses tried, applied by kind and refused by code
+/// ([`report::LAPSE_REFUSALS`]), legal cards both refused, and whether the match got stuck.
 #[derive(Clone, Copy, Debug, Default)]
 struct TurnTally {
     attempts: u64,
-    refused: [u64; 6],
+    refused: [u64; 5],
+    lapse_attempts: u64,
+    lapses: [u64; 4],
+    lapse_refused: [u64; 4],
+    refused_plays: u64,
+    stuck: u64,
 }
 
 enum Outcome {
@@ -395,44 +502,27 @@ fn drive(ctx: &Ctx, pr: &mut Progress) -> Result<Outcome, Disagreement> {
         if over {
             break;
         }
-        if let Some(every) = ctx.turn_every
-            && matches!(engine.phase(), EPhase::AwaitPlay(_))
-            && (again || turns.bounded(every) == 0)
-        {
-            let team = turns.bounded(4) as u8;
-            again = turns.bounded(3) == 0;
-            if ctx.stops(pr, Stage::Turn) {
-                return Ok(stopped(&engine, &reference));
-            }
-            pr.stage = Stage::Turn;
-            tally.attempts += 1;
-            let e = engine.turn_team(team);
-            let r = reference.turn_team(team);
-            match (&e, &r) {
-                (Ok(()), Ok(())) => {}
-                (Err(e), Err(r)) if r.split(':').next() == Some(e.why.code()) => {
-                    if let Some(i) = report::TURN_REFUSALS
-                        .iter()
-                        .position(|&c| c == e.why.code())
-                    {
-                        tally.refused[i] += 1;
+        if let Some(every) = ctx.turn_every {
+            let burn = matches!(engine.phase(), EPhase::AwaitBurn(_));
+            if (again || turns.bounded(if burn { 3 } else { every }) == 0)
+                && let Some(step) = random_extra(&mut turns, &engine)
+            {
+                again = turns.bounded(3) == 0;
+                if ctx.stops(pr, Stage::Turn) {
+                    return Ok(stopped(&engine, &reference));
+                }
+                pr.stage = Stage::Turn;
+                let applied = both_extra(step, &mut engine, &mut reference, &mut tally)
+                    .map_err(|why| fail(pr, &engine, &reference, why))?;
+                if applied {
+                    // The full snapshot after every step (the hand may have ended: deal first).
+                    if reference.needs_deck() {
+                        reference.start_hand(&engine.truth().deck);
                     }
+                    compare(ctx, pr, &engine, &reference, &mut log, true)?;
                 }
-                _ => {
-                    let why = format!(
-                        "turning team {team}: the engine says {e:?}, the reference says {r:?}"
-                    );
-                    return Err(fail(pr, &engine, &reference, why));
-                }
+                continue;
             }
-            if e.is_ok() {
-                // The full snapshot after every turn (the hand may have ended: deal first).
-                if reference.needs_deck() {
-                    reference.start_hand(&engine.truth().deck);
-                }
-                compare(ctx, pr, &engine, &reference, &mut log, true)?;
-            }
-            continue;
         }
         again = false;
         let legal = engine.legal_actions();
@@ -448,21 +538,77 @@ fn drive(ctx: &Ctx, pr: &mut Progress) -> Result<Outcome, Disagreement> {
             let why = "the reference's legal_actions() is not sorted by card index".to_string();
             return Err(fail(pr, &engine, &reference, why));
         }
-        let action = legal[rng.bounded(legal.len() as u64) as usize];
+        let first = rng.bounded(legal.len() as u64) as usize;
         if ctx.stops(pr, Stage::Apply) {
             return Ok(stopped(&engine, &reference));
         }
         pr.stage = Stage::Apply;
-        pr.last_action = Some(action);
-        if let Err(e) = engine.apply(action) {
-            let why = format!("the engine refused its own legal action: {e}");
-            return Err(fail(pr, &engine, &reference, why));
+        let mut played = false;
+        for k in 0..legal.len() {
+            let action = legal[(first + k) % legal.len()];
+            pr.last_action = Some(action);
+            match engine.apply(action) {
+                Ok(()) => {}
+                Err(e) if e.reason == TurnRefusal::LedTrickInProgress.reason() => {
+                    // A renege let through would be proved by this card and turn the
+                    // partnership that led the trick (the open question): both refuse it.
+                    match reference.apply(reference_action(action)) {
+                        Err(r) if r.contains("led_trick_in_progress") => {
+                            tally.refused_plays += 1;
+                            continue;
+                        }
+                        r => {
+                            let why = format!(
+                                "the engine refused a legal card as the open question, the \
+                                 reference says {r:?}"
+                            );
+                            return Err(fail(pr, &engine, &reference, why));
+                        }
+                    }
+                }
+                Err(e) => {
+                    let why = format!("the engine refused its own legal action: {e}");
+                    return Err(fail(pr, &engine, &reference, why));
+                }
+            }
+            if let Err(e) = reference.apply(reference_action(action)) {
+                let why = format!(
+                    "the reference refused an action legal in both (the engine has applied \
+                     it): {e}"
+                );
+                return Err(fail(pr, &engine, &reference, why));
+            }
+            played = true;
+            break;
         }
-        if let Err(e) = reference.apply(reference_action(action)) {
-            let why = format!(
-                "the reference refused an action legal in both (the engine has applied it): {e}"
+        if !played {
+            // Every legal card is refused: the app catches the seat's partnership before its
+            // card, or the seat plays an illegal card; failing those the engine stops here.
+            let seat = engine.to_act().expect("a play is awaited");
+            let mut steps = vec![Extra::Turn(engine::team_of(seat))];
+            steps.extend(
+                engine::cards::cards(engine.truth().hands[usize::from(seat)])
+                    .map(|c| Extra::Lapse(Lapse::Play(c))),
             );
-            return Err(fail(pr, &engine, &reference, why));
+            let mut moved = false;
+            for step in steps {
+                if both_extra(step, &mut engine, &mut reference, &mut tally)
+                    .map_err(|why| fail(pr, &engine, &reference, why))?
+                {
+                    moved = true;
+                    break;
+                }
+            }
+            if moved {
+                if reference.needs_deck() {
+                    reference.start_hand(&engine.truth().deck);
+                }
+                compare(ctx, pr, &engine, &reference, &mut log, true)?;
+                continue;
+            }
+            tally.stuck = 1;
+            compare(ctx, pr, &engine, &reference, &mut log, true)?;
+            break;
         }
         pr.applied += 1;
         if pr.applied > MAX_ACTIONS {
@@ -481,14 +627,14 @@ fn drive(ctx: &Ctx, pr: &mut Progress) -> Result<Outcome, Disagreement> {
 /// The finished engine match must rebuild exactly from its start and its record (its actions,
 /// and its turns when partnerships were turned).
 fn check_replay(ctx: &Ctx, pr: &Progress, engine: &EMatch) -> Result<(), Disagreement> {
-    let rebuilt = if ctx.seeded && engine.turns().is_empty() {
+    let rebuilt = if ctx.seeded && engine.extras().is_empty() {
         EMatch::replay(ctx.match_seed, ctx.rules, engine.actions()).map_err(|e| e.to_string())
     } else if ctx.seeded {
-        EMatch::replay_record(ctx.match_seed, ctx.rules, engine.actions(), engine.turns())
+        EMatch::replay_record(ctx.match_seed, ctx.rules, engine.actions(), engine.extras())
             .map_err(|e| e.to_string())
     } else {
         let mut m = (ctx.make)();
-        m.apply_record(engine.actions(), engine.turns())
+        m.apply_record(engine.actions(), engine.extras())
             .map(|()| m)
             .map_err(|e| e.to_string())
     };
@@ -589,6 +735,15 @@ fn run_ctx(ctx: &Ctx, report: &mut Report) -> Result<(), Disagreement> {
             for (a, b) in report.turn_refusals.iter_mut().zip(&t.refused) {
                 *a += b;
             }
+            report.lapse_attempts += t.lapse_attempts;
+            for (a, b) in report.lapses.iter_mut().zip(&t.lapses) {
+                *a += b;
+            }
+            for (a, b) in report.lapse_refusals.iter_mut().zip(&t.lapse_refused) {
+                *a += b;
+            }
+            report.refused_plays += t.refused_plays;
+            report.stuck_matches += t.stuck;
             Ok(())
         }
         Err(first) if ctx.check == Check::Boundaries => {

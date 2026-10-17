@@ -142,7 +142,7 @@ jobs:
           SEED=$(( ${{ github.run_id }} * 16 + ${{ matrix.shard }} ))
           mkdir -p out
           ./target/release/difftest "$GAMES" "$SEED" | tee "out/shard-${{ matrix.shard }}.txt"
-      - name: Run shard with turned partnerships (rules 34, 39-41; docs/APP-ENGINE-CONTRACT.md §7)
+      - name: Run shard with the app's referee steps (turned pairs, reneges let through; rules 34, 37-41; docs/APP-ENGINE-CONTRACT.md §7.1)
         if: steps.gate.outputs.run == 'true' && env.skip != 'true'
         shell: bash
         run: |

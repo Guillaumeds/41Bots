@@ -11,9 +11,18 @@
 //! - the ace of trumps from `ace_of_trumps`, `legal_burns` and the `ProvedNoAce` / `AceUndealt`
 //!   events (F4–F11);
 //! - capacities from the view's hand sizes, burn counts, burn order and hidden count (F12).
+//!
+//! A partnership the app has turned (docs/APP-ENGINE-CONTRACT.md §7) may have broken a rule
+//! unseen: its seats' show-outs and "no ace" proofs prove nothing, and a turned robber may have
+//! taken the turned card without the ace of trumps or burned it. Its face-down cards are still
+//! cards in its hand (capacities as before), out of play but not anywhere else. What the turn
+//! itself makes public is kept: a robber's partnership caught at a claim or at the end of the
+//! hand does not hold the ace of trumps; a robber turned for not robbing holds it. A robber still
+//! in play whose own plays show it cannot hold the ace of trumps (a plain card to a trump lead)
+//! took the turned card without it or burned it, uncaught yet: its rob proves nothing either.
 
 use engine::cards::{ALL_CARDS, Bits, Card, JOKER, Suit, bit, cards, count, has, suit_of};
-use engine::game::{Event, Phase};
+use engine::game::{Event, Phase, TurnCause};
 use engine::rules::{ace_of_trumps, legal_burns, legal_plays};
 use engine::view::{BurnKind, SeatView};
 
@@ -50,6 +59,23 @@ struct Facts {
     ace_undealt: bool,
     /// The card that led the current trick.
     led: Option<Card>,
+    /// The seat that played the last card of the current trick.
+    last_played: Option<u8>,
+    /// Partnerships turned this hand (their seats' plays prove nothing).
+    turned: [bool; 4],
+    /// The seat turned for not robbing: it holds the ace of trumps.
+    ace_holder: Option<u8>,
+    /// The robber's partnership was caught at a claim or at the end of the hand: the robber does
+    /// not hold the ace of trumps.
+    robber_lacks_ace: bool,
+    /// Seats the engine itself shows without the ace of trumps whatever they did (F9 at a past
+    /// moment): asked to play in trick 1, with nobody robbed, when the app turned a partnership
+    /// before that play or with it.
+    no_ace_certain: [bool; 8],
+    /// Tricks completed this hand.
+    tricks_done: u8,
+    /// The seat that played the ace of trumps, once played.
+    ace_played_by: Option<u8>,
 }
 
 impl Facts {
@@ -64,7 +90,26 @@ impl Facts {
             no_ace: [false; 8],
             ace_undealt: false,
             led: None,
+            last_played: None,
+            turned: [false; 4],
+            ace_holder: None,
+            robber_lacks_ace: false,
+            no_ace_certain: [false; 8],
+            tricks_done: 0,
+            ace_played_by: None,
         }
+    }
+
+    /// The seat to act in trick 1 now: the first seat still in play after the last card played,
+    /// or from the dealer's left.
+    fn to_act_in_trick_one(&self) -> u8 {
+        let mut s = self
+            .last_played
+            .map_or((self.dealer + 1) % 8, |p| (p + 1) % 8);
+        while self.turned[usize::from(s % 4)] {
+            s = (s + 1) % 8;
+        }
+        s
     }
 
     fn apply(&mut self, ev: &Event) {
@@ -84,14 +129,54 @@ impl Facts {
             Event::BurnDone { .. } => self.burns_done += 1,
             Event::ProvedNoAce { seat } => self.no_ace[usize::from(seat)] = true,
             Event::AceUndealt => self.ace_undealt = true,
-            Event::TrickWon { .. } => self.led = None,
-            Event::Played { seat, card } => match self.led {
-                None => self.led = Some(card),
-                Some(led) => {
-                    let trump = self.trump.expect("tricks are played with trumps known");
-                    self.hand_forbid[usize::from(seat)] |= play_forbids(card, led, trump);
+            Event::TrickWon { .. } => {
+                self.led = None;
+                self.last_played = None;
+                self.tricks_done += 1;
+            }
+            Event::Played { seat, card } => {
+                self.last_played = Some(seat);
+                if self.trump.is_some_and(|t| card == ace_of_trumps(t)) {
+                    self.ace_played_by = Some(seat);
                 }
-            },
+                match self.led {
+                    None => self.led = Some(card),
+                    Some(led) => {
+                        let trump = self.trump.expect("tricks are played with trumps known");
+                        self.hand_forbid[usize::from(seat)] |= play_forbids(card, led, trump);
+                    }
+                }
+            }
+            Event::PairTurned { team, cause, .. } => {
+                let t = usize::from(team);
+                let rob_open = self.tricks_done == 0 && self.robber.is_none();
+                match cause {
+                    TurnCause::NoRob => {
+                        // The seat whose rob was due: the seat to act in trick 1.
+                        let s = self.to_act_in_trick_one();
+                        debug_assert_eq!(usize::from(s % 4), t);
+                        self.ace_holder = Some(s);
+                    }
+                    // The engine robs by itself: a seat asked to play in trick 1 with nobody
+                    // robbed lacks the ace (the app turned a partnership before its card, or right
+                    // after it).
+                    TurnCause::BeforePlay if rob_open && self.trump.is_some() => {
+                        self.no_ace_certain[usize::from(self.to_act_in_trick_one())] = true;
+                    }
+                    TurnCause::WithPlay if rob_open => {
+                        if let Some(s) = self.last_played {
+                            self.no_ace_certain[usize::from(s)] = true;
+                        }
+                    }
+                    TurnCause::Claim | TurnCause::HandEnd
+                        if self.robber.is_some_and(|r| usize::from(r % 4) == t) =>
+                    {
+                        self.robber_lacks_ace = true;
+                    }
+                    _ => {}
+                }
+                self.turned[t] = true;
+            }
             _ => {}
         }
     }
@@ -130,8 +215,15 @@ pub struct Tracker {
     pub locs: Vec<(Loc, u8)>,
     /// Per card: bit `i` set iff the card may be in `locs[i]`; 0 for known cards.
     pub allowed: [u32; 53],
-    /// The hidden out-of-play count of the view (12 or 13, F12).
+    /// The hidden out-of-play count of the view (12 or 13, F12; 11 after a Joker left on the
+    /// deck).
     pub hidden_count: u8,
+    /// The robber (if any) may have taken the turned card without the ace of trumps or burned it
+    /// and not been caught: its partnership is turned, or the cards the viewer sees show it.
+    pub robber_may_have_lapsed: bool,
+    /// Seats (never the viewer) whose show-outs and "no ace" proofs this tracker does not trust:
+    /// a turned partnership's, or, when the cards seen admit no placement otherwise, every seat's.
+    pub lapsed: [bool; 8],
     facts: Facts,
 }
 
@@ -150,6 +242,11 @@ impl Tracker {
     /// [`Tracker::update`] with every later event of the hand, or use [`Tracker::from_view`].
     pub fn new(view: &SeatView) -> Tracker {
         let evs = hand_events(view);
+        Self::from_events(view, &evs[..Self::start_len(evs)])
+    }
+
+    /// A tracker with the facts of these events of the hand, its masks built against `view`.
+    fn from_events(view: &SeatView, evs: &[Event]) -> Tracker {
         let mut t = Tracker {
             seat: view.seat,
             hand: view.hand,
@@ -159,9 +256,11 @@ impl Tracker {
             locs: Vec::new(),
             allowed: [0; 53],
             hidden_count: view.public.hidden_count,
+            robber_may_have_lapsed: false,
+            lapsed: [false; 8],
             facts: Facts::new(view.public.dealer),
         };
-        for e in &evs[..Self::start_len(evs)] {
+        for e in evs {
             t.facts.apply(e);
         }
         t.rebuild(view);
@@ -184,14 +283,10 @@ impl Tracker {
     }
 
     /// [`Tracker::new`] then every later event of the current hand: the tracker of this view.
+    /// (The masks are built once, from all the facts: exactly what the masks built after the
+    /// start events and rebuilt after the rest would be.)
     pub fn from_view(view: &SeatView) -> Tracker {
-        let mut t = Tracker::new(view);
-        let evs = hand_events(view);
-        for e in &evs[Self::start_len(evs)..] {
-            t.facts.apply(e);
-        }
-        t.rebuild(view);
-        t
+        Self::from_events(view, hand_events(view))
     }
 
     /// A tracker built directly from its masks, with no facts behind them: for hand-made
@@ -226,6 +321,8 @@ impl Tracker {
             locs,
             allowed,
             hidden_count,
+            robber_may_have_lapsed: false,
+            lapsed: [false; 8],
             facts: Facts::new(0),
         }
     }
@@ -245,8 +342,36 @@ impl Tracker {
         self.facts.hand_forbid[usize::from(seat)]
     }
 
-    /// Rebuild `known`, `unknown`, `locs` and `allowed` from the facts and the view.
+    /// Rebuild `known`, `unknown`, `locs` and `allowed` from the facts and the view. When the
+    /// facts admit no placement at all (only possible after the app's referee let a renege through
+    /// that the cards seen give away but nobody has caught yet), every other seat is taken as
+    /// possibly having broken the rules, as a turned seat is.
     fn rebuild(&mut self, view: &SeatView) {
+        self.fill(view, false);
+        if !self.placeable() {
+            self.fill(view, true);
+        }
+    }
+
+    /// Can the unknown cards be placed at all (max-flow over the card classes)?
+    fn placeable(&self) -> bool {
+        let mut by_mask: Vec<(u32, u8)> = Vec::new();
+        for c in cards(self.unknown) {
+            let m = self.allowed[usize::from(c)];
+            match by_mask.iter_mut().find(|(mm, _)| *mm == m) {
+                Some((_, n)) => *n += 1,
+                None => by_mask.push((m, 1)),
+            }
+        }
+        let rem: Vec<u8> = by_mask.iter().map(|&(_, n)| n).collect();
+        let allow: Vec<u32> = by_mask.iter().map(|&(m, _)| m).collect();
+        let caps: Vec<u8> = self.locs.iter().map(|&(_, c)| c).collect();
+        crate::space::feasible(&rem, &allow, &caps, 0)
+    }
+
+    /// [`Tracker::rebuild`]'s work, with every seat but the viewer taken as possibly having broken
+    /// the rules (`relax_all`) or only those the app turned and those the cards seen give away.
+    fn fill(&mut self, view: &SeatView, relax_all: bool) {
         let p = &view.public;
         let me = view.seat;
         let f = &self.facts;
@@ -273,8 +398,10 @@ impl Tracker {
                 locs.push((Loc::Hand(s), n));
             }
         }
+        // 11 only when the dealer left a turned Joker on the deck (the app's referee: the Joker
+        // and the next turned card are both face up, nothing burned).
         assert!(
-            p.hidden_count == 12 || p.hidden_count == 13,
+            (12..=13).contains(&p.hidden_count) || (p.hidden_count == 11 && p.joker_turned),
             "F12: 12 or 13 hidden out-of-play cards, not {}",
             p.hidden_count
         );
@@ -307,6 +434,38 @@ impl Tracker {
             "F12: the capacities hold exactly the unknown cards"
         );
         let ace = f.trump.map(ace_of_trumps);
+        let out = |s: u8| relax_all || f.turned[usize::from(s % 4)];
+        // The robber holds the ace of trumps until it plays it (F5, F6), unless its partnership
+        // is turned, or its own plays show it cannot (a plain card to a trump lead, or every card
+        // played without it), or it is the viewer without it, or the engine showed it without the
+        // ace before its rob, or another seat was turned for not robbing with it: then it took the
+        // turned card without it, or burned it, and the app has not caught it yet.
+        // A robber that took the ace of trumps itself from the table at its turn (a dealer had
+        // refused it) did not hold it before: it took the turned card without it.
+        let took_ace_at_turn = f.robber.is_some_and(|r| {
+            ace.is_some_and(|a| f.taken.iter().any(|&(t, c, _)| t == r && c == a))
+                && p.burn_order
+                    .iter()
+                    .any(|&(s, k)| s == r && k == BurnKind::RobAtTurn)
+        });
+        let robber_in_play = f.robber.filter(|&r| {
+            r != me
+                && !out(r)
+                && !took_ace_at_turn
+                && f.ace_holder.is_none()
+                && !f.no_ace_certain[usize::from(r)]
+                && p.hand_sizes[usize::from(r)] > 0
+                && !ace.is_some_and(|a| has(f.hand_forbid[usize::from(r)], a))
+        });
+        let lapsed_robber = f.robber.filter(|&r| robber_in_play != Some(r));
+        // Seen elsewhere: in the viewer's hand or burn (the viewer not the robber), or played by
+        // another seat.
+        let ace_elsewhere = ace.is_some_and(|a| {
+            (has(view.hand | view.own_burns, a) && f.robber != Some(me))
+                || f.ace_played_by.is_some_and(|s| Some(s) != f.robber)
+        });
+        self.robber_may_have_lapsed =
+            f.robber.is_some() && (ace_elsewhere || lapsed_robber.is_some_and(|r| r != me));
         // F9 (the engine robs automatically): a seat asked to play its first card of trick 1
         // while nobody has robbed does not hold the ace of trumps.
         let to_play_without_ace = match p.phase {
@@ -322,24 +481,34 @@ impl Tracker {
                 let ok = match loc {
                     Loc::Hand(s) => {
                         let si = usize::from(s);
-                        // F2, F3.
-                        let mut ok = !has(f.hand_forbid[si], c);
+                        // F2, F3 (a turned seat's show-outs prove nothing).
+                        let mut ok = out(s) || !has(f.hand_forbid[si], c);
                         // F5–F7: a taken card stays with its taker (hand or a later burn).
                         if let Some((t, _, _)) = taken {
                             ok &= t == s;
                         }
                         if is_ace {
-                            if let Some(r) = f.robber {
+                            if let Some(h) = f.ace_holder {
+                                ok &= h == s;
+                            }
+                            if let Some(r) = robber_in_play {
                                 ok &= r == s; // F5, F6.
                             }
-                            ok &= !f.no_ace[si]; // F4.
-                            ok &= !f.ace_undealt; // F11.
+                            if f.robber_lacks_ace {
+                                ok &= f.robber != Some(s);
+                            }
+                            ok &= out(s) || !f.no_ace[si]; // F4.
+                            ok &= !f.no_ace_certain[si]; // F9 at a turn.
+                            ok &= out(s) || !f.ace_undealt; // F11.
                             ok &= to_play_without_ace != Some(s); // F9.
                         }
                         ok
                     }
                     // A taken card is never back in the pack; nor is a robbed ace (F5, F6).
-                    Loc::Undealt => taken.is_none() && !(is_ace && f.robber.is_some()),
+                    Loc::Undealt => {
+                        taken.is_none()
+                            && !(is_ace && (robber_in_play.is_some() || f.ace_holder.is_some()))
+                    }
                     Loc::Burn(s, k) => {
                         let pos = burn_pos
                             .iter()
@@ -353,15 +522,20 @@ impl Tracker {
                         }
                         if is_ace {
                             // F6, F8: a burn made with trumps known never holds the ace of
-                            // trumps (`legal_burns`). F7: the dealer's burn after a turned
-                            // Joker was made before trumps were known and may hold it, unless
-                            // someone robbed (then the robber holds it).
+                            // trumps (`legal_burns`), unless a robber whose partnership is turned
+                            // made it. F7: the dealer's burn after a turned Joker was made before
+                            // trumps were known and may hold it, unless someone still in play
+                            // robbed (then the robber holds it).
                             let trump_at_burn = match k {
                                 BurnKind::JokerTake => None,
                                 BurnKind::AceRobAtOnce | BurnKind::RobAtTurn => f.trump,
                             };
-                            ok &= legal_burns(bit(c), trump_at_burn) != 0;
-                            ok &= f.robber.is_none();
+                            let lapsed = k == BurnKind::RobAtTurn
+                                && lapsed_robber == Some(s)
+                                && !f.no_ace_certain[usize::from(s)]
+                                && !took_ace_at_turn;
+                            ok &= lapsed || legal_burns(bit(c), trump_at_burn) != 0;
+                            ok &= robber_in_play.is_none() && f.ace_holder.is_none();
                         }
                         ok
                     }
@@ -374,6 +548,7 @@ impl Tracker {
         }
         self.locs = locs;
         self.allowed = allowed;
+        self.lapsed = core::array::from_fn(|s| s as u8 != me && out(s as u8));
     }
 
     /// The sum of all capacities (equal to `count(unknown)`, F12).

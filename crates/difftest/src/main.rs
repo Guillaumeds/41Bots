@@ -15,8 +15,10 @@ const USAGE: &str = "usage: difftest <matches> [seed] [--threads N] [--turns N]\
     \x20 matches        number of matches to play\n\
     \x20 seed           run seed (default 0)\n\
     \x20 --threads      worker threads (default: all cores); the report does not depend on it\n\
-    \x20 --turns        also turn partnerships at random, one chance in N before each play\n\
-    \x20                (rules 34, 39-41; docs/APP-ENGINE-CONTRACT.md §7; 12 is the test default)";
+    \x20 --turns        also take the app's referee steps at random (turns, plays with a turn,\n\
+    \x20                reneges let through), one chance in N before each play and one in 3\n\
+    \x20                while a rob is due (rules 34, 37-41; docs/APP-ENGINE-CONTRACT.md §7;\n\
+    \x20                12 is the test default)";
 
 struct Options {
     matches: u64,
@@ -161,7 +163,10 @@ fn main() -> ExitCode {
         if o.threads == 1 { "" } else { "s" }
     );
     if let Some(n) = o.turns {
-        println!("turning partnerships at random: one chance in {n} before each play");
+        println!(
+            "the app's referee steps at random: one chance in {n} before each play, one in 3 \
+             while a rob is due"
+        );
     }
     let start = Instant::now();
     let result = match o.turns {
@@ -183,10 +188,13 @@ fn main() -> ExitCode {
     );
     if o.turns.is_some() {
         println!(
-            "turns: {} attempted, {} partnerships turned; both implementations accepted or \
-             refused each alike",
+            "referee steps: {} turns and {} lapses attempted, {} partnerships turned; both \
+             implementations accepted or refused each alike; {} matches stopped at the open \
+             question",
             grouped(report.turn_attempts),
-            grouped(report.pairs_turned)
+            grouped(report.lapse_attempts),
+            grouped(report.pairs_turned),
+            grouped(report.stuck_matches)
         );
     }
     println!(

@@ -256,9 +256,13 @@ pub fn from_match(m: &Match) -> Result<(Position, MatchCtx, Option<u8>), FromMat
     // its trick is won); the engine's public flag is set as soon as the 5 hits the table.
     hand.five_played = p.five_played && !p.trick_cards.iter().any(|&(_, c)| c == five_of(trump));
     hand.tricks_done = p.trick_winners.len() as u8;
+    // The ace holder robs at its first turn in trick 1; one that already played its first card
+    // without robbing (a play the app's referee let through) robs no more.
     let pending = if p.trick_no == 1 && p.robber.is_none() && p.table_card.is_some() {
         let ace = ace_of_trumps(trump);
-        (0..SEATS as u8).find(|&s| has(hands[usize::from(s)], ace))
+        (0..SEATS as u8)
+            .find(|&s| has(hands[usize::from(s)], ace))
+            .filter(|&s| !p.proved_no_ace[usize::from(s)])
     } else {
         None
     };

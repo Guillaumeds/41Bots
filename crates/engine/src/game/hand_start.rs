@@ -106,7 +106,7 @@ impl Match {
             phase: Phase::MatchOver,
             events: Vec::new(),
             actions: Vec::new(),
-            turns: Vec::new(),
+            extras: Vec::new(),
             truth: Truth {
                 deck: identity_deck(),
                 hands: [0; SEATS],
@@ -160,7 +160,7 @@ pub fn current_hand_start_of(view: &crate::view::SeatView) -> HandStartState {
                     }
                 }
             }
-            Event::PairTurned { team, score } => {
+            Event::PairTurned { team, score, .. } => {
                 let t = usize::from(team);
                 scores[t] = score;
                 bonus[t] = score % 5 == 1;

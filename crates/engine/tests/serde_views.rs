@@ -3,7 +3,7 @@
 #![cfg(feature = "serde")]
 
 use engine::cards::Suit;
-use engine::game::{Action, Event, Match, Phase, Rules, Visibility};
+use engine::game::{Action, Event, Extra, Lapse, Match, Phase, Rules, TurnCause, Visibility};
 use engine::rng::Rng;
 use engine::view::{PublicState, SeatView};
 
@@ -110,7 +110,24 @@ fn turned_views_round_trip_and_normal_json_is_unchanged() {
     }
     assert!(turned_json > 0);
     assert_eq!(
-        serde_json::to_string(&Event::PairTurned { team: 1, score: 10 }).unwrap(),
-        r#"{"PairTurned":{"team":1,"score":10}}"#
+        serde_json::to_string(&Event::PairTurned {
+            team: 1,
+            score: 10,
+            cause: TurnCause::Claim
+        })
+        .unwrap(),
+        r#"{"PairTurned":{"team":1,"score":10,"cause":"Claim"}}"#
+    );
+    // The match record's extras (turns, plays with a turn, lapses) round trip too.
+    let extras = [
+        (3u32, Extra::Turn(2)),
+        (5, Extra::PlayThenTurn(7, 1)),
+        (9, Extra::Lapse(Lapse::FalseRob(12))),
+        (11, Extra::Lapse(Lapse::BurnAce)),
+    ];
+    assert_eq!(round_trip(&extras.to_vec()), extras.to_vec());
+    assert_eq!(
+        serde_json::to_string(&extras[2].1).unwrap(),
+        r#"{"Lapse":{"FalseRob":12}}"#
     );
 }

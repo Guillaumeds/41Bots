@@ -61,7 +61,8 @@ pub struct PublicState {
     /// The cards themselves stay hidden; this tells a dealer's pre-trump burn after a turned Joker
     /// from a rob burn.
     pub burn_order: Vec<(u8, BurnKind)>,
-    /// Hidden, out-of-play cards: the undealt pack plus every burned card (always 12 or 13).
+    /// Hidden, out-of-play cards: the undealt pack plus every burned card (12 or 13; 11 when the
+    /// dealer left a turned Joker on the deck, which only the app's referee allows).
     pub hidden_count: u8,
     /// Every card played to a trick this hand.
     pub played: Bits,
