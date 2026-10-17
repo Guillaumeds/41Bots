@@ -1,13 +1,26 @@
 //! The 41 engine built for WebAssembly (docs/PLAN.md §6.1 and §7).
 //!
-//! For now it holds only the M0 determinism check (PLAN §13, M0 gate "WASM results equal native"):
-//! [`random_matches_hash`] plays seeded random matches with the engine and hashes everything that
-//! happened in them. `tools/wasm_check.sh` runs the same code natively (the `wasm-native` binary)
-//! and as a `.wasm` module under Node, and fails if the two hashes differ.
+//! - **The app's API** (docs/WASM-API.md): [`api`] values a decision from the app's own seat view
+//!   ([`appview`] rebuilds it in the engine, [`cards`] maps the numbering) with the engine's PIMC
+//!   search, exact or hybrid; [`ffi`] is the module's exports; `js/engine.mjs` the loader.
+//!   [`appjson`] writes an engine position as the app's `MatchState` (tests and fixtures).
+//! - **The M0 determinism check** (PLAN §13, M0 gate "WASM results equal native"):
+//!   [`random_matches_hash`] plays seeded random matches with the engine and hashes everything
+//!   that happened in them. `tools/wasm_check.sh` runs the same code natively (the `wasm-native`
+//!   binary) and as a `.wasm` module under Node, and fails if the two hashes differ; it checks
+//!   the API's results the same way (the `engine-native` binary).
 //!
 //! Lints: this crate denies `unsafe_code` instead of inheriting the workspace's `forbid`, because
-//! the export [`result_hash`] needs the `no_mangle` attribute (see Cargo.toml). That export is the
-//! only item allowed it. Everything else here is ordinary safe Rust.
+//! an export needs the `no_mangle` attribute (see Cargo.toml). The exports ([`result_hash`] and
+//! those in [`ffi`]) are the only items allowed it, one by one. Everything else here is ordinary
+//! safe Rust.
+
+pub mod api;
+pub mod appjson;
+pub mod appview;
+pub mod cards;
+pub mod ffi;
+pub mod fixtures;
 
 use engine::game::{Match, Rules, Visibility};
 use engine::rng::Rng;

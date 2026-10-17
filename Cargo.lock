@@ -710,7 +710,13 @@ dependencies = [
 name = "wasm"
 version = "0.1.0"
 dependencies = [
+ "belief",
  "engine",
+ "equity",
+ "nn",
+ "search",
+ "serde_json",
+ "solver",
 ]
 
 [[package]]
