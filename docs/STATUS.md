@@ -291,3 +291,33 @@ Owner request: a database of every machine we rent with its real cost per 10^12 
 - Overlap the golden-set generation with training (round 1 spent 1,057 s generating it before training started), and feed the labels to training a quarter at a time as the owner proposed.
 - Expect merge conflicts in the workflow files with `main` when `m3-hybrid` goes to `main`.
 - The vast API key cannot create destroy-only keys (the launcher logs it and goes on; machines are destroyed by the launcher and the cleanup workflow only).
+
+## 2026-10-17 (overnight, owner asleep): the audit loops on tricks 4 and 3
+
+**Built and merged on `m3-hybrid` (binaries fcb3e73):** the auditor down to groups of 0.01% (`audit_gamma`) with the
+standard and push standard (`audit_standard`, `audit_push_standard`), unmeasurable mini sets, the best round as the result,
+audit shards deleted after use, a capacity ladder that only grows; trainer memory released at each streamed join, a stall
+watch instead of the runner's fixed training limit, a bound on targeted harvests, `harvest_net` required at cut 3; every
+`docs/vast` manifest checked by `cargo test`; the launcher's `gpu_names` (fast GPUs by name); item A (cheaper exact labels,
+byte-identical) and item B (batched wide-network evaluation, byte-identical). `main` got the cleanup's 60-minute first
+heartbeat rule.
+
+**Runs.** Two mechanism tests (three rounds and two rounds, $0.6 and $1.25), then the trick-4 loop (third launch:
+AMD EPYC 7B13, 122 threads, 504 GB, $0.73/h, about $4.2; the first two launches stopped for a mini-set cap and a price
+ladder, about $1.4) and the trick-3 loop (AMD EPYC 7663, 224 threads, 2x A100, $1.60/h, about $9.9). Both stopped on the
+owner's diminishing-returns rule after four rounds. Overnight spend about $17.5. Tables: `docs/m3-hybrid/audit-loop.md` §8.
+
+**Results.**
+- **O_4: 0.0016%** (95% upper bound on 4,000 trick-3 decisions x 320 exact worlds), seats 1-2 0.0026%, 3-4 0.0023%,
+  5-8 0.0012%, largest bias 0.0025% (round 1, 1024-1024-512-128, `inputs/sha256/b28750e3…`; round 3 at 2048-2048-1024-256
+  ties it). The earlier "seats 3-4 fail" was the 400-decision set's small sample.
+- **O_3: 0.0068%** overall (2,000 trick-2 decisions; round 2, 2048-1024-256, `inputs/sha256/f5766aa9…`), but seats 1-2
+  at 0.012-0.016% and the leader's own team under-valued by about 0.02% in that band: not yet 0.01% everywhere.
+- "Flat" was not reached by either loop: the auditor confirms thousands of small position-level groups at 10M rows and
+  flat needs each measured at the decision level (60 a round at trick 4); the push to 0.005% / 0.0075% did not start.
+
+**Decisions for the owner.** (a) Calibrate the auditor's position-level thresholds against the decision-level results
+each round records, so that it confirms the groups that can matter for decisions; (b) cut the round-to-round noise of
+retraining from scratch (warm start, or several seeds); (c) a targeted study of trick 3's leader positions and own-team
+bias; (d) adopt O_4 round 1 and O_3 round 2 as the current best. Not started: the trick-2 loop (branch `m3-hybrid-t2loop`,
+built), items C and D.
