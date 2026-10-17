@@ -64,14 +64,52 @@
 //! heartbeat interval that was at least [`TAIL_SHARE_OK`] in a genuine tail: fewer tasks left in
 //! the queue than worker threads (the end of the step), or fewer subproblems left in the running
 //! parallel solve than its threads, or (planned runs) every world started and threads free.
+//!
+//! **A silver reference** (docs/m3-hybrid/silver.md; [`Silver`]): where no exact golden set is
+//! affordable (trick 1), the chunk values its decisions' worlds with a deeper hybrid instead of
+//! exact search. Settings (format 2: each network is a manifest input, named):
+//! ```json
+//! "reference": { "cut": 3, "net_input": "o3" },
+//! "check": { "cut": 2, "net_input": "o2", "verify_pct": 1, "tt_mb": 64, "standard": "0.01",
+//!            "boot": 1000, "race_groups": true },
+//! "worlds_input": "silver-t1", "share": true
+//! ```
+//! - `reference`: the worlds step is `search worlds --method hybrid --cut 3 --net <o3>` into
+//!   `silver-t<trick>-c<cut>-n<to>.jsonl` (the same decisions, worlds, checkpoint and resume, world
+//!   by world, as the exact step; the records say `hybrid` with the network's SHA-256, never
+//!   exact). The fingerprint names the method `hybrid` and the frontier (cut, the network's
+//!   SHA-256), so a resume never builds on exact files or another network's. `methods` is refused
+//!   (`search score` scores against exact yardsticks); `agree` runs on the silver file and
+//!   `curves` with `--method hybrid` (how many trick-1 worlds a decision needs, by this reference).
+//! - `share` (default true with `reference`, else false): once the worlds are in, the decisions
+//!   file and the worlds file go to `inputs/sha256/<hex>` (content-addressed; a failure is a
+//!   warning, both files being in the bundle), and `result.json`'s `shared.reuse_params` gives
+//!   the settings that reuse them (`worlds_input`, with the same `reference`).
+//! - `worlds_input`: a stored worlds file (a manifest input; e.g. a shared silver set) is copied
+//!   in as the worlds file before the step, which then values only what it lacks (nothing, for a
+//!   whole set: a later network's check against the stored silver set costs no H_3 solve). Its
+//!   records must be the step's own kind (`search worlds` refuses others).
+//! - `check` (one object, or a list with distinct cuts: the exact anchor set checks H_3 and H_2
+//!   against the same exact worlds): after the worlds (and the analysis), `search hybrid-check
+//!   --trick <trick> --cut 2
+//!   --net <o2> --worlds <the worlds file>`, with `--reference silver --reference-net <o3>` when
+//!   the chunk's reference is silver, `--verify-pct` of the stored worlds recomputed first and
+//!   required byte-identical, `--race-groups` (default true: the score and race groups), into
+//!   `out/measure/hc-t<trick>-o<cut>-<silver|exact>.json` and the printed tables in `.txt`;
+//!   `result.json`'s `checks` give each verdict and the overall and band rows. A check's cut must
+//!   be before the reference's. Not with an extension (`from` above 0). Without `reference` the
+//!   worlds are exact and so is each check's reference.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 
+use crate::bundle::sha256_file;
 use crate::mem::{self, Requested, Tables};
+use crate::remote::{Remote, input_key, put_input};
 use crate::spike::build_table_from;
 use crate::{Ctx, sibling, unix_now, utc_string};
 
@@ -184,6 +222,8 @@ fn run_worlds(
             "worlds_resumed": g("worlds_resumed"), "eta": eta_block(ctx, p),
             // This machine's own work, for its cost per node (`machine.rs`).
             "worlds_valued": g("worlds_valued"), "nodes_valued": g("nodes_valued"),
+            // A silver run's network evaluations (its other unit of work).
+            "evals_valued": g("evals_valued"),
             "schedule": extra["schedule"], "trick": extra["trick"],
             "tt_budget_mb": extra["tt_budget_mb"],
             "par_tasks_done": g("par_tasks_done"), "par_tasks_total": g("par_tasks_total"),
@@ -274,9 +314,289 @@ pub(crate) fn spread(p: &Value, threads: u64) -> Result<Spread, String> {
     })
 }
 
+/// A network a `search_measure` chunk names: its frontier trick, the manifest input that holds it
+/// (format 2) and, once resolved, its local path.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct NetRef {
+    pub cut: u64,
+    pub input: Option<String>,
+    pub path: Option<String>,
+}
+
+/// The `check` of a `search_measure` chunk (module notes).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CheckSpec {
+    pub net: NetRef,
+    pub verify_pct: f64,
+    pub tt_mb: u64,
+    pub standard: String,
+    pub boot: u64,
+    pub race_groups: bool,
+}
+
+/// A `search_measure` chunk's silver-reference settings (module notes): all absent, the chunk
+/// exactly as before.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Silver {
+    pub reference: Option<NetRef>,
+    /// The checks, in order (`check`: one object, or a list of them with distinct cuts).
+    pub checks: Vec<CheckSpec>,
+    /// A stored worlds file to start from: its input name, and its local path once resolved.
+    pub worlds_input: Option<String>,
+    pub worlds_path: Option<String>,
+    pub share: bool,
+}
+
+/// The keys of `reference` and of `check` (any other is refused).
+const REFERENCE_KEYS: [&str; 3] = ["cut", "net_input", "net"];
+const CHECK_KEYS: [&str; 8] = [
+    "cut",
+    "net_input",
+    "net",
+    "verify_pct",
+    "tt_mb",
+    "standard",
+    "boot",
+    "race_groups",
+];
+
+/// Reads a network block (`reference` or `check`) of `p`.
+fn net_ref(v: &Value, what: &str, keys: &[&str]) -> Result<NetRef, String> {
+    let o = v
+        .as_object()
+        .ok_or_else(|| format!("search_measure: {what} must be an object"))?;
+    for k in o.keys() {
+        if !keys.contains(&k.as_str()) {
+            return Err(format!("search_measure: {what}: unknown setting `{k}`"));
+        }
+    }
+    let cut = v
+        .get("cut")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("search_measure: {what}.cut: the frontier trick, 2 to 5"))?;
+    if !(2..=5).contains(&cut) {
+        return Err(format!(
+            "search_measure: {what}.cut {cut}: the frontier trick, 2 to 5"
+        ));
+    }
+    let s = |k: &str| match v.get(k) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(x)) if !x.is_empty() => Ok(Some(x.clone())),
+        Some(_) => Err(format!("search_measure: {what}.{k} must be a string")),
+    };
+    let (input, path) = (s("net_input")?, s("net")?);
+    if input.is_none() && path.is_none() {
+        return Err(format!(
+            "search_measure: {what} needs net_input (a manifest input holding the network)"
+        ));
+    }
+    Ok(NetRef { cut, input, path })
+}
+
+/// Checks the silver-reference settings of a `search_measure` chunk (also when the manifest is
+/// read, so a typo stops the run before it starts).
+pub(crate) fn parse_silver(p: &Value) -> Result<Silver, String> {
+    let trick = n(p, "trick", 2);
+    let reference = match p.get("reference") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(net_ref(v, "reference", &REFERENCE_KEYS)?),
+    };
+    if let Some(r) = &reference {
+        if r.cut <= trick {
+            return Err(format!(
+                "search_measure: reference.cut {} must be after the decisions' trick {trick}",
+                r.cut
+            ));
+        }
+        if p.get("methods")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty())
+        {
+            return Err(
+                "search_measure: methods are scored against an exact yardstick (search score), \
+                 not a silver reference"
+                    .into(),
+            );
+        }
+    }
+    let check_values: Vec<Value> = match p.get("check") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(a)) => a.clone(),
+        Some(v) => vec![v.clone()],
+    };
+    let mut checks: Vec<CheckSpec> = Vec::new();
+    for v in &check_values {
+        let check = {
+            let net = net_ref(v, "check", &CHECK_KEYS)?;
+            if net.cut <= trick {
+                return Err(format!(
+                    "search_measure: check.cut {} must be after the decisions' trick {trick}",
+                    net.cut
+                ));
+            }
+            if let Some(r) = &reference
+                && net.cut >= r.cut
+            {
+                return Err(format!(
+                    "search_measure: check.cut {} must be before reference.cut {}: a silver \
+                     reference looks deeper than the hybrid it checks",
+                    net.cut, r.cut
+                ));
+            }
+            if n(p, "from", 0) > 0 {
+                return Err(
+                    "search_measure: check needs the worlds from 0 (not an extension, from > 0)"
+                        .into(),
+                );
+            }
+            let verify_pct = match v.get("verify_pct") {
+                None | Some(Value::Null) => 1.0,
+                Some(x) => x
+                    .as_f64()
+                    .filter(|x| (0.0..=100.0).contains(x))
+                    .ok_or("search_measure: check.verify_pct must be a number from 0 to 100")?,
+            };
+            let standard = match v.get("standard") {
+                None | Some(Value::Null) => "0.01".to_string(),
+                Some(Value::String(x)) => x.clone(),
+                Some(_) => {
+                    return Err(
+                        "search_measure: check.standard must be a string, e.g. \"0.01\"".into(),
+                    );
+                }
+            };
+            let race_groups = match v.get("race_groups") {
+                None | Some(Value::Null) => true,
+                Some(b) => b
+                    .as_bool()
+                    .ok_or("search_measure: check.race_groups must be true or false")?,
+            };
+            CheckSpec {
+                net,
+                verify_pct,
+                tt_mb: v.get("tt_mb").and_then(Value::as_u64).unwrap_or(64).max(1),
+                standard,
+                boot: v.get("boot").and_then(Value::as_u64).unwrap_or(1000),
+                race_groups,
+            }
+        };
+        if checks.iter().any(|c| c.net.cut == check.net.cut) {
+            return Err(format!(
+                "search_measure: two checks at cut {} (one a cut: their reports are named by it)",
+                check.net.cut
+            ));
+        }
+        checks.push(check);
+    }
+    let worlds_input = match p.get("worlds_input") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(x)) if !x.is_empty() => Some(x.clone()),
+        Some(_) => return Err("search_measure: worlds_input must be an input name".into()),
+    };
+    let worlds_path = p.get("worlds").and_then(Value::as_str).map(str::to_string);
+    let share = match p.get("share") {
+        None | Some(Value::Null) => reference.is_some(),
+        Some(b) => b
+            .as_bool()
+            .ok_or("search_measure: share must be true or false")?,
+    };
+    Ok(Silver {
+        reference,
+        checks,
+        worlds_input,
+        worlds_path,
+        share,
+    })
+}
+
+/// The manifest inputs a chunk's silver settings name (for the manifest check, `sched.rs`).
+pub(crate) fn input_names(p: &Value) -> Result<Vec<String>, String> {
+    let q = parse_silver(p)?;
+    Ok(q.reference
+        .iter()
+        .chain(q.checks.iter().map(|c| &c.net))
+        .filter_map(|r| r.input.clone())
+        .chain(q.worlds_input)
+        .collect())
+}
+
+/// Adds the local path of each named input (`reference.net`, `check.net`, `worlds`) from the
+/// worker's `inputs` (name → path); a name the manifest does not list is an error.
+pub(crate) fn resolve(
+    p: &Value,
+    inputs: &std::collections::BTreeMap<String, String>,
+) -> Result<Value, String> {
+    let q = parse_silver(p)?;
+    let path = |name: &str| {
+        inputs
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("search_measure needs input `{name}` in the manifest's inputs"))
+    };
+    let mut out = p.clone();
+    if let Some(i) = q.reference.as_ref().and_then(|r| r.input.as_deref()) {
+        out["reference"]["net"] = json!(path(i)?);
+    }
+    match out.get_mut("check") {
+        Some(Value::Array(a)) => {
+            for (v, c) in a.iter_mut().zip(&q.checks) {
+                if let Some(i) = c.net.input.as_deref() {
+                    v["net"] = json!(path(i)?);
+                }
+            }
+        }
+        Some(v @ Value::Object(_)) => {
+            if let Some(i) = q.checks.first().and_then(|c| c.net.input.as_deref()) {
+                v["net"] = json!(path(i)?);
+            }
+        }
+        _ => {}
+    }
+    if let Some(i) = &q.worlds_input {
+        out["worlds"] = json!(path(i)?);
+    }
+    Ok(out)
+}
+
+/// The SHA-256 and frontier trick of a network file (`int.safetensors`): its trick must be `cut`.
+fn net_facts(path: &str, cut: u64, what: &str) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|e| format!("search_measure: {what} {path}: {e}"))?;
+    let f = nn::safetensors::read(&bytes)
+        .map_err(|e| format!("search_measure: {what} {path}: not a network ({e})"))?;
+    let trick = f
+        .meta("trick")
+        .ok()
+        .and_then(|t| t.parse::<u64>().ok())
+        .ok_or_else(|| format!("search_measure: {what} {path}: no frontier trick recorded"))?;
+    if trick != cut {
+        return Err(format!(
+            "search_measure: {what} is a trick-{trick} network (O_{trick}), not O_{cut}"
+        ));
+    }
+    Ok(sha256_file(Path::new(path))?.0)
+}
+
 /// Run one `search_measure` chunk.
 pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
     let (table, table_rec) = build_table_from(ctx, p.get("table").unwrap_or(&json!({})), "auto")?;
+    let remote = ctx
+        .remote()
+        .or_else(|| crate::remote::from_env().map(Arc::from));
+    chunk_with(ctx, p, &sibling("search"), &table, table_rec, remote)
+}
+
+/// The chunk after the equity table, with the given `search` program and remote store (for
+/// sharing a silver set).
+pub(crate) fn chunk_with(
+    ctx: &mut Ctx,
+    p: &Value,
+    search: &Path,
+    table: &Path,
+    table_rec: Value,
+    remote: Option<Arc<dyn Remote>>,
+) -> Result<Value, String> {
+    let table = table.to_path_buf();
+    let silver = parse_silver(p)?;
     let out = ctx.root.join("out").join("measure");
     fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     let trick = n(p, "trick", 2);
@@ -289,12 +609,28 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
     }
     let ids = ids_arg(p)?;
     let start_hands = n(p, "start_hands", 20_000);
-    let fingerprint = json!({
-        "method": "exact", "label": 1, "seed": seed, "trick": trick, "count": count,
+    // The silver reference's network (its SHA-256 is part of the fingerprint).
+    let reference = match &silver.reference {
+        None => None,
+        Some(r) => {
+            let path = r.path.clone().ok_or(
+                "search_measure: reference.net_input is not resolved to a file (a format-2 \
+                 manifest's input)",
+            )?;
+            let sha = net_facts(&path, r.cut, "reference")?;
+            Some((r.cut, path, sha))
+        }
+    };
+    let mut fingerprint = json!({
+        "method": if reference.is_some() { "hybrid" } else { "exact" },
+        "label": 1, "seed": seed, "trick": trick, "count": count,
         "start_hands": start_hands, "ids": ids, "first": n(p, "first", 0),
         "last": n(p, "last", count.saturating_sub(1)), "from": from, "to": to,
         "table_sha256": crate::bundle::sha256_file(&table)?.0,
     });
+    if let Some((cut, _, sha)) = &reference {
+        fingerprint["frontier"] = json!({ "cut": cut, "net_sha256": sha });
+    }
     check_fingerprint(&out.join("fingerprint.json"), &fingerprint)?;
     let sched_json = match p.get("schedule") {
         None | Some(Value::Null) => None,
@@ -335,7 +671,7 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         .unwrap_or("10,20,40,80,160,320")
         .to_string();
     let dec = out.join(format!("decisions-t{trick}.jsonl"));
-    let mut c = Command::new(sibling("search"));
+    let mut c = Command::new(search);
     c.args(["decisions", "--trick", &trick.to_string()])
         .args(["--count", &count.to_string(), "--seed", &seed.to_string()])
         .args(["--start-hands", &start_hands.to_string()])
@@ -353,7 +689,7 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
     );
     ctx.run_child(c, "measure/search.log")?;
     let worlds = |label: u64, method: &str, from: u64, to: u64, file: &std::path::Path| {
-        let mut c = Command::new(sibling("search"));
+        let mut c = Command::new(search);
         c.args(["worlds", "--method", method, "--to", &to.to_string()])
             .args(["--from-world", &from.to_string()])
             .args(["--label", &label.to_string(), "--seed", &seed.to_string()])
@@ -371,6 +707,10 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         if let Some(ids) = &ids {
             c.args(["--ids", ids]);
         }
+        // A silver reference: the hybrid with its network (the step's own method only).
+        if let (Some((cut, path, _)), "hybrid") = (&reference, method) {
+            c.args(["--cut", &cut.to_string(), "--net", path]);
+        }
         if let Some(b) = budget_mb {
             c.args(["--schedule", "auto", "--tt-budget-mb", &b.to_string()]);
             if let Some(j) = &sched_json {
@@ -386,15 +726,35 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         "schedule": if budget_mb.is_some() { "plan" } else if solve_threads > 1 { "split" } else { "fill" },
         "trick": trick, "tt_budget_mb": budget_mb,
     });
-    let yard = if from == 0 {
-        out.join(format!("exact-t{trick}-n{to}.jsonl"))
-    } else {
-        out.join(format!("exact-t{trick}-w{from}-{to}.jsonl"))
+    // The worlds file: `exact-t<trick>-…` as before, `silver-t<trick>-c<cut>-…` for a silver
+    // reference.
+    let (method, kind) = match &reference {
+        None => ("exact", format!("exact-t{trick}")),
+        Some((cut, _, _)) => ("hybrid", format!("silver-t{trick}-c{cut}")),
     };
+    let base_name = if from == 0 {
+        format!("{kind}-n{to}.jsonl")
+    } else {
+        format!("{kind}-w{from}-{to}.jsonl")
+    };
+    let yard = out.join(&base_name);
+    // A stored worlds file to start from (copied once; the step values only what it lacks).
+    let mut stored_in = Value::Null;
+    if let Some(src) = &silver.worlds_path {
+        if !yard.exists() {
+            fs::copy(src, &yard).map_err(|e| format!("search_measure: worlds_input {src}: {e}"))?;
+        }
+        let (sha, bytes) = sha256_file(Path::new(src))?;
+        stored_in = json!({ "input": silver.worlds_input, "sha256": sha, "bytes": bytes });
+    }
     let last = run_worlds(
         ctx,
-        worlds(1, "exact", from, to, &yard),
-        "exact worlds",
+        worlds(1, method, from, to, &yard),
+        if reference.is_some() {
+            "silver worlds"
+        } else {
+            "exact worlds"
+        },
         to,
         threads,
         solve_threads,
@@ -402,12 +762,31 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         &progress_file,
         &extra,
     )?;
-    let base = json!({ "resumed": resumed(&last), "trick": trick, "count": count, "seed": seed, "from": from, "to": to,
+    let mut warnings: Vec<String> = tt.warning.iter().cloned().collect();
+    let mut base = json!({ "resumed": resumed(&last), "trick": trick, "count": count, "seed": seed, "from": from, "to": to,
                        "ids": ids, "grid": grid, "solve_threads": solve_threads,
                        "worlds_threads": threads, "table": table_rec,
                        "schedule": if budget_mb.is_some() { "auto" } else { "fixed" },
                        "tt_budget_mb": budget_mb,
-                       "tt": tt.record, "warnings": tt.warning.iter().collect::<Vec<_>>() });
+                       "tt": tt.record });
+    base["worlds_file"] = json!(base_name);
+    base["worlds_sha256"] = json!(sha256_file(&yard)?.0);
+    if let Some((cut, path, sha)) = &reference {
+        base["reference"] = json!({
+            "kind": "silver", "cut": cut, "net_sha256": sha,
+            "net": Path::new(path).file_name().map(|f| f.to_string_lossy().into_owned()),
+            "what": "a silver reference (docs/m3-hybrid/silver.md): every world valued by the \
+                     hybrid H_cut with this network, never exact values",
+        });
+    }
+    if !stored_in.is_null() {
+        base["worlds_input"] = stored_in;
+    }
+    if silver.share {
+        let shared = share(ctx, remote.as_ref(), &dec, &yard, &mut warnings);
+        base["shared"] = shared;
+    }
+    base["warnings"] = json!(warnings);
     if from > 0 {
         // An extension: the analysis needs the earlier worlds too, so it is run where both
         // files are (`search agree|curves --worlds <first run> --worlds <this>`).
@@ -416,7 +795,7 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         r["extension"] = json!(true);
         return Ok(r);
     }
-    let mut c = Command::new(sibling("search"));
+    let mut c = Command::new(search);
     c.arg("agree")
         .arg("--worlds")
         .arg(&yard)
@@ -428,11 +807,12 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         json!({ "kind": "search_measure", "step": "agree" }),
     );
     ctx.run_child(c, "measure/agree.log")?;
-    let mut c = Command::new(sibling("search"));
+    let mut c = Command::new(search);
     c.arg("curves")
         .arg("--worlds")
         .arg(&yard)
         .args(["--grid", &grid])
+        .args(["--method", method])
         .args(["--threads", &ctx.threads.to_string()])
         .arg("--json")
         .arg(out.join(format!("curves-t{trick}.json")));
@@ -469,7 +849,7 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         methods.push(format!("{}:{mto}", f.display()));
     }
     if !methods.is_empty() {
-        let mut c = Command::new(sibling("search"));
+        let mut c = Command::new(search);
         c.arg("score")
             .arg("--yardstick")
             .arg(&yard)
@@ -485,7 +865,217 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
     }
     let mut r = base;
     r["methods"] = json!(methods);
+    let mut checks = Vec::new();
+    for cs in &silver.checks {
+        let check = check_step(
+            ctx,
+            search,
+            &CheckRun {
+                spec: cs,
+                reference: reference.as_ref().map(|(c, p, _)| (*c, p.as_str())),
+                trick,
+                seed,
+                to,
+                ids: ids.as_deref(),
+                first: n(p, "first", 0),
+                last: n(p, "last", count.saturating_sub(1)),
+                table: &table,
+                decisions: &dec,
+                worlds: &yard,
+                out: &out,
+            },
+        )?;
+        checks.push(check);
+    }
+    if !checks.is_empty() {
+        r["checks"] = json!(checks);
+    }
     Ok(r)
+}
+
+/// Shares the decisions and worlds files content-addressed (`inputs/sha256/<hex>`), so a later
+/// run names them as inputs (`worlds_input`); returns the record. A failure is a warning: both
+/// files are in the bundle.
+fn share(
+    ctx: &mut Ctx,
+    remote: Option<&Arc<dyn Remote>>,
+    decisions: &Path,
+    worlds: &Path,
+    warnings: &mut Vec<String>,
+) -> Value {
+    let Some(remote) = remote else {
+        let w = "the worlds were not shared for reuse: no remote store (R2, or \
+                 RUNNER_REMOTE_DIR); they are in this run's bundle"
+            .to_string();
+        eprintln!("runner: WARNING: search_measure: {w}");
+        warnings.push(w);
+        return Value::Null;
+    };
+    ctx.set_phase(
+        "chunk",
+        json!({ "kind": "search_measure", "step": "share worlds", "partial_cpu_ok": true }),
+    );
+    let mut rec = serde_json::Map::new();
+    for (name, path) in [("decisions", decisions), ("worlds", worlds)] {
+        let (p2, r) = (path.to_path_buf(), Arc::clone(remote));
+        match ctx.blocking(move || put_input(&*r, &p2, None)) {
+            Ok((sha, bytes, status)) => {
+                println!(
+                    "runner: search_measure: {name}: {} ({bytes} bytes, {status})",
+                    input_key(&sha)
+                );
+                rec.insert(
+                    name.into(),
+                    json!({ "key": input_key(&sha), "sha256": sha, "bytes": bytes }),
+                );
+            }
+            Err(e) => {
+                let w = format!(
+                    "the {name} file was not shared for reuse: {e}; it is in this run's bundle"
+                );
+                eprintln!("runner: WARNING: search_measure: {w}");
+                warnings.push(w);
+            }
+        }
+    }
+    if let Some(k) = rec.get("worlds").and_then(|w| w["key"].as_str()) {
+        rec.insert(
+            "reuse_params".into(),
+            json!({ "worlds_input": "<a manifest input name for this key>", "key": k,
+                    "note": "a format-2 manifest lists the key under its inputs, names it in \
+                             worlds_input, and keeps reference, trick, count, seed and to as \
+                             they were (the decisions are made again, byte-identical)" }),
+        );
+    }
+    Value::Object(rec)
+}
+
+/// What the check step runs on.
+struct CheckRun<'a> {
+    spec: &'a CheckSpec,
+    /// The silver reference's cut and network file (`None`: the worlds are exact).
+    reference: Option<(u64, &'a str)>,
+    trick: u64,
+    seed: u64,
+    to: u64,
+    ids: Option<&'a str>,
+    first: u64,
+    last: u64,
+    table: &'a Path,
+    decisions: &'a Path,
+    worlds: &'a Path,
+    out: &'a Path,
+}
+
+/// The `search hybrid-check` command of the check step, and its JSON and text outputs.
+fn check_command(
+    search: &Path,
+    r: &CheckRun,
+    threads: usize,
+    progress: &Path,
+) -> Result<(Command, PathBuf, PathBuf), String> {
+    let cs = r.spec;
+    let net = cs.net.path.as_deref().ok_or(
+        "search_measure: check.net_input is not resolved to a file (a format-2 manifest's input)",
+    )?;
+    let kind = if r.reference.is_some() {
+        "silver"
+    } else {
+        "exact"
+    };
+    let stem = format!("hc-t{}-o{}-{kind}", r.trick, cs.net.cut);
+    let (json_out, txt_out) = (
+        r.out.join(format!("{stem}.json")),
+        r.out.join(format!("{stem}.txt")),
+    );
+    let mut c = Command::new(search);
+    c.args(["hybrid-check", "--trick", &r.trick.to_string()])
+        .args(["--cut", &cs.net.cut.to_string()])
+        .arg("--net")
+        .arg(net)
+        .arg("--equity")
+        .arg(r.table)
+        .arg("--decisions")
+        .arg(r.decisions)
+        .arg("--worlds")
+        .arg(r.worlds)
+        .args(["--to", &r.to.to_string(), "--seed", &r.seed.to_string()])
+        .args([
+            "--first",
+            &r.first.to_string(),
+            "--last",
+            &r.last.to_string(),
+        ]);
+    if let Some(ids) = r.ids {
+        c.args(["--ids", ids]);
+    }
+    if let Some((cut, path)) = r.reference {
+        c.args(["--reference", "silver", "--reference-cut", &cut.to_string()])
+            .arg("--reference-net")
+            .arg(path);
+    }
+    if cs.race_groups {
+        c.arg("--race-groups");
+    }
+    c.args(["--verify-pct", &cs.verify_pct.to_string()])
+        .args(["--threads", &threads.to_string()])
+        .args(["--tt-mb", &cs.tt_mb.to_string()])
+        .args(["--boot", &cs.boot.to_string()])
+        .args(["--standard", &cs.standard])
+        .arg("--json")
+        .arg(&json_out)
+        .arg("--progress")
+        .arg(progress);
+    Ok((c, json_out, txt_out))
+}
+
+/// The check step: H_cut of the check's network against the chunk's worlds (module notes).
+fn check_step(ctx: &mut Ctx, search: &Path, r: &CheckRun) -> Result<Value, String> {
+    let threads = ctx.threads.max(1);
+    let progress = ctx.root.join("check-progress.json");
+    let _ = fs::remove_file(&progress);
+    let (c, json_out, txt_out) = check_command(search, r, threads, &progress)?;
+    let step = json!({ "kind": "search_measure", "step": "hybrid check",
+                       "cut": r.spec.net.cut, "partial_cpu_ok": false });
+    ctx.set_phase("chunk", step.clone());
+    ctx.run_child_io(c, "measure/check.log", Some(&txt_out), None, &mut |ctx| {
+        let mut s = step.clone();
+        if let Some(x) = fs::read_to_string(&progress)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        {
+            for k in ["worlds_done", "worlds_total", "exact_done", "exact_total"] {
+                s[k] = x[k].clone();
+            }
+            s["partial_cpu_ok"] = json!(x["tail"].as_bool().unwrap_or(false));
+        }
+        ctx.progress = s;
+    })?;
+    let hc: Value = fs::read_to_string(&json_out)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .ok_or("search_measure: hybrid-check wrote no JSON")?;
+    let rows = |g: &Value| -> Vec<Value> {
+        g.as_array()
+            .into_iter()
+            .flatten()
+            .take(4)
+            .cloned()
+            .collect()
+    };
+    Ok(json!({
+        "file": json_out.file_name().map(|f| f.to_string_lossy().into_owned()),
+        "cut": r.spec.net.cut,
+        "net_sha256": hc["net"]["sha256"],
+        "reference": hc["reference"],
+        "pass": hc["pass"],
+        "standard_pct": hc["standard_pct"],
+        "verified_worlds": hc["verified_worlds"],
+        "groups": rows(&hc["groups"]),
+        "race_groups": hc["race_groups"]["groups"],
+        "score_groups": hc["score_groups"]["groups"],
+        "time": hc["time"],
+    }))
 }
 
 /// Writes the chunk's fingerprint to `path`, or, when a restored one is there already (a
@@ -540,6 +1130,242 @@ mod tests {
         fs::write(&p, "{not json").expect("write");
         assert!(check_fingerprint(&p, &fp).is_err());
         let _ = fs::remove_dir_all(&d);
+    }
+
+    /// A silver reference's settings: checked (cuts, the reference deeper than the check, no
+    /// methods, no extension with a check, known keys, a network named), the inputs they name, and
+    /// those inputs resolved to paths; absent, nothing changes (and nothing is shared).
+    #[test]
+    fn silver_settings_are_checked() {
+        let p = json!({ "trick": 1, "count": 32, "to": 8,
+                        "reference": { "cut": 3, "net_input": "o3" },
+                        "check": { "cut": 2, "net_input": "o2", "verify_pct": 2.5 },
+                        "worlds_input": "stored" });
+        let q = parse_silver(&p).expect("valid");
+        assert_eq!(q.reference.as_ref().map(|r| r.cut), Some(3));
+        let c = q.checks.first().expect("a check");
+        assert_eq!(
+            (c.net.cut, c.verify_pct, c.tt_mb, c.boot),
+            (2, 2.5, 64, 1000)
+        );
+        assert!(c.race_groups && c.standard == "0.01" && q.share);
+        assert_eq!(input_names(&p).expect("names"), ["o3", "o2", "stored"]);
+        let plain = parse_silver(&json!({ "trick": 2 })).expect("plain");
+        assert!(plain.reference.is_none() && plain.checks.is_empty() && !plain.share);
+        assert!(input_names(&json!({})).expect("none").is_empty());
+        let bad = |f: &dyn Fn(&mut Value), want: &str| {
+            let mut x = p.clone();
+            f(&mut x);
+            let e = parse_silver(&x).expect_err(want);
+            assert!(e.contains(want), "{e} (wanted {want})");
+        };
+        bad(&|x| x["reference"]["cut"] = json!(1), "reference.cut 1");
+        bad(&|x| x["reference"]["cut"] = json!(6), "2 to 5");
+        bad(
+            &|x| x["check"]["cut"] = json!(3),
+            "must be before reference.cut",
+        );
+        bad(&|x| x["trick"] = json!(2), "check.cut 2 must be after");
+        bad(
+            &|x| x["reference"]["typo"] = json!(1),
+            "unknown setting `typo`",
+        );
+        bad(&|x| x["check"]["typo"] = json!(1), "unknown setting `typo`");
+        bad(&|x| x["reference"] = json!({ "cut": 3 }), "needs net_input");
+        bad(
+            &|x| x["methods"] = json!([{ "method": "rollout" }]),
+            "not a silver reference",
+        );
+        bad(&|x| x["from"] = json!(4), "not an extension");
+        bad(&|x| x["check"]["verify_pct"] = json!(101), "verify_pct");
+        bad(&|x| x["share"] = json!("yes"), "share must be");
+        // Resolved: the paths join the settings, which stay valid.
+        let mut inputs = std::collections::BTreeMap::new();
+        inputs.insert("o3".to_string(), "/in/o3".to_string());
+        inputs.insert("o2".to_string(), "/in/o2".to_string());
+        let e = resolve(&p, &inputs).expect_err("stored is missing");
+        assert!(e.contains("`stored`"), "{e}");
+        inputs.insert("stored".to_string(), "/in/w".to_string());
+        let r = resolve(&p, &inputs).expect("resolves");
+        let q = parse_silver(&r).expect("still valid");
+        assert_eq!(q.reference.and_then(|r| r.path).as_deref(), Some("/in/o3"));
+        assert_eq!(q.checks[0].net.path.as_deref(), Some("/in/o2"));
+        // Several checks (the exact anchor set: H_3 and H_2 against the same exact worlds), each
+        // resolved; two at one cut are refused.
+        let anchor = json!({ "trick": 1, "check": [{ "cut": 3, "net_input": "o3" },
+                                                   { "cut": 2, "net_input": "o2" }] });
+        assert_eq!(input_names(&anchor).expect("names"), ["o3", "o2"]);
+        let ra = resolve(&anchor, &inputs).expect("resolves");
+        let qa = parse_silver(&ra).expect("valid");
+        assert_eq!(
+            qa.checks
+                .iter()
+                .map(|c| (c.net.cut, c.net.path.clone()))
+                .collect::<Vec<_>>(),
+            [
+                (3, Some("/in/o3".to_string())),
+                (2, Some("/in/o2".to_string()))
+            ]
+        );
+        assert!(!qa.share && qa.reference.is_none());
+        let e = parse_silver(
+            &json!({ "trick": 1, "check": [{ "cut": 2, "net_input": "a" },
+                                                            { "cut": 2, "net_input": "b" }] }),
+        )
+        .expect_err("two at cut 2");
+        assert!(e.contains("two checks at cut 2"), "{e}");
+        assert_eq!(q.worlds_path.as_deref(), Some("/in/w"));
+        // The manifest check: a named input must be listed.
+        let m = json!({ "format": 2, "run_id": "silver-test", "run_seed": 1,
+                        "inputs": { "o3": format!("sha256:{}", "a".repeat(64)) },
+                        "streams": [{ "name": "silver", "priority": 1, "kind": "search_measure",
+                                      "chunks": 1, "params": p }] });
+        let e = crate::sched::parse_v2(&m).expect_err("o2 and stored are not listed");
+        assert!(e.contains("`o2`"), "{e}");
+    }
+
+    /// The chunk with a silver reference, with a fake `search`: the worlds step is the hybrid
+    /// with the reference's network into `silver-t1-c3-n4.jsonl` (a stored worlds file copied in
+    /// first), the fingerprint names it, the analysis reads it as `hybrid`, the decisions and
+    /// worlds are shared content-addressed, and the check runs H_2 against it as a silver
+    /// reference, its verdict in `result.json`. A network of the wrong trick is refused, and a
+    /// resume under another network is refused by the fingerprint.
+    #[cfg(unix)]
+    #[test]
+    fn silver_chunk_runs_shares_and_checks() {
+        use std::collections::BTreeMap;
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("measure-silver-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("in")).expect("mkdir");
+        let net = |k: u8, seed: u64| {
+            let n = nn::synthetic::random_net(seed, &[8], nn::outcome::vocab(k), 100);
+            let meta = BTreeMap::from([("head".to_string(), "outcome-v1".to_string())]);
+            let f = base.join("in").join(format!("o{k}-{seed}"));
+            fs::write(&f, nn::oracle::write_net(&n, k, &meta)).expect("write");
+            f.display().to_string()
+        };
+        let (o3, o2, o3b) = (net(3, 1), net(2, 2), net(3, 3));
+        let stored = base.join("in").join("stored");
+        fs::write(&stored, "{\"stored\": true}\n").expect("write");
+        let table = base.join("equity-v0.npy");
+        fs::write(&table, "table").expect("write");
+        let calls = base.join("calls.log");
+        let search = base.join("search");
+        let arg = r#"arg() { n=$1; shift; while [ $# -gt 0 ]; do [ "$1" = "$n" ] && { echo "$2"; return; }; shift; done; }"#;
+        fs::write(
+            &search,
+            format!(
+                r#"#!/bin/sh
+{arg}
+echo "search $*" >> '{calls}'
+case "$1" in
+  decisions) echo '{{"id": 0}}' > "$(arg --out "$@")" ;;
+  worlds) echo '{{"id": 0, "method": "hybrid"}}' >> "$(arg --out "$@")"
+          echo '{{"worlds_done": 4, "worlds_total": 4}}' > "$(arg --progress "$@")" ;;
+  agree|curves) echo '{{}}' > "$(arg --json "$@")" ;;
+  hybrid-check)
+    echo '{{"exact_done": 1, "exact_total": 1, "worlds_done": 4, "worlds_total": 4}}' > "$(arg --progress "$@")"
+    echo '{{"net": {{"sha256": "o2sha"}}, "reference": {{"kind": "silver", "cut": 3}}, "pass": true,
+      "standard_pct": "0.01", "verified_worlds": 1,
+      "groups": [{{"group": "all"}}, {{"group": "pos 1-2"}}, {{"group": "pos 3-4"}}, {{"group": "pos 5-8"}}, {{"group": "pos 1"}}],
+      "race_groups": {{"groups": [{{"group": "race 2"}}]}}, "score_groups": {{"groups": [{{"group": "S1"}}]}},
+      "time": {{"wall_s": 1}}}}' > "$(arg --json "$@")"
+    echo "the check's tables" ;;
+esac
+"#,
+                calls = calls.display()
+            ),
+        )
+        .expect("write");
+        fs::set_permissions(&search, fs::Permissions::from_mode(0o755)).expect("chmod");
+        let remote_dir = base.join("remote");
+        let remote: Arc<dyn Remote> = Arc::new(crate::remote::DirRemote {
+            root: remote_dir.clone(),
+        });
+        let params = |o3: &str| {
+            json!({ "trick": 1, "count": 32, "to": 4, "grid": "2,4", "worlds_at_once": 1,
+                    "solve_threads": 1, "tt_mb": 64, "allow_uneven": true,
+                    "reference": { "cut": 3, "net": o3 },
+                    "check": { "cut": 2, "net": o2.clone(), "verify_pct": 3 },
+                    "worlds_input": "stored", "worlds": stored.display().to_string() })
+        };
+        let chunk_dir = base.join("chunk");
+        let mut ctx = Ctx::local("silver-test", &chunk_dir, 4);
+        let r = chunk_with(
+            &mut ctx,
+            &params(&o3),
+            &search,
+            &table,
+            json!({"sha256": "t"}),
+            Some(Arc::clone(&remote)),
+        )
+        .expect("runs");
+        let out = chunk_dir.join("out/measure");
+        assert_eq!(r["worlds_file"], "silver-t1-c3-n4.jsonl");
+        assert_eq!(r["reference"]["kind"], "silver");
+        assert_eq!(r["reference"]["cut"], 3);
+        let o3_sha = sha256_file(Path::new(&o3)).expect("sha").0;
+        assert_eq!(r["reference"]["net_sha256"], json!(o3_sha));
+        assert_eq!(r["worlds_input"]["input"], "stored");
+        // The stored file was copied in, and the step appended to it.
+        let worlds = fs::read_to_string(out.join("silver-t1-c3-n4.jsonl")).expect("worlds");
+        assert!(worlds.starts_with("{\"stored\": true}\n"), "{worlds}");
+        // Shared, content-addressed.
+        for what in ["decisions", "worlds"] {
+            let key = r["shared"][what]["key"].as_str().expect("a key");
+            assert!(remote_dir.join(key).is_file(), "{key}");
+        }
+        let fp: Value = serde_json::from_str(
+            &fs::read_to_string(out.join("fingerprint.json")).expect("fingerprint"),
+        )
+        .expect("json");
+        assert_eq!(fp["method"], "hybrid");
+        assert_eq!(fp["frontier"], json!({ "cut": 3, "net_sha256": o3_sha }));
+        // The check.
+        assert_eq!(r["checks"][0]["pass"], true);
+        assert_eq!(r["checks"][0]["file"], "hc-t1-o2-silver.json");
+        assert_eq!(r["checks"][0]["groups"].as_array().map(Vec::len), Some(4));
+        assert_eq!(r["checks"][0]["race_groups"][0]["group"], "race 2");
+        assert_eq!(
+            fs::read_to_string(out.join("hc-t1-o2-silver.txt")).expect("report"),
+            "the check's tables\n"
+        );
+        let call = fs::read_to_string(&calls).expect("calls");
+        let line = |sub: &str| {
+            call.lines()
+                .find(|l| l.starts_with(&format!("search {sub} ")))
+                .unwrap_or_else(|| panic!("no {sub} call: {call}"))
+                .to_string()
+        };
+        let w = line("worlds");
+        assert!(
+            w.contains("--method hybrid") && w.contains(&format!("--cut 3 --net {o3}")),
+            "{w}"
+        );
+        assert!(line("curves").contains("--method hybrid"));
+        let h = line("hybrid-check");
+        assert!(
+            h.contains(&format!("--cut 2 --net {o2}"))
+                && h.contains(&format!(
+                    "--reference silver --reference-cut 3 --reference-net {o3}"
+                ))
+                && h.contains("--race-groups --verify-pct 3")
+                && h.contains("silver-t1-c3-n4.jsonl"),
+            "{h}"
+        );
+        assert!(!call.contains("search score"), "no methods");
+        // A resume under another network is refused (the fingerprint), as is a network of
+        // another trick.
+        let mut ctx = Ctx::local("silver-test", &chunk_dir, 4);
+        let e = chunk_with(&mut ctx, &params(&o3b), &search, &table, json!({}), None)
+            .expect_err("another network");
+        assert!(e.contains("frontier"), "{e}");
+        let mut ctx = Ctx::local("silver-test", &base.join("chunk2"), 4);
+        let e = chunk_with(&mut ctx, &params(&o2), &search, &table, json!({}), None)
+            .expect_err("an O_2 as the reference");
+        assert!(e.contains("trick-2 network"), "{e}");
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

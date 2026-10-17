@@ -1770,6 +1770,13 @@ impl Rung<'_> {
                 ));
             }
         }
+        // ... and its worlds exact: a silver reference (docs/m3-hybrid/silver.md) is never a
+        // golden set (`search hybrid-check` would refuse it too, but only at the check, after the
+        // labels and the training).
+        if let Some(w) = self.inputs.get("golden_worlds") {
+            search::measure::require_exact(w)
+                .map_err(|e| format!("hybrid_rung: golden_worlds_input: {e}"))?;
+        }
         self.rec.insert("inputs".into(), Value::Object(recs));
         self.additive_check_init()?;
         self.done("inputs", t)

@@ -35,12 +35,13 @@ use engine::rng::Rng;
 use engine::view::SeatView;
 use equity::{MoneyChance, ONE};
 use serde::{Deserialize, Serialize};
-use solver::{ParProgress, SolveMem};
+use solver::frontier::Frontier;
+use solver::{FrontierCut, ParProgress, SolveMem};
 
 use crate::eta::{Eta, EtaClass, EtaTracker, MIN_PRIOR_S};
 use crate::labels;
 use crate::pimc::{
-    Candidate, Ctx, Method, SearchConfig, aggregate, candidates, solves_per_world,
+    Candidate, Ctx, Method, SearchConfig, WorldCost, aggregate, candidates, solves_per_world,
     world_row_counted,
 };
 use crate::plan::{AutoParams, ExecProgress, PlanTask, Planned, WorldPlan, plan_auto, run_planned};
@@ -496,6 +497,42 @@ pub struct RowFp {
     /// existed (never resumed, extended or joined with records that have it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub values: Option<u32>,
+    /// The frontier of a hybrid record ([`HYBRID`]: a silver reference, docs/m3-hybrid/
+    /// silver.md): the trick at whose start the network valued the positions, and the network.
+    /// Absent in exact and rollout records (whose bytes are unchanged by its existence).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontier: Option<FrontierFp>,
+}
+
+/// The method name of a hybrid worlds record: exact search from the decision down to the start of
+/// trick `cut`, an oracle network's value there (H_cut; docs/M3-HYBRID-SPEC.md §2). Such a file is
+/// a **silver reference** (docs/m3-hybrid/silver.md): never an exact golden set. Every reader of
+/// exact worlds takes only `exact` records (`search::saved`, `hybrid-check`'s default reference,
+/// `curves`' default method, `score`'s yardstick), and a worlds run never resumes, extends or
+/// joins records of another method or another frontier.
+pub const HYBRID: &str = "hybrid";
+
+/// What decides a hybrid record's values beyond an exact record's: the frontier and its network.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct FrontierFp {
+    /// The trick at whose start the network values the positions (2..=5).
+    pub cut: u8,
+    /// SHA-256 (hex) of the integer network's weights file (`nn::Oracle::sha256`).
+    pub net_sha256: String,
+    /// The encoder the network reads (`nn::encode::ENCODER`).
+    pub encoder: String,
+}
+
+impl FrontierFp {
+    /// "H_3 (net f5766aa98a1d)": for messages.
+    pub fn describe(&self) -> String {
+        format!("H_{} (net {})", self.cut, short_sha(&self.net_sha256))
+    }
+
+    /// The values version of a hybrid record (as `hybrid-check` writes it: `2+O3:<sha256>`).
+    pub fn values(&self) -> String {
+        format!("{VALUES_VERSION}+O{}:{}", self.cut, self.net_sha256)
+    }
 }
 
 /// How long one decision's worlds took (reports only; never part of a result).
@@ -525,6 +562,14 @@ pub struct DecisionTiming {
     /// 2026-10-16). The runner's machine-cost records count work in nodes.
     #[serde(default)]
     pub nodes: u64,
+    /// Network evaluations summed over the worlds valued by this process (hybrid records only;
+    /// absent otherwise): with `nodes`, what a silver set costs (docs/m3-hybrid/silver.md).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub evals: u64,
+}
+
+fn is_zero(x: &u64) -> bool {
+    *x == 0
 }
 
 /// How a worlds run is spread over the machine. Values never depend on it.
@@ -559,6 +604,23 @@ pub struct WorldsJob {
     /// The equity table's SHA-256 (hex): part of every record's and checkpoint line's
     /// fingerprint, so a file made with another table is never resumed.
     pub table: String,
+    /// A hybrid run (a silver reference, docs/m3-hybrid/silver.md): exact PIMC (`method`) with
+    /// this frontier and network; its records are [`HYBRID`] with the frontier in their
+    /// fingerprint. The network itself is handed to the run beside the job
+    /// ([`worlds_file_net`], [`run_worlds`]), and must be the one named here.
+    pub frontier: Option<FrontierFp>,
+}
+
+impl WorldsJob {
+    /// The name the job's records are made under: [`HYBRID`] with a frontier, else
+    /// [`method_name`] of its method.
+    pub fn method_name(&self) -> &'static str {
+        if self.frontier.is_some() {
+            HYBRID
+        } else {
+            method_name(self.method)
+        }
+    }
 }
 
 /// The name a method is recorded under.
@@ -592,6 +654,9 @@ pub struct BatchProgress {
     /// Solver nodes of the worlds valued by this process (the machine's own work, for its cost
     /// per node; restored worlds are not counted).
     pub nodes_valued: AtomicU64,
+    /// Network evaluations of the worlds valued by this process (hybrid runs; restored worlds are
+    /// not counted).
+    pub evals_valued: AtomicU64,
     /// Worker threads in use (a position-aware run: all its threads).
     pub threads: AtomicU64,
     /// The parallel exact solve now running, when one worker runs `solve_fast_par`
@@ -664,6 +729,7 @@ pub fn world_rows_batch(
         &Resume::default(),
         &mut (),
         &mut sink,
+        None,
     )
 }
 
@@ -676,6 +742,8 @@ pub struct DoneWorld {
     pub us: u64,
     /// Solver nodes it took (timings only; 0 when unknown).
     pub nodes: u64,
+    /// Network evaluations it took (timings only; 0 when unknown or without a frontier).
+    pub evals: u64,
 }
 
 /// What a resumed run already has. Both only shorten the work: no value, row or order depends
@@ -691,10 +759,16 @@ pub struct Resume {
 /// Receives each world as it finishes, on the one thread that collects results, before the
 /// decision it belongs to is handed on. [`worlds_file`]'s checkpoint is one.
 pub trait WorldSink {
-    /// World `w` of decision `id` finished with these values, in `us` microseconds and `nodes`
-    /// solver nodes.
-    fn world(&mut self, id: u64, w: u64, v: &[[u64; 4]], us: u64, nodes: u64)
-    -> Result<(), String>;
+    /// World `w` of decision `id` finished with these values, in `us` microseconds at `cost`
+    /// (solver nodes, network evaluations).
+    fn world(
+        &mut self,
+        id: u64,
+        w: u64,
+        v: &[[u64; 4]],
+        us: u64,
+        cost: WorldCost,
+    ) -> Result<(), String>;
     /// Decision `id` has been handed on complete: its worlds are no longer needed.
     fn decision(&mut self, _id: u64) -> Result<(), String> {
         Ok(())
@@ -707,7 +781,14 @@ pub trait WorldSink {
 
 /// No checkpoint.
 impl WorldSink for () {
-    fn world(&mut self, _: u64, _: u64, _: &[[u64; 4]], _: u64, _: u64) -> Result<(), String> {
+    fn world(
+        &mut self,
+        _: u64,
+        _: u64,
+        _: &[[u64; 4]],
+        _: u64,
+        _: WorldCost,
+    ) -> Result<(), String> {
         Ok(())
     }
 }
@@ -718,6 +799,14 @@ type Sink<'s> = dyn FnMut(WorldRows, DecisionTiming) -> Result<(), String> + 's;
 /// [`world_rows_sched`] resuming from `resume` and reporting every world to `ws` (the
 /// checkpoint) as it finishes: the worlds in `resume.worlds` are taken as they are, not valued
 /// again, so rows, their order and the `sink` calls are exactly an uninterrupted run's.
+///
+/// `net`: the frontier evaluator of a hybrid job (`job.frontier`, a silver reference): every
+/// world is valued by exact search down to the start of trick `job.frontier.cut` and `net`
+/// there (`crate::pimc::world_row_counted` with the cut). It must be given exactly when the job
+/// has a frontier, and the job's decisions must come before the frontier's trick (at or after it
+/// the solve would be exact, and its records would say hybrid). A hybrid run takes the plain
+/// workers (one world per thread, `cfg`'s table) under any schedule: the position-aware plan
+/// prices exact worlds.
 #[allow(clippy::too_many_arguments)]
 pub fn run_worlds(
     ds: &[DecisionSpec],
@@ -729,8 +818,10 @@ pub fn run_worlds(
     resume: &Resume,
     ws: &mut dyn WorldSink,
     sink: &mut Sink,
+    net: Option<&dyn Frontier>,
 ) -> Result<(), String> {
     assert!(job.to >= job.from, "worlds from..to");
+    let cut = check_frontier(ds, job, net)?;
     let preps = prepare_batch(ds, job);
     let worlds: Vec<_> = preps
         .iter()
@@ -754,6 +845,7 @@ pub fn run_worlds(
         ctx,
         progress,
         cost: &cost,
+        cut,
     };
     let Schedule::Auto {
         threads,
@@ -771,7 +863,7 @@ pub fn run_worlds(
         tt_mb,
         ..*cfg
     };
-    if job.method != Method::ExactPimc || todo.is_empty() {
+    if job.method != Method::ExactPimc || todo.is_empty() || cut.is_some() {
         return batch_path(&b, &flat(cfg.tt_mb), &todo, &mut col, ws, sink);
     }
     let tasks: Vec<PlanTask> = todo
@@ -799,6 +891,42 @@ pub fn run_worlds(
     )
 }
 
+/// The frontier of a hybrid job, checked against its decisions and its network (see
+/// [`run_worlds`]).
+fn check_frontier<'n>(
+    ds: &[DecisionSpec],
+    job: &WorldsJob,
+    net: Option<&'n dyn Frontier>,
+) -> Result<Option<FrontierCut<'n>>, String> {
+    match (&job.frontier, net) {
+        (None, None) => Ok(None),
+        (Some(f), Some(n)) => {
+            if job.method != Method::ExactPimc {
+                return Err(format!(
+                    "a hybrid worlds run is exact search with a frontier, not {}",
+                    method_name(job.method)
+                ));
+            }
+            if !(2..=engine::game::TRICKS_PER_HAND).contains(&f.cut) {
+                return Err(format!("frontier at trick {}: it must be 2..=5", f.cut));
+            }
+            if let Some(d) = ds.iter().find(|d| d.trick == 0 || d.trick >= f.cut) {
+                return Err(format!(
+                    "decision {} is at trick {}: H_{} is defined for decisions at tricks 1..{} \
+                     (at or after the frontier's trick the solve would be exact)",
+                    d.id, d.trick, f.cut, f.cut
+                ));
+            }
+            Ok(Some(FrontierCut::new(f.cut, n)))
+        }
+        (Some(f), None) => Err(format!(
+            "a hybrid worlds run ({}) needs its network",
+            f.describe()
+        )),
+        (None, Some(_)) => Err("a network was given to a worlds run without a frontier".into()),
+    }
+}
+
 /// The read-only state of one worlds run, shared by its workers.
 struct Batch<'a> {
     preps: &'a [Prepared<'a>],
@@ -807,6 +935,8 @@ struct Batch<'a> {
     ctx: &'a Ctx<'a>,
     progress: Option<&'a BatchProgress>,
     cost: &'a Costs,
+    /// The frontier of a hybrid job (`job.frontier` with its network).
+    cut: Option<FrontierCut<'a>>,
 }
 
 impl Batch<'_> {
@@ -829,12 +959,14 @@ struct Costs {
     classes: Vec<EtaClass>,
 }
 
-/// The prior cost (thread-seconds) of one world of a decision with these candidates.
+/// The prior cost (thread-seconds) of one world of a decision with these candidates (`cut`: a
+/// hybrid world's frontier trick).
 fn world_prior(
     trick: u8,
     position: u8,
     cands: &[Candidate],
     method: Method,
+    cut: Option<u8>,
     p: &AutoParams,
 ) -> f64 {
     let task = PlanTask {
@@ -842,8 +974,17 @@ fn world_prior(
         position,
         solves: solves_per_world(cands),
     };
-    let s = match method {
-        Method::ExactPimc => p.expected_cost(&task),
+    let s = match (method, cut) {
+        // A hybrid world: exact search over the tricks before the frontier only. Measured on
+        // the build VM (2026-10-17, docs/m3-hybrid/silver.md): H_3 from trick 1 about 3 s a
+        // world at the leader down to a tenth of that at the eighth seat; H_2, H_4 and later
+        // decisions far less. Rough until measured times replace it.
+        (Method::ExactPimc, Some(cut)) => {
+            let tricks = i32::from(cut) - i32::from(trick);
+            let seat = 1.0 - f64::from(position) / 9.0;
+            f64::from(solves_per_world(cands)) * seat * 3.0 * 0.03f64.powi(2 - tricks.min(2))
+        }
+        (Method::ExactPimc, None) => p.expected_cost(&task),
         // No model for rollout worlds: about a millisecond per candidate per trick left; the
         // estimate calls itself rough until this is replaced by measured times.
         _ => 1e-3 * cands.len() as f64 * f64::from(6u8.saturating_sub(trick).max(1)),
@@ -869,9 +1010,19 @@ impl Costs {
             e.2 += pre;
             e.3 += pre as f64 * prior;
         };
+        let hybrid = job.frontier.as_ref().map(|f| f.cut);
         let priors: Vec<f64> = preps
             .iter()
-            .map(|p| world_prior(p.d.trick, p.d.position, &p.cands, job.method, params))
+            .map(|p| {
+                world_prior(
+                    p.d.trick,
+                    p.d.position,
+                    &p.cands,
+                    job.method,
+                    hybrid,
+                    params,
+                )
+            })
             .collect();
         for (j, p) in preps.iter().enumerate() {
             add((p.d.trick, p.d.position), priors[j], col.restored_per[j]);
@@ -879,7 +1030,7 @@ impl Costs {
         for d in before {
             let (_, view, legal) = d.replay();
             let (_, cands) = candidates(&view, &legal);
-            let prior = world_prior(d.trick, d.position, &cands, job.method, params);
+            let prior = world_prior(d.trick, d.position, &cands, job.method, hybrid, params);
             add((d.trick, d.position), prior, nw);
         }
         let index: BTreeMap<(u8, u8), usize> =
@@ -917,6 +1068,8 @@ struct Collect {
     us: Vec<(u64, u64)>,
     /// Solver nodes of each decision's worlds.
     nodes: Vec<u64>,
+    /// Network evaluations of each decision's worlds valued by this process (hybrid runs).
+    evals: Vec<u64>,
     /// Solver threads per world of each decision, in a position-aware run.
     threads: Vec<Option<u64>>,
     /// The next decision to hand on.
@@ -938,6 +1091,7 @@ impl Collect {
             left: vec![nw; n],
             us: vec![(0, 0); n],
             nodes: vec![0; n],
+            evals: vec![0; n],
             threads: vec![None; n],
             next: 0,
             restored: 0,
@@ -955,6 +1109,7 @@ impl Collect {
                     c.left[j] -= 1;
                     c.us[j] = (c.us[j].0 + d.us, c.us[j].1.max(d.us));
                     c.nodes[j] += d.nodes;
+                    c.evals[j] += d.evals;
                     c.restored += 1;
                     c.restored_per[j] += 1;
                 }
@@ -970,23 +1125,24 @@ impl Collect {
             .collect()
     }
 
-    /// Task `k` finished with values `v` in `us` µs and `nodes` solver nodes: report it to
-    /// `ws`, then keep it.
+    /// Task `k` finished with values `v` in `us` µs at `cost` (solver nodes, network
+    /// evaluations): report it to `ws`, then keep it.
     fn put(
         &mut self,
         k: usize,
         v: Vec<[u64; 4]>,
         us: u64,
-        nodes: u64,
+        cost: WorldCost,
         ws: &mut dyn WorldSink,
     ) -> Result<(), String> {
         let (j, i) = (k / self.nw, k % self.nw);
-        ws.world(self.ids[j], self.from + i as u64, &v, us, nodes)?;
+        ws.world(self.ids[j], self.from + i as u64, &v, us, cost)?;
         debug_assert!(self.rows[j][i].is_none(), "each task is valued once");
         self.rows[j][i] = Some(v);
         self.left[j] -= 1;
         self.us[j] = (self.us[j].0 + us, self.us[j].1.max(us));
-        self.nodes[j] += nodes;
+        self.nodes[j] += cost.nodes;
+        self.evals[j] += cost.evals;
         Ok(())
     }
 
@@ -1005,7 +1161,7 @@ impl Collect {
                 &*b.worlds[j],
                 rows,
                 self.us[j],
-                self.nodes[j],
+                (self.nodes[j], self.evals[j]),
                 self.threads[j],
             );
             sink(r, t)?;
@@ -1053,7 +1209,7 @@ fn batch_path(
     let eta = &*eta;
     let next = AtomicUsize::new(0);
     let stop = AtomicBool::new(false);
-    type Msg = (usize, Vec<[u64; 4]>, u64, u64);
+    type Msg = (usize, Vec<[u64; 4]>, u64, WorldCost);
     let work = |worker: usize, tx: mpsc::Sender<Msg>| {
         // One solver memory per worker for the whole run: its transposition table is allocated
         // once and emptied in O(1) between worlds, not allocated, first-touched and freed per
@@ -1069,7 +1225,7 @@ fn batch_path(
             let (class, prior) = b.cost.per_prep[j];
             let slot = eta.begin(worker, class, prior, world_threads);
             let t0 = Instant::now();
-            let (v, nodes) = world_row_counted(
+            let (v, cost) = world_row_counted(
                 &p.view,
                 &*b.worlds[j],
                 &p.cands,
@@ -1080,16 +1236,18 @@ fn batch_path(
                 cfg,
                 par,
                 &mut mem,
+                b.cut,
             );
             let wall = t0.elapsed();
             eta.end(slot, class, prior, world_threads, wall.as_secs_f64());
             if let Some(pr) = b.progress {
                 pr.worlds_done.fetch_add(1, Ordering::Relaxed);
                 pr.worlds_valued.fetch_add(1, Ordering::Relaxed);
-                pr.nodes_valued.fetch_add(nodes, Ordering::Relaxed);
+                pr.nodes_valued.fetch_add(cost.nodes, Ordering::Relaxed);
+                pr.evals_valued.fetch_add(cost.evals, Ordering::Relaxed);
             }
             let v: Vec<[u64; 4]> = v.into_iter().map(|x| x.0).collect();
-            if tx.send((k, v, wall.as_micros() as u64, nodes)).is_err() {
+            if tx.send((k, v, wall.as_micros() as u64, cost)).is_err() {
                 // The collector has stopped (a sink error).
                 break;
             }
@@ -1109,12 +1267,12 @@ fn batch_path(
                 return Ok(());
             }
             // Every worker has stopped (one panicked); the scope re-raises the panic.
-            let Ok((k, v, us, nodes)) = rx.recv() else {
+            let Ok((k, v, us, cost)) = rx.recv() else {
                 return Ok(());
             };
-            col.put(k, v, us, nodes, ws)?;
-            while let Ok((k, v, us, nodes)) = rx.try_recv() {
-                col.put(k, v, us, nodes, ws)?;
+            col.put(k, v, us, cost, ws)?;
+            while let Ok((k, v, us, cost)) = rx.try_recv() {
+                col.put(k, v, us, cost, ws)?;
             }
             ws.flush()?;
         })();
@@ -1163,7 +1321,7 @@ fn planned_path(
             tt_mb: plan.tt_mb,
             ..*cfg
         };
-        let (v, nodes) = world_row_counted(
+        let (v, cost) = world_row_counted(
             &p.view,
             &*b.worlds[j],
             &p.cands,
@@ -1174,9 +1332,10 @@ fn planned_path(
             &c,
             None,
             mem,
+            b.cut,
         );
         eta.end(slot, class, prior, plan.threads, t0.elapsed().as_secs_f64());
-        (v.into_iter().map(|x| x.0).collect::<Vec<[u64; 4]>>(), nodes)
+        (v.into_iter().map(|x| x.0).collect::<Vec<[u64; 4]>>(), cost)
     };
     run_planned(
         &planned.order,
@@ -1186,13 +1345,14 @@ fn planned_path(
         &stop,
         b.progress.map(|p| &p.exec),
         work,
-        |n, (v, nodes), ran| {
+        |n, (v, cost): (Vec<[u64; 4]>, WorldCost), ran| {
             if let Some(p) = b.progress {
                 p.worlds_done.fetch_add(1, Ordering::Relaxed);
                 p.worlds_valued.fetch_add(1, Ordering::Relaxed);
-                p.nodes_valued.fetch_add(nodes, Ordering::Relaxed);
+                p.nodes_valued.fetch_add(cost.nodes, Ordering::Relaxed);
+                p.evals_valued.fetch_add(cost.evals, Ordering::Relaxed);
             }
-            col.put(todo[n], v, (ran.wall_s * 1e6) as u64, nodes, ws)?;
+            col.put(todo[n], v, (ran.wall_s * 1e6) as u64, cost, ws)?;
             ws.flush()?;
             col.emit(b, ws, sink)
         },
@@ -1219,7 +1379,8 @@ fn prepare_batch<'d>(ds: &'d [DecisionSpec], job: &WorldsJob) -> Vec<Prepared<'d
     preps
 }
 
-/// The worlds record and timing of a finished decision (`us`: total and slowest world in µs).
+/// The worlds record and timing of a finished decision (`us`: total and slowest world in µs;
+/// `cost`: solver nodes and network evaluations).
 #[allow(clippy::too_many_arguments)]
 fn records(
     p: &Prepared,
@@ -1228,7 +1389,7 @@ fn records(
     worlds: &dyn Worlds,
     rows: Vec<Vec<[u64; 4]>>,
     us: (u64, u64),
-    nodes: u64,
+    cost: (u64, u64),
     threads: Option<u64>,
 ) -> (WorldRows, DecisionTiming) {
     let nw = rows.len() as u64;
@@ -1238,7 +1399,7 @@ fn records(
         stratum: p.d.stratum,
         position: p.d.position,
         team: engine::team_of(p.d.seat),
-        method: method_name(job.method).to_string(),
+        method: job.method_name().to_string(),
         label: job.label,
         from: job.from,
         cands: p.cands.clone(),
@@ -1251,6 +1412,7 @@ fn records(
             source: source.to_string(),
             table: job.table.clone(),
             values: Some(VALUES_VERSION),
+            frontier: job.frontier.clone(),
         }),
     };
     let t = DecisionTiming {
@@ -1263,7 +1425,8 @@ fn records(
         world_us: us.0,
         max_world_us: us.1,
         threads,
-        nodes,
+        nodes: cost.0,
+        evals: cost.1,
     };
     (r, t)
 }
@@ -1293,6 +1456,7 @@ pub fn world_rows_sched(
         &Resume::default(),
         &mut (),
         &mut sink,
+        None,
     )
 }
 
@@ -1317,6 +1481,7 @@ pub fn world_rows(
         from,
         to,
         table: table.to_string(),
+        frontier: None,
     };
     let mut out = None;
     world_rows_batch(std::slice::from_ref(d), &job, ctx, cfg, None, |r, _| {
@@ -1325,6 +1490,35 @@ pub fn world_rows(
     })
     .expect("the sink never fails");
     out.expect("one decision")
+}
+
+/// The records of `ds` under `job` (a batch run in memory, as [`world_rows_batch`]), with the
+/// network `net` of a hybrid job (`job.frontier`; `None` otherwise): the records a worlds file
+/// would hold, in batch order.
+pub fn world_rows_net(
+    ds: &[DecisionSpec],
+    job: &WorldsJob,
+    ctx: &Ctx,
+    cfg: &SearchConfig,
+    net: Option<&dyn Frontier>,
+) -> Result<Vec<WorldRows>, String> {
+    let mut out = Vec::new();
+    run_worlds(
+        ds,
+        job,
+        ctx,
+        cfg,
+        &Schedule::Fixed,
+        None,
+        &Resume::default(),
+        &mut (),
+        &mut |r, _| {
+            out.push(r);
+            Ok(())
+        },
+        net,
+    )?;
+    Ok(out)
 }
 
 /// Read a JSON-lines file; a torn line (a run killed mid-write) is skipped.
@@ -1391,6 +1585,26 @@ pub fn worlds_file_sched(
     progress: Option<&BatchProgress>,
     on_done: impl FnMut(&WorldRows, &DecisionTiming),
 ) -> Result<usize, String> {
+    worlds_file_net(out, ds, job, ctx, cfg, sched, progress, on_done, None)
+}
+
+/// [`worlds_file_sched`] with the network of a hybrid job (`job.frontier`, a silver reference:
+/// docs/m3-hybrid/silver.md; `None` for an exact or rollout job): the same resumable,
+/// checkpointed file, byte-identical for any thread count and any interruptions, its records
+/// [`HYBRID`] with the frontier in their fingerprint (and in every checkpoint line), so a run never
+/// resumes, extends or joins worlds valued exactly or by another network.
+#[allow(clippy::too_many_arguments)]
+pub fn worlds_file_net(
+    out: &Path,
+    ds: &[DecisionSpec],
+    job: &WorldsJob,
+    ctx: &Ctx,
+    cfg: &SearchConfig,
+    sched: &Schedule,
+    progress: Option<&BatchProgress>,
+    on_done: impl FnMut(&WorldRows, &DecisionTiming),
+    net: Option<&dyn Frontier>,
+) -> Result<usize, String> {
     worlds_file_knobs(
         out,
         ds,
@@ -1401,6 +1615,7 @@ pub fn worlds_file_sched(
         progress,
         on_done,
         CkptKnobs::default(),
+        net,
     )
 }
 
@@ -1440,10 +1655,16 @@ pub struct CkptRow {
     /// Solver nodes the world took (timings only; 0 in lines made before 2026-10-16).
     #[serde(default)]
     pub nodes: u64,
+    /// Network evaluations the world took (timings only; hybrid worlds, absent otherwise).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub evals: u64,
     /// [`VALUES_VERSION`] of the code that valued the world; absent in lines made before it
     /// existed (refused).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub values: Option<u32>,
+    /// The frontier of a hybrid world ([`RowFp::frontier`]); absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontier: Option<FrontierFp>,
 }
 
 /// A decision's fingerprint: 64-bit FNV-1a of the JSON of what defines it (start state, deck,
@@ -1504,25 +1725,32 @@ fn read_ckpt(
     }
     let mut seen: BTreeMap<(u64, u64), Vec<[u64; 4]>> = BTreeMap::new();
     for row in read_jsonl::<CkptRow>(path)? {
-        if row.method != method_name(job.method)
+        if row.method != job.method_name()
             || row.label != job.label
             || row.seed != job.seed
             || row.source != source
             || row.table != job.table
+            || row.frontier != job.frontier
         {
+            let net = |f: &Option<FrontierFp>| {
+                f.as_ref()
+                    .map_or(String::new(), |f| format!(" {}", f.describe()))
+            };
             return Err(format!(
-                "{}: world {} of decision {} was made with other settings ({} label {} seed {} \
-                 source {} table {}; this run: {} label {} seed {} source {source} table {}); \
+                "{}: world {} of decision {} was made with other settings ({}{} label {} seed {} \
+                 source {} table {}; this run: {}{} label {} seed {} source {source} table {}); \
                  use another output file, or delete the checkpoint",
                 path.display(),
                 row.w,
                 row.id,
                 row.method,
+                net(&row.frontier),
                 row.label,
                 row.seed,
                 row.source,
                 short_sha(&row.table),
-                method_name(job.method),
+                job.method_name(),
+                net(&job.frontier),
                 job.label,
                 job.seed,
                 short_sha(&job.table),
@@ -1577,6 +1805,7 @@ fn read_ckpt(
                     v: row.v,
                     us: row.us,
                     nodes: row.nodes,
+                    evals: row.evals,
                 },
             );
         } else {
@@ -1695,12 +1924,12 @@ impl WorldSink for Ckpt {
         w: u64,
         v: &[[u64; 4]],
         us: u64,
-        nodes: u64,
+        cost: WorldCost,
     ) -> Result<(), String> {
         let row = CkptRow {
             id,
             fp: self.fps.get(&id).copied().unwrap_or(0),
-            method: method_name(self.job.method).to_string(),
+            method: self.job.method_name().to_string(),
             label: self.job.label,
             seed: self.job.seed,
             source: self.source.clone(),
@@ -1708,8 +1937,10 @@ impl WorldSink for Ckpt {
             w,
             v: v.to_vec(),
             us,
-            nodes,
+            nodes: cost.nodes,
+            evals: cost.evals,
             values: Some(VALUES_VERSION),
+            frontier: self.job.frontier.clone(),
         };
         let line = serde_json::to_string(&row).map_err(|e| e.to_string())?;
         writeln!(self.f, "{line}").map_err(|e| format!("{}: {e}", self.path.display()))?;
@@ -1755,21 +1986,27 @@ fn worlds_file_knobs(
     progress: Option<&BatchProgress>,
     mut on_done: impl FnMut(&WorldRows, &DecisionTiming),
     knobs: CkptKnobs,
+    net: Option<&dyn Frontier>,
 ) -> Result<usize, String> {
+    // Refused before anything is read or written.
+    check_frontier(ds, job, net)?;
     let done: Vec<WorldRows> = if out.exists() {
         read_jsonl(out)?
     } else {
         Vec::new()
     };
     let nw = job.to - job.from;
-    let mine = |r: &WorldRows| r.method == method_name(job.method) && r.label == job.label;
+    let mine = |r: &WorldRows| r.method == job.method_name() && r.label == job.label;
     if let Some(r) = done.iter().find(|r| !mine(r)) {
         return Err(format!(
-            "{}: decision {} was made with other settings ({} label {}); use another output file",
+            "{}: decision {} was made with other settings ({} label {}; this run: {} label {}); \
+             use another output file",
             out.display(),
             r.id,
             r.method,
             r.label,
+            job.method_name(),
+            job.label,
         ));
     }
     if let Some(r) = done
@@ -1853,6 +2090,7 @@ fn worlds_file_knobs(
             n += 1;
             Ok(())
         },
+        net,
     )?;
     ckpt.close()?;
     Ok(n)
@@ -1910,6 +2148,16 @@ fn check_fingerprints(
                  has changed since)",
                 fp.values
                     .map_or("1 (none recorded)".to_string(), |v| v.to_string())
+            ))
+        } else if fp.frontier != job.frontier {
+            let d = |f: &Option<FrontierFp>| {
+                f.as_ref()
+                    .map_or("exact values".into(), FrontierFp::describe)
+            };
+            Some(format!(
+                "{} (this run: {})",
+                d(&fp.frontier),
+                d(&job.frontier)
             ))
         } else {
             None
@@ -1975,10 +2223,15 @@ pub fn merge_rows(recs: Vec<WorldRows>) -> Result<(Vec<WorldRows>, Vec<String>),
                 && a != b
             {
                 let ver = |f: &RowFp| f.values.map_or("1".to_string(), |v| v.to_string());
+                let net = |f: &RowFp| {
+                    f.frontier
+                        .as_ref()
+                        .map_or("none".to_string(), FrontierFp::describe)
+                };
                 return Err(format!(
                     "decision {} ({} label {}): records were made under other settings (seed {} vs \
-                     {}, equity table {} vs {}, world source {} vs {}, values version {} vs {}); \
-                     they cannot be joined",
+                     {}, equity table {} vs {}, world source {} vs {}, values version {} vs {}, \
+                     frontier {} vs {}); they cannot be joined",
                     s.id,
                     s.method,
                     s.label,
@@ -1989,7 +2242,9 @@ pub fn merge_rows(recs: Vec<WorldRows>) -> Result<(Vec<WorldRows>, Vec<String>),
                     a.source,
                     b.source,
                     ver(a),
-                    ver(b)
+                    ver(b),
+                    net(a),
+                    net(b)
                 ));
             }
             if cur.fp.is_some() != s.fp.is_some() {
@@ -2020,6 +2275,30 @@ pub fn merge_rows(recs: Vec<WorldRows>) -> Result<(Vec<WorldRows>, Vec<String>),
         out.push(cur);
     }
     Ok((out, warnings))
+}
+
+/// Checks that a worlds file holds exact records only (an exact golden set): any other record is
+/// refused, a silver reference's ([`HYBRID`]) by name, so a silver file can never be taken for a
+/// golden set. Returns the number of records.
+pub fn require_exact(path: &Path) -> Result<usize, String> {
+    let rows: Vec<WorldRows> = read_jsonl(path)?;
+    if let Some(r) = rows
+        .iter()
+        .find(|r| r.method != "exact" || r.fp.as_ref().is_some_and(|f| f.frontier.is_some()))
+    {
+        let f = r.fp.as_ref().and_then(|f| f.frontier.as_ref());
+        return Err(format!(
+            "{}: decision {} holds `{}` records{}, not exact ones: a golden set is exact",
+            path.display(),
+            r.id,
+            r.method,
+            f.map_or(String::new(), |f| format!(
+                " (a silver reference, {}: docs/m3-hybrid/silver.md)",
+                f.describe()
+            ))
+        ));
+    }
+    Ok(rows.len())
 }
 
 /// Read and merge one or more worlds files ([`merge_rows`]).
@@ -2325,6 +2604,7 @@ mod tests {
     use solver::FnLeaf;
 
     use crate::pimc::{SharedLeaf, world_row, world_values};
+    use crate::plan::AutoParams;
     use crate::worlds::RejectionSource;
 
     fn leaf() -> Arc<SharedLeaf> {
@@ -2422,6 +2702,7 @@ mod tests {
                 from: 1,
                 to: 5,
                 table: TABLE.to_string(),
+                frontier: None,
             };
             let mut files = Vec::new();
             for threads in [1, 3, 8] {
@@ -2523,6 +2804,7 @@ mod tests {
             from: 0,
             to: 3,
             table: TABLE.to_string(),
+            frontier: None,
         };
         let base = tmp("plan-base");
         clean(&base);
@@ -2647,6 +2929,7 @@ mod tests {
                 from: 0,
                 to: nw,
                 table: TABLE.to_string(),
+                frontier: None,
             };
             let base = tmp(&format!("pw{c}-base"));
             clean(&base);
@@ -2668,9 +2951,19 @@ mod tests {
                         fail_after: Some(stop),
                         compact_min: 3,
                     };
-                    let e =
-                        worlds_file_knobs(&p, &ds, &job, &ctx, &cfg, sched, None, |_, _| {}, knobs)
-                            .expect_err("stopped");
+                    let e = worlds_file_knobs(
+                        &p,
+                        &ds,
+                        &job,
+                        &ctx,
+                        &cfg,
+                        sched,
+                        None,
+                        |_, _| {},
+                        knobs,
+                        None,
+                    )
+                    .expect_err("stopped");
                     assert!(e.contains("test"), "{e}");
                 }
                 // What the stopped runs saved: complete decisions, and checkpointed worlds.
@@ -2733,6 +3026,7 @@ mod tests {
             from: 0,
             to: nw,
             table: TABLE.to_string(),
+            frontier: None,
         };
         let cfg = SearchConfig::default();
         let knobs = CkptKnobs {
@@ -2749,6 +3043,7 @@ mod tests {
             None,
             |_, _| {},
             knobs,
+            None,
         )
         .expect_err("stopped");
         let _ = std::fs::remove_file(&p);
@@ -2836,6 +3131,7 @@ mod tests {
             from,
             to,
             table: TABLE.to_string(),
+            frontier: None,
         };
         let long = tmp("ext-long");
         clean(&long);
@@ -3248,5 +3544,319 @@ mod tests {
             let r = crate::pimc::isqrt(n);
             assert!(r * r <= n && (r + 1) * (r + 1) > n, "{n}");
         }
+    }
+
+    // ------------------------------------------------------------ silver references
+
+    /// A random integer network for frontier trick `k` (an O_k of the test's own).
+    fn oracle(k: u8, seed: u64) -> nn::Oracle {
+        let net = nn::synthetic::random_net(seed, &[32, 16], nn::outcome::vocab(k), 100);
+        let meta = BTreeMap::from([("head".to_string(), "outcome-v1".to_string())]);
+        nn::Oracle::from_bytes(
+            &nn::oracle::write_net(&net, k, &meta),
+            Arc::new(nn::synthetic::SyntheticLeaf),
+        )
+        .expect("loads")
+    }
+
+    fn frontier_of(o: &nn::Oracle) -> FrontierFp {
+        FrontierFp {
+            cut: o.trick,
+            net_sha256: o.sha256.clone(),
+            encoder: nn::encode::ENCODER.to_string(),
+        }
+    }
+
+    /// Trick-2 decisions at every position (ids 0..8), and two trick-1 decisions at the last
+    /// seats (ids 100, 101), with their worlds' seed.
+    fn silver_set() -> Vec<DecisionSpec> {
+        let starts = collect_starts(400, 5);
+        let mut ds: Vec<DecisionSpec> = [0u64, 5, 10, 15, 16, 21, 26, 31]
+            .iter()
+            .enumerate()
+            .map(|(k, &i)| {
+                let mut d = build_decision_at(2, i, 3, &starts);
+                d.id = k as u64;
+                d
+            })
+            .collect();
+        for (k, i) in [(100u64, 30u64), (101, 31)] {
+            let mut d = build_decision_at(1, i, 3, &starts);
+            d.id = k;
+            ds.push(d);
+        }
+        ds
+    }
+
+    /// A hybrid job (a silver reference) with network `o`, worlds `0..to`.
+    fn silver_job(o: &nn::Oracle, to: u64) -> WorldsJob {
+        WorldsJob {
+            method: Method::ExactPimc,
+            label: 1,
+            seed: 7,
+            from: 0,
+            to,
+            table: TABLE.to_string(),
+            frontier: Some(frontier_of(o)),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_net(
+        path: &Path,
+        ds: &[DecisionSpec],
+        job: &WorldsJob,
+        threads: usize,
+        net: Option<&dyn Frontier>,
+        knobs: CkptKnobs,
+    ) -> Result<Vec<u8>, String> {
+        let l: Arc<SharedLeaf> = Arc::new(nn::synthetic::SyntheticLeaf);
+        let src = crate::worlds::BeliefSource::new();
+        let ctx = Ctx {
+            leaf: &*l,
+            source: &src,
+            rules: Rules::HOUSE,
+        };
+        let cfg = SearchConfig {
+            threads,
+            tt_mb: 4,
+            ..SearchConfig::default()
+        };
+        worlds_file_knobs(
+            path,
+            ds,
+            job,
+            &ctx,
+            &cfg,
+            &Schedule::Fixed,
+            None,
+            |_, _| {},
+            knobs,
+            net,
+        )?;
+        Ok(std::fs::read(path).expect("written"))
+    }
+
+    /// A silver reference's worlds file (docs/m3-hybrid/silver.md): byte-identical on 1, 2 and 4
+    /// threads, under the position-aware schedule too, and after an interruption and a resume;
+    /// its records are `hybrid` with the frontier and network in their fingerprint (and every
+    /// checkpoint line); each world's values are the hybrid's own (`exact_world` with the cut on
+    /// the world the yardstick draws), which differ from exact ones; trick-1 decisions (a robber's
+    /// joint burn and play among the candidates when drawn) go through the same path.
+    #[test]
+    fn silver_worlds_are_thread_independent_and_resumable() {
+        let ds = silver_set();
+        let o3 = oracle(3, 11);
+        let job = silver_job(&o3, 3);
+        let net: Option<&dyn Frontier> = Some(&o3);
+        let mut files = Vec::new();
+        for threads in [1, 2, 4] {
+            let p = tmp(&format!("silver-{threads}"));
+            clean(&p);
+            files.push(run_net(&p, &ds, &job, threads, net, CkptKnobs::default()).expect("runs"));
+            assert!(
+                !ckpt_path(&p).exists(),
+                "the checkpoint goes once every decision is in"
+            );
+            // The timing file counts each decision's network evaluations.
+            let times: Vec<DecisionTiming> = read_jsonl(&timing_path(&p)).expect("timings");
+            assert_eq!(times.len(), ds.len());
+            assert!(
+                times.iter().all(|t| t.evals > 0 && t.method == HYBRID),
+                "{times:?}"
+            );
+            clean(&p);
+        }
+        assert_eq!(files[0], files[1], "1 and 2 threads");
+        assert_eq!(files[0], files[2], "1 and 4 threads");
+        // The position-aware schedule takes the plain workers for a hybrid run: the same bytes.
+        let l: Arc<SharedLeaf> = Arc::new(nn::synthetic::SyntheticLeaf);
+        let src = crate::worlds::BeliefSource::new();
+        let ctx = Ctx {
+            leaf: &*l,
+            source: &src,
+            rules: Rules::HOUSE,
+        };
+        let p = tmp("silver-auto");
+        clean(&p);
+        let cfg = SearchConfig {
+            tt_mb: 4,
+            ..SearchConfig::default()
+        };
+        let auto = Schedule::Auto {
+            threads: 3,
+            budget_mb: 64,
+            params: Box::new(AutoParams::default()),
+        };
+        worlds_file_net(&p, &ds, &job, &ctx, &cfg, &auto, None, |_, _| {}, net).expect("runs");
+        assert_eq!(
+            std::fs::read(&p).expect("written"),
+            files[0],
+            "position-aware"
+        );
+        clean(&p);
+        // Interrupted after 7 worlds (the checkpoint holds them, marked hybrid with the
+        // network), then resumed: the same bytes.
+        let p = tmp("silver-resume");
+        clean(&p);
+        let knobs = CkptKnobs {
+            fail_after: Some(7),
+            compact_min: 3,
+        };
+        run_net(&p, &ds, &job, 2, net, knobs).expect_err("stopped");
+        let lines: Vec<CkptRow> = read_jsonl(&ckpt_path(&p)).expect("a checkpoint");
+        assert!(!lines.is_empty());
+        for l in &lines {
+            assert_eq!(l.method, HYBRID);
+            assert_eq!(l.frontier.as_ref(), Some(&frontier_of(&o3)));
+        }
+        let resumed = run_net(&p, &ds, &job, 3, net, CkptKnobs::default()).expect("resumes");
+        assert_eq!(resumed, files[0], "resumed");
+        clean(&p);
+        // The records.
+        let text = String::from_utf8(files[0].clone()).expect("text");
+        let recs: Vec<WorldRows> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("a record"))
+            .collect();
+        assert_eq!(recs.len(), ds.len());
+        let mut differs = false;
+        for r in &recs {
+            assert_eq!(r.method, HYBRID);
+            let fp = r.fp.as_ref().expect("a fingerprint");
+            assert_eq!(fp.frontier.as_ref(), Some(&frontier_of(&o3)));
+            assert_eq!(fp.values, Some(VALUES_VERSION));
+            let d = ds.iter().find(|d| d.id == r.id).expect("one of the set");
+            let (_, view, legal) = d.replay();
+            let (_, cands) = candidates(&view, &legal);
+            assert_eq!(r.cands, cands);
+            let worlds = ctx.source.prepare(&view, ctx.rules);
+            let dseed = measure_seed(7, 1, d.id);
+            let mut mem = SolveMem::new();
+            for (w, row) in r.rows.iter().enumerate() {
+                let m = crate::pimc::world_match(&view, &*worlds, w as u64, dseed, ctx.rules);
+                let mut run = crate::pimc::WorldSolve::default();
+                let h = crate::pimc::exact_world(
+                    &m,
+                    &cands,
+                    &ctx,
+                    &cfg,
+                    None,
+                    &mut mem,
+                    &mut run,
+                    Some(FrontierCut::new(3, &o3)),
+                )
+                .expect("solved");
+                assert_eq!(
+                    h.iter().map(|x| x.0).collect::<Vec<_>>(),
+                    *row,
+                    "decision {} world {w}",
+                    d.id
+                );
+                // Exact values, for the decisions late in trick 2 (cheap to solve).
+                if d.trick == 2 && d.position >= 5 {
+                    let mut run = crate::pimc::WorldSolve::default();
+                    let e = crate::pimc::exact_world(
+                        &m, &cands, &ctx, &cfg, None, &mut mem, &mut run, None,
+                    )
+                    .expect("solved");
+                    differs |= e != h;
+                }
+            }
+        }
+        assert!(differs, "a random network's values are not exact ones");
+        assert!(recs.iter().any(|r| r.trick == 1) && recs.iter().any(|r| r.trick == 2));
+    }
+
+    /// Silver and exact never mix in a worlds run: an exact file is not resumed or extended by a
+    /// hybrid run, nor a hybrid file by an exact run or by a hybrid run with another network
+    /// (records and checkpoint lines alike); records of two networks are never joined; a hybrid
+    /// job needs its network, a network needs a hybrid job, and decisions at or after the
+    /// frontier's trick are refused.
+    #[test]
+    fn silver_and_exact_never_mix() {
+        // The cheap ones: trick 2 at seats 6-8.
+        let ds: Vec<DecisionSpec> = silver_set().into_iter().skip(5).take(3).collect();
+        assert!(ds.iter().all(|d| d.trick == 2 && d.position >= 5));
+        let (o3, o3b) = (oracle(3, 11), oracle(3, 12));
+        let exact = WorldsJob {
+            frontier: None,
+            ..silver_job(&o3, 2)
+        };
+        let silver = silver_job(&o3, 2);
+        let other = silver_job(&o3b, 2);
+        let (a, b): (Option<&dyn Frontier>, Option<&dyn Frontier>) = (Some(&o3), Some(&o3b));
+        let k = CkptKnobs::default;
+        // An exact file: a hybrid run refuses it.
+        let p = tmp("mix-exact");
+        clean(&p);
+        run_net(&p, &ds, &exact, 2, None, k()).expect("exact");
+        let e = run_net(&p, &ds, &silver, 2, a, k()).expect_err("hybrid on exact");
+        assert!(e.contains("other settings") && e.contains("exact"), "{e}");
+        clean(&p);
+        // A hybrid file: an exact run and another network's run refuse it.
+        let p = tmp("mix-silver");
+        clean(&p);
+        let want = run_net(&p, &ds, &silver, 2, a, k()).expect("silver");
+        let e = run_net(&p, &ds, &exact, 2, None, k()).expect_err("exact on hybrid");
+        assert!(e.contains("other settings") && e.contains(HYBRID), "{e}");
+        let e = run_net(&p, &ds, &other, 2, b, k()).expect_err("another network");
+        assert!(e.contains("net ") && e.contains("this run"), "{e}");
+        assert_eq!(std::fs::read(&p).expect("kept"), want, "nothing changed");
+        clean(&p);
+        // A hybrid checkpoint alone: refused by an exact run and another network's run, resumed
+        // by its own.
+        let p = tmp("mix-ckpt");
+        clean(&p);
+        let knobs = CkptKnobs {
+            fail_after: Some(2),
+            compact_min: 1000,
+        };
+        run_net(&p, &ds, &silver, 1, a, knobs).expect_err("stopped");
+        let _ = std::fs::remove_file(&p);
+        let e = run_net(&p, &ds, &exact, 2, None, k()).expect_err("exact on a hybrid checkpoint");
+        assert!(e.contains("other settings"), "{e}");
+        let _ = std::fs::remove_file(&p);
+        let e = run_net(&p, &ds, &other, 2, b, k()).expect_err("another network's checkpoint");
+        assert!(e.contains("other settings") && e.contains("net "), "{e}");
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(run_net(&p, &ds, &silver, 2, a, k()).expect("resumes"), want);
+        clean(&p);
+        // Records of two networks for the same decision are never joined.
+        let p = tmp("mix-join");
+        clean(&p);
+        let q = tmp("mix-join-b");
+        clean(&q);
+        run_net(&p, &ds, &silver, 2, a, k()).expect("worlds 0..2");
+        let later = WorldsJob {
+            from: 2,
+            to: 3,
+            ..silver_job(&o3b, 3)
+        };
+        run_net(&q, &ds, &later, 2, b, k()).expect("worlds 2..3 with another network");
+        let e = read_worlds(&[p.as_path(), q.as_path()]).expect_err("not joined");
+        assert!(e.contains("frontier"), "{e}");
+        // ... while an exact file beside a hybrid one stays two separate sets of records.
+        let r = tmp("mix-join-e");
+        clean(&r);
+        run_net(&r, &ds, &exact, 2, None, k()).expect("exact");
+        let (rows, _) = read_worlds(&[p.as_path(), r.as_path()]).expect("read");
+        assert_eq!(rows.len(), 2 * ds.len());
+        assert_eq!(rows.iter().filter(|x| x.method == HYBRID).count(), ds.len());
+        for f in [&p, &q, &r] {
+            clean(f);
+        }
+        // The job and its network go together; the decisions come before the frontier.
+        let p = tmp("mix-net");
+        clean(&p);
+        let e = run_net(&p, &ds, &silver, 1, None, k()).expect_err("no network");
+        assert!(e.contains("needs its network"), "{e}");
+        let e = run_net(&p, &ds, &exact, 1, a, k()).expect_err("no frontier");
+        assert!(e.contains("without a frontier"), "{e}");
+        let o2 = oracle(2, 13);
+        let e = run_net(&p, &ds, &silver_job(&o2, 2), 1, Some(&o2), k()).expect_err("trick 2");
+        assert!(e.contains("is at trick 2") && e.contains("H_2"), "{e}");
+        assert!(!p.exists(), "nothing written");
+        clean(&p);
     }
 }

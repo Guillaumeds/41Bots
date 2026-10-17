@@ -55,7 +55,10 @@
 //!   shards outside `out/` (uploaded content-addressed when `params.upload_shards`);
 //! - `hybrid_t1check` (`t1check.rs`, format 2 only): its `net_input`, `decisions_input` and
 //!   `saved[].input` name inputs whose paths are added to its params (`net`, `decisions`,
-//!   `saved[].path`).
+//!   `saved[].path`);
+//! - `search_measure`'s silver reference (`measure.rs`): `reference.net_input`,
+//!   `check.net_input` and `worlds_input` name inputs whose paths are added to its params
+//!   (`reference.net`, `check.net`, `worlds`).
 //!
 //! The equity input is `inputs.equity` (or the input named by `params.equity_input`).
 //!
@@ -230,6 +233,11 @@ fn worker_inner(spec_path: &Path) -> Result<(), String> {
             // `hybrid_t1check` names its files among the inputs: their paths join its params.
             if kind == "hybrid_t1check" {
                 p = crate::t1check::resolve(&p, &inputs)?;
+            }
+            // A `search_measure` chunk's silver reference, check network and stored worlds
+            // (`measure.rs`, "A silver reference") are inputs too.
+            if kind == "search_measure" {
+                p = crate::measure::resolve(&p, &inputs)?;
             }
             // A prebuilt equity table among the inputs (`params.equity_input`, default
             // `equity`) replaces building it; its hash is still checked against the record.

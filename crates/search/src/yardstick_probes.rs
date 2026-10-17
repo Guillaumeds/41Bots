@@ -238,6 +238,7 @@ mod stale {
             from,
             to,
             table: TABLE.to_string(),
+            frontier: None,
         }
     }
 
