@@ -161,7 +161,20 @@ pub fn read_saved(path: &Path, from: &str) -> Result<(Vec<SavedWorld>, SavedFile
     parse_saved(&text, from).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// [`read_saved`] on the text of a file.
+/// The refusal of a silver reference's line among saved exact worlds.
+fn silver_refused(line_no: usize, f: Option<&crate::measure::FrontierFp>) -> String {
+    format!(
+        "line {line_no}: a silver reference's world ({}), not an exact one: the saved trick-1 \
+         worlds are exact, and a silver file is never one of them",
+        f.map_or(
+            "a hybrid record".into(),
+            crate::measure::FrontierFp::describe
+        )
+    )
+}
+
+/// [`read_saved`] on the text of a file. A silver reference's line (`crate::measure::HYBRID`, or
+/// any line with a frontier) is refused, never skipped as another method.
 pub fn parse_saved(text: &str, from: &str) -> Result<(Vec<SavedWorld>, SavedFile), String> {
     let mut out = Vec::new();
     let mut info = SavedFile {
@@ -182,6 +195,9 @@ pub fn parse_saved(text: &str, from: &str) -> Result<(Vec<SavedWorld>, SavedFile
         if v.get("w").is_some() {
             let r: CkptRow = serde_json::from_value(v).map_err(bad)?;
             info.ckpt_lines += 1;
+            if r.method == crate::measure::HYBRID || r.frontier.is_some() {
+                return Err(silver_refused(line_no, r.frontier.as_ref()));
+            }
             if r.method != "exact" {
                 info.other_method += 1;
                 continue;
@@ -207,6 +223,10 @@ pub fn parse_saved(text: &str, from: &str) -> Result<(Vec<SavedWorld>, SavedFile
         } else if v.get("rows").is_some() {
             let r: WorldRows = serde_json::from_value(v).map_err(bad)?;
             info.records += 1;
+            let frontier = r.fp.as_ref().and_then(|f| f.frontier.as_ref());
+            if r.method == crate::measure::HYBRID || frontier.is_some() {
+                return Err(silver_refused(line_no, frontier));
+            }
             if r.method != "exact" {
                 info.other_method += r.rows.len() as u64;
                 continue;
@@ -461,7 +481,11 @@ pub fn plan<'a>(
         if let Some(mut ws) = tasks.remove(&d.id) {
             ws.sort_by_key(|t| t.w);
             notes.worlds += ws.len();
-            out.push(DecisionWorlds { d, worlds: ws });
+            out.push(DecisionWorlds {
+                d,
+                worlds: ws,
+                silver: false,
+            });
         }
     }
     notes.decisions = out.len();

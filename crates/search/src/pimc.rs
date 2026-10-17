@@ -542,9 +542,20 @@ pub fn world_row(
     }
 }
 
-/// [`world_row`] with the solver nodes the world took (0 for a rollout or forced world): the
-/// machine-cost records of the runner count work in nodes (docs/VAST-MACHINES.md, "Measured on
-/// our runs"). The values are exactly [`world_row`]'s.
+/// What one world's valuation cost (reports only; never part of a result).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WorldCost {
+    /// Solver nodes (0 for a rollout or forced world).
+    pub nodes: u64,
+    /// Frontier evaluations (network values asked for; 0 without a frontier).
+    pub evals: u64,
+}
+
+/// [`world_row`] with what the world cost (solver nodes, 0 for a rollout or forced world; the
+/// machine-cost records of the runner count work in nodes, docs/VAST-MACHINES.md, "Measured on
+/// our runs"). With `cut` (exact PIMC only), the values are the hybrid's: exact search down to the
+/// start of the cut's trick, its evaluator there ([`exact_world`]); a silver reference's worlds
+/// (docs/m3-hybrid/silver.md). Without it, the values are exactly [`world_row`]'s.
 #[allow(clippy::too_many_arguments)]
 pub fn world_row_counted(
     view: &SeatView,
@@ -557,17 +568,29 @@ pub fn world_row_counted(
     cfg: &SearchConfig,
     par: Option<&ParProgress>,
     mem: &mut SolveMem,
-) -> (Vec<MoneyChance>, u64) {
+    cut: Option<FrontierCut>,
+) -> (Vec<MoneyChance>, WorldCost) {
     if method != Method::ExactPimc {
+        assert!(cut.is_none(), "a frontier is for exact PIMC worlds only");
         return (
             world_row(view, worlds, cands, method, w, dseed, ctx, cfg, par, mem),
-            0,
+            WorldCost::default(),
         );
     }
     let mut run = WorldSolve::default();
-    let v = exact_world_row(view, worlds, cands, w, dseed, ctx, cfg, par, mem, &mut run)
-        .expect("nothing stops a solve here");
-    (v, run.stats.nodes)
+    let v = match cut {
+        None => exact_world_row(view, worlds, cands, w, dseed, ctx, cfg, par, mem, &mut run),
+        Some(cut) => {
+            let m = world_match(view, worlds, w, dseed, ctx.rules);
+            exact_world(&m, cands, ctx, cfg, par, mem, &mut run, Some(cut))
+        }
+    }
+    .expect("nothing stops a solve here");
+    let cost = WorldCost {
+        nodes: run.stats.nodes,
+        evals: run.stats.frontier,
+    };
+    (v, cost)
 }
 
 /// The values of every candidate in worlds `from..to` of the decision with seed `dseed`, one row

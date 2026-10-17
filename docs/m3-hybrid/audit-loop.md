@@ -510,3 +510,18 @@ harvests; not the audit shards), through the per-row weights `NAME.npy.rowweight
 weights and the file's SHA-256). Not built: the audit shard's error by the decider's seat — the shard's
 rows do not record the decider (only the sidecar's counts by position), so the auditor cannot split
 its errors by seat; the golden check's bands are the decision-level measure.
+
+## 11. Trick 1 at the decision level: the silver set (build of 2026-10-17, branch `eng-silver`)
+
+At trick 2 the loop's stop is position-level only, and its decision-level stage is the rough test
+on the saved exact trick-1 worlds (8 decisions with worlds, seats 1–2). The **silver set**
+(`docs/m3-hybrid/silver.md`) adds a decision-level check of O_2 that covers every seat and score
+group: 400 trick-1 decisions × 320 worlds valued by H_3 (exact through tricks 1–2, the adopted O_3
+at the start of trick 3) instead of exact search, and `search hybrid-check --reference silver`
+measuring H_2's decision loss against it with the §3 statistics, by seat band, score group
+(stratum) and race group. Its files are marked `hybrid` with the network's SHA-256 and are refused
+wherever an exact golden set is required. **What it proves:** how much money O_2 adds to what O_3
+loses, on the positions H_2 meets in play; the true loss is at most the loss against silver plus
+the silver's own error (O_3: 0.0068% overall at trick 2, 0.012–0.016% at seats 1–2; at trick 1 the
+optional exact anchor of a few dozen leader decisions measures it). It never replaces the
+position-level audit, and it is never trained on.

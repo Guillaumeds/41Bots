@@ -7,7 +7,8 @@
 //!                  [--keep-share 0.5] [--keep-worlds 8] [--cut T+1] [--net WEIGHTS]
 //!                  [--first-candidate 0] [--max-candidates 200N] [--seed 1] [--label 1]
 //!                  [--tt-mb 64] [--source belief|rejection] [--threads T] [--start-hands H]
-//! search worlds    --decisions FILE --method exact|rollout --to N --out FILE
+//! search worlds    --decisions FILE --method exact|rollout|hybrid --to N --out FILE
+//!                  [--cut K --net WEIGHTS (hybrid: a silver reference)]
 //!                  [--from-world A] [--label L] [--seed S] [--first I] [--last J]
 //!                  [--ids 3,17,42 | --ids FILE] [--threads K] [--solve-threads K] [--tt-mb M]
 //!                  [--schedule fixed|auto] [--tt-budget-mb B] [--sched-json JSON|FILE]
@@ -29,7 +30,7 @@
 //!                  [--thresholds 0.0001,0.00005,0.00002] [--min-cell 10] [--threads K]
 //!                  [--method exact] [--label 1] [--json FILE]
 //! search score     --yardstick FILE --n N --method FILE:N [--method FILE:N …] [--json FILE]
-//!                  [--boot 1000] [--seed 1]
+//!                  [--boot 1000] [--seed 1] [--allow-silver]
 //! search teacher   --hands N --out DIR --equity TABLE [--seed S] [--config NAME] [--start-hands H]
 //! search labels    --trick K --count N --seed S --source random|rules|harvest --out FILE.npy
 //!                  --equity TABLE [--threads T] [--start-hands 20000] [--chunk-rows 32 (1 at K=2)]
@@ -48,6 +49,9 @@
 //!                  [--verify-solve-threads 1] [--verify-tt-mb (--tt-mb)]
 //!                  [--explain 143,335 [--explain-worlds 3] [--explain-json FILE]]
 //!                  [--slices PRED.json [--slice-share 0.5]] [--standard 0.01]
+//!                  [--reference exact|silver [--reference-net WEIGHTS] [--reference-cut R]
+//!                   [--allow-exact]] [--race-groups [--race-share 0.5] [--min-group 30]]
+//!                  [--progress FILE]
 //! search hybrid-check --trick T --cut K --net WEIGHTS --equity TABLE --decisions FILE
 //!                  --saved RUN=FILE [--saved RUN=FILE …] [--only D:W,…] [--hard D:W,…]
 //!                  [--verify-pct 0] [--verify-rule all|rules-v1|searched]
@@ -152,6 +156,25 @@
 //! decision-loss bound (JSON: `slices`, `pass` with them, `pass_without_slices`). With `--saved`
 //! (the audit loop's rough test at trick 2) each set gets its own slices, in its JSON entry
 //! under `sets`.
+//! **A silver reference** (docs/m3-hybrid/silver.md): `--reference silver --reference-net
+//! WEIGHTS` checks H_K against a deeper hybrid H_R (`--reference-cut R`, by default the network's
+//! trick, after `--cut`) instead of exact search, on the same worlds: its values are read from
+//! `--worlds` files of `hybrid` records made with that very network (`search worlds --method
+//! hybrid`; another network's are refused, a `--verify-pct` sample recomputed with H_R and
+//! required byte-identical), or recomputed when no `--worlds` is given. A silver file is refused
+//! by the default `--reference exact` (it is never an exact golden set), and exact records by
+//! `--reference silver` unless `--allow-exact` (they then stand in for the silver values of their
+//! decisions, the anchor set; the report counts them). The report says "H_K vs silver (H_R, net
+//! …)", the JSON `reference` (`kind`, `cut`, the network, `values`, how many decisions against
+//! each kind) and `values.reference`; a decision's `exact_*` fields hold its reference's values
+//! (`silver` true). Not with `--saved` or `--explain`.
+//! `--race-groups`: the §3 tables also per stratum of the hand's start state (S1–S4, the score
+//! groups) and per race class (`nn::outcome::race_class_of`, the classes the label shards count)
+//! of the frontier positions the hybrid's own search reaches (a decision is in a class when at
+//! least `--race-share` of its reached positions are, else in "mixed"; `search::hybrid::
+//! race_groups`); a group is judged only with at least `--min-group` decisions, and none of
+//! them is part of the verdict (JSON `score_groups`, `race_groups`). `--progress FILE` (the
+//! golden-set form too) is rewritten every 2 s with the reference solves and hybrid worlds done.
 //! `--standard PCT` (default 0.01, a percentage of money chance; owner, 2026-10-16 night: the
 //! audit loop's push standards 0.005 at trick 4 and 0.0075 at trick 3) is the standard every
 //! verdict uses: the overall, band and position rows' decision-loss bound and bias, and every
@@ -170,6 +193,17 @@
 //! `--max-candidates` drawn. The file holds the kept decisions in the ordinary format;
 //! `FILE.json` records the predicate file (SHA-256), the share, the frontier's driver, the
 //! candidates drawn, and each kept decision's reach by group. Byte-identical for any `--threads`.
+//! `worlds --method hybrid --cut K --net WEIGHTS` values every candidate by the hybrid H_K (exact
+//! search to the start of trick K, the integer network there; decisions before trick K only):
+//! a **silver reference** (docs/m3-hybrid/silver.md), never an exact golden set. Its records are
+//! `hybrid` with `fp.frontier` (the cut, the network's SHA-256, the encoder) and so are its
+//! checkpoint lines; a run never resumes, extends or joins records of another method or network.
+//! The worlds are the yardstick's (seed, label, decision, world), so a silver set and an exact
+//! set of the same decisions value the same deals; the file is byte-identical for any thread
+//! count and any interruption, and its timing file counts each decision's network evaluations
+//! (`evals`). Under `--schedule auto` a hybrid run takes one world per thread.
+//! `score --yardstick` takes exact records only (a silver one with `--allow-silver`, said in the
+//! report); `agree` refuses files mixing methods and notes a silver reference's.
 //! `worlds` and `teacher` take `--source belief|rejection`: the world generator, by default
 //! `crates/belief`'s counted uniform sampler (which also records each decision's exact world
 //! count); `rejection` is the engine-based oracle (same distribution, no counts).
@@ -218,7 +252,7 @@ use search::curves::{CurveParams, N_CAP, TrickReport, analyse, score_groups};
 use search::measure::{
     BatchProgress, DecisionSpec, DecisionTiming, Schedule, WorldRows, WorldsJob, agreement_curve,
     build_decisions, collect_starts, collect_starts_with, feature_band_name, paired, parse_ids,
-    read_jsonl, read_worlds, relabel, score, stratum_of, summarise, timing_path, worlds_file_sched,
+    read_jsonl, read_worlds, relabel, score, stratum_of, summarise, timing_path, worlds_file_net,
 };
 use search::pimc::{Ctx, Method, SearchConfig, SharedLeaf};
 use search::plan::AutoParams;
@@ -575,7 +609,7 @@ fn write_progress(
 ) {
     let ld = |x: &std::sync::atomic::AtomicU64| x.load(Ordering::Relaxed);
     let v = serde_json::json!({
-        "method": search::measure::method_name(job.method),
+        "method": job.method_name(),
         "label": job.label,
         "from": job.from,
         "to": job.to,
@@ -589,6 +623,7 @@ fn write_progress(
         "worlds_resumed": ld(&p.worlds_resumed),
         "worlds_valued": ld(&p.worlds_valued),
         "nodes_valued": ld(&p.nodes_valued),
+        "evals_valued": ld(&p.evals_valued),
         "eta": p.eta().map(|e| serde_json::json!({
             "done_frac": e.done_frac, "remaining_s": e.remaining_s, "measured": e.measured,
             "basis": e.basis, "work_thread_s": e.work_s, "done_thread_s": e.done_s,
@@ -612,14 +647,45 @@ fn write_progress(
 
 fn worlds(a: &Args) -> Result<(), String> {
     let ds: Vec<DecisionSpec> = read_lines(a.req("--decisions")?)?;
+    let hybrid = a.req("--method")? == search::measure::HYBRID;
     let method = match a.req("--method")? {
         "exact" => Method::ExactPimc,
         "rollout" => Method::RolloutPimc,
-        m => return Err(format!("unknown method {m}")),
+        // A silver reference (docs/m3-hybrid/silver.md): exact search to the start of trick
+        // --cut, the network --net there.
+        m if m == search::measure::HYBRID => Method::ExactPimc,
+        m => return Err(format!("unknown method {m} (exact, rollout or hybrid)")),
     };
+    if !hybrid {
+        for k in ["--cut", "--net"] {
+            if a.has(k) {
+                return Err(format!("{k} is for --method hybrid (a silver reference)"));
+            }
+        }
+    }
     let t0 = Instant::now();
     let (table, table_sha) = load_equity_sha(a.req("--equity")?)?;
     let leaf: Arc<SharedLeaf> = Arc::new(table);
+    // The frontier's network of a hybrid run, and the fingerprint its records carry.
+    let oracle = if hybrid {
+        let cut = a.num("--cut", 0)? as u8;
+        let path = a.req("--net")?;
+        let o = nn::Oracle::load(Path::new(path), leaf.clone())?;
+        if a.has("--cut") && o.trick != cut {
+            return Err(format!(
+                "--net {path} was trained for trick {} positions, not trick {cut}",
+                o.trick
+            ));
+        }
+        Some(o)
+    } else {
+        None
+    };
+    let frontier = oracle.as_ref().map(|o| search::measure::FrontierFp {
+        cut: o.trick,
+        net_sha256: o.sha256.clone(),
+        encoder: nn::encode::ENCODER.to_string(),
+    });
     let src = world_source(a)?;
     let ctx = Ctx {
         leaf: &*leaf,
@@ -644,6 +710,7 @@ fn worlds(a: &Args) -> Result<(), String> {
         from,
         to,
         table: table_sha,
+        frontier,
     };
     let (first, last) = (a.num("--first", 0)?, a.num("--last", u64::MAX)?);
     let ids = a.get("--ids").map(parse_ids).transpose()?;
@@ -661,6 +728,17 @@ fn worlds(a: &Args) -> Result<(), String> {
     let progress_path = a.get("--progress").map(PathBuf::from);
     let prog = BatchProgress::default();
     let finished = AtomicBool::new(false);
+    if let (Some(f), Some(o)) = (&job.frontier, &oracle) {
+        eprintln!(
+            "worlds: a silver reference: H_{} (exact search to the start of trick {}, network {} \
+             {:?} there), records `{}`; never an exact golden set",
+            f.cut,
+            f.cut,
+            &f.net_sha256[..12],
+            o.net().widths(),
+            job.method_name()
+        );
+    }
     match &sched {
         Schedule::Fixed => eprintln!(
             "worlds: {} decisions, worlds {from}..{to}, {} threads, {} solve threads (table loaded in {:.1} s)",
@@ -693,20 +771,42 @@ fn worlds(a: &Args) -> Result<(), String> {
                 }
             });
         }
-        let r = worlds_file_sched(out, &ds, &job, &ctx, &cfg, &sched, Some(&prog), |r, t| {
-            eprintln!(
-                "decision {} trick {} pos {} cands {}: {:.1} ms per world (slowest {:.1} ms); {}/{} decisions, {:.0} s",
-                r.id,
-                r.trick,
-                r.position + 1,
-                r.cands.len(),
-                t.world_us as f64 / 1000.0 / t.worlds.max(1) as f64,
-                t.max_world_us as f64 / 1000.0,
-                prog.decisions_done.load(Ordering::Relaxed) + 1,
-                prog.decisions_total.load(Ordering::Relaxed),
-                t0.elapsed().as_secs_f64()
-            );
-        });
+        let net = oracle
+            .as_ref()
+            .map(|o| o as &dyn solver::frontier::Frontier);
+        let r = worlds_file_net(
+            out,
+            &ds,
+            &job,
+            &ctx,
+            &cfg,
+            &sched,
+            Some(&prog),
+            |r, t| {
+                eprintln!(
+                    "decision {} trick {} pos {} cands {}: {:.1} ms per world (slowest {:.1} ms; {:.3e} nodes{}); {}/{} decisions, {:.0} s",
+                    r.id,
+                    r.trick,
+                    r.position + 1,
+                    r.cands.len(),
+                    t.world_us as f64 / 1000.0 / t.worlds.max(1) as f64,
+                    t.max_world_us as f64 / 1000.0,
+                    t.nodes as f64 / t.worlds.max(1) as f64,
+                    if t.evals > 0 {
+                        format!(
+                            ", {:.0} network evaluations",
+                            t.evals as f64 / t.worlds.max(1) as f64
+                        )
+                    } else {
+                        String::new()
+                    },
+                    prog.decisions_done.load(Ordering::Relaxed) + 1,
+                    prog.decisions_total.load(Ordering::Relaxed),
+                    t0.elapsed().as_secs_f64()
+                );
+            },
+            net,
+        );
         finished.store(true, Ordering::Relaxed);
         r
     })?;
@@ -949,6 +1049,23 @@ const MIN_CELL: usize = 25;
 
 fn agree(a: &Args) -> Result<(), String> {
     let rows = worlds_args(a)?;
+    let methods: std::collections::BTreeSet<&str> =
+        rows.iter().map(|r| r.method.as_str()).collect();
+    if methods.len() > 1 {
+        return Err(format!(
+            "the --worlds files hold records of several methods ({}): agree one at a time",
+            methods.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    if let Some(f) = rows
+        .iter()
+        .find_map(|r| r.fp.as_ref().and_then(|f| f.frontier.as_ref()))
+    {
+        eprintln!(
+            "note: a silver reference's values ({}), not exact ones (docs/m3-hybrid/silver.md)",
+            f.describe()
+        );
+    }
     // Timings, when the timing files are there: per decision, summed over its records (an
     // extension adds a record).
     let mut times: BTreeMap<u64, DecisionTiming> = BTreeMap::new();
@@ -1291,6 +1408,28 @@ fn curves(a: &Args) -> Result<(), String> {
 
 fn score_cmd(a: &Args) -> Result<(), String> {
     let (yard, _) = read_worlds(&[Path::new(a.req("--yardstick")?)])?;
+    // The yardstick is exact PIMC; a silver reference (hybrid records, docs/m3-hybrid/silver.md)
+    // only when asked for, and the report then says so.
+    if let Some(r) = yard.iter().find(|r| r.method != "exact") {
+        if !(a.has("--allow-silver") && r.method == search::measure::HYBRID) {
+            return Err(format!(
+                "--yardstick: decision {} holds `{}` records, not exact ones{}",
+                r.id,
+                r.method,
+                if r.method == search::measure::HYBRID {
+                    " (a silver reference: pass --allow-silver to score against it)"
+                } else {
+                    ""
+                }
+            ));
+        }
+        println!(
+            "yardstick: a silver reference ({}), not exact PIMC",
+            r.fp.as_ref()
+                .and_then(|f| f.frontier.as_ref())
+                .map_or("hybrid".to_string(), |f| f.describe())
+        );
+    }
     let n = a.num("--n", 80)? as usize;
     let mut scored = Vec::new();
     let mut reports = Vec::new();
@@ -2181,7 +2320,8 @@ fn harvest_record(
 
 /// `search hybrid-check`: H_K against exact on the same worlds (docs/M3-HYBRID-SPEC.md §3).
 fn hybrid_check(a: &Args) -> Result<(), String> {
-    use search::hybrid::{CheckJob, report};
+    use search::hybrid::{CheckJob, CheckProgress, Reference, report};
+    use search::measure::FrontierFp;
     let std_pct = a.get("--standard").unwrap_or("0.01").to_string();
     let standard = search::hybrid::parse_standard(&std_pct)?;
     let std_txt = format!("{}%", std_pct.trim());
@@ -2191,6 +2331,23 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
         return Err(format!(
             "--cut {cut} must be 2..=5 and after --trick {trick} (and --trick at least 1)"
         ));
+    }
+    // The reference: exact (the golden sets) or silver (a deeper hybrid, docs/m3-hybrid/
+    // silver.md). Neither stands in for the other unless asked.
+    let silver = match a.get("--reference").unwrap_or("exact") {
+        "exact" => false,
+        "silver" => true,
+        r => return Err(format!("--reference {r}: exact or silver")),
+    };
+    if !silver {
+        for k in ["--reference-net", "--reference-cut", "--allow-exact"] {
+            if a.has(k) {
+                return Err(format!("{k} is for --reference silver"));
+            }
+        }
+    }
+    if !a.has("--race-groups") && (a.has("--race-share") || a.has("--min-group")) {
+        return Err("--race-share and --min-group are for --race-groups".into());
     }
     let seed = a.num("--seed", 1)?;
     let t0 = Instant::now();
@@ -2204,6 +2361,39 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             oracle.trick
         ));
     }
+    // The silver reference's network and fingerprint (its records must carry exactly this).
+    let reference = if silver {
+        if a.has("--saved") || a.has("--explain") {
+            return Err(
+                "--reference silver is for the golden-set form of the check (not --saved or \
+                 --explain): the saved trick-1 worlds and the explanation are exact"
+                    .into(),
+            );
+        }
+        let p = a.req("--reference-net")?;
+        let o = nn::Oracle::load(Path::new(p), leaf.clone())?;
+        let rc = a.num("--reference-cut", u64::from(o.trick))? as u8;
+        if o.trick != rc {
+            return Err(format!(
+                "--reference-net {p} was trained for trick {} positions, not trick {rc}",
+                o.trick
+            ));
+        }
+        if rc <= cut {
+            return Err(format!(
+                "a silver reference must look deeper than the hybrid it checks: H_{rc} against \
+                 H_{cut} (--reference-cut after --cut)"
+            ));
+        }
+        let fp = FrontierFp {
+            cut: rc,
+            net_sha256: o.sha256.clone(),
+            encoder: nn::encode::ENCODER.to_string(),
+        };
+        Some((o, p.to_string(), fp))
+    } else {
+        None
+    };
     let mut ds: Vec<DecisionSpec> = match a.get("--decisions") {
         Some(f) => read_lines::<DecisionSpec>(f)?
             .into_iter()
@@ -2266,7 +2456,17 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
     let share_text = a.get("--slice-share").unwrap_or("0.5");
     let share =
         nn::predicate::parse_share(share_text).map_err(|e| format!("--slice-share: {e}"))?;
+    let race = a.has("--race-groups");
+    let race_share_text = a.get("--race-share").unwrap_or("0.5");
+    let race_share =
+        nn::predicate::parse_share(race_share_text).map_err(|e| format!("--race-share: {e}"))?;
+    let min_group = a.num("--min-group", 30)? as usize;
     if a.has("--saved") {
+        if race {
+            return Err(
+                "--race-groups is for the golden-set form of the check, not --saved".into(),
+            );
+        }
         return hybrid_check_saved(
             a,
             SavedRun {
@@ -2287,23 +2487,35 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             },
         );
     }
+    // Stored reference values: exact records (the golden sets) or the silver reference's own
+    // hybrid records; never one for the other unless allowed (`--allow-exact`: exact records stand
+    // in for the silver reference, the anchor decisions).
+    let allow_exact = a.has("--allow-exact");
     let stored: BTreeMap<u64, WorldRows> = if a.has("--worlds") {
         let paths: Vec<&Path> = a.all("--worlds").into_iter().map(Path::new).collect();
         let (rows, warnings) = read_worlds(&paths)?;
         for w in warnings {
             eprintln!("warning: {w}");
         }
-        rows.into_iter()
-            .filter(|r| r.method == "exact" && r.trick == trick)
-            .map(|r| (r.id, r))
-            .collect()
+        search::hybrid::stored_reference(
+            rows,
+            trick,
+            &selected,
+            reference.as_ref().map(|r| &r.2),
+            allow_exact,
+            &a.all("--worlds").join(", "),
+        )?
     } else {
         BTreeMap::new()
     };
     if a.has("--worlds")
         && let Some(d) = ds.iter().find(|d| !stored.contains_key(&d.id))
     {
-        return Err(format!("decision {} has no stored exact worlds", d.id));
+        return Err(format!(
+            "decision {} has no stored {} worlds",
+            d.id,
+            if silver { "reference" } else { "exact" }
+        ));
     }
     if src.name() != "rejection"
         && let Some(r) = stored.values().find(|r| r.log2_worlds.is_none())
@@ -2317,6 +2529,22 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
     if let Some(ids) = a.get("--explain") {
         return hybrid_explain(a, ids, &ds, &stored, &job, &ctx, &oracle);
     }
+    let n_exact_stored = stored.values().filter(|r| r.method == "exact").count();
+    let ref_name = match &reference {
+        None => "exact".to_string(),
+        Some((o, _, fp)) => format!(
+            "silver (H_{}, net {} {:?}){}",
+            fp.cut,
+            &fp.net_sha256[..12],
+            o.net().widths(),
+            if n_exact_stored > 0 {
+                format!(", exact for the {n_exact_stored} decisions stored exact")
+            } else {
+                String::new()
+            }
+        ),
+    };
+    let ref_values = if silver { "reference" } else { "exact" };
     let exact_from = if stored.is_empty() || job.recompute {
         "recomputed by this binary".to_string()
     } else {
@@ -2327,7 +2555,7 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
         )
     };
     eprintln!(
-        "hybrid-check: {} decisions at trick {trick}, frontier at trick {cut}, net {} {:?}, {} worlds each (seed {seed}, label {}, {} source), {} threads; exact values {exact_from}",
+        "hybrid-check: {} decisions at trick {trick}, frontier at trick {cut}, net {} {:?}, {} worlds each (seed {seed}, label {}, {} source), {} threads; against {ref_name}; {ref_values} values {exact_from}",
         ds.len(),
         &oracle.sha256[..12],
         oracle.net().widths(),
@@ -2336,20 +2564,87 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
         src.name(),
         job.threads
     );
+    let progress_path = a.get("--progress").map(PathBuf::from);
+    let prog = CheckProgress::default();
+    let finished = AtomicBool::new(false);
     let t1 = Instant::now();
-    let run = search::hybrid::run_check_slices(
-        &ds,
-        &stored,
-        &job,
-        &ctx,
-        &oracle,
-        slice_preds.as_ref().map(|(p, _)| p),
-    )?;
+    let run = std::thread::scope(|s| {
+        if let Some(p) = &progress_path {
+            let (prog, finished) = (&prog, &finished);
+            let threads = job.threads as u64;
+            let ex_workers = (job.threads / job.exact_solve_threads.max(1)).max(1) as u64;
+            s.spawn(move || {
+                while !finished.load(Ordering::Relaxed) {
+                    let ld = |x: &std::sync::atomic::AtomicU64| x.load(Ordering::Relaxed);
+                    let (ed, et) = (ld(&prog.exact_done), ld(&prog.exact_total));
+                    let (hd, ht) = (ld(&prog.hybrid_done), ld(&prog.hybrid_total));
+                    // The finished worlds' list is for the saved form's log; not kept here.
+                    prog.finished
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clear();
+                    write_atomic(
+                        p,
+                        &serde_json::json!({
+                            "exact_done": ed, "exact_total": et,
+                            "worlds_done": hd, "worlds_total": ht,
+                            "tail": if ed < et { et - ed < ex_workers } else { ht - hd < threads },
+                            "elapsed_s": t1.elapsed().as_secs_f64(),
+                        }),
+                    );
+                    for _ in 0..20 {
+                        if finished.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                }
+            });
+        }
+        struct Finish<'a>(&'a AtomicBool);
+        impl Drop for Finish<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+        let _finish = Finish(&finished);
+        search::hybrid::run_check_ref(
+            &ds,
+            &stored,
+            &job,
+            &ctx,
+            &oracle,
+            slice_preds.as_ref().map(|(p, _)| p),
+            reference.as_ref().map(|(o, _, fp)| {
+                (
+                    Reference {
+                        cut: fp.cut,
+                        net: o as &dyn solver::frontier::Frontier,
+                    },
+                    fp,
+                )
+            }),
+            race,
+            progress_path.as_ref().map(|_| &prog),
+        )
+    })?;
     let wall = t1.elapsed().as_secs_f64();
+    if let Some(p) = &progress_path {
+        write_atomic(
+            p,
+            &serde_json::json!({
+                "exact_done": prog.exact_done.load(Ordering::Relaxed),
+                "exact_total": prog.exact_total.load(Ordering::Relaxed),
+                "worlds_done": prog.hybrid_done.load(Ordering::Relaxed),
+                "worlds_total": prog.hybrid_total.load(Ordering::Relaxed),
+                "tail": false, "elapsed_s": wall, "finished": true,
+            }),
+        );
+    }
     if run.verified.1 > 0 {
         return Err(format!(
-            "{} of {} recomputed worlds differ from the stored exact values: recompute them \
-             (--recompute, or off this VM for trick 2)",
+            "{} of {} recomputed worlds differ from the stored {ref_values} values: recompute them \
+             (--recompute, or off this VM for trick 2 and earlier)",
             run.verified.1, run.verified.0
         ));
     }
@@ -2357,8 +2652,9 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
     for (_, g) in &mut groups {
         search::hybrid::judge(g, standard);
     }
+    let n_silver = run.decisions.iter().filter(|d| d.silver).count();
     println!(
-        "H_{cut} vs exact, trick {trick}: {} decisions x {} worlds (seed {seed}, label {}, {} source); net {} {:?}; exact values {exact_from}{}",
+        "H_{cut} vs {ref_name}, trick {trick}: {} decisions x {} worlds (seed {seed}, label {}, {} source); net {} {:?}; {ref_values} values {exact_from}{}",
         run.decisions.len(),
         job.to,
         job.label,
@@ -2371,6 +2667,16 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             String::new()
         }
     );
+    if silver {
+        println!(
+            "(a silver reference: the loss is measured against H_{} with its network, not \
+             against exact search; the true loss is at most this loss plus the reference's own \
+             error, docs/m3-hybrid/silver.md; {n_silver} decisions against the silver values, \
+             {} against exact ones)",
+            reference.as_ref().map_or(0, |r| r.2.cut),
+            run.decisions.len() - n_silver
+        );
+    }
     print_groups(&groups, &std_txt);
     let sl = slice_preds.as_ref().map(|(p, _)| {
         let mut sl = search::hybrid::slices(&run, p, share, boots, boot_seed);
@@ -2385,8 +2691,26 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
     if let Some(sl) = &sl {
         print_slices(sl, share_text, &std_txt);
     }
+    // Score (strata) and race groups: reported, judged only where enough decisions exist, and
+    // never part of the verdict.
+    let groups_extra = race.then(|| {
+        let mut st = search::hybrid::strata(&run, &ds, boots, boot_seed);
+        let mut rg = search::hybrid::race_groups(&run, race_share, boots, boot_seed);
+        for (_, g) in st.iter_mut().chain(rg.iter_mut()) {
+            search::hybrid::judge(g, standard);
+        }
+        (st, rg)
+    });
+    if let Some((st, rg)) = &groups_extra {
+        print_score_groups(st, rg, race_share_text, min_group, &std_txt);
+    }
     let time = check_time(&run, job.threads, wall);
-    print_time(&time);
+    if silver {
+        // The reference's solves are the silver hybrid's, not exact ones.
+        print_time_as(&time, "reference (silver)", "by the reference");
+    } else {
+        print_time(&time);
+    }
     let (bands_pass, line) = verdict(&groups, &std_txt);
     let (pass, line) = match &sl {
         None => (bands_pass, line),
@@ -2419,8 +2743,25 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             (pass, line)
         }
     };
-    println!("{line}");
+    println!(
+        "{line}{}",
+        if silver {
+            " (against the silver reference)"
+        } else {
+            ""
+        }
+    );
     if let Some(out) = a.get("--json") {
+        let group_rows = |g: &[(String, search::hybrid::Summary)]| {
+            g.iter()
+                .map(|(n, s)| {
+                    serde_json::json!({
+                        "group": n, "summary": s,
+                        "judged": s.decisions >= min_group,
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
         let v = serde_json::json!({
             "trick": trick,
             "cut": cut,
@@ -2428,12 +2769,34 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             "label": job.label,
             "worlds": job.to,
             "world_source": src.name(),
+            "reference": match &reference {
+                None => serde_json::json!({ "kind": "exact" }),
+                Some((o, p, fp)) => serde_json::json!({
+                    "kind": "silver",
+                    "what": "a silver reference (docs/m3-hybrid/silver.md): the deeper hybrid \
+                             H_cut, exact search to the start of trick `cut` and the network \
+                             there; the `exact_*` fields of a decision hold its reference's \
+                             values (`silver` true), or exact values where an exact record \
+                             stood in (--allow-exact)",
+                    "cut": fp.cut,
+                    "net": net_record(p, o),
+                    "values": fp.values(),
+                    "decisions_silver": n_silver,
+                    "decisions_exact": run.decisions.len() - n_silver,
+                }),
+            },
             "exact_values": exact_from,
             "verified_worlds": run.verified.0,
             "net": net_record(net_path, &oracle),
-            "values": {
-                "exact": search::measure::VALUES_VERSION,
-                "hybrid": format!("{}+O{cut}:{}", search::measure::VALUES_VERSION, oracle.sha256),
+            "values": match &reference {
+                None => serde_json::json!({
+                    "exact": search::measure::VALUES_VERSION,
+                    "hybrid": format!("{}+O{cut}:{}", search::measure::VALUES_VERSION, oracle.sha256),
+                }),
+                Some((_, _, fp)) => serde_json::json!({
+                    "reference": fp.values(),
+                    "hybrid": format!("{}+O{cut}:{}", search::measure::VALUES_VERSION, oracle.sha256),
+                }),
             },
             "equity_sha256": table_sha,
             "binary_sha256": binary_sha256(),
@@ -2443,6 +2806,18 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             "groups": groups.iter().map(|(n, s)| serde_json::json!({"group": n, "summary": s})).collect::<Vec<_>>(),
             "pass": pass,
             "pass_without_slices": bands_pass,
+            "score_groups": groups_extra.as_ref().map(|(st, _)| serde_json::json!({
+                "what": "the decisions by the stratum of their hand's start state (S1-S4, search::measure::stratum_of); reported, not part of `pass`",
+                "min_group": min_group,
+                "groups": group_rows(st),
+            })),
+            "race_groups": groups_extra.as_ref().map(|(_, rg)| serde_json::json!({
+                "what": "a decision is in race class c (nn::outcome::race_class_of, the classes the label shards count) when at least `share` of the distinct frontier positions the hybrid's searches over its worlds reach are of class c, else in `mixed`; reported, not part of `pass`",
+                "share": race_share_text,
+                "share_millionths": race_share,
+                "min_group": min_group,
+                "groups": group_rows(rg),
+            })),
             "slices": slice_preds.as_ref().zip(sl.as_ref()).map(|((p, f), sl)| serde_json::json!({
                 "what": "a decision is in a group when at least `share` of the distinct frontier \
                          positions the hybrid's searches over its worlds reach are in it \
@@ -2463,6 +2838,68 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
         write_json(out, &v)?;
     }
     Ok(())
+}
+
+/// The score (stratum) and race-group tables of `hybrid-check --race-groups`
+/// (`search::hybrid::strata`, `search::hybrid::race_groups`): reported, judged only where at
+/// least `min` decisions fall in a group.
+fn print_score_groups(
+    st: &[(String, search::hybrid::Summary)],
+    rg: &[(String, search::hybrid::Summary)],
+    share: &str,
+    min: usize,
+    std: &str,
+) {
+    let spct = |x: f64| format!("{:+.4}%", 100.0 * x);
+    for (title, rows) in [
+        ("score groups (the stratum of the hand's start state)", st),
+        (
+            &*format!(
+                "race groups (a decision is in a class when at least {share} of the distinct \
+                 frontier positions its hybrid searches reach are of it)"
+            ),
+            rg,
+        ),
+    ] {
+        println!("{title}; judged only with at least {min} decisions; not part of the verdict:");
+        println!(
+            "{:<62} {:>5} {:>10} {:>10} {:>9} {:>7} {:>38} {:>9}",
+            "group",
+            "dec",
+            "mean loss",
+            "95% upper",
+            format!("<={std}"),
+            "agree",
+            "bias: own / next / opposite / previous",
+            "SD"
+        );
+        for (name, s) in rows {
+            let judged = if s.decisions == 0 {
+                "-".to_string()
+            } else if s.decisions < min {
+                "too few".to_string()
+            } else if s.loss_pass {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            };
+            if s.decisions == 0 {
+                println!("{name:<62} {:>5}", 0);
+                continue;
+            }
+            println!(
+                "{:<62} {:>5} {:>10} {:>10} {:>9} {:>6.1}% {:>38} {:>9}",
+                name,
+                s.decisions,
+                pct(s.mean_loss),
+                pct(s.loss_upper95),
+                judged,
+                100.0 * s.agreement,
+                s.bias.map(spct).join(" "),
+                pct(s.sd)
+            );
+        }
+    }
 }
 
 /// The slices' table of `hybrid-check --slices` (`search::hybrid::slices`).
@@ -2632,8 +3069,13 @@ fn check_time(run: &search::hybrid::CheckRun, threads: usize, wall: f64) -> Chec
 }
 
 fn print_time(t: &CheckTime) {
+    print_time_as(t, "exact", "exactly");
+}
+
+/// [`print_time`] naming the reference's solves (`what`, `how`: "exact", "exactly").
+fn print_time_as(t: &CheckTime, what: &str, how: &str) {
     println!(
-        "time: exact {:.3} ms a world ({:.0} nodes; {} worlds solved exactly here), hybrid {:.3} ms a world ({:.0} nodes, {:.0} frontier evaluations); {:.0} ns per frontier evaluation (encode + integer forward + softmax, or the oracle's memo of recent positions); {:.1} s wall on {} threads",
+        "time: {what} {:.3} ms a world ({:.0} nodes; {} worlds solved {how} here), hybrid {:.3} ms a world ({:.0} nodes, {:.0} frontier evaluations); {:.0} ns per frontier evaluation (encode + integer forward + softmax, or the oracle's memo of recent positions); {:.1} s wall on {} threads",
         t.exact_us as f64 / 1000.0 / t.exact_worlds.max(1.0),
         t.exact_nodes as f64 / t.exact_worlds.max(1.0),
         t.exact_worlds,

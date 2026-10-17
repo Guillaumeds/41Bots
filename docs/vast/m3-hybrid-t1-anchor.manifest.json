@@ -1,0 +1,87 @@
+{
+ "format": 2,
+ "run_id": "m3-hybrid-t1-anchor-1",
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "Optional exact anchor of the trick-1 silver set (docs/m3-hybrid/silver.md): 24 leader and second-seat decisions of the silver set (ids 32-39, 64-71, 96-103: seats 1-2, every stratum) x 16 worlds solved exactly (the same worlds as the silver set's first 16: seed 1, label 1), position-aware threads and tables; then H_3 (O_3) and H_2 (O_2) each checked against these exact worlds. With the silver set's check of the same O_2 on the same decisions, it measures the silver's own error (H_3 against exact at trick 1) and how far the loss against silver is from the true loss. Exact trick-1 worlds cost about 10^10 to 1.6x10^11 solver nodes each (docs/m3-hybrid/rung2.md section 4): priced in silver.md before launching.",
+ "machine": {
+  "min_cores": 190,
+  "min_ram_gb": 128,
+  "disk_gb": 40,
+  "min_inet_down": 100,
+  "max_dph": 1.7
+ },
+ "inputs": {
+  "o3": "sha256:f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
+  "o2": "sha256:REPLACE_WITH_THE_O2_INT_SAFETENSORS_SHA256"
+ },
+ "streams": [
+  {
+   "name": "silver",
+   "priority": 1,
+   "kind": "search_measure",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "trick": 1,
+    "count": 400,
+    "seed": 1,
+    "allow_uneven": true,
+    "start_hands": 20000,
+    "to": 16,
+    "grid": "4,8,16",
+    "ids": [
+     32,
+     33,
+     34,
+     35,
+     36,
+     37,
+     38,
+     39,
+     64,
+     65,
+     66,
+     67,
+     68,
+     69,
+     70,
+     71,
+     96,
+     97,
+     98,
+     99,
+     100,
+     101,
+     102,
+     103
+    ],
+    "worlds_at_once": "auto",
+    "tt_mb": "auto",
+    "check": [
+     {
+      "cut": 3,
+      "net_input": "o3",
+      "verify_pct": 0,
+      "tt_mb": 64,
+      "race_groups": true
+     },
+     {
+      "cut": 2,
+      "net_input": "o2",
+      "verify_pct": 0,
+      "tt_mb": 64,
+      "race_groups": true
+     }
+    ],
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  }
+ ]
+}

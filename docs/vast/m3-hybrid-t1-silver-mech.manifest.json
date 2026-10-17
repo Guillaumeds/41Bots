@@ -1,0 +1,76 @@
+{
+ "format": 2,
+ "run_id": "m3-hybrid-t1-silver-mech-1",
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "Trick-1 silver set, mechanism test (docs/m3-hybrid/silver.md; owner, 2026-10-17): 16 trick-1 decisions of the full set's generator (search decisions --trick 1 --count 400 --seed 1; two a seat position, ids 33/66 at seat 1 up to 61/94 at seat 8) x 8 worlds, each world valued by H_3 (exact search through tricks 1 and 2, the adopted O_3 f5766aa9 at the start of trick 3) into silver-t1-c3-n8.jsonl, resumable world by world; the decisions and the silver worlds shared content-addressed; agree and curves on them; then search hybrid-check of a toy O_2 (round 1 of m3-hybrid-t2-mech-6, 1024-512-128, 25,000 labels: only to run the step) against them with --reference silver, 3% of the silver worlds recomputed and required byte-identical, the score and race groups. Every step runs once; the timing file (silver-t1-c3-n8.jsonl.times.jsonl) gives H_3's thread-seconds, nodes and network evaluations per seat on the real machine, to confirm the price of the full set before it is launched. Each world is split over 8 threads (24 worlds at a time, the parallel solver: the same values), and so is each recomputed world of the check: one heavy leader world (the pilot met worlds of 20-60+ thread-minutes at seats 1-3 on the build VM) would otherwise hold the machine for one to three hours on one thread. Pilot estimate (docs/m3-hybrid/silver.md section 5): about 30-45 minutes, under $1.",
+ "machine": {
+  "min_cores": 190,
+  "min_ram_gb": 64,
+  "disk_gb": 40,
+  "min_inet_down": 100,
+  "max_dph": 1.7
+ },
+ "inputs": {
+  "o3": "sha256:f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
+  "o2": "sha256:0cb6d614f66af4b2a8496dc9f9d6be36d9e7dd0956d07dad4becf9bc061f8fc9"
+ },
+ "streams": [
+  {
+   "name": "silver",
+   "priority": 1,
+   "kind": "search_measure",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "trick": 1,
+    "count": 400,
+    "seed": 1,
+    "allow_uneven": true,
+    "start_hands": 20000,
+    "worlds_at_once": 24,
+    "solve_threads": 8,
+    "tt_mb": 64,
+    "to": 8,
+    "grid": "2,4,8",
+    "ids": [
+     33,
+     66,
+     37,
+     70,
+     41,
+     74,
+     45,
+     78,
+     49,
+     82,
+     53,
+     86,
+     57,
+     90,
+     61,
+     94
+    ],
+    "reference": {
+     "cut": 3,
+     "net_input": "o3"
+    },
+    "check": {
+     "cut": 2,
+     "net_input": "o2",
+     "verify_pct": 3,
+     "tt_mb": 64,
+     "race_groups": true,
+     "verify_solve_threads": 8
+    },
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  }
+ ]
+}

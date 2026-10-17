@@ -381,6 +381,20 @@ pub fn parse_v2(v: &Value) -> Result<Manifest2, String> {
                 }
             }
         }
+        // A `search_measure` chunk's silver settings are checked here, and the networks and
+        // stored worlds they name must be among the manifest's inputs.
+        if kind == "search_measure" {
+            for n in
+                crate::measure::input_names(&params).map_err(|e| format!("stream `{name}`: {e}"))?
+            {
+                if !inputs.iter().any(|(i, _)| *i == n) {
+                    return Err(format!(
+                        "stream `{name}`: search_measure names input `{n}`, which the manifest's \
+                         inputs do not list"
+                    ));
+                }
+            }
+        }
         if kind == "arena_blocks" {
             for k in ["a", "b"] {
                 if params.get(k).and_then(Value::as_str).is_none() {

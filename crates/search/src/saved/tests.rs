@@ -99,7 +99,9 @@ fn ckpt_line(d: &DecisionSpec, src: &str, seed: u64, w: u64, v: &[[u64; 4]]) -> 
         v: v.to_vec(),
         us: 1000 + w,
         nodes: 10 + w,
+        evals: 0,
         values: Some(VALUES_VERSION),
+        frontier: None,
     })
     .expect("serialises")
 }
