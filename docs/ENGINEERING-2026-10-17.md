@@ -418,7 +418,8 @@ decision per thread.
 Also:
 - `search labels --chunk-rows` defaults to 1 at trick 2, 32 elsewhere. A trick-2 chunk of 32 rows
   was minutes on one thread: the mechanism test's 5,000-row rules and validation shards were 157
-  chunks on 245 threads, one wave.
+  chunks on 245 threads, one wave. As first merged (`7088230`), this slowed the plain labels; see
+  "Follow-up: the plain labels' look-ahead" below for the cause and the fix.
 - `search labels --tt-mb` sets the label solves' table, and the runner lowers it only if one table
   per thread would not fit the machine (`hybrid::label_tables`, `crate::mem`).
 
@@ -531,3 +532,37 @@ A machine with less memory gets its label tables lowered by the runner to fit: a
   measurement. The longest single trick-2 label on the rented machines, which bounds the pooled
   tail, is not known.
 - The runner's lowering of the table is unit-tested on stated machine sizes only.
+
+### Follow-up: the plain labels' look-ahead (run 6, 2026-10-17)
+
+**What happened.** Run 6 of the trick-2 mechanism test (`m3-hybrid-t2-mech-6`, a 384-thread EPYC
+9654 with 368 threads usable, binary `7088230`) made its random labels at about 1,400 rows a
+minute. About 3,800 were expected; the old binary made 1,640 on the slower 245-thread machine. The
+heartbeats' CPU swung from minute to minute between 3% and 96%.
+
+**Cause.** The plain labels' stream (`ordered`) let the workers run a fixed *count* of chunks
+ahead of the next one written: `4 × threads + 16` = 1,488 chunks. With 32-row chunks that was
+47,616 rows, more than the whole shard. With the new 1-row chunks at trick 2 it was 1,488 rows,
+about half a minute's work for 367 threads. So whenever one row took longer than that, every
+other thread stopped until it was done.
+
+**Fix.** The look-ahead is now a byte budget, `label_window`: 1 GiB of finished rows, about
+570,000 rows at trick 2, for any chunk size. It is the same budget the pooled harvest already used,
+and the runner's memory plan counts it. The 1-row chunks at trick 2 stay. With this window one
+slow row costs only its own thread, so small chunks only remove the chunk-sized tail.
+
+Tests:
+- `a_slow_row_never_stops_the_others` holds row 0 of a 400-row shard in 1-row chunks until the
+  other 399 rows are made, and checks the shard's bytes. With the old count window it fails: the
+  other threads stop at 32 rows.
+- `streamed_shards_are_the_rows_bytes` checks the shards are the same bytes on 1, 2 and 4 threads
+  and for chunk sizes 1 to 50.
+- `ordered` and `pooled` now also stop their workers when the calling thread panics
+  (`a_panic_on_the_calling_thread_is_passed_on`). Before, a panic in `take` could leave the pool
+  waiting forever.
+- `harvest_schedules_give_the_same_shard` now also covers the targeted harvest with a network
+  driver (tricks 3 and 4).
+
+Not measured on this VM: with 4 threads the old window (32 one-row chunks) already held about ten
+rows a thread, so the stall needs hundreds of threads to show. Mechanism test 7 (a 384-thread EPYC
+9654) measures the plain labels' rate and the CPU's steadiness with this binary before the real run.

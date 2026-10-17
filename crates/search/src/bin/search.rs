@@ -62,8 +62,9 @@
 //! counts and the shard's SHA-256. Byte-identical for any `--threads` and `--chunk-rows`; seed 1
 //! (the golden sets') is refused. The shard is streamed
 //! (`search::oracle_labels::write_label_shard`): chunks of `--chunk-rows` rows are made on every
-//! thread, then hashed and written in row order as they come, under the name `FILE.npy.part`,
-//! renamed to `FILE.npy` once whole. `--tt-mb M` sets the exact label solves' table (megabytes a
+//! thread, up to 1 GiB of finished rows ahead of the next one written (`label_window`: one slow
+//! row never stops the other threads, whatever the chunk size), then hashed and written in row
+//! order as they come, under the name `FILE.npy.part`, renamed to `FILE.npy` once whole. `--tt-mb M` sets the exact label solves' table (megabytes a
 //! thread; default `oracle_labels::tt_mb_for` the trick, 256 at trick 2): the runner lowers it
 //! when the machine's memory would not hold one per thread; it never changes a row, only the
 //! solves' node counts (`solver_nodes`; the sidecar then records `label_tt_mb`). A harvest's own

@@ -422,7 +422,7 @@ pub fn label_rows(
     ordered(
         job.threads,
         Some(job.count),
-        window_for(job.threads),
+        label_window(job.trick, 1, job.threads),
         SolveMem::new,
         |mem, i| {
             let r = make_row(job, i, starts, &source, leaf, tt_mb_for(job.trick), mem);
@@ -445,10 +445,28 @@ pub fn label_rows(
 /// large enough that handing them over costs nothing. Trick 2 takes 1 ([`chunk_rows_for`]).
 pub const CHUNK_ROWS: u64 = 32;
 
+/// The bytes of finished rows a label stream (a shard of any source) holds at most beyond the next
+/// row it writes: a row that takes long holds the writing up while every other thread goes on
+/// with the rows after it, up to this much ([`label_window`]).
+pub const LABEL_WINDOW_BYTES: u64 = 1 << 30;
+
+/// How many units of `rows_per_unit` rows at frontier trick `trick` a label stream on `threads`
+/// threads makes ahead of the next unit it writes: as many as hold [`LABEL_WINDOW_BYTES`] of
+/// finished rows, at least [`window_for`]`(threads)`. A fixed count of units would make the
+/// look-ahead depend on the chunk size: with one-row chunks at trick 2, `4 × 368 + 16` = 1,488
+/// rows are half a minute's work for 368 threads, after which one row of minutes stops every
+/// thread (the trick-2 mechanism test's random labels, run 6: the CPU swung between 3% and 96%).
+/// At trick 2 the budget is about 570,000 rows. The window never changes a row.
+pub fn label_window(trick: u8, rows_per_unit: u64, threads: usize) -> u64 {
+    let unit = row_bytes_for(nn::outcome::vocab(trick)) as u64 * rows_per_unit.max(1);
+    (LABEL_WINDOW_BYTES / unit).max(window_for(threads))
+}
+
 /// The default rows a unit of [`write_label_shard`]'s work at frontier trick `k` (`search labels
 /// --chunk-rows`): [`CHUNK_ROWS`], but 1 at trick 2, where one exact label takes seconds (32 of
-/// them are minutes on one thread, the tail of a short shard on hundreds of threads). The shard
-/// is the same bytes for any chunk size (tested).
+/// them are minutes on one thread, the tail of a short shard on hundreds of threads). One-row
+/// chunks are safe because the stream's look-ahead is a byte budget ([`label_window`]), not a
+/// count of chunks. The shard is the same bytes for any chunk size (tested).
 pub fn chunk_rows_for(k: u8) -> u64 {
     if k <= 2 { 1 } else { CHUNK_ROWS }
 }
@@ -656,22 +674,48 @@ pub fn write_label_shard_with<W: Write + Send>(
     out: &mut W,
 ) -> Result<ShardSummary, String> {
     check_label_job(job);
-    let (n, v) = (job.count, nn::outcome::vocab(job.trick));
-    let chunk = chunk_rows.max(1);
     let source = BeliefSource::new();
+    stream_label_rows(
+        job.trick,
+        job.count,
+        job.threads,
+        chunk_rows,
+        |mem, i| make_row(job, i, starts, &source, leaf, exec.tt_mb, mem),
+        progress,
+        out,
+    )
+}
+
+/// The shard of rows `0..n` at frontier trick `trick` made by `make` (row `i` from `i` alone, with
+/// a worker's solver memory), streamed to `out`: chunks of `chunk_rows` consecutive rows made on
+/// `threads` threads, claimed in order up to [`label_window`] chunks ahead of the next one
+/// written (a byte budget, so no chunk size lets one slow row stop the other threads), hashed and
+/// written in row order as they come. The same bytes, hash and counts for any thread count and
+/// chunk size.
+fn stream_label_rows<W: Write + Send>(
+    trick: u8,
+    n: u64,
+    threads: usize,
+    chunk_rows: u64,
+    make: impl Fn(&mut SolveMem, u64) -> (Row, RowInfo) + Sync,
+    progress: Option<&AtomicUsize>,
+    out: &mut W,
+) -> Result<ShardSummary, String> {
+    let v = nn::outcome::vocab(trick);
+    let chunk = chunk_rows.max(1);
     let mut counts = RowCounts::default();
     let ((), sha256, hash_time, write_time) = stream_shard(out, n, v, |sink| {
         ordered(
-            job.threads,
+            threads,
             Some(n.div_ceil(chunk)),
-            window_for(job.threads),
+            label_window(trick, chunk, threads),
             SolveMem::new,
             |mem, c| {
                 let (lo, hi) = (c * chunk, ((c + 1) * chunk).min(n));
                 let mut bytes = Vec::with_capacity((hi - lo) as usize * row_bytes_for(v));
                 let mut cnt = RowCounts::default();
                 for i in lo..hi {
-                    let (row, info) = make_row(job, i, starts, &source, leaf, exec.tt_mb, mem);
+                    let (row, info) = make(mem, i);
                     assert_eq!(row.outcomes.len(), v, "every row has the trick's outcomes");
                     row_bytes(&row, &mut bytes);
                     cnt.add(&info);
@@ -1658,12 +1702,6 @@ fn check_harvest_job(job: &HarvestJob) {
     assert!(!job.schedule.is_empty() && job.schedule.iter().all(|&p| p < 8));
 }
 
-/// The bytes of finished labels a pooled harvest holds at most beyond the next one it writes
-/// (`crate::ordered::pooled`'s item window, in rows of the trick's size, at least
-/// [`window_for`]`(threads)` rows): a label that takes long holds the writing up while every other
-/// thread goes on with the labels after it, up to this much.
-pub const LABEL_WINDOW_BYTES: u64 = 1 << 30;
-
 /// A harvest's run, whatever its schedule: decisions 0, 1, 2, … in order, each giving its sampled
 /// positions' rows, until `job.count` rows (the last decision cut short) or `max_decisions`
 /// decisions. `decision` gets each decision taken, in order, before any of its rows: its facts
@@ -1709,13 +1747,10 @@ fn run_harvest<T: Send>(
     };
     match exec.schedule {
         HarvestSchedule::Pooled => {
-            let v = nn::outcome::vocab(job.trick);
-            let item_window =
-                (LABEL_WINDOW_BYTES / row_bytes_for(v) as u64).max(window_for(job.threads));
             crate::ordered::pooled(
                 job.threads,
                 window_for(job.threads),
-                item_window,
+                label_window(job.trick, 1, job.threads),
                 || (SolveMem::new(), SolveMem::new()),
                 |(search_mem, label_mem), j| {
                     let (plan, _) = harvest_plan(
@@ -2411,7 +2446,7 @@ mod tests {
                 nn::outcome::vocab(trick),
             );
             let sha = equity::sha256::sha256_hex(&want);
-            for threads in [1, 4] {
+            for threads in [1, 2, 4] {
                 for chunk in [1, 4, 8, 16, 23, 50] {
                     let mut out = Vec::new();
                     let done = AtomicUsize::new(0);
@@ -3361,6 +3396,27 @@ mod tests {
                 Driver::Exact,
                 None,
             ),
+            (
+                "trick 4, targeted, network",
+                HarvestJob {
+                    keep: Some(keep.clone()),
+                    cap: 1,
+                    ..base(4, 1, 30)
+                },
+                Driver::Net(&net4),
+                None,
+            ),
+            (
+                "trick 3, targeted, network",
+                HarvestJob {
+                    keep: Some(keep.clone()),
+                    cap: 1,
+                    schedule: position_schedule(parse_band_shares("0,0,1").expect("shares")),
+                    ..base(3, 1, 8)
+                },
+                Driver::Net(&net3),
+                None,
+            ),
             ("trick 4, bounded", base(4, 5, 41), Driver::Exact, Some(4)),
         ];
         for (what, job, driver, max) in &cases {
@@ -3499,5 +3555,63 @@ mod tests {
             assert_eq!(HarvestSchedule::parse(s.name()), Ok(s));
         }
         assert!(HarvestSchedule::parse("fast").is_err());
+    }
+
+    /// One slow row never stops the other threads, whatever the chunk size: while row 0 of a
+    /// shard in one-row chunks is held, the other workers make every other row (399, against
+    /// the 32 one-row chunks a window of `4 × threads + 16` units would have let them make), and
+    /// the shard is the same bytes as made without the hold. The window is a byte budget
+    /// ([`label_window`]): at trick 2 about 570,000 rows.
+    #[test]
+    fn a_slow_row_never_stops_the_others() {
+        let starts = collect_starts(400, 9);
+        let l = leaf();
+        let job = LabelJob {
+            trick: 4,
+            count: 400,
+            seed: 11,
+            source: Source::Rules,
+            threads: 4,
+        };
+        let rows = label_rows(&job, &starts, &*l, None);
+        let want = nn::shard::to_npy(
+            &rows.iter().map(|r| r.0.clone()).collect::<Vec<_>>(),
+            nn::outcome::vocab(4),
+        );
+        assert!(window_for(4) < 399, "the old window would stop the others");
+        let row_bytes = row_bytes_for(nn::outcome::vocab(2)) as u64;
+        assert_eq!(label_window(2, 1, 368), LABEL_WINDOW_BYTES / row_bytes);
+        assert!(label_window(2, 1, 368) > 500_000);
+        assert_eq!(label_window(2, 1 << 40, 368), window_for(368));
+        let made = AtomicUsize::new(0);
+        let mut out = Vec::new();
+        let sum = stream_label_rows(
+            4,
+            400,
+            4,
+            1,
+            |_, i| {
+                if i == 0 {
+                    // Held until every other row is made (at most 20 s: then the test fails).
+                    let t = Instant::now();
+                    while made.load(Ordering::SeqCst) < 399 && t.elapsed() < Duration::from_secs(20)
+                    {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    assert_eq!(
+                        made.load(Ordering::SeqCst),
+                        399,
+                        "the other rows are made while row 0 is held"
+                    );
+                }
+                made.fetch_add(1, Ordering::SeqCst);
+                rows[i as usize].clone()
+            },
+            None,
+            &mut out,
+        )
+        .expect("written");
+        assert!(out == want);
+        assert_eq!(sum.counts, counts_of(&rows));
     }
 }

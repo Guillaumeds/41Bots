@@ -49,7 +49,8 @@ fn lock(m: &Mutex<Claims>) -> MutexGuard<'_, Claims> {
 ///
 /// # Panics
 /// If `make` panics (on any worker), the other workers stop claiming and the panic is passed on
-/// once they have finished; `take` sees no unit after the gap.
+/// once they have finished; `take` sees no unit after the gap. A panic in `take` stops the
+/// workers the same way and is passed on.
 pub fn ordered<S, T: Send>(
     threads: usize,
     units: Option<u64>,
@@ -108,6 +109,18 @@ pub fn ordered<S, T: Send>(
             }));
         }
         drop(tx);
+        // A panic in `take` (on this thread) stops the workers too: the scope joins them before
+        // passing the panic on, and a worker waiting for the window to move would wait forever.
+        struct StopOnUnwind<'a>(&'a Mutex<Claims>, &'a Condvar);
+        impl Drop for StopOnUnwind<'_> {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    lock(self.0).stop = true;
+                    self.1.notify_all();
+                }
+            }
+        }
+        let _unwind = StopOnUnwind(&claims, &moved);
         let mut pending: BTreeMap<u64, T> = BTreeMap::new();
         let mut taken = 0u64;
         let mut res = Ok(());
@@ -210,7 +223,7 @@ enum Claimed<I> {
 ///
 /// # Panics
 /// If `plan` or `make` panics (on any worker), the other workers stop claiming and the panic is
-/// passed on once they have finished.
+/// passed on once they have finished; a panic in `expand` or `take` the same way.
 #[allow(clippy::too_many_arguments)]
 pub fn pooled<S, P: Send, I: Send, R: Send>(
     threads: usize,
@@ -291,6 +304,21 @@ pub fn pooled<S, P: Send, I: Send, R: Send>(
             }));
         }
         drop(tx);
+        // A panic in `expand` or `take` (on this thread) stops the workers too (as in
+        // [`ordered`]): the scope joins them before passing the panic on.
+        struct StopOnUnwind<'a, I>(&'a Mutex<Pool<I>>, &'a Condvar);
+        impl<I> Drop for StopOnUnwind<'_, I> {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    let mut g = lock_pool(self.0);
+                    g.stop = true;
+                    g.plans_done = true;
+                    drop(g);
+                    self.1.notify_all();
+                }
+            }
+        }
+        let _unwind = StopOnUnwind(&pool, &moved);
         let mut plans: BTreeMap<u64, P> = BTreeMap::new();
         let mut items: BTreeMap<u64, (u64, R)> = BTreeMap::new();
         let (mut plans_taken, mut items_taken) = (0u64, 0u64);
@@ -632,16 +660,63 @@ mod tests {
                     |_, _| Ok(()),
                 )
             });
-            let msg = r.expect_err("the panic is passed on");
-            let msg = msg
-                .downcast_ref::<String>()
-                .cloned()
-                .or_else(|| msg.downcast_ref::<&str>().map(|s| s.to_string()))
-                .unwrap_or_default();
+            let msg = panic_text(r.expect_err("the panic is passed on"));
             assert!(
                 msg.contains(if in_plan { "plan 5" } else { "item 7" }),
                 "{msg}"
             );
+        }
+    }
+
+    /// The message of a caught panic.
+    fn panic_text(p: Box<dyn std::any::Any + Send>) -> String {
+        p.downcast_ref::<String>()
+            .cloned()
+            .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default()
+    }
+
+    /// A panic on the calling thread (in `take`, or `expand`) is passed on without leaving a
+    /// worker waiting: with a window of 3 the workers are soon all waiting for it to move.
+    #[test]
+    fn a_panic_on_the_calling_thread_is_passed_on() {
+        for threads in [1, 4] {
+            let r = std::panic::catch_unwind(|| {
+                ordered(
+                    threads,
+                    None,
+                    3,
+                    || (),
+                    |_, c| c,
+                    |c, _| {
+                        assert_ne!(c, 5, "take 5");
+                        Ok(true)
+                    },
+                )
+            });
+            assert!(panic_text(r.expect_err("passed on")).contains("take 5"));
+            for in_expand in [true, false] {
+                let r = std::panic::catch_unwind(|| {
+                    pooled(
+                        threads,
+                        3,
+                        3,
+                        || (),
+                        |_, j| j,
+                        |j, _| {
+                            assert!(!(in_expand && j == 6), "expand 6");
+                            Ok((vec![(j, 1), (j, 1)], true))
+                        },
+                        |_, x| x,
+                        |i, _| {
+                            assert!(in_expand || i != 9, "take 9");
+                            Ok(())
+                        },
+                    )
+                });
+                let want = if in_expand { "expand 6" } else { "take 9" };
+                assert!(panic_text(r.expect_err("passed on")).contains(want));
+            }
         }
     }
 
