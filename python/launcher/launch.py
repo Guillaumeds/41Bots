@@ -580,6 +580,20 @@ def offer_check_failures(o: dict, floor: float = MIN_RELIABILITY, verified_only:
     return check_failures(o, floor, verified_only)
 
 
+def named_text(o: dict) -> str:
+    """One line on a named offer as vast lists it (price, threads, CPU, RAM, GPU, host, link), logged before
+    its checks so that a refusal still says what the machine is."""
+    def num(k, scale=1.0, fmt="{:.0f}"):
+        try:
+            return fmt.format(float(o[k]) / scale)
+        except (KeyError, TypeError, ValueError):
+            return "?"
+    return (f"${num('dph_total', fmt='{:.3f}')}/h, {num('cpu_cores_effective')} eff. cores of {num('cpu_cores')}, "
+            f"{o.get('cpu_name')}, {num('cpu_ram', 1000)} GB RAM, {o.get('num_gpus')}x {o.get('gpu_name')} "
+            f"({num('gpu_ram', 1000)} GB, cc {o.get('compute_cap')}), host {host_status(o)}, "
+            f"rel {num('reliability2', fmt='{:.3f}')}, link {num('inet_down')} Mbps, {o.get('geolocation')}")
+
+
 def lookup_offer(a) -> dict:
     """The one offer the owner named (--offer-id), read back from vast by its id (one search,
     `id=N`, on-demand) and checked like every searched offer (`offer_check_failures`). Stops the
@@ -587,7 +601,9 @@ def lookup_offer(a) -> dict:
     are never skipped."""
     oid = int(a.offer_id)
     try:
-        rows = vast("search", "offers", f"id={oid}", "--type", "on-demand", "--limit", "5")
+        # `verified=any`: vast's search adds `verified=true` to every query by itself (see `offer_query`), so
+        # without it an offer on an unverified host reads as gone (2026-10-17, offer 31231107).
+        rows = vast("search", "offers", f"id={oid} verified=any", "--type", "on-demand", "--limit", "5")
     except RuntimeError as e:
         sys.exit(f"launch: offer {oid} could not be checked (vast's search failed: {redact(str(e))[:200]}); the checks "
                  f"(reliability >= {MIN_RELIABILITY}, whole machine) cannot be skipped, so nothing was rented")
@@ -596,6 +612,7 @@ def lookup_offer(a) -> dict:
     row = next((o for o in rows if isinstance(o, dict) and o.get("id") == oid), None)
     if row is None:
         sys.exit(f"launch: offer {oid} is not on offer (on-demand) any more; nothing was rented")
+    log(f"named offer {oid}: {named_text(row)}")
     verified_only = bool(getattr(a, "verified_only", False))
     failed = offer_check_failures(row, float(a.min_reliability), verified_only)
     # The run's own needs, as the normal search filters them (`offer_query`): vast's raw records
