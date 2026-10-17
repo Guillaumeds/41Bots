@@ -341,7 +341,8 @@ def offer_query(a, verified: bool = True) -> str:
         f"cpu_cores_effective>={a.min_cores}", f"cpu_ram>={a.min_ram_gb}",
     ] + gpu[1:] + [
         f"disk_space>={a.disk_gb}", f"inet_down_cost<={a.max_net_cost}", f"inet_up_cost<={a.max_net_cost}",
-    ] + ([f"dph_total<={a.max_dph}"] if a.max_dph else []) + inet_down_clause(a))
+    ] + ([f"dph_total<={a.max_dph}"] if a.max_dph else []) + inet_down_clause(a)
+        + ([f"inet_up>={up_floor(a):g}"] if up_floor(a) > 0 else []))
 
 
 def inet_down_clause(a) -> list[str]:
@@ -349,6 +350,13 @@ def inet_down_clause(a) -> list[str]:
     Mb/s), or nothing when --min-inet-down is 0. Every search carries it: the base image is big."""
     floor = inet_floor(a)
     return [f"inet_down>={floor:g}"] if floor > 0 else []
+
+
+def up_floor(a) -> float:
+    """The run's minimum upload speed in Mbps (`inet_up`): --min-inet-up and/or the manifest's machine.min_inet_up, the
+    larger wins; 0 (the default) = none. For runs that store hours of labels (2026-10-17: a slow uplink timed uploads
+    out on a mechanism test)."""
+    return max(float(getattr(a, "min_inet_up", 0) or 0), 0.0)
 
 
 def inet_floor(a) -> float:
@@ -413,6 +421,7 @@ def parse_gpu_names(text: str) -> list[str]:
 
 # The keys of a manifest's "machine" object (what the launcher rents for it).
 MACHINE_KEYS = ("gpus", "min_gpu_ram_gb", "min_compute_cap", "min_cores", "min_ram_gb", "disk_gb", "min_inet_down",
+                "min_inet_up",
                 "max_dph", "wait_for_offer_min", "offer_poll_s", "price_steps", "tries_per_step", "gpu_names", "blackwell")
 
 
@@ -463,7 +472,7 @@ def apply_machine(a, manifest: dict) -> None:
         sys.exit(f"launch: the manifest asks for {gpus} GPUs but --gpus says {a.gpus}")
     if gpus:
         a.gpus = gpus
-    for k in ("min_gpu_ram_gb", "min_compute_cap", "min_cores", "min_ram_gb", "disk_gb"):
+    for k in ("min_gpu_ram_gb", "min_compute_cap", "min_cores", "min_ram_gb", "disk_gb", "min_inet_up"):
         if k in m:
             setattr(a, k, max(m[k], getattr(a, k, 0) or 0))
     if "min_inet_down" in m:
@@ -500,6 +509,7 @@ def search_offers(a, verified: bool = True) -> list[dict]:
                 and float(o["cpu_cores_effective"]) >= a.min_cores
                 and (o.get("cpu_ram") is None or float(o["cpu_ram"]) >= a.min_ram_gb * 1000)
                 and (floor <= 0 or inet_down_of(o) is None or inet_down_of(o) >= floor)
+                and (up_floor(a) <= 0 or o.get("inet_up") is None or float(o["inet_up"]) >= up_floor(a))
                 and (not a.cpu_match or re.search(a.cpu_match, o.get("cpu_name") or "", re.I))
                 and o.get("id") not in getattr(a, "exclude_offers", set())
                 and o.get("machine_id", o.get("id")) not in getattr(a, "exclude_machines", set())
@@ -730,6 +740,9 @@ def lookup_offer(a) -> dict:
         ram_mb = float(row.get("cpu_ram")) if row.get("cpu_ram") is not None else None
     except (TypeError, ValueError):
         ram_mb = None
+    up = row.get("inet_up")
+    if up_floor(a) > 0 and up is not None and float(up) < up_floor(a):
+        failed.append(f"upload {float(up):.0f} Mbps, below --min-inet-up {up_floor(a):g}")
     if ram_mb is not None and ram_mb < a.min_ram_gb * 1000:
         failed.append(f"{ram_mb / 1000:.0f} GB of RAM, below --min-ram-gb {a.min_ram_gb}")
     try:
@@ -896,6 +909,8 @@ def floors_text(a) -> str:
     parts = [f">= {a.min_cores} threads", f">= {a.min_ram_gb} GB RAM", f"reliability >= {a.min_reliability}"]
     link = inet_floor(a)
     parts.append(f"download >= {link:g} Mbps" if link > 0 else "any download speed")
+    if up_floor(a) > 0:
+        parts.append(f"upload >= {up_floor(a):g} Mbps")
     parts.append(f"price cap {rung_text(cap)}")
     if getattr(a, "gpus", 0):
         parts.append(f">= {a.gpus} GPU(s)")
@@ -2468,6 +2483,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="the host reliability floor (default 0.90, the owner's rule of 2026-10-16); raise it for a run that wants a steadier host")
         s.add_argument("--disk-gb", type=int, default=20)
         s.add_argument("--max-net-cost", type=float, default=MAX_NET_COST, help="max $/GB up or down (owner 2026-10-14: 0.10; our traffic is tiny)")
+        s.add_argument("--min-inet-up", type=float, default=0,
+                       help="minimum upload speed in Mbps an offer must report (vast's inet_up; default 0 = none; a "
+                            "manifest's machine.min_inet_up, the larger wins); for runs that store hours of labels")
         s.add_argument("--min-inet-down", type=float, default=None,
                        help="minimum download speed in Mbps an offer must report (vast's inet_down; default 500: the base "
                             "image is several GB; 0 = no filter; a manifest's machine.min_inet_down replaces the default, "

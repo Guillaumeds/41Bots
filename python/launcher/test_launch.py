@@ -1157,6 +1157,25 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual((code, w.created_on, report["outcome"]), (0, [1], "DONE"))
         self.assertNotIn("too few usable threads", json.dumps(report))
 
+    def test_an_upload_floor_keeps_slow_uplinks_out(self):
+        # machine.min_inet_up (or --min-inet-up): the query asks for it and the launcher checks it again, a named offer too.
+        manifest = {**self.FORMAT1, "machine": {"min_inet_up": 100}}
+        w = World([offer(1, 11, 0.5, inet_up=20.0), offer(2, 12, 0.8, inet_up=150.0)], ["done:1"])
+        code, report = self.run_launch(w, manifest)
+        self.assertEqual((code, w.created_on), (0, [2]))
+        self.assertTrue(all("inet_up>=100" in q.split() for q in w.queries), w.queries)
+        self.assertIn("upload >= 100 Mbps", launch.floors_text(launch.build_parser().parse_args(
+            ["run", "--manifest", "{}", "--image", "i", "--bin-sha", "b", "--min-inet-up", "100"])))
+        w = World([offer(1, 11, 0.5, inet_up=20.0)], ["done:1"])
+        w.forbid_search = True
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, self.FORMAT1, "--offer-id", "1", "--min-inet-up", "100")
+        self.assertIn("upload 20 Mbps, below --min-inet-up 100", str(e.exception))
+        # No floor (the default): the query does not carry it.
+        w = World([offer(1, 11, 0.5, inet_up=20.0)], ["done:1"])
+        self.run_launch(w, self.FORMAT1)
+        self.assertFalse(any("inet_up>=" in q for q in w.queries))
+
     def test_a_xeon_phi_is_never_rented(self):
         # 2026-10-17: unmeasured, the ranking's assumed rate made a 256-thread Xeon Phi 7210 at $0.27/h look like the
         # cheapest machine; it does about a tenth of an EPYC's work per thread. Never rented, named or searched.

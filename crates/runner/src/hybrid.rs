@@ -3677,7 +3677,7 @@ mod tests {
         let mach = &v["machine"];
         assert_eq!(
             (&mach["min_cores"], &mach["gpus"], &mach["min_ram_gb"]),
-            (&json!(240), &json!(1), &json!(192))
+            (&json!(240), &json!(1), &json!(128))
         );
         assert_eq!(mach["price_steps"], json!([1.4, 1.7, 2.0]));
         assert!(mach.get("gpu_names").is_none());
