@@ -904,3 +904,94 @@ fn a_sidecar_upload_failure_is_only_a_warning() {
     assert_eq!(doc["label_inputs"][0]["set"], "val");
     let _ = fs::remove_dir_all(&f.base);
 }
+
+/// A remote store whose first `fail` uploads of label shards (`.npy` files) fail, everything else
+/// as `DirRemote`.
+struct FlakyShards {
+    inner: DirRemote,
+    fail: usize,
+    seen: std::sync::atomic::AtomicUsize,
+}
+
+impl Remote for FlakyShards {
+    fn describe(&self) -> String {
+        self.inner.describe()
+    }
+    fn put(&self, local: &Path, key: &str, immutable: bool) -> Result<(), String> {
+        let shard = local.extension().is_some_and(|e| e == "npy");
+        if shard && self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < self.fail {
+            return Err("the upload was killed at its time limit".into());
+        }
+        self.inner.put(local, key, immutable)
+    }
+    fn get(&self, key: &str, local: &Path) -> Result<bool, String> {
+        self.inner.get(key, local)
+    }
+    fn list_sized(&self, prefix: &str) -> Result<Vec<(String, u64)>, String> {
+        self.inner.list_sized(prefix)
+    }
+    fn sha256(&self, key: &str) -> Result<Option<(String, u64)>, String> {
+        self.inner.sha256(key)
+    }
+    fn exists(&self, key: &str) -> Result<bool, String> {
+        self.inner.exists(key)
+    }
+}
+
+/// `upload_shards` with label shards whose upload fails at first (every attempt of the step's
+/// three) and works at the chunk's end: the sidecars are shared at once all the same, the
+/// shards' `label_inputs` entries wait in `label_inputs_pending` (so `label_inputs` never names
+/// a shard that is not stored), and move to `label_inputs` when the end's retry stores them.
+#[cfg(unix)]
+#[test]
+fn label_inputs_name_only_stored_shards() {
+    let f = fakes("pendingentries");
+    let remote: Arc<dyn Remote> = Arc::new(FlakyShards {
+        inner: DirRemote {
+            root: f.base.join("remote"),
+        },
+        fail: 3 * 3,
+        seen: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let params = parse(&json!({
+        "check": false, "labels_random": 7, "labels_random_seed": 511, "labels_rules": 5,
+        "labels_rules_seed": 512, "val_count": 3, "val_seed": 601, "widths": "16,8", "epochs": 2,
+        "upload_shards": true }))
+    .expect("params");
+    let tools = Tools {
+        search: f.search.clone(),
+        uv: f.uv.clone(),
+        python_dir: f.py.clone(),
+        nvidia_smi: f.base.join("no-such-nvidia-smi"),
+        remote: Some(Arc::clone(&remote)),
+    };
+    let root = f.base.join("run");
+    let mut ctx = Ctx::local("hybrid-test", &root, 4);
+    chunk_with(&mut ctx, &params, &tools, &f.table, json!({})).expect("the chunk runs");
+    let out = root.join("out/hybrid");
+    let rung = read_json(&out.join("rung.json")).expect("rung.json");
+    let warnings = rung["warnings"].to_string();
+    assert!(warnings.contains("was not uploaded ("), "{warnings}");
+    assert!(
+        !warnings.contains("its sidecar was not shared"),
+        "{warnings}"
+    );
+    let doc = read_json(&out.join("shards.json")).expect("shards.json");
+    let entries = doc["label_inputs"].as_array().expect("entries");
+    assert_eq!(entries.len(), 3, "{doc}");
+    assert_eq!(doc["label_inputs_pending"], json!([]), "{doc}");
+    for (e, s) in entries
+        .iter()
+        .zip(doc["shards"].as_array().expect("shards"))
+    {
+        assert_eq!(s["retried"], true, "{s}");
+        assert_eq!(s["sidecar_key"], e["sidecar"], "{s}");
+        for k in ["shard", "sidecar"] {
+            assert!(
+                remote.exists(e[k].as_str().expect("key")).expect("listed"),
+                "{k} {e}"
+            );
+        }
+    }
+    let _ = fs::remove_dir_all(&f.base);
+}

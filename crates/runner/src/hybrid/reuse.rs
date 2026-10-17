@@ -15,7 +15,8 @@
 //! rows, its loss weight (`weight`, a training shard's `NAME.npy.weight`; not for `val`) and its
 //! per-row weights (`rowweights`, the key of its `NAME.npy.rowweights`). A run with
 //! `upload_shards` writes these entries, ready to paste, in `out/hybrid/shards.json`
-//! (`label_inputs`), and in the audit loop (additive mode, or trick 2 where the targeted shards are
+//! (`label_inputs`: stored shards only; a shard whose upload failed waits in `label_inputs_pending`
+//! until the chunk's end retry stores it), and in the audit loop (additive mode, or trick 2 where the targeted shards are
 //! shared anyway) also shares every targeted harvest (set `extra`, with its sidecar, weight and row
 //! weights) and lists it in `out/hybrid/audit/label_inputs.json`: an additive run trains on old and
 //! new data together, so the old targeted data is kept too.

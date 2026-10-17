@@ -489,7 +489,9 @@ record the shard's SHA-256, the format, this binary's encoder, feature count and
 rung's trick and outcomes, the entry's seed, a source that fits the set, and the shard header's rows.
 Reused seeds count in the seed-disjointness checks (training, validation, audit, targeted harvests,
 golden). With `upload_shards`, a run now also shares each shard's sidecar (and row weights) and writes
-ready-to-paste entries: `out/hybrid/shards.json` (`label_inputs`: the base shards) and, in the audit
+ready-to-paste entries: `out/hybrid/shards.json` (`label_inputs`: the base shards that are stored; a
+shard whose upload failed waits in `label_inputs_pending`, its sidecar shared all the same, until the
+chunk's end retry stores it) and, in the audit
 loop (additive mode, or trick 2 where the targeted shards are shared anyway), `out/hybrid/audit/label_inputs.json`
 (every targeted harvest, set `extra`, with its weight).
 `label_inputs` works at every cut, trick 2 included (the sidecar must record the rung's trick and its

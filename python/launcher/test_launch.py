@@ -159,7 +159,12 @@ class World:
                 self.id_lookups += 1
                 if self.id_lookup_fails:
                     raise RuntimeError("vastai search offers failed: 429 Too Many Requests")
-                return [dict(o) for o in self.offers if o["id"] == int(args[2][3:])]
+                toks = args[2].split()
+                rows = [dict(o) for o in self.offers if o["id"] == int(toks[0][3:])]
+                if "verified=any" not in toks:
+                    # vast's default query: verified hosts only, unless the query says `verified=any`.
+                    rows = [o for o in rows if o.get("verification", "verified") == "verified"]
+                return rows
             self.searches += 1
             self.queries.append(args[2])
             if self.forbid_search:
@@ -1202,6 +1207,28 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual((code, w.created_on), (0, [500]))
         self.assertIn("offer 500 is on machine 50 (host 60400), which did not start a run (container failed to start at", self.log)
         self.assertIn("going ahead, because the owner named it", self.log)
+
+    def test_a_named_offer_on_an_unverified_host_is_found_described_and_rented(self):
+        # vast's search adds `verified=true` by itself: the lookup by id must lift it, or an unverified host's offer
+        # reads as gone (2026-10-17, offer 31231107). The offer is described before its checks.
+        w = World([offer(500, 50, 1.0, verification="unverified", cpu_ram=257000, geolocation="Texas, US")], ["done:1"])
+        w.forbid_search = True
+        code, _ = self.run_launch(w, self.FORMAT1, "--offer-id", "500")
+        self.assertEqual((code, w.created_on), (0, [500]))
+        self.assertIn("named offer 500: $1.000/h, 32 eff. cores of ?, EPYC 7B12, 257 GB RAM, 1x GTX 1080", self.log)
+        self.assertIn("host unverified", self.log)
+        self.assertIn("accepted, because the owner named it", self.log)
+
+    def test_a_named_offer_that_is_gone_says_why_after_wider_searches(self):
+        # Not found by the plain lookup: wider searches (any host, external, unrentable, interruptible) say why;
+        # here nothing finds it, and the refusal says the number may not be an offer id.
+        w = World([], ["done:1"])
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, self.FORMAT1, "--offer-id", "501")
+        self.assertIn("offer 501 is not on offer (on-demand) any more", str(e.exception))
+        self.assertIn("no wider search finds it", str(e.exception))
+        self.assertIn("the market's 150+ thread offers (0), matched here by id: not there either", str(e.exception))
+        self.assertEqual((w.created_on, w.id_lookups, w.searches), ([], 3, 1))
 
     def test_container_error_is_replaced_at_once(self):
         # The container cannot start: destroyed at the first poll (not after --startup-minutes)

@@ -1305,6 +1305,7 @@ pub(crate) fn chunk_with(
         audit_hb: Map::new(),
         shape: None,
         additive: None,
+        pending_shards: Vec::new(),
     };
     r.rec.insert("params".into(), params.to_json());
     r.rec.insert("table".into(), table_rec);
@@ -1323,7 +1324,9 @@ pub(crate) fn chunk_with(
         r.upload_shards(&shards)?;
     }
     if params.audit.is_some() {
-        return r.audit_chunk(shards);
+        let out = r.audit_chunk(shards);
+        r.retry_pending_shards()?;
+        return out;
     }
     let generate = params.check && params.golden_inputs.is_none();
     let overlap = gpu && params.overlap && generate;
@@ -1394,6 +1397,7 @@ pub(crate) fn chunk_with(
             TRAIN_ONLY.to_string()
         }
     };
+    r.retry_pending_shards()?;
     r.rec.insert("seconds".into(), json!(secs(r.t0)));
     r.save()?;
     r.ctx.set_phase(
@@ -1449,6 +1453,9 @@ struct Rung<'a> {
     /// `train_mode` `"additive"`: the starting network, the best so far and each round's
     /// adoption ([`additive`]); `None` in scratch mode.
     additive: Option<additive::Run>,
+    /// Label shards whose upload (`upload_shards`) failed: tried once more at the chunk's end
+    /// ([`Rung::retry_pending_shards`]); a failure never stops the run.
+    pending_shards: Vec<PathBuf>,
 }
 
 impl Rung<'_> {
@@ -1999,7 +2006,12 @@ impl Rung<'_> {
         Ok(train)
     }
 
-    /// Step 4b (`upload_shards`): each shard to `inputs/sha256/<hex>`.
+    /// Step 4b (`upload_shards`): each shard to `inputs/sha256/<hex>`. Sharing is for later runs
+    /// only (this run trains on the shards on its disk), so a failed upload never stops the run
+    /// (2026-10-17: a 38 MB shard on a host with a slow upload link was killed at its time limit
+    /// three times and ended the trick-2 mechanism test): it is a warning, the shard is listed as
+    /// not uploaded in `shards.json`, and it is tried once more at the chunk's end
+    /// ([`Rung::retry_pending_shards`]).
     fn upload_shards(&mut self, shards: &[PathBuf]) -> Result<(), String> {
         let t = Instant::now();
         let progress = self.progress("upload shards", json!({ "shards": shards.len() }));
@@ -2016,6 +2028,7 @@ impl Rung<'_> {
         let mut list = Vec::new();
         let mut inputs = Map::new();
         let mut label_inputs = Vec::new();
+        let mut label_inputs_pending = Vec::new();
         for path in shards {
             let name = path
                 .file_name()
@@ -2030,38 +2043,144 @@ impl Rung<'_> {
                 .unwrap_or(Value::Null);
             let want = rec["shard_sha256"].as_str().unwrap_or_default().to_string();
             let file = name;
-            let (p2, r) = (path.clone(), Arc::clone(&remote));
-            let (sha, bytes, status) = self
-                .ctx
-                .blocking(move || put_input(&*r, &p2, Some(&want)))
-                .map_err(|e| format!("hybrid_rung: upload_shards: {e}"))?;
-            println!("runner: hybrid_rung: {file}: inputs/sha256/{sha} ({status})");
-            inputs.insert(
-                file.trim_end_matches(".npy").to_string(),
-                json!(format!("sha256:{sha}")),
-            );
-            // What a later run's `label_inputs` names it by (its sidecar shared too). A failure
-            // is only a warning: the sidecar is in the bundle, and a paid run never stops for it.
-            let entry = match self.label_input_entry(path, &rec, &sha) {
-                Ok(e) => Some(e),
+            let (p2, r, w2) = (path.clone(), Arc::clone(&remote), want.clone());
+            let tu = Instant::now();
+            let uploaded = match self.ctx.blocking(move || put_input(&*r, &p2, Some(&w2))) {
+                Ok((sha, bytes, status)) => {
+                    println!("runner: hybrid_rung: {file}: inputs/sha256/{sha} ({status})");
+                    inputs.insert(
+                        file.trim_end_matches(".npy").to_string(),
+                        json!(format!("sha256:{sha}")),
+                    );
+                    list.push(json!({ "file": file, "sha256": sha, "bytes": bytes,
+                                      "key": input_key(&sha), "status": status,
+                                      "seconds": secs(tu) }));
+                    Some(sha)
+                }
                 Err(e) => {
                     self.warn(format!(
-                        "upload_shards: {file}: its sidecar was not shared ({e}); it is in this \
-                         run's bundle (out/hybrid/labels/)"
+                        "upload_shards: {file} was not uploaded ({e}); the run goes on (it trains \
+                         on the shard on its disk) and tries once more at its end"
                     ));
+                    list.push(
+                        json!({ "file": file, "sha256": want, "status": "not uploaded",
+                                      "error": e, "seconds": secs(tu) }),
+                    );
+                    self.pending_shards.push(path.clone());
                     None
                 }
             };
-            list.push(json!({ "file": file, "sha256": sha, "bytes": bytes,
-                              "key": input_key(&sha), "status": status,
-                              "sidecar_key": entry.as_ref().map(|e| e["sidecar"].clone()) }));
-            label_inputs.extend(entry);
+            // What a later run's `label_inputs` names it by, with its sidecar (and row weights)
+            // shared too, also for a shard whose own upload failed (it is tried again at the
+            // end). A failure is only a warning: the sidecar is in the bundle, and a paid run
+            // never stops for it. The entry of a shard not (yet) uploaded waits in
+            // `label_inputs_pending`, so `label_inputs` names only stored shards.
+            let sha = uploaded.clone().unwrap_or_else(|| want.clone());
+            let entry = if input_hex(&format!("sha256:{sha}")).is_none() {
+                None
+            } else {
+                match self.label_input_entry(path, &rec, &sha) {
+                    Ok(e) => Some(e),
+                    Err(e) => {
+                        self.warn(format!(
+                            "upload_shards: {file}: its sidecar was not shared ({e}); it is in \
+                             this run's bundle (out/hybrid/labels/)"
+                        ));
+                        None
+                    }
+                }
+            };
+            if let Some(last) = list.last_mut() {
+                last["sidecar_key"] = json!(entry.as_ref().map(|e| e["sidecar"].clone()));
+            }
+            match (entry, uploaded.is_some()) {
+                (Some(e), true) => label_inputs.push(e),
+                (Some(e), false) => label_inputs_pending.push(e),
+                (None, _) => {}
+            }
         }
         let doc = json!({ "shards": list, "manifest_inputs": inputs,
-                          "label_inputs": label_inputs });
+                          "label_inputs": label_inputs,
+                          "label_inputs_pending": label_inputs_pending });
         write_json(&self.out.join("shards.json"), &doc)?;
         self.rec.insert("shards".into(), doc);
         self.done("upload shards", t)
+    }
+
+    /// The chunk's last try at the label shards whose upload failed ([`Rung::upload_shards`]):
+    /// each one once more; still a warning on failure. Updates `shards.json` and `rung.json`.
+    fn retry_pending_shards(&mut self) -> Result<(), String> {
+        if self.pending_shards.is_empty() {
+            return Ok(());
+        }
+        let Some(remote) = self.tools.remote.clone() else {
+            return Ok(());
+        };
+        let t = Instant::now();
+        let progress = self.progress(
+            "upload shards (retry)",
+            json!({ "shards": self.pending_shards.len() }),
+        );
+        self.ctx.set_phase("chunk", progress);
+        let pending = std::mem::take(&mut self.pending_shards);
+        let mut doc = self
+            .rec
+            .get("shards")
+            .cloned()
+            .unwrap_or_else(|| json!({ "shards": [], "manifest_inputs": {} }));
+        for path in pending {
+            let file = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let Some(i) = doc["shards"]
+                .as_array()
+                .and_then(|l| l.iter().position(|s| s["file"].as_str() == Some(&file)))
+            else {
+                continue;
+            };
+            let want = doc["shards"][i]["sha256"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let (p2, r) = (path.clone(), Arc::clone(&remote));
+            let tu = Instant::now();
+            match self.ctx.blocking(move || put_input(&*r, &p2, Some(&want))) {
+                Ok((sha, bytes, status)) => {
+                    println!(
+                        "runner: hybrid_rung: {file}: inputs/sha256/{sha} ({status}, at the end)"
+                    );
+                    doc["manifest_inputs"][file.trim_end_matches(".npy")] =
+                        json!(format!("sha256:{sha}"));
+                    let sidecar = doc["shards"][i]["sidecar_key"].clone();
+                    doc["shards"][i] = json!({ "file": file, "sha256": sha, "bytes": bytes,
+                                               "key": input_key(&sha), "status": status,
+                                               "seconds": secs(tu), "retried": true,
+                                               "sidecar_key": sidecar });
+                    // Its `label_inputs` entry, waiting, now names a stored shard.
+                    let key = json!(input_key(&sha));
+                    if let Some(pend) = doc["label_inputs_pending"].as_array_mut()
+                        && let Some(j) = pend.iter().position(|x| x["shard"] == key)
+                    {
+                        let e = pend.remove(j);
+                        if let Some(l) = doc["label_inputs"].as_array_mut() {
+                            l.push(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.warn(format!(
+                        "upload_shards: {file} was not uploaded at the end either ({e}); it is \
+                         not stored for later runs"
+                    ));
+                    doc["shards"][i]["error_at_end"] = json!(e);
+                }
+            }
+        }
+        write_json(&self.out.join("shards.json"), &doc)?;
+        self.rec.insert("shards".into(), doc);
+        self.done("upload shards (retry)", t)?;
+        self.save()
     }
 
     /// Step 5: the golden set, generated (then shared: [`Rung::share_golden`]) or stored
@@ -3460,6 +3579,7 @@ mod tests {
             audit_hb: Map::new(),
             shape: None,
             additive: None,
+            pending_shards: Vec::new(),
         }
     }
 
@@ -4475,6 +4595,92 @@ esac
                 .as_str()
                 .is_some_and(|w| w.contains("the network was not shared")))),
             "{r}"
+        );
+    }
+
+    /// `upload_shards` on a store that refuses them (2026-10-17: a slow upload link killed the
+    /// trick-2 mechanism test at this step): the chunk goes on and trains, warns, lists each shard
+    /// as not uploaded in `shards.json`, and tries once more at its end.
+    #[test]
+    fn a_failed_shard_upload_never_stops_the_chunk() {
+        let f = fakes("shardfail");
+        let root_remote = f.base.join("remote");
+        fs::create_dir_all(&root_remote).expect("remote");
+        // `inputs` is a file: nothing can be written under `inputs/sha256/`.
+        fs::write(root_remote.join("inputs"), b"not a directory").expect("block");
+        let remote: Arc<dyn Remote> = Arc::new(crate::remote::DirRemote { root: root_remote });
+        let params = parse(&json!({
+            "cut": 2, "check": false, "labels_random": 7, "labels_random_seed": 511,
+            "labels_rules": 5, "labels_rules_seed": 512, "val_count": 3, "val_seed": 601,
+            "widths": "16,8", "epochs": 2, "upload_shards": true,
+        }))
+        .expect("params");
+        let tools = Tools {
+            search: f.search.clone(),
+            uv: f.uv.clone(),
+            python_dir: f.py.clone(),
+            nvidia_smi: f.base.join("no-such-nvidia-smi"),
+            remote: Some(Arc::clone(&remote)),
+        };
+        let root = f.base.join("run");
+        let mut ctx = Ctx::local("hybrid-test", &root, 4);
+        let r = chunk_with(&mut ctx, &params, &tools, &f.table, json!({}))
+            .expect("the chunk runs although no shard could be uploaded");
+        assert_eq!(r["verdict"], TRAIN_ONLY);
+        let out = root.join("out").join("hybrid");
+        let rung = read_json(&out.join("rung.json")).expect("rung.json");
+        let steps: Vec<&str> = rung["steps"]
+            .as_array()
+            .expect("steps")
+            .iter()
+            .filter_map(|s| s["step"].as_str())
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                "python environment",
+                "GPU check",
+                "labels random (1 of 3)",
+                "labels rules (2 of 3)",
+                "labels val (3 of 3)",
+                "upload shards",
+                "train",
+                "upload shards (retry)"
+            ]
+        );
+        let shards = read_json(&out.join("shards.json")).expect("shards.json");
+        let list = shards["shards"].as_array().expect("list");
+        assert_eq!(list.len(), 3, "{shards}");
+        for s in list {
+            assert_eq!(s["status"], "not uploaded", "{s}");
+            assert!(
+                s["error"].is_string() && s["error_at_end"].is_string(),
+                "{s}"
+            );
+            assert_eq!(s["sha256"].as_str().map(str::len), Some(64), "{s}");
+        }
+        assert_eq!(shards["manifest_inputs"], json!({}));
+        let warnings: Vec<&str> = r["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|w| w.contains("was not uploaded (") && w.contains("the run goes on"))
+                .count(),
+            3,
+            "{warnings:?}"
+        );
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|w| w.contains("was not uploaded at the end either"))
+                .count(),
+            3,
+            "{warnings:?}"
         );
     }
 
