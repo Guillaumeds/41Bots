@@ -162,6 +162,9 @@ pub struct AppTable {
     own: Bits,
     /// Every hand's size as the app shows it (a turned seat: 0).
     sizes: [usize; 8],
+    /// The cards shown face up in each other hand (the turned card its robber took, a Joker the
+    /// dealer stole; every card when the app sends the whole match): only those it took are read.
+    shown: [Bits; 8],
     /// A Joker was turned first this hand (stolen, left, or waiting to be stolen).
     joker_turned: bool,
     /// The dealer took it.
@@ -347,13 +350,20 @@ impl AppTable {
             return Err(bad("hand.hands must hold 8 hands"));
         }
         let mut sizes = [0usize; 8];
+        let mut shown = [0 as Bits; 8];
         let mut own: Bits = 0;
         for (s, x) in hands.iter().enumerate() {
             let a = x
                 .as_array()
                 .ok_or_else(|| bad(format!("hand.hands[{s}] must be an array")))?;
             sizes[s] = a.len();
-            if s == usize::from(seat) {
+            if s != usize::from(seat) {
+                for (i, c) in a.iter().enumerate() {
+                    if let Some(c) = opt_card(c, &format!("hand.hands[{s}][{i}]"))? {
+                        shown[s] |= bit(c);
+                    }
+                }
+            } else {
                 for (i, c) in a.iter().enumerate() {
                     let c = card_value(c, &format!("hand.hands[{s}][{i}] (the seat's own card)"))?;
                     if has(own, c) {
@@ -448,6 +458,7 @@ impl AppTable {
             start,
             own,
             sizes,
+            shown,
             joker_turned,
             joker_stolen,
             joker_left,
@@ -693,11 +704,53 @@ pub fn rebuild(t: &AppTable) -> Result<Rebuilt, Refusal> {
     }
 
     // Every card the seat knows the place of.
-    let public_held: [Bits; 8] = core::array::from_fn(|s| taken[s] & !played_by[s]);
+    // A card a seat took is seen in its hand until it plays it (or, for the seat itself, burns it:
+    // a dealer who stole the Joker may burn it when it robs; another seat cannot tell which card
+    // a burn was, so for it the Joker stays in that hand, as the engine's own view has it).
+    let public_held: [Bits; 8] = core::array::from_fn(|s| {
+        let left = taken[s] & !played_by[s];
+        if s == m_idx {
+            left & !own_burn_bits
+        } else if !t.penalised[s] {
+            // What the app shows face up in that hand.
+            left & t.shown[s]
+        } else if count(left) as usize > size_now[s] {
+            // A turned hand is face down: it can only have burned the Joker it stole.
+            left & !bit(JOKER)
+        } else {
+            left
+        }
+    });
+    // A stolen Joker another seat sees gone from the dealer's hand without being played was
+    // burned when the dealer robbed: that burn is the Joker.
+    let mut joker_burn: Option<usize> = None;
+    for s in 0..8 {
+        if s == m_idx {
+            continue;
+        }
+        let gone = taken[s] & !played_by[s] & !public_held[s];
+        if gone == 0 {
+            continue;
+        }
+        if gone != bit(JOKER) {
+            return Err(inconsistent(format!(
+                "seat {s}'s turned card is not in its hand"
+            )));
+        }
+        joker_burn = seq
+            .iter()
+            .position(|&(bs, k)| usize::from(bs) == s && k != BurnKind::JokerTake);
+        if joker_burn.is_none() {
+            return Err(inconsistent(
+                "a stolen Joker is gone from the dealer's hand",
+            ));
+        }
+    }
     let turned_bits = turned_seq.iter().fold(0, |a: Bits, &c| a | bit(c));
     let mut known = t.own | own_burn_bits | played | turned_bits;
     if t.own & (own_burn_bits | played | turned_bits) & !public_held[m_idx] != 0
-        || own_burn_bits & (played | turned_bits) != 0
+        || own_burn_bits & played != 0
+        || own_burn_bits & turned_bits & !taken[m_idx] != 0
     {
         return Err(inconsistent("a card of the seat's is also elsewhere"));
     }
@@ -731,32 +784,48 @@ pub fn rebuild(t: &AppTable) -> Result<Rebuilt, Refusal> {
                 excluded[usize::from(s)] |= bit(ace);
             }
         }
+        // A pair turned at its robber's turn in trick 1 (Guide's play without robbing): its
+        // first seat in trick-1 order without a trick-1 play held the ace (and anyone who took
+        // the turned card after it robbed without the ace).
+        let no_rob = no_rob_seat(t, first);
         match robber_at_turn {
+            _ if no_rob.is_some() => {
+                let x = usize::from(no_rob.expect("checked"));
+                forced_hand[x] |= bit(ace);
+                excluded[x] &= !bit(ace);
+                if let Some(r) = robber_at_turn {
+                    excluded[usize::from(r)] |= bit(ace);
+                }
+            }
             Some(r) if t.caught_burned_ace[usize::from(r)] => {
                 forced_burn = seq
                     .iter()
                     .position(|&(s, k)| s == r && k == BurnKind::AtTurn);
+                if forced_burn.is_some() && forced_burn == joker_burn {
+                    return Err(inconsistent(
+                        "a burn is both the ace of trumps and the Joker",
+                    ));
+                }
             }
             Some(r) if t.caught_false_rob[usize::from(r)] => {
                 excluded[usize::from(r)] |= bit(ace);
             }
             // A robber with no hidden card left that never showed the ace of trumps lapsed (the
             // app catches it at the end of the hand): it burned the ace, or robbed without it.
-            // Either fits what the seat saw; the deal takes the burned ace.
+            // Either fits what the seat saw; the deal takes the burned ace, unless that burn is
+            // the stolen Joker (then it robbed without the ace).
             Some(r) if hidden_cap[usize::from(r)] == 0 => {
-                forced_burn = seq
+                let b = seq
                     .iter()
                     .position(|&(s, k)| s == r && k == BurnKind::AtTurn);
-            }
-            Some(r) => forced_hand[usize::from(r)] |= bit(ace),
-            None => {
-                // A pair turned at its robber's turn in trick 1 (Guide's play without robbing):
-                // its first seat in trick-1 order without a trick-1 play held the ace.
-                if let Some(x) = no_rob_seat(t, first) {
-                    forced_hand[usize::from(x)] |= bit(ace);
-                    excluded[usize::from(x)] &= !bit(ace);
+                if b.is_some() && b == joker_burn {
+                    excluded[usize::from(r)] |= bit(ace);
+                } else {
+                    forced_burn = b;
                 }
             }
+            Some(r) => forced_hand[usize::from(r)] |= bit(ace),
+            None => {}
         }
     }
     for s in 0..8 {
@@ -814,7 +883,7 @@ pub fn rebuild(t: &AppTable) -> Result<Rebuilt, Refusal> {
     }
     let mut burn_place = vec![usize::MAX; seq.len()];
     for (i, &(s, kind)) in seq.iter().enumerate() {
-        if s == me || Some(i) == forced_burn {
+        if s == me || Some(i) == forced_burn || Some(i) == joker_burn {
             continue;
         }
         let mut allowed = unknown;
@@ -852,6 +921,8 @@ pub fn rebuild(t: &AppTable) -> Result<Rebuilt, Refusal> {
             *own_iter.next().expect("counted above")
         } else if Some(i) == forced_burn {
             ace.expect("trumps known")
+        } else if Some(i) == joker_burn {
+            JOKER
         } else {
             cards(placed[burn_place[i]]).next().expect("one card")
         };

@@ -1,8 +1,8 @@
 # The engine in the browser: the WebAssembly API
 
-**Status: Stage A built (2026-10-17): the bots' fields, tested and measured.** Stage B (the coach's
-fields: `trickWin`, `trickWinner`, `expectedPoints`, `gameEnds`, `plan`) is marked "coming". The
-design follows `docs/APP-ENGINE-CONTRACT.md` §1–§3, §5, §6 and §7.1; this file is its item §5.1,
+**Status: built (2026-10-17).** Stage A, the bots' fields, and Stage B, the coach's fields from each
+deal's principal line (`trickWin`, `trickWinner`, `expectedPoints`, `gameEnds`, `plan`; asked for
+with `lines: true`), tested and measured. The design follows `docs/APP-ENGINE-CONTRACT.md` §1–§3, §5, §6 and §7.1; this file is its item §5.1,
 bots first. Changes since the Stage 0 draft are listed at the end.
 
 ## 1. What the app gets
@@ -100,6 +100,7 @@ const request = { v: 1, seat, deals: 64, seed: String(seed), match: maskMatch(m,
 | `shard`, `shards` | optional, default 0 and 1; `shards` ≤ `deals` | this call values shard `shard` of `shards` (§6) |
 | `ttMb` | optional, 1..1024, default 16 | the exact search's memory table in MB: only the speed, never a value (measured: 2 to 64 MB change the time by about 10%) |
 | `ownBurns` | optional, app card ids, oldest first | the cards this seat burned this hand, when `match.hand.discards` hides them |
+| `lines` | optional, default false | also the coach's fields from each deal's principal line (§4.1): every candidate then has its own row. Costs about 10% more at trick 2 and about 3× at tricks 3–5 (measured, §8); the bots leave it off. |
 | `match` | the app's `MatchState` | the seat's view: `maskMatch(m, seat)`. The unmasked match gives the same bytes (tested): the engine reads nothing a seat may not see. |
 
 **What the engine reads from `match`** (everything else is ignored):
@@ -231,7 +232,32 @@ and the three other candidates shortened):
 | `.se` | standard error of `value` over the deals, computed in whole numbers (0 with one deal) |
 | `.n`, `.ess` | deals valued; effective sample size of the deals' weights (`(Σw)²/Σw²`), equal to `n` (the deals are equally weighted today) |
 | `.sum_fp[4]`, `.sumsq_fp` | exact sums over the deals of each pair's fixed-point value and of the square of the acting pair's: what `merge` adds (strings) |
-| `.trickWin`, `.trickWinner[8]`, `.expectedPoints`, `.gameEnds`, `.plan` | **coming (Stage B)**: contract §1 and §2, from each deal's principal line, merged by `n` |
+| `.trickWin`, `.trickWinner[8]`, `.expectedPoints[4]`, `.gameEnds`, `.plan`, `.lines_fp` | with `lines: true` only (§4.1) |
+
+### 4.1 The coach's fields (`lines: true`)
+
+The **principal line** of a candidate in a deal is the line its value comes from: after the
+candidate every seat plays the card the solver chooses there (its pair's best, ties to the first
+card, the engine's tie rule), a robber burns its pair's best card. The engine walks it by solving
+again at each step with the same evaluator and frontier, and the tests check that each line ends
+exactly where the deal's value comes from (the leaf after the hand, or the network's value at the
+frontier). The line stops at the end of the hand (exact search) or at the network's frontier
+(the hybrid); beyond the frontier the network's outcome head [its estimate of how likely each way
+of ending the hand is] gives the endings' chances.
+
+| Field | Meaning |
+|---|---|
+| `.trickWinner[8]` | per seat (0..7), the share of deals whose line has that seat win the current trick |
+| `.trickWin` | the share of deals whose line has the acting seat's pair win it (the sum of its two seats) |
+| `.expectedPoints[4]` | per pair (`seat % 4`), the mean over deals of its points in this hand on the line: exact where the line reaches the end of the hand (11/10 as credited, a jink as the app credits it: what the pair needs, at least 10); beyond the frontier the mean over the network's endings: a hand that ends gives every pair its points exactly (5 a trick, the bonus fixed by the position); a game won by a pair credits it the points that reach 41 and every other pair its points at the frontier (a lower bound, contract §6.3). A turned pair scores 0. |
+| `.gameEnds` | the share of deals whose line ends a game in this hand (beyond the frontier: the network's chance of a game-won ending) |
+| `.plan` | `{ "<app card>": [5 shares] }` for every card of the acting seat's hand: the share of deals whose line plays that card in trick 1..5 (index 0..4). The candidate's own card is 1 in the current trick; robs are not counted; a card the line does not reach before the frontier has shares summing below 1 (contract §2) |
+| `.lines_fp` | the exact sums behind them (`winner` counts per seat, `points` per pair in units of 2⁻³² points, `gameEnds` in units of 2⁻³², `plan` counts): what `merge` adds |
+
+Every share and mean is computed in whole numbers (the network's chances from its integer softmax
+weights) and divided once at the end, so merged shards give the same bytes. With `lines: true`
+every candidate has its own row (its line is its own), and `equivalent` still lists the actions of
+equal value in every deal. Results with and without the lines never merge.
 
 A forced card gives `method: "forced"`, `worlds: 0`, one candidate with `mean`, `mean_fp`,
 `value`, `se`, `sum_fp`, `sumsq_fp` null and `n` 0; it needs no file loaded. `stake` and `floor`
@@ -317,6 +343,13 @@ plain and with `+simd128`):
 - Where the time goes at trick 2 in WebAssembly: 89% in the network's two integer kernels
   (`nn::kernel`, no SIMD there); natively those kernels use AVX2, hence the 5×. A hand-written
   WebAssembly SIMD kernel (same integers, same bytes) is the one lever left; it is not built.
+- **The coach's lines** (`lines: true`), one instance in WebAssembly, ms per deal without / with:
+  trick 2 leader 337 / 375, second 230 / 253, fourth 31 / 31 (the line's searches to the frontier
+  mostly reuse the network's memo); trick 3 leader 17 / 54, second 8.9 / 27, fourth 3.7 / 5.8
+  (the line is searched to the end of the hand).
+- The network's memo of recent positions lives as long as the instance: a later request that
+  meets the same frontier positions (the same deals again, or the next decision of the same hand)
+  runs faster. It never changes a value.
 - Several workers (measured with real worker threads, same bytes as one): trick 2 leader 1.6× /
   2.1× / 2.2× faster with 2 / 3 / 4 workers (deals cost unevenly, the slowest shard decides, and
   four copies of the network share the memory bus); trick-2 second seat 2.2× / 2.5× / 3.4×;
@@ -344,7 +377,6 @@ table of deals by trick and place that its slowest supported phone meets, e.g. f
 
 ## 9. What is coming
 
-- Stage B: `trickWin`, `trickWinner[8]`, `expectedPoints`, `gameEnds`, `plan` (contract §1, §2).
 - Trick 1 works as soon as O_2 is loaded (plays and the robber's rob, H_2); the dealer's burn
   before trick 1 needs a method first (`not_built`).
 - A view from another seat than the one to act (the app's §5), `plan_only` (contract §6.5), and a
@@ -366,12 +398,18 @@ table of deals by trick and place that its slowest supported phone meets, e.g. f
   the yardstick's per-deal `exact_world` with the network as frontier (trick 2 with O_3, trick 1
   and the robber's joint rob with O_2, a turned pair), and the best is the native choice.
 - **The rebuilt view is the engine's own**: on every decision of random matches (12 plain, 40
-  with the app's referee steps: pairs turned at a rob, refused aces, left Jokers, illegal cards,
+  with the app's referee steps; the long run: 1,600 matches, 566,910 views, 34,648 of them with a
+  pair turned: pairs turned at a rob, refused aces, left Jokers, illegal cards,
   plays without robbing, false robs, burned aces), the view rebuilt from the app's JSON equals the
   engine's view of the seat (hand, burns, public state, every event of the hand), masked or not;
   a hidden own burn is refused `own_burns_hidden`, a seat's own uncaught renege
   `inconsistent_view`. A longer run: `WASM_API_MATCHES=400 cargo test --release -p wasm --test
   api -- --ignored`.
+- **The coach's lines**: each line's end value equals its deal's value for every candidate and
+  deal (trick 2 with O_3, tricks 3 and 4, a turned pair, trick 1 with O_2 including a robber's
+  rob); the shares add up (the candidate's card in its trick, each card at most once, the trick's
+  winners at most 1); 2, 3, 4 and 7 shards merge to the same bytes; three of the check's requests
+  ask for the lines, natively and in WebAssembly.
 - **Cards and actions**: all 53 cards both ways; plays in the app's numbers; a robber's candidates
   are a rob of each of its five cards but the ace of trumps, never of the card it takes, each with
   its play.
@@ -385,3 +423,9 @@ table of deals by trick and place that its slowest supported phone meets, e.g. f
 - Trick 1 is valued as soon as O_2 is loaded (it was "coming").
 - `merge` of identical refusals returns that refusal.
 - `worldCount` and the forced card's fields are `null` for a forced card.
+- Stage B: the request's `lines` and the fields of §4.1 (`expectedPoints` per pair, as the app's
+  `CandidateStats` has it).
+- A dealer who stole the Joker and burned it when robbing is read (the long test found it); for
+  another seat that burn stays a face-down card in the engine's view, as the engine's own view has
+  it (the app shows the Joker gone from the dealer's hand: slightly less information, never a
+  wrong one).

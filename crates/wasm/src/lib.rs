@@ -21,6 +21,7 @@ pub mod appview;
 pub mod cards;
 pub mod ffi;
 pub mod fixtures;
+pub mod lines;
 
 use engine::game::{Match, Rules, Visibility};
 use engine::rng::Rng;

@@ -29,10 +29,11 @@ fn leaf() -> Arc<dyn Leaf + Send + Sync> {
     Arc::new(SyntheticLeaf)
 }
 
-/// A seeded random network for trick `k`, as a weights file.
+/// A seeded random network for trick `k` with the outcome head (as O_3 has), as a weights file.
 fn net_bytes(k: u8) -> Vec<u8> {
-    let net = random_net(u64::from(k) * 7 + 1, &[32, 16], 4, 100);
-    nn::oracle::write_net(&net, k, &BTreeMap::new())
+    let net = random_net(u64::from(k) * 7 + 1, &[32, 16], nn::outcome::vocab(k), 100);
+    let extra = BTreeMap::from([("head".to_string(), "outcome-v1".to_string())]);
+    nn::oracle::write_net(&net, k, &extra)
 }
 
 /// An engine over the synthetic leaf with random O_3 (and O_2 when asked).
@@ -90,6 +91,29 @@ fn same_view(a: &SeatView, b: &SeatView) -> bool {
         && hand_events(a) == hand_events(b)
 }
 
+/// Where two views differ, in words (for failures).
+fn view_diff(a: &SeatView, b: &SeatView) -> String {
+    if a.hand != b.hand || a.own_burns != b.own_burns {
+        return format!(
+            "hand {} / {}, burns {} / {}",
+            engine::cards::names(a.hand),
+            engine::cards::names(b.hand),
+            engine::cards::names(a.own_burns),
+            engine::cards::names(b.own_burns)
+        );
+    }
+    if a.public != b.public {
+        return format!("public\n{:?}\n{:?}", a.public, b.public);
+    }
+    let (x, y) = (hand_events(a), hand_events(b));
+    for (i, (e, f)) in x.iter().zip(y).enumerate() {
+        if e != f {
+            return format!("event {i}: {} / {}", e.canonical(), f.canonical());
+        }
+    }
+    format!("{} / {} events", x.len(), y.len())
+}
+
 /// Does the seat to act have a renege of its own nobody has caught (the app then shows it to
 /// that seat alone, and the API refuses the view)?
 fn own_hidden_renege(m: &Match) -> bool {
@@ -115,7 +139,8 @@ fn check_rebuild(m: &Match, counts: &mut [u32; 4]) {
                 assert!(!hidden_own, "a seat's own hidden renege is refused");
                 assert!(
                     same_view(&r.view, &want),
-                    "{mask:?}: the rebuilt view differs\n{}",
+                    "{mask:?}: the rebuilt view differs: {}\n{}",
+                    view_diff(&r.view, &want),
                     engine::game::transcript(m)
                 );
                 counts[0] += 1;
@@ -711,4 +736,181 @@ fn the_rebuilt_view_is_the_engines_own_long() {
         "rebuilt {} views; {} own burns hidden; {} with a pair turned; {} own lapses refused",
         counts[0], counts[1], counts[2], counts[3]
     );
+}
+
+/// Positions for the lines' tests: trick 2 (hybrid), 3 and 4 (exact), a turned pair, trick 1
+/// with O_2 (a play and a robber's rob).
+fn line_cases() -> Vec<(Match, u32)> {
+    let plain = |m: &Match| !any_turned(m) && m.reneges().is_empty();
+    vec![
+        (find(91, 0, &|m| plain(m) && playing(m, 2)), 3),
+        (find(92, 0, &|m| plain(m) && playing(m, 3)), 6),
+        (find(93, 0, &|m| plain(m) && playing(m, 4)), 8),
+        (
+            find(94, 4, &|m| {
+                any_turned(m) && playing(m, 3) && m.reneges().iter().all(|r| r.caught)
+            }),
+            5,
+        ),
+        (
+            find(95, 0, &|m| {
+                plain(m) && playing(m, 1) && m.public().trick_cards.len() >= 6
+            }),
+            2,
+        ),
+        (
+            find(96, 0, &|m| {
+                let p = m.public();
+                matches!(p.phase, Phase::AwaitBurn(_))
+                    && p.trick_no == 1
+                    && p.trick_cards.len() >= 6
+            }),
+            1,
+        ),
+    ]
+}
+
+#[test]
+fn each_lines_end_is_its_deals_value() {
+    // The principal line ends where the search's value comes from: the leaf after the hand, or
+    // the network's value at the frontier, equal to the candidate's value in that deal.
+    let o3 = Oracle::from_bytes(&net_bytes(3), leaf()).expect("loads");
+    let o2 = Oracle::from_bytes(&net_bytes(2), leaf()).expect("loads");
+    let leaf = leaf();
+    for (k, (m, deals)) in line_cases().iter().enumerate() {
+        let seat = m.to_act().expect("a decision");
+        let view = m.view(seat);
+        let p = &view.public;
+        let net = match p.trick_no {
+            1 if !any_turned(m) => Some((2u8, &o2)),
+            2 if !any_turned(m) => Some((3u8, &o3)),
+            _ => None,
+        };
+        let (_, cands) = candidates(&view, &m.legal_actions());
+        let source = BeliefSource::new();
+        let ctx = Ctx {
+            leaf: &*leaf,
+            source: &source,
+            rules: Rules::HOUSE,
+        };
+        let cfg = SearchConfig::default();
+        let worlds = source.prepare(&view, Rules::HOUSE);
+        let walker = wasm::lines::Walker {
+            leaf: &*leaf,
+            cut: net,
+            tt_mb: 16,
+        };
+        let mut mem = SolveMem::new();
+        for w in 0..u64::from(*deals) {
+            let wm = world_match(&view, &*worlds, w, 5 + k as u64, Rules::HOUSE);
+            let cut = net.map(|(t, o)| FrontierCut::new(t, o));
+            let row = exact_world(
+                &wm,
+                &cands,
+                &ctx,
+                &cfg,
+                None,
+                &mut mem,
+                &mut WorldSolve::default(),
+                cut,
+            )
+            .expect("solved");
+            for (j, &cand) in cands.iter().enumerate() {
+                let l = wasm::lines::principal_line(&wm, cand, &walker, &mut mem);
+                assert_eq!(
+                    l.end_value, row[j],
+                    "case {k}, deal {w}, candidate {cand:?}"
+                );
+                // The candidate's own card is played in the current trick.
+                let own = cand.1.unwrap_or(cand.0.card());
+                let t0 = p.trick_no.max(1) - 1;
+                assert_eq!(l.plays.first(), Some(&(own, t0)), "case {k}");
+            }
+        }
+    }
+}
+
+#[test]
+fn lines_merge_to_the_same_bytes_and_add_up() {
+    let e = engine(true);
+    for (k, (m, deals)) in line_cases().into_iter().enumerate() {
+        let mut req = app_request(&m, deals, 31 + k as u64, Mask::SeatOwnBurns);
+        req["lines"] = json!(true);
+        let whole = e.evaluate(&req.to_string());
+        let v = parse(&whole);
+        assert_eq!(v["status"], "ok", "case {k}: {whole}");
+        let seat = m.to_act().expect("a decision");
+        let n = f64::from(deals);
+        let hand: Vec<String> = engine::cards::cards(m.view(seat).hand)
+            .map(|c| app_card(c).to_string())
+            .collect();
+        for c in v["candidates"].as_array().expect("candidates") {
+            // One row per action with the lines.
+            assert_eq!(c["equivalent"][0]["action"], c["action"], "case {k}");
+            let winners: Vec<f64> = c["trickWinner"]
+                .as_array()
+                .expect("8")
+                .iter()
+                .map(|x| x.as_f64().expect("a share"))
+                .collect();
+            assert_eq!(winners.len(), 8);
+            let total: f64 = winners.iter().sum();
+            assert!(total <= 1.0 + 1e-9, "case {k}");
+            let pair: f64 = (0..8)
+                .filter(|&s| s % 4 == seat % 4)
+                .map(|s| winners[s as usize])
+                .sum();
+            assert!((pair - c["trickWin"].as_f64().expect("a share")).abs() < 1e-9);
+            for x in c["expectedPoints"].as_array().expect("4") {
+                let x = x.as_f64().expect("points");
+                assert!((0.0..=41.0).contains(&x), "case {k}: {x}");
+            }
+            let g = c["gameEnds"].as_f64().expect("a share");
+            assert!((0.0..=1.0).contains(&g));
+            // The plan: a row per card of the seat's hand; the candidate's card in this trick in
+            // every deal; no card in two tricks more often than there are deals.
+            let plan = c["plan"].as_object().expect("the plan");
+            let mut keys: Vec<&String> = plan.keys().collect();
+            keys.sort_by_key(|x| x.parse::<u8>().expect("a card"));
+            let mut want = hand.clone();
+            want.sort_by_key(|x| x.parse::<u8>().expect("a card"));
+            assert_eq!(keys, want.iter().collect::<Vec<_>>(), "case {k}");
+            let own = c.get("then").map_or(&c["action"]["card"], |t| &t["card"]);
+            let t0 = (m.public().trick_no.max(1) - 1) as usize;
+            assert_eq!(plan[&own.to_string()][t0].as_f64(), Some(1.0), "case {k}");
+            for row in plan.values() {
+                let s: f64 = row
+                    .as_array()
+                    .expect("5")
+                    .iter()
+                    .map(|x| x.as_f64().expect("a share"))
+                    .sum();
+                assert!(s <= 1.0 + 1e-9, "case {k}");
+            }
+            let _ = n;
+        }
+        for kk in [2u32, 3, 4, 7] {
+            let kk = kk.min(deals);
+            let mut parts = Vec::new();
+            for i in (0..kk).rev() {
+                req["shard"] = json!(i);
+                req["shards"] = json!(kk);
+                parts.push(e.evaluate(&req.to_string()));
+            }
+            assert_eq!(
+                merge(&format!("[{}]", parts.join(","))),
+                whole,
+                "case {k}, {kk} shards"
+            );
+        }
+        // Results with and without the lines never merge.
+        req.as_object_mut().expect("an object").remove("shard");
+        req.as_object_mut().expect("an object").remove("shards");
+        req["lines"] = json!(false);
+        let plain = e.evaluate(&req.to_string());
+        assert_eq!(
+            code(&merge(&format!("[{plain},{whole}]"))),
+            "merge_mismatch"
+        );
+    }
 }

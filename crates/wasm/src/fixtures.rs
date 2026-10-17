@@ -206,10 +206,20 @@ pub fn requests() -> Vec<(String, String)> {
             16,
         ),
     ];
+    // The coach's fields (`lines`) on three of them.
+    let with_lines: Vec<(String, Match, u32)> = out
+        .iter()
+        .filter(|(n, _, _)| ["t2-hybrid", "t3-exact", "t3-turned"].contains(&n.as_str()))
+        .map(|(n, m, d)| (format!("{n}-lines"), m.clone(), (*d).min(8)))
+        .collect();
+    out.extend(with_lines);
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out.into_iter()
         .map(|(name, m, deals)| {
-            let req = app_request(&m, deals, 20_261_017, Mask::SeatOwnBurns);
+            let mut req = app_request(&m, deals, 20_261_017, Mask::SeatOwnBurns);
+            if name.ends_with("-lines") {
+                req["lines"] = serde_json::Value::Bool(true);
+            }
             (name, req.to_string())
         })
         .collect()

@@ -26,6 +26,7 @@ use solver::{FrontierCut, Leaf, SolveMem};
 
 use crate::appview::{AppPhase, AppTable, Refusal, field, int, rebuild};
 use crate::cards::{app_card, engine_card};
+use crate::lines::{LineSums, Walker, principal_line};
 
 /// The request and result format version.
 pub const API_VERSION: u32 = 1;
@@ -106,6 +107,8 @@ struct CandTotals {
     sums: [u64; 4],
     /// Σ of the square of the acting team's value.
     sumsq: u128,
+    /// The principal lines' sums (when the request asked for `lines`).
+    lines: LineSums,
 }
 
 /// Everything a result says, in the engine's terms: what [`write`] prints and [`merge`] adds.
@@ -123,6 +126,10 @@ struct Totals {
     to: u32,
     world_count: Option<u128>,
     verb: BurnVerb,
+    /// The coach's fields from each deal's principal line were asked for.
+    lines: bool,
+    /// The acting seat's cards (its hand at the decision; the plan's rows).
+    hand: Vec<Card>,
     /// In the engine's candidate order.
     cands: Vec<CandTotals>,
     /// Per candidate: the first candidate whose value equalled its own in every deal.
@@ -137,6 +144,7 @@ struct Request {
     shard: u32,
     shards: u32,
     tt_mb: usize,
+    lines: bool,
     table: AppTable,
 }
 
@@ -199,6 +207,11 @@ fn read_request(text: &str) -> Result<Request, Refusal> {
         }
         Some(_) => return Err(bad("ownBurns must be an array of cards")),
     };
+    let lines = match v.get("lines") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(bad("lines must be true or false")),
+    };
     let table = AppTable::read(field(&v, "match", "request")?, seat, own_burns)?;
     Ok(Request {
         seat,
@@ -207,6 +220,7 @@ fn read_request(text: &str) -> Result<Request, Refusal> {
         shard,
         shards,
         tt_mb,
+        lines,
         table,
     })
 }
@@ -375,7 +389,7 @@ impl Engine {
             _ => None,
         };
         let engine = engine_version(net_sha);
-        let key = request_key(&engine, &view, req.seat, req.deals, req.seed);
+        let key = request_key(&engine, &view, req.seat, req.deals, req.seed, req.lines);
         let (from, to) = shard_range(req.deals, req.shard, req.shards);
         let mut t = Totals {
             engine,
@@ -390,12 +404,15 @@ impl Engine {
             to,
             world_count: None,
             verb,
+            lines: req.lines,
+            hand: engine::cards::cards(view.hand).collect(),
             cands: cands
                 .iter()
                 .map(|&cand| CandTotals {
                     cand,
                     sums: [0; 4],
                     sumsq: 0,
+                    lines: LineSums::default(),
                 })
                 .collect(),
             class: (0..cands.len()).collect(),
@@ -431,6 +448,14 @@ impl Engine {
         let n = cands.len();
         let mut same = vec![vec![true; n]; n];
         let mut mem = SolveMem::new();
+        let walker = Walker {
+            leaf: &**leaf,
+            cut: match method {
+                Method::Hybrid(k) => Some((k, &self.nets[&k])),
+                _ => None,
+            },
+            tt_mb: req.tt_mb,
+        };
         for w in from..to {
             let world = world_match(&view, &*worlds, u64::from(w), req.seed, Rules::HOUSE);
             let mut run = WorldSolve::default();
@@ -449,6 +474,12 @@ impl Engine {
                     }
                 }
             }
+            if req.lines {
+                for (j, &cand) in cands.iter().enumerate() {
+                    let l = principal_line(&world, cand, &walker, &mut mem);
+                    t.cands[j].lines.add(&l);
+                }
+            }
         }
         t.class = (0..n)
             .map(|j| (0..=j).find(|&i| i == j || same[i][j]).expect("itself"))
@@ -459,9 +490,16 @@ impl Engine {
 
 /// The fingerprint of a search: the engine version, the seat's view as the engine rebuilt it,
 /// the seat, the deals and the seed (equal for every shard of one search).
-fn request_key(engine: &str, view: &SeatView, seat: u8, deals: u32, seed: u64) -> String {
+fn request_key(
+    engine: &str,
+    view: &SeatView,
+    seat: u8,
+    deals: u32,
+    seed: u64,
+    lines: bool,
+) -> String {
     let v = serde_json::to_string(view).expect("a view serialises");
-    sha256_hex(format!("{engine}\n{seat}\n{deals}\n{seed}\n{v}").as_bytes())
+    sha256_hex(format!("{engine}\n{seat}\n{deals}\n{seed}\n{lines}\n{v}").as_bytes())
 }
 
 // ----- writing -----
@@ -519,7 +557,13 @@ fn write(t: &Totals) -> String {
     // Groups: candidates equal in every deal, each led by its first member (engine order).
     let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
     for j in 0..t.cands.len() {
-        if t.class[j] == j {
+        if t.lines {
+            // With the lines every candidate is its own row (its line is its own); `equivalent`
+            // still lists the candidates of equal value in every deal, itself first.
+            let mut members = vec![j];
+            members.extend((0..t.cands.len()).filter(|&i| i != j && t.class[i] == t.class[j]));
+            groups.push((j, members));
+        } else if t.class[j] == j {
             groups.push((j, vec![j]));
         } else {
             let g = groups
@@ -596,12 +640,63 @@ fn write(t: &Totals) -> String {
                     fp_number(se_fp(c.sums[team], c.sumsq, n)),
                     json_str(&c.sumsq.to_string())
                 ));
+                if t.lines {
+                    s.push_str(&lines_json(&c.lines, &t.hand, t.seat, n));
+                }
             }
         }
         s.push('}');
     }
     s.push_str("]}");
     s
+}
+
+/// A share of `n` deals as a JSON number (an exact quotient of whole numbers, correctly rounded).
+fn share(count: u64, n: u64) -> String {
+    format!("{}", count as f64 / n as f64)
+}
+
+/// The mean over `n` deals of a sum in units of 2^-32, as a JSON number (floor in whole numbers,
+/// then exact).
+fn mean_fp(sum: u128, n: u64) -> String {
+    let q = sum / u128::from(n);
+    format!("{}", q as f64 / ONE as f64)
+}
+
+/// The coach's fields of a candidate from its lines' sums (docs/WASM-API.md §4), then the sums
+/// themselves (`lines_fp`, for `merge`).
+fn lines_json(l: &LineSums, hand: &[Card], seat: u8, n: u64) -> String {
+    let team = team_of(seat);
+    let won: u64 = (0..8u8)
+        .filter(|&s| team_of(s) == team)
+        .map(|s| l.winner[usize::from(s)])
+        .sum();
+    let winner = l.winner.map(|c| share(c, n)).join(",");
+    let points = l.points_fp.map(|x| mean_fp(x, n)).join(",");
+    // The plan's rows: the acting seat's cards, in the app's numbering.
+    let mut rows: Vec<(u8, [u64; 5])> = hand
+        .iter()
+        .map(|&c| (app_card(c), l.plan.get(&c).copied().unwrap_or_default()))
+        .collect();
+    rows.sort_by_key(|r| r.0);
+    let plan = rows
+        .iter()
+        .map(|(c, v)| format!("\"{c}\":[{}]", v.map(|x| share(x, n)).join(",")))
+        .collect::<Vec<_>>()
+        .join(",");
+    let raw_plan = rows
+        .iter()
+        .map(|(c, v)| format!("\"{c}\":[{}]", v.map(|x| x.to_string()).join(",")))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        ",\"trickWin\":{},\"trickWinner\":[{winner}],\"expectedPoints\":[{points}],\"gameEnds\":{},\"plan\":{{{plan}}},\"lines_fp\":{{\"winner\":[{}],\"points\":[{}],\"gameEnds\":{},\"plan\":{{{raw_plan}}}}}",
+        share(won, n),
+        mean_fp(l.game_end_fp, n),
+        l.winner.map(|c| c.to_string()).join(","),
+        l.points_fp.map(|x| json_str(&x.to_string())).join(","),
+        json_str(&l.game_end_fp.to_string()),
+    )
 }
 
 /// The standard error of the mean of `n` values with sum `s` and sum of squares `s2`, in units of
@@ -702,6 +797,8 @@ fn merge_totals(results: &str) -> Result<Totals, Refusal> {
             || p.deals != first.deals
             || p.world_count != first.world_count
             || p.verb != first.verb
+            || p.lines != first.lines
+            || p.hand != first.hand
             || p.cands.len() != first.cands.len()
             || p.cands
                 .iter()
@@ -729,11 +826,13 @@ fn merge_totals(results: &str) -> Result<Totals, Refusal> {
     for (j, c) in out.cands.iter_mut().enumerate() {
         c.sums = [0; 4];
         c.sumsq = 0;
+        c.lines = LineSums::default();
         for p in &parts {
             for (s, x) in c.sums.iter_mut().zip(p.cands[j].sums) {
                 *s += x;
             }
             c.sumsq += p.cands[j].sumsq;
+            c.lines.merge(&p.cands[j].lines);
         }
     }
     out.class = (0..n)
@@ -811,10 +910,29 @@ fn read_totals(r: &Value) -> Result<Totals, Refusal> {
     };
     let forced = method == Method::Forced;
     let mut verb = BurnVerb::Rob;
-    let mut rows: Vec<(Candidate, [u64; 4], u128, usize)> = Vec::new();
+    let mut lines = false;
+    let mut hand: Vec<Card> = Vec::new();
+    // Per candidate: its sums, its lines' sums and its class (the least candidate of its
+    // `equivalent` list).
+    type Row = (Candidate, [u64; 4], u128, Candidate, LineSums);
+    let mut rows: Vec<Row> = Vec::new();
     let list = field(r, "candidates", "result")?
         .as_array()
         .ok_or_else(|| bad("result.candidates must be an array"))?;
+    let read_cand = |e: &Value, what: &str, verb: &mut BurnVerb| -> Result<Candidate, Refusal> {
+        let (a, vb) = read_action(field(e, "action", what)?, &format!("{what}.action"))?;
+        if let Some(vb) = vb {
+            *verb = vb;
+        }
+        let then = match e.get("then") {
+            None => None,
+            Some(t) => match read_action(t, &format!("{what}.then"))? {
+                (Action::Play(c), None) => Some(c),
+                _ => return Err(bad(format!("{what}.then must be a play"))),
+            },
+        };
+        Ok((a, then))
+    };
     for (g, c) in list.iter().enumerate() {
         let at = format!("result.candidates[{g}]");
         let (sums, sumsq) = if forced {
@@ -833,23 +951,38 @@ fn read_totals(r: &Value) -> Result<Totals, Refusal> {
                 u_str(field(c, "sumsq_fp", &at)?, &format!("{at}.sumsq_fp"))?,
             )
         };
+        let own_lines = match c.get("lines_fp") {
+            None => None,
+            Some(l) => {
+                lines = true;
+                let (sums, cards) = read_lines(l, &format!("{at}.lines_fp"))?;
+                hand = cards;
+                Some(sums)
+            }
+        };
         let eq = field(c, "equivalent", &at)?
             .as_array()
             .ok_or_else(|| bad(format!("{at}.equivalent must be an array")))?;
+        let mut members = Vec::new();
         for (k, e) in eq.iter().enumerate() {
-            let what = format!("{at}.equivalent[{k}]");
-            let (a, vb) = read_action(field(e, "action", &what)?, &format!("{what}.action"))?;
-            if let Some(vb) = vb {
-                verb = vb;
+            members.push(read_cand(e, &format!("{at}.equivalent[{k}]"), &mut verb)?);
+        }
+        let key = *members
+            .iter()
+            .min()
+            .ok_or_else(|| bad(format!("{at}.equivalent is empty")))?;
+        match own_lines {
+            // With the lines every candidate is its own row.
+            Some(l) => {
+                let own = read_cand(c, &at, &mut verb)?;
+                rows.push((own, sums, sumsq, key, l));
             }
-            let then = match e.get("then") {
-                None => None,
-                Some(t) => match read_action(t, &format!("{what}.then"))? {
-                    (Action::Play(c), None) => Some(c),
-                    _ => return Err(bad(format!("{what}.then must be a play"))),
-                },
-            };
-            rows.push(((a, then), sums, sumsq, g));
+            // Without, a row stands for every candidate of its class.
+            None => {
+                for m in members {
+                    rows.push((m, sums, sumsq, key, LineSums::default()));
+                }
+            }
         }
     }
     rows.sort_by_key(|r| r.0);
@@ -857,10 +990,10 @@ fn read_totals(r: &Value) -> Result<Totals, Refusal> {
         return Err(bad("a candidate is listed twice"));
     }
     // The class of each candidate: the first (in engine order) of its group.
-    let mut lead_of_group: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut lead: BTreeMap<Candidate, usize> = BTreeMap::new();
     let mut class = Vec::with_capacity(rows.len());
     for (j, row) in rows.iter().enumerate() {
-        class.push(*lead_of_group.entry(row.3).or_insert(j));
+        class.push(*lead.entry(row.3).or_insert(j));
     }
     Ok(Totals {
         engine: s("engine")?,
@@ -875,12 +1008,66 @@ fn read_totals(r: &Value) -> Result<Totals, Refusal> {
         to,
         world_count,
         verb,
+        lines,
+        hand,
         cands: rows
-            .iter()
-            .map(|&(cand, sums, sumsq, _)| CandTotals { cand, sums, sumsq })
+            .into_iter()
+            .map(|(cand, sums, sumsq, _, lines)| CandTotals {
+                cand,
+                sums,
+                sumsq,
+                lines,
+            })
             .collect(),
         class,
     })
+}
+
+/// A candidate's lines' sums (`lines_fp`) and the acting seat's cards (the plan's rows).
+fn read_lines(l: &Value, at: &str) -> Result<(LineSums, Vec<Card>), Refusal> {
+    let arr = |name: &str, len: usize| -> Result<&Vec<Value>, Refusal> {
+        field(l, name, at)?
+            .as_array()
+            .filter(|a| a.len() == len)
+            .ok_or_else(|| bad(format!("{at}.{name} must hold {len} entries")))
+    };
+    let mut out = LineSums::default();
+    for (k, x) in arr("winner", 8)?.iter().enumerate() {
+        out.winner[k] = x
+            .as_u64()
+            .ok_or_else(|| bad(format!("{at}.winner[{k}] must be a count")))?;
+    }
+    for (k, x) in arr("points", 4)?.iter().enumerate() {
+        out.points_fp[k] = u_str(x, &format!("{at}.points[{k}]"))?;
+    }
+    out.game_end_fp = u_str(field(l, "gameEnds", at)?, &format!("{at}.gameEnds"))?;
+    let mut cards = Vec::new();
+    let plan = field(l, "plan", at)?
+        .as_object()
+        .ok_or_else(|| bad(format!("{at}.plan must be an object")))?;
+    for (card, v) in plan {
+        let c = card
+            .parse::<i64>()
+            .ok()
+            .and_then(engine_card)
+            .ok_or_else(|| bad(format!("{at}.plan: {card} is not a card")))?;
+        let a = v
+            .as_array()
+            .filter(|a| a.len() == 5)
+            .ok_or_else(|| bad(format!("{at}.plan[{card}] must hold 5 counts")))?;
+        let mut row = [0u64; 5];
+        for (t, x) in a.iter().enumerate() {
+            row[t] = x
+                .as_u64()
+                .ok_or_else(|| bad(format!("{at}.plan[{card}] must hold counts")))?;
+        }
+        if row.iter().any(|&x| x > 0) {
+            out.plan.insert(c, row);
+        }
+        cards.push(c);
+    }
+    cards.sort_unstable();
+    Ok((out, cards))
 }
 
 #[cfg(test)]
