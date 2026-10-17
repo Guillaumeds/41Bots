@@ -682,6 +682,54 @@ pub const HARVEST_SHARES: &str = "0.25,0.25,0.5";
 /// The position bands of the yardstick (spec §3): positions 1–2, 3–4, 5–8 (0-based ranges).
 pub const BANDS: [(usize, usize); 3] = [(0, 2), (2, 4), (4, 8)];
 
+/// The loss weights of a harvest's rows by their decision's seat band (`--seat-weights
+/// w12,w34,w58`; docs/m3-hybrid/audit-loop.md §10, the leader focus): three numbers, for the
+/// decider's positions 1–2, 3–4 and 5–8, each a multiple of 1/256 from 1/256 to 65535/256 (the
+/// per-row weights' fixed point, `nn::rowweights`). Returned in that fixed point.
+///
+/// # Errors
+/// If it is not three such numbers.
+pub fn parse_seat_weights(s: &str) -> Result<[u16; 3], String> {
+    let parts: Vec<&str> = s.split(',').map(str::trim).collect();
+    if parts.len() != 3 {
+        return Err(format!(
+            "seat weights {s:?}: three numbers, for the decider's positions 1–2, 3–4 and 5–8 \
+             (e.g. 2,1,1)"
+        ));
+    }
+    let mut out = [0u16; 3];
+    for (o, p) in out.iter_mut().zip(&parts) {
+        *o = p
+            .parse::<f64>()
+            .ok()
+            .filter(|x| x.is_finite())
+            .and_then(nn::rowweights::fixed)
+            .ok_or_else(|| {
+                format!(
+                    "seat weights {s:?}: {p:?} is not a multiple of 1/256 from 1/256 to 65535/256"
+                )
+            })?;
+    }
+    Ok(out)
+}
+
+/// The per-row weights of a harvest shard by its decisions' seat bands: each decision's rows (in
+/// the order written, `ShardSummary::decisions`) weigh its decider's band's weight (`weights`, in
+/// the fixed point of [`parse_seat_weights`]).
+pub fn seat_row_weights(decisions: &[HarvestDecision], weights: [u16; 3]) -> Vec<u16> {
+    let band = |position: u8| {
+        let p = usize::from(position.max(1)) - 1;
+        BANDS
+            .iter()
+            .position(|&(lo, hi)| (lo..hi).contains(&p))
+            .unwrap_or(2)
+    };
+    decisions
+        .iter()
+        .flat_map(|d| std::iter::repeat_n(weights[band(d.position)], d.rows as usize))
+        .collect()
+}
+
 /// One harvest run (rows at the start of trick `trick`, from decisions at `tricks`).
 #[derive(Clone, Debug)]
 pub struct HarvestJob {
@@ -2197,6 +2245,37 @@ mod tests {
         ] {
             assert!(parse_band_shares(bad).is_err(), "{bad}");
         }
+    }
+
+    /// `--seat-weights`: three multiples of 1/256 in the per-row fixed point; each decision's rows
+    /// weigh its decider's band's weight, in the order written.
+    #[test]
+    fn seat_weights() {
+        assert_eq!(parse_seat_weights("2,1,1"), Ok([512, 256, 256]));
+        assert_eq!(parse_seat_weights(" 1.5, 0.5 ,255"), Ok([384, 128, 65280]));
+        for bad in [
+            "2,1",
+            "2,1,1,1",
+            "0,1,1",
+            "1.001,1,1",
+            "256,1,1",
+            "-1,1,1",
+            "x,1,1",
+            "inf,1,1",
+        ] {
+            assert!(parse_seat_weights(bad).is_err(), "{bad}");
+        }
+        let d = |position: u8, rows: u32| HarvestDecision {
+            position,
+            rows,
+            ..HarvestDecision::default()
+        };
+        let w = seat_row_weights(
+            &[d(1, 2), d(4, 1), d(8, 0), d(5, 2), d(2, 1)],
+            [512, 384, 256],
+        );
+        assert_eq!(w, vec![512, 512, 384, 256, 256, 512]);
+        assert!(seat_row_weights(&[], [512, 256, 256]).is_empty());
     }
 
     /// A random integer network (outcome head) for frontier trick `k`, valued with the synthetic

@@ -142,6 +142,9 @@ use serde_json::{Map, Value, json};
 use super::{GOLDEN_SEED, Rung, label_progress, merge_beside, read_json, secs, write_json};
 use crate::remote::{input_hex, input_key, put_input};
 
+/// `train_mode` (scratch or additive) and the leader focus (docs/m3-hybrid/audit-loop.md §10).
+pub(super) mod additive;
+
 /// The audit loop's settings beside `audit_rounds`, refused when it is 0.
 const AUDIT_KEYS: [&str; 15] = [
     "audit_rows",
@@ -897,6 +900,7 @@ fn check_summary(hc: &Value) -> Value {
             "reached_share": x["reached_share"] })).collect::<Vec<_>>(),
         "slices_failing": failing.len(),
         "worst_slice": worst.map(|w| json!({ "name": w["name"], "loss_upper95": w["summary"]["loss_upper95"] })),
+        "bands": additive::bands_of(hc),
     })
 }
 
@@ -1128,6 +1132,7 @@ impl Rung<'_> {
             results: Vec::new(),
         };
         st.standard = st.s.standard;
+        self.additive_start(&mut st);
         self.audit_hb
             .insert("standard".into(), json!(std_text(st.standard)));
         let outcome = self.audit_rounds(&mut st);
@@ -1140,8 +1145,10 @@ impl Rung<'_> {
         };
         self.audit_hb.insert("audit_stop".into(), json!(stop));
         // The chunk keeps the best round's network and check (`best_round`), also on a stop.
-        let best =
-            best_round(&st).map(|b| (b.r, b.level, b.overall, b.net.clone(), b.check.clone()));
+        let best = self
+            .additive_best(&st)
+            .or_else(|| best_round(&st))
+            .map(|b| (b.r, b.level, b.overall, b.net.clone(), b.check.clone()));
         if let Some((r, level, overall, _, _)) = &best {
             st.lines.push(format!(
                 "best: round {r} ({}; golden 95% upper {})",
@@ -1266,7 +1273,8 @@ impl Rung<'_> {
                 json!(format!("{} of {}", st.step + 1, st.s.shapes.len())),
             );
             self.shape = Some(shape);
-            let bg = self.bg_train.is_some() || (self.device == "cuda" && self.p.overlap);
+            let bg = self.bg_train.is_some()
+                || (self.device == "cuda" && self.p.overlap && self.p.additive.is_none());
             let shard;
             if bg {
                 // Round r trains at once: round r - 1 has groups to target (confirmed, or still
@@ -1482,13 +1490,16 @@ impl Rung<'_> {
     }
 
     /// The network a harvest's search uses in round `r` (`None`: exact values): exact at trick 4
-    /// and later; at trick 3 and earlier the latest network (`latest`), else `harvest_net`.
+    /// and later; at trick 3 and earlier the latest network (`latest`), else `init_net` (additive
+    /// mode), else `harvest_net`.
     fn harvest_driver(&self, latest: Option<&Path>) -> Option<PathBuf> {
         if self.p.cut >= 4 {
             return None;
         }
         latest
             .map(Path::to_path_buf)
+            // Additive mode: round 1's network is `init_net` itself.
+            .or_else(|| self.inputs.get("init_net").cloned())
             .or_else(|| self.inputs.get("harvest_net").cloned())
     }
 
@@ -1547,8 +1558,11 @@ impl Rung<'_> {
     /// harvest shard takes them.
     fn harvest_args(&self) -> Vec<String> {
         let from = self.p.train.iter().find(|s| s.name == "harvest");
-        match from {
-            Some(h) => h.args.clone(),
+        match from
+            .map(|h| &h.args)
+            .or(self.p.reused_harvest_args.as_ref())
+        {
+            Some(h) => h.clone(),
             None => vec![
                 "--harvest-cap".into(),
                 search::oracle_labels::HARVEST_CAP.to_string(),
@@ -1845,6 +1859,7 @@ impl Rung<'_> {
         let hc = read_json(&hc_json)
             .ok_or_else(|| format!("hybrid_rung: hybrid-check wrote no {}", hc_json.display()))?;
         let golden = check_summary(&hc);
+        self.additive_judge(st, p, &hc, tag);
         let overall_pass = golden["overall_pass"].as_bool().unwrap_or(false);
         let big = st.s.mini_decisions;
         // The mini golden sets of earlier rounds, re-measured with this network.
@@ -1856,6 +1871,7 @@ impl Rung<'_> {
         }
         let judged = judge(st, &golden, &minis, r);
         update_failing(st, &judged, r);
+        self.additive_failing(st, &judged, r);
         let mut targeted = None;
         let mut stop_dim = false;
         if !overall_pass || !failing(st).is_empty() {
@@ -1913,13 +1929,14 @@ impl Rung<'_> {
         // Every group at the decision level.
         let judged = judge(st, &golden, &minis, r);
         update_failing(st, &judged, r);
+        self.additive_failing(st, &judged, r);
         let remaining = judged
             .iter()
             .filter(|x| x["pass"].as_bool() == Some(false))
             .count();
         let pending = judged.iter().filter(|x| unmeasured(x)).count();
         let n_failing = failing(st).len();
-        let flat = overall_pass && n_failing == 0 && pending == 0;
+        let flat = overall_pass && n_failing == 0 && pending == 0 && self.additive_may_be_flat(r);
         let mut verdict = if flat { After::Flat } else { After::Go };
         if !flat
             && !stop_dim
@@ -2018,22 +2035,23 @@ impl Rung<'_> {
         rdir: &Path,
         watch: Option<&Path>,
     ) -> Result<Option<Value>, String> {
+        // In additive mode only the confirmed groups that are new or not passing.
+        let confirmed = self.additive_targets(st, p);
         let carried: Vec<usize> = failing(st)
             .into_iter()
-            .filter(|i| !p.confirmed.contains(i))
+            .filter(|i| !confirmed.contains(i))
             .collect();
-        if p.confirmed.is_empty() && carried.is_empty() {
+        if confirmed.is_empty() && carried.is_empty() {
             return Ok(None);
         }
-        let list: Vec<Value> = p
-            .confirmed
+        let list: Vec<Value> = confirmed
             .iter()
             .chain(&carried)
             .map(|&i| st.groups[i].entry.clone())
             .collect();
         let path = rdir.join("targets.json");
         write_json(&path, &Value::Array(list))?;
-        let why = match (p.confirmed.len(), carried.len()) {
+        let why = match (confirmed.len(), carried.len()) {
             (0, n) => format!("re-targeting {n} groups still failing"),
             (c, 0) => format!("{c} groups confirmed this round"),
             (c, n) => format!("{c} groups confirmed this round and {n} groups still failing"),
@@ -2046,7 +2064,7 @@ impl Rung<'_> {
         t["why"] = json!(why);
         t["targets"] = json!({
             "file": format!("audit/round-{}/targets.json", p.r),
-            "confirmed": p.confirmed.iter().map(|&i| st.groups[i].name.clone()).collect::<Vec<_>>(),
+            "confirmed": confirmed.iter().map(|&i| st.groups[i].name.clone()).collect::<Vec<_>>(),
             "failing": carried.iter().map(|&i| json!({ "group": st.groups[i].name,
                                                         "failing_since": st.groups[i].failing_since }))
                               .collect::<Vec<_>>(),
@@ -2307,6 +2325,10 @@ impl Rung<'_> {
         if let Some(n) = &driver {
             c.arg("--harvest-net").arg(n);
         }
+        // The rows' loss weights by seat band (`harvest_seat_weights`), beside the shard.
+        if let Some(w) = &self.p.seat_weights {
+            c.args(["--seat-weights", w]);
+        }
         self.audit_step(
             &format!("targeted harvest (round {r})"),
             c,
@@ -2327,6 +2349,10 @@ impl Rung<'_> {
                 .join(format!("{file}.json")),
             &side,
         )?;
+        if self.p.upload_shards {
+            // Kept for a later run's training (`label_inputs`, set `extra`).
+            self.share_targeted(&st.dir, &path, seed);
+        }
         st.train.push(path);
         // A harvest stopped by its bound on decisions writes fewer rows than asked
         // (`search labels --max-decisions`): count the rows written.
@@ -2421,6 +2447,7 @@ impl Rung<'_> {
             "flat": st.flat,
             "shared": keys,
         });
+        let rec = self.additive_fields(rec, r, golden);
         let json_path = st.dir.join(format!("round-{r}{tag}.json"));
         write_json(&json_path, &rec)?;
         // Plain English.
@@ -2666,6 +2693,7 @@ impl Rung<'_> {
                     .join("; ")
             );
         }
+        t += &self.additive_text(r, golden);
         let txt_path = st.dir.join(format!("round-{r}{tag}.txt"));
         fs::write(&txt_path, &t).map_err(|e| format!("write {}: {e}", txt_path.display()))?;
         let jk = self.share_file(st, &json_path);

@@ -74,6 +74,13 @@
 //! (the equity table, as `search_measure`'s), and the scheduler's `threads`, `est_seconds`,
 //! `equity_input`.
 //!
+//! Training modes, reused labels and the leader focus (docs/m3-hybrid/audit-loop.md §10; owner,
+//! 2026-10-17): `train_mode` (`"scratch"`, the default: everything above, unchanged; or
+//! `"additive"`: the audit loop continues a stored network, `init_net` and `init_net_float`,
+//! keeping a round only if the golden set is no worse), `additive_epochs`, `additive_lr`,
+//! `shrink_perturb`, `adopt_tolerance` and `harvest_seat_weights` ([`audit::additive`]);
+//! `label_inputs`, stored shards reused instead of generated ([`reuse`]).
+//!
 //! Steps (each a child process with its own log; the heartbeat names the step and its progress):
 //! 0. **Inputs** (only when the settings name stored inputs): `harvest_net` and the stored golden
 //!    set fetched from the remote store (`inputs/sha256/<hex>`, the path a format-2 manifest's
@@ -115,7 +122,8 @@
 //!    `report.json` (history, errors, device facts). The heartbeat shows the epoch and batches.
 //!    The integer network is then shared content-addressed (`put_input`, checked against its
 //!    SHA-256; `rung.json` `net.int_key` and `result.json` `net_int_key` give the key a later
-//!    run names it by, as `harvest_net` or a check's network); a failure is only a warning.
+//!    run names it by, as `harvest_net` or a check's network); a failure is only a warning. Its
+//!    float weights are shared the same way (`net.float_key`: `init_net_float` of an additive run).
 //! 7. **Hybrid check** (`search hybrid-check`, all usable threads): H_cut against exact on the
 //!    golden set; `out/hybrid/hc-t<G>-o<K>.json` and its printed tables in `.txt`. Skipped, with
 //!    step 5, when `check` is false.
@@ -160,6 +168,9 @@ use crate::spike::build_table_from;
 use crate::{Ctx, sibling};
 
 mod audit;
+mod reuse;
+
+use audit::additive;
 
 /// The settings a `hybrid_rung` chunk takes; any other key is refused.
 pub(crate) const KEYS: [&str; 66] = [
@@ -360,6 +371,15 @@ pub(crate) struct Params {
     /// The audit loop's settings (`audit_rounds` above 0; [`audit`]); `None`: one training and
     /// one check, as before.
     pub audit: Option<audit::AuditSettings>,
+    /// `train_mode` `"additive"`'s settings ([`additive`]); `None`: scratch, as before.
+    pub additive: Option<additive::Additive>,
+    /// `label_inputs`: stored shards reused instead of generated ([`reuse`]).
+    pub label_inputs: Vec<reuse::LabelInput>,
+    /// `harvest_seat_weights`: the harvested rows' loss weights by seat band ([`additive`]).
+    pub seat_weights: Option<String>,
+    /// The harvest's settings (`harvest_cap_per_decision`, `harvest_positions`) when its shard is
+    /// reused, for the audit loop's harvests (else they come from the generated harvest set).
+    pub reused_harvest_args: Option<Vec<String>>,
 }
 
 /// One label shard to make: its set, and its part (`(k, of)`, 1-based) when the set is made in
@@ -431,6 +451,9 @@ impl Params {
             "label_parts": self.label_parts, "overlap": self.overlap,
             "partial_epochs": self.partial_epochs,
             "audit": self.audit.as_ref().map(audit::AuditSettings::to_json),
+            "train_mode": self.additive.as_ref().map_or(json!({ "train_mode": "scratch" }), additive::Additive::to_json),
+            "label_inputs": self.label_inputs.iter().map(reuse::LabelInput::to_json).collect::<Vec<_>>(),
+            "harvest_seat_weights": self.seat_weights,
         })
     }
 
@@ -447,7 +470,8 @@ impl Params {
             return self
                 .train
                 .iter()
-                .chain(std::iter::once(&self.val))
+                // A reused validation shard (`label_inputs`) has no rows to make.
+                .chain(std::iter::once(&self.val).filter(|v| v.count > 0))
                 .map(one)
                 .collect();
         }
@@ -486,10 +510,14 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         Value::Object(o) => o,
         _ => return Err("hybrid_rung: the settings must be an object".into()),
     };
-    if let Some(k) = o.keys().find(|k| !KEYS.contains(&k.as_str())) {
+    let known =
+        |k: &str| KEYS.contains(&k) || additive::KEYS.contains(&k) || reuse::KEYS.contains(&k);
+    if let Some(k) = o.keys().find(|k| !known(k.as_str())) {
         return Err(format!(
-            "hybrid_rung: unknown setting {k:?} (settings: {})",
-            KEYS.join(", ")
+            "hybrid_rung: unknown setting {k:?} (settings: {}, {}, {})",
+            KEYS.join(", "),
+            additive::KEYS.join(", "),
+            reuse::KEYS.join(", ")
         ));
     }
     let u = |k: &str, d: u64| -> Result<u64, String> {
@@ -566,14 +594,14 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
             args: Vec::new(),
         })
     };
-    let random = set(
+    let mut random = set(
         "random",
         "random",
         "labels_random",
         "labels_random_seed",
         (3_200_000, 101),
     )?;
-    let rules = set(
+    let mut rules = set(
         "rules",
         "rules",
         "labels_rules",
@@ -626,7 +654,8 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
                 .into(),
         );
     }
-    if audit_rounds > 0 && cut <= 3 && harvest_net.is_none() {
+    let additive_mode = o.get("train_mode").and_then(Value::as_str) == Some("additive");
+    if audit_rounds > 0 && cut <= 3 && harvest_net.is_none() && !additive_mode {
         return Err(format!(
             "hybrid_rung: the audit loop at cut {cut} needs harvest_net: round 1's audit shard is \
              harvested before the loop has a network of its own, and exact values at the \
@@ -734,19 +763,50 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
             other_cap,
         })
     };
-    let val = set("val", "random", "val_count", "val_seed", (100_000, 201))?;
+    let mut val = set("val", "random", "val_count", "val_seed", (100_000, 201))?;
+    // Stored shards reused instead of generated (`label_inputs`): the sets they give are not
+    // made, and their own settings are refused rather than ignored.
+    let label_inputs = reuse::parse(o, u("label_parts", 1)?)?;
+    let mut reused_harvest_args = None;
+    for x in &label_inputs {
+        if let Some(k) = reuse::generating_keys(x.set)
+            .iter()
+            .find(|k| o.contains_key(**k))
+        {
+            return Err(format!(
+                "hybrid_rung: {k} is set, but label_inputs gives the {} shards: remove it",
+                x.set
+            ));
+        }
+        match x.set {
+            "random" => random.count = 0,
+            "rules" => rules.count = 0,
+            "harvest" => {
+                reused_harvest_args = Some(harvest.args.clone());
+                harvest.count = 0;
+            }
+            "race" => race.count = 0,
+            "val" => {
+                val.count = 0;
+                val.seed = x.seed;
+            }
+            _ => {}
+        }
+    }
     let train: Vec<LabelSet> = [random, rules, harvest, race]
         .into_iter()
         .filter(|s| s.count > 0)
         .collect();
-    if train.is_empty() {
+    let reused_train = label_inputs.iter().filter(|x| x.set != "val").count();
+    let reused_val = label_inputs.iter().any(|x| x.set == "val");
+    if train.is_empty() && reused_train == 0 {
         return Err(
             "hybrid_rung: labels_random, labels_rules, labels_harvest and labels_race are all 0: \
              no training labels"
                 .into(),
         );
     }
-    if val.count == 0 {
+    if val.count == 0 && !reused_val {
         return Err("hybrid_rung: val_count must be at least 1".into());
     }
     let label_parts = u("label_parts", 1)?;
@@ -783,6 +843,17 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         } else {
             effective.push(x.clone());
         }
+    }
+    // A reused shard's seed counts like a generated one's (the validation shard's is in `val`).
+    effective.retain(|x| x.count > 0 || x.name != "val" || !reused_val);
+    for x in label_inputs.iter() {
+        effective.push(LabelSet {
+            name: x.set,
+            source: "stored",
+            count: x.rows.unwrap_or(0),
+            seed: x.seed,
+            args: Vec::new(),
+        });
     }
     // Training, validation and golden-set positions use disjoint seeds (spec §5).
     let mut seen: Vec<(u64, &str)> = Vec::new();
@@ -913,6 +984,10 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         overlap,
         partial_epochs,
         audit,
+        additive: additive::parse(o, audit_rounds, label_parts)?,
+        label_inputs,
+        seat_weights: additive::parse_seat_weights(o)?,
+        reused_harvest_args,
     })
 }
 
@@ -1186,6 +1261,7 @@ pub(crate) fn chunk_with(
         beside: Vec::new(),
         audit_hb: Map::new(),
         shape: None,
+        additive: None,
     };
     r.rec.insert("params".into(), params.to_json());
     r.rec.insert("table".into(), table_rec);
@@ -1324,6 +1400,9 @@ struct Rung<'a> {
     /// The hidden widths the next training uses when the audit loop's capacity ladder has moved
     /// (`None`: `widths`).
     shape: Option<String>,
+    /// `train_mode` `"additive"`: the starting network, the best so far and each round's
+    /// adoption ([`additive`]); `None` in scratch mode.
+    additive: Option<additive::Run>,
 }
 
 impl Rung<'_> {
@@ -1406,6 +1485,11 @@ impl Rung<'_> {
         {
             want.push(("audit_predicates", h.clone()));
         }
+        // Additive mode's starting network (`init_net`) and its float weights.
+        if let Some(a) = &self.p.additive {
+            want.push(("init_net", a.init_net.clone()));
+            want.push(("init_net_float", a.init_float.clone()));
+        }
         if want.is_empty() {
             return Ok(());
         }
@@ -1452,6 +1536,7 @@ impl Rung<'_> {
             }
         }
         self.rec.insert("inputs".into(), Value::Object(recs));
+        self.additive_check_init()?;
         self.done("inputs", t)
     }
 
@@ -1701,9 +1786,8 @@ impl Rung<'_> {
             fs::create_dir_all(&parts_dir).map_err(|e| e.to_string())?;
         }
         let jobs = self.p.shards();
-        let mut train = Vec::new();
-        let mut val = None;
-        let mut recs = Vec::new();
+        // Stored shards reused (`label_inputs`): fetched and checked, first in the training set.
+        let (mut train, mut val, mut recs) = self.reused_labels(&dir)?;
         for (i, job) in jobs.iter().enumerate() {
             let s = &job.set;
             let t = Instant::now();
@@ -1742,6 +1826,10 @@ impl Rung<'_> {
                 .filter(|_| s.source == "harvest");
             if let Some(net) = net {
                 c.arg("--harvest-net").arg(net);
+            }
+            // The harvested rows' loss weights by seat band (`harvest_seat_weights`).
+            if let (Some(w), "harvest") = (&self.p.seat_weights, s.source) {
+                c.args(["--seat-weights", w]);
             }
             let base = self.progress(&step, json!({ "rows_total": s.count }));
             self.ctx.set_phase("chunk", base.clone());
@@ -1835,6 +1923,7 @@ impl Rung<'_> {
         let labels = self.rec.get("labels").cloned().unwrap_or(Value::Null);
         let mut list = Vec::new();
         let mut inputs = Map::new();
+        let mut label_inputs = Vec::new();
         for path in shards {
             let name = path
                 .file_name()
@@ -1859,10 +1948,17 @@ impl Rung<'_> {
                 file.trim_end_matches(".npy").to_string(),
                 json!(format!("sha256:{sha}")),
             );
+            // What a later run's `label_inputs` names it by (its sidecar shared too).
+            let entry = self
+                .label_input_entry(path, &rec, &sha)
+                .map_err(|e| format!("hybrid_rung: upload_shards: {file}: {e}"))?;
             list.push(json!({ "file": file, "sha256": sha, "bytes": bytes,
-                              "key": input_key(&sha), "status": status }));
+                              "key": input_key(&sha), "status": status,
+                              "sidecar_key": entry["sidecar"] }));
+            label_inputs.push(entry);
         }
-        let doc = json!({ "shards": list, "manifest_inputs": inputs });
+        let doc = json!({ "shards": list, "manifest_inputs": inputs,
+                          "label_inputs": label_inputs });
         write_json(&self.out.join("shards.json"), &doc)?;
         self.rec.insert("shards".into(), doc);
         self.done("upload shards", t)
@@ -2065,19 +2161,22 @@ impl Rung<'_> {
                 }
             }
         }
+        // Additive mode: the next training's epochs and rate, and its start (`--init`).
+        let (epochs, lr) = self.epochs_lr();
         c.arg("--out")
             .arg(dir)
             .args(["--head", &self.p.head, "--widths", &self.widths_now()])
-            .args(["--epochs", &self.p.epochs.to_string()])
+            .args(["--epochs", &epochs.to_string()])
             .args(["--batch", &self.p.batch.to_string()])
-            .args(["--lr", &self.p.lr.to_string()])
+            .args(["--lr", &lr.to_string()])
             .args(["--patience", &self.p.patience.to_string()])
             .args(["--seed", &self.p.train_seed.to_string()])
             .args(["--threads", &threads.to_string()])
             .args(["--max-minutes", &self.p.max_minutes.to_string()])
             .args(["--mix-weight", &self.p.mix_weight.to_string()])
             .args(["--device", device, "--progress"])
-            .arg(prog);
+            .arg(prog)
+            .args(self.init_args());
         c
     }
 
@@ -2218,9 +2317,16 @@ impl Rung<'_> {
         } else {
             None
         };
+        // Its float weights too, so that a later run can continue it (`init_net_float`).
+        let float_sha = sha("float.safetensors")?;
+        let float_key = if int_key.is_some() {
+            self.share_float(&dir.join("float.safetensors"), &float_sha)
+        } else {
+            None
+        };
         let mut rec = json!({ "dir": rel, "device": device, "threads": threads,
                 "int_sha256": int_sha, "int_key": int_key,
-                "float_sha256": sha("float.safetensors")?,
+                "float_sha256": float_sha, "float_key": float_key,
                 "epochs_run": report["history"].as_array().map_or(0, Vec::len),
                 "best_epoch": report["best_epoch"],
                 "float": report["float"],
@@ -2265,6 +2371,26 @@ impl Rung<'_> {
             Err(e) => {
                 self.warn(format!(
                     "the network was not shared as an input: {e}; it is in this run's bundle"
+                ));
+                None
+            }
+        }
+    }
+
+    /// Uploads a trained network's float weights to `inputs/sha256/<hex>` beside its integer
+    /// network ([`Rung::share_net`]), so that a later run can continue it (`train_mode`
+    /// `"additive"`'s `init_net_float`); its key, or `None` with a warning when the upload fails.
+    fn share_float(&mut self, path: &Path, sha: &str) -> Option<String> {
+        let remote = self.tools.remote.clone()?;
+        let (p2, want) = (path.to_path_buf(), sha.to_string());
+        match self
+            .ctx
+            .blocking(move || put_input(&*remote, &p2, Some(&want)))
+        {
+            Ok((sha, _, _)) => Some(input_key(&sha)),
+            Err(e) => {
+                self.warn(format!(
+                    "the float network was not shared as an input: {e}; it is in this run's bundle"
                 ));
                 None
             }
@@ -2350,6 +2476,9 @@ impl Rung<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The additive mode and stored label shards reused (`hybrid/tests/additive.rs`).
+    mod additive;
 
     #[test]
     fn defaults_are_the_rung1_workflow() {
@@ -3147,6 +3276,7 @@ mod tests {
             beside: Vec::new(),
             audit_hb: Map::new(),
             shape: None,
+            additive: None,
         }
     }
 

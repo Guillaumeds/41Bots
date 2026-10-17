@@ -787,6 +787,41 @@ class LauncherTest(unittest.TestCase):
         code, _ = self.run_launch(w, m)
         self.assertEqual((code, w.created_on), (0, [1]))
 
+    def test_additive_and_reused_label_inputs_are_checked_before_renting(self):
+        # Additive mode's starting network (init_net and its float weights) and every reused label
+        # shard's files (label_inputs: shard, sidecar, row weights) are stored inputs too
+        # (docs/m3-hybrid/audit-loop.md §10).
+        i, f, s1, c1, w1, s2, c2 = ("%02x" % n * 32 for n in range(0x11, 0x18))
+        params = {"threads": "all", "cut": 3, "audit_rounds": 2, "train_mode": "additive",
+                  "init_net": f"inputs/sha256/{i}", "init_net_float": f"sha256:{f}",
+                  "label_inputs": [{"set": "random", "seed": 321, "shard": f"inputs/sha256/{s1}",
+                                    "sidecar": f"inputs/sha256/{c1}", "rowweights": f"inputs/sha256/{w1}"},
+                                   {"set": "val", "seed": 401, "shard": f"inputs/sha256/{s2}",
+                                    "sidecar": f"inputs/sha256/{c2}"}]}
+        m = {"format": 2, "run_id": RUN, "run_seed": 1, "streams": [
+            {"name": "rung", "priority": 1, "kind": "hybrid_rung", "chunks": 1, "params": params}]}
+        self.assertEqual(launch.param_inputs(m), {
+            "rung.init_net": i, "rung.init_net_float": f, "rung.label_inputs[0].shard": s1,
+            "rung.label_inputs[0].sidecar": c1, "rung.label_inputs[0].rowweights": w1,
+            "rung.label_inputs[1].shard": s2, "rung.label_inputs[1].sidecar": c2})
+        w = World([offer(1, 11, 1.0)], ["done:1"])
+        for h in (i, s1, c1, w1, s2, c2):
+            w.store["inputs/sha256/" + h] = b"x"
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, m)
+        self.assertIn(f"rung.init_net_float (inputs/sha256/{f})", str(e.exception))
+        self.assertEqual(w.created_on, [])
+        w.store["inputs/sha256/" + f] = b"f"
+        code, _ = self.run_launch(w, m)
+        self.assertEqual((code, w.created_on), (0, [1]))
+        for bad, want in (([{"shard": "x"}], "params.label_inputs[0].shard must be"),
+                          ({"shard": s1}, "params.label_inputs must be a list"),
+                          (["x"], "params.label_inputs[0] must be an object")):
+            params["label_inputs"] = bad
+            with self.assertRaises(SystemExit) as e:
+                launch.param_inputs(m)
+            self.assertIn(want, str(e.exception))
+
     def test_bin_sha_mismatch_refused(self):
         w = World([offer(1, 11, 1.0)], ["done:1"])
         with self.assertRaises(SystemExit):

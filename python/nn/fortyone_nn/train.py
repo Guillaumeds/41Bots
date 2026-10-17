@@ -19,6 +19,23 @@ integer inference), hidden layers, then the head:
 
 Adam, seeded, early stopping on the validation shard.
 
+Additive training (``--init FLOAT [--init-int INT] [--shrink-perturb L [--perturb-seed S]]``;
+docs/m3-hybrid/audit-loop.md §10, owner 2026-10-17): the network starts from a stored float network
+(a trainer's ``float.safetensors``) instead of the seeded fresh initialisation, and trains on the
+given shards as usual (the caller mixes old and new data: training on new data alone makes a
+network forget). Checked before any data is read: float32 layers that chain from the encoder's
+features, the hidden widths of ``--widths`` and the head of ``--head`` (then, once the data is
+read, its trick and outputs); ``--init-int`` must be the integer network ``quantize`` makes from it,
+byte for byte (the float file is then provably that network's weights). ``--shrink-perturb L``
+(Ash & Adams, NeurIPS 2020): every weight ``L*w + N(0, sigma^2)``, sigma by ``SIGMA_RULE``, drawn on
+the CPU from ``--perturb-seed`` (default ``--seed``) before the network moves to a device: a seed
+gives one network. The rest is unchanged (Adam afresh at ``--lr``, the plateau scheduler, early
+stopping), so the run is as repeatable as a fresh one. ``--epochs 0`` (only with ``--init``) takes
+the network as it is: its float file copied, its integer network quantised from it (the same bytes
+as ``--init-int``), both measured on the validation shard; the training shards are not read. The
+report's ``init`` and the network's metadata (``init_float_sha256``, ``init_int_sha256``,
+``shrink_perturb``) record the start.
+
 Device (``--device``, default ``cpu``): ``cuda`` trains on the GPU (an error if it fails the
 checks of ``device.probe``), ``auto`` on the GPU when it passes them, else on the CPU with the
 reason printed and recorded. The network is initialised on the CPU under the seed and then
@@ -153,6 +170,7 @@ from .formats import (
     mask_bits,
     parse_widths,
     race_classes,
+    read_safetensors,
     sha256_file,
     value_fault,
     write_safetensors,
@@ -1038,6 +1056,189 @@ def evaluate(model, head, data, mix_weight, batch=8192, device=None):
     return sum(losses) / n, v, hits / n
 
 
+# Additive training (docs/m3-hybrid/audit-loop.md §10; owner, 2026-10-17): the network starts from
+# a stored one (``--init``) instead of the seeded fresh initialisation.
+
+
+def head_name_of(head):
+    """The head's name in the network files (``outcome`` -> ``outcome-v1``)."""
+    return "outcome-v1" if head == "outcome" else "money4"
+
+
+def read_init(path, widths, head):
+    """The float network of ``--init`` (a trainer's ``float.safetensors``): its layers [(w float64
+    [n_in, n_out] input-major, b float64 [n_out])], metadata and outputs, checked before any data is
+    loaded: float32 tensors ``w0..wL``, ``b0..bL`` that chain from the encoder's features, hidden
+    widths equal to ``--widths`` and the head of ``--head``. Anything else stops the run
+    (``SystemExit``): a network of another shape or head cannot be continued."""
+    try:
+        t, meta = read_safetensors(path)
+    except (OSError, ValueError, KeyError) as e:
+        raise SystemExit(f"--init {path}: not a float network ({e})") from None
+    n = sum(1 for k in t if k.startswith("w"))
+    want = {f"{p}{k}" for k in range(n) for p in "wb"}
+    if n < 2 or set(t) != want:
+        raise SystemExit(f"--init {path}: tensors {sorted(t)}, not a float network w0..wL, b0..bL")
+    if any(x.dtype != np.float32 for x in t.values()):
+        raise SystemExit(f"--init {path}: not a float network (float32 tensors; an integer network cannot be "
+                         "continued: give its float.safetensors)")
+    n_in = N_BINARY + N_DENSE
+    for k in range(n):
+        w, b = t[f"w{k}"], t[f"b{k}"]
+        if w.ndim != 2 or w.shape[0] != n_in or b.shape != (w.shape[1],):
+            raise SystemExit(f"--init {path}: layer {k} has shape {list(w.shape)} (bias {list(b.shape)}), "
+                             f"which does not follow {n_in} inputs")
+        n_in = w.shape[1]
+    hidden = [int(t[f"w{k}"].shape[1]) for k in range(n - 1)]
+    if hidden != list(widths):
+        raise SystemExit(f"--init {path}: its hidden widths are {','.join(map(str, hidden))}, but --widths is "
+                         f"{','.join(map(str, widths))}: a network continues with its own shape")
+    if meta.get("head") != head_name_of(head):
+        raise SystemExit(f"--init {path}: its head is {meta.get('head')!r}, but --head {head} asks for "
+                         f"{head_name_of(head)!r}")
+    layers = [(t[f"w{k}"].astype(np.float64), t[f"b{k}"].astype(np.float64)) for k in range(n)]
+    return layers, meta, int(t[f"w{n - 1}"].shape[1])
+
+
+def requantised_sha256(layers, meta):
+    """The SHA-256 of the integer network the trainer writes for these float layers and metadata
+    (``quantize`` then ``write_int``, as at the end of a training): byte-identical to the
+    ``int.safetensors`` written beside a ``float.safetensors``, so ``--init-int`` proves that the float
+    file is that integer network's own weights."""
+    import tempfile
+
+    rest = {k: v for k, v in meta.items() if k not in ("trick", "head")}
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "int.safetensors")
+        write_int(p, quantize(layers), int(meta["trick"]), rest, head=meta["head"])
+        return sha256_file(p)
+
+
+def set_layers(model, layers):
+    """The network's weights from float layers in the integer file's layout (the inverse of
+    ``Net.float_layers``: float32 values round-trip exactly); the embedding's padding row 0."""
+    (w0, b0), last = layers[0], layers[-1]
+    f32 = lambda a: torch.from_numpy(np.ascontiguousarray(a, dtype=np.float32))  # noqa: E731
+    with torch.no_grad():
+        model.emb.weight[:N_BINARY].copy_(f32(w0[:N_BINARY]))
+        model.emb.weight[N_BINARY].zero_()
+        model.dense.weight.copy_(f32(w0[N_BINARY:].T))
+        model.dense.bias.copy_(f32(b0))
+        for layer, (w, b) in zip(model.hidden, layers[1:-1]):
+            layer.weight.copy_(f32(w.T))
+            layer.bias.copy_(f32(b))
+        model.out.weight.copy_(f32(last[0].T))
+        model.out.bias.copy_(f32(last[1]))
+
+
+SIGMA_RULE = ("sigma = (1 - lambda) / sqrt(3 * fan_in) per parameter: (1 - lambda) times the standard deviation of "
+              "the layer's fresh uniform initialisation (bound 1/sqrt(fan_in); fan_in 909 for the embedding, the "
+              "input width for a linear layer)")
+
+
+def shrink_perturb(model, lam, seed):
+    """Shrink and perturb (Ash & Adams, "On warm-starting neural network training", NeurIPS 2020):
+    every parameter ``p <- lam * p + e``, ``e ~ N(0, sigma^2)`` with ``sigma`` by ``SIGMA_RULE``.
+    Drawn on the CPU (call it before the network moves to a GPU) from a generator seeded with
+    ``seed``, parameter by parameter in ``named_parameters`` order, so a seed gives one network on
+    every machine; the embedding's padding row stays 0. Returns sigma by parameter."""
+    if not (0.0 < lam < 1.0):
+        raise SystemExit(f"--shrink-perturb {lam}: lambda must be above 0 and below 1")
+    g = torch.Generator().manual_seed(int(seed))
+    sigmas = {}
+    with torch.no_grad():
+        for name, p in model.named_parameters():
+            mod = name.rsplit(".", 1)[0]
+            fan_in = N_BINARY + N_DENSE if mod == "emb" else model.get_submodule(mod).in_features
+            sigma = (1.0 - lam) / math.sqrt(3.0 * fan_in)
+            noise = torch.randn(tuple(p.shape), generator=g, dtype=torch.float32) * sigma
+            p.mul_(lam).add_(noise)
+            sigmas[name] = sigma
+        model.emb.weight[N_BINARY].zero_()
+    return sigmas
+
+
+def evaluate_init(args, init, widths, device, facts, progress, t0):
+    """``--init`` with ``--epochs 0``: the stored network taken as it is (the audit loop's round 1 in
+    additive mode: no training spent on what it already knows). Its float file is copied, its
+    integer network written by ``quantize`` from it (byte-identical to the stored one, which
+    ``--init-int`` proves), and both are measured on the validation shard as after a training; the
+    training shards are not read."""
+    import shutil
+
+    layers, meta, n_out = init["layers"], init["meta"], init["n_out"]
+    progress(step="load")
+    val = np.asarray(load_shard(args.val))
+    tricks = check_shards([val])
+    if len(tricks) != 1:
+        raise SystemExit(f"the validation shard holds tricks {sorted(tricks)}: one frontier trick per network")
+    trick = tricks.pop()
+    check_init_trick(args, init, trick, val.dtype["outcomes"].shape[0])
+    model = Net(widths, n_out)
+    set_layers(model, layers)
+    model = model.to(device)
+    va = tensors(val)
+    val_classes = race_classes(val)
+    vloss, pf, acc = evaluate(model, args.head, va, args.mix_weight, device=device)
+    progress(step="quantise", best_epoch=-1)
+    shutil.copyfile(args.init, os.path.join(args.out, "float.safetensors"))
+    int_path = os.path.join(args.out, "int.safetensors")
+    rest = {k: v for k, v in meta.items() if k not in ("trick", "head")}
+    ints = quantize(layers)
+    write_int(int_path, ints, int(meta["trick"]), rest, head=meta["head"])
+    progress(step="int-eval")
+    ti = time.time()
+    m = min(args.int_eval_rows, len(val))
+    if args.head == "outcome":
+        pi = money_rows(ints, val["active"][:m], val["dense"][:m], mask=val["mask"][:m], outcomes=val["outcomes"][:m])
+    else:
+        pi = money_rows(ints, val["active"][:m], val["dense"][:m])
+    pi = pi.astype(np.float64)
+    report = {
+        "args": vars(args),
+        "trick": trick,
+        "head": head_name_of(args.head),
+        "outcomes": int(val.dtype["outcomes"].shape[0]),
+        "data": {"train": [], "val": sha256_file(args.val), "train_files_not_read": list(args.train)},
+        "history": [],
+        "best_epoch": -1,
+        "init": dict(init["record"], evaluated_only=True),
+        "float": {"val_loss": vloss, "outcome_accuracy": acc, "error": error_stats(pf, val["value"]),
+                  "error_by_race_class": error_by_race_class(pf, val["value"], val_classes)},
+        "int": {
+            "rows": m,
+            "error": error_stats(pi, val["value"][:m]),
+            "error_by_race_class": error_by_race_class(pi, val["value"][:m], val_classes[:m]),
+            "vs_float": error_stats(pi, pf[:m]),
+            "sha256": sha256_file(int_path),
+            "shifts": [int(s) for _, _, s in ints],
+        },
+        "minutes": (time.time() - t0) / 60,
+        "seconds": {"int_eval": round(time.time() - ti, 3)},
+        "device": facts,
+    }
+    if init["record"].get("int_sha256") not in (None, report["int"]["sha256"]):
+        raise SystemExit("--init: the integer network written differs from --init-int")
+    with open(os.path.join(args.out, "report.json"), "w") as f:
+        json.dump(report, f, indent=1)
+    progress(step="done", best_epoch=-1, int_sha256=report["int"]["sha256"])
+    print(f"--init {args.init} taken as it is (--epochs 0): validation loss {vloss:.6f}, int sha256 "
+          f"{report['int']['sha256']}", flush=True)
+    return report
+
+
+def check_init_trick(args, init, trick, v):
+    """The ``--init`` network was trained for this frontier trick (and so has its outputs)."""
+    meta = init["meta"]
+    if str(meta.get("trick")) != str(trick):
+        raise SystemExit(f"--init {args.init}: trained for trick {meta.get('trick')} positions, but the data is "
+                         f"at trick {trick}")
+    want = v if args.head == "outcome" else 4
+    if init["n_out"] != want:
+        raise SystemExit(f"--init {args.init}: {init['n_out']} outputs, but a {head_name_of(args.head)} head at "
+                         f"trick {trick} has {want}")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--train", nargs="+", default=[])
@@ -1071,7 +1272,20 @@ def main(argv=None):
     ap.add_argument("--partial-epochs", type=int, default=0,
                     help="with --watch-dir: at most this many epochs on each partial set of shards, then wait (0: no limit)")
     ap.add_argument("--watch-poll", type=float, default=1.0, help=argparse.SUPPRESS)
+    ap.add_argument("--init", help="additive training: start from this float network (a float.safetensors) instead of "
+                                   "a fresh initialisation; its widths and head must be --widths and --head")
+    ap.add_argument("--init-int", help="with --init: the integer network it must quantise to, byte for byte (proves the "
+                                       "float file is that network's own weights)")
+    ap.add_argument("--shrink-perturb", type=float, default=None,
+                    help="with --init: shrink and perturb, every weight lambda*w + N(0, sigma^2) (SIGMA_RULE)")
+    ap.add_argument("--perturb-seed", type=int, default=None, help="the shrink-and-perturb noise's seed (default --seed)")
     args = ap.parse_args(argv)
+    if args.init is None and (args.init_int or args.shrink_perturb is not None or args.perturb_seed is not None):
+        ap.error("--init-int, --shrink-perturb and --perturb-seed go with --init")
+    if args.epochs < 0 or (args.epochs == 0 and args.init is None):
+        ap.error("--epochs must be at least 1 (0 only with --init: the network taken as it is, measured)")
+    if args.epochs == 0 and args.shrink_perturb is not None:
+        ap.error("--epochs 0 takes the --init network as it is: no --shrink-perturb")
     if args.watch_dir is None and not args.train:
         ap.error("--train (or --watch-dir with --expect) is required")
     if args.watch_dir is not None and args.expect < max(1, len(args.train)):
@@ -1082,6 +1296,20 @@ def main(argv=None):
         widths = parse_widths(args.widths)
     except ValueError as e:
         raise SystemExit(f"--widths {args.widths}: {e}") from None
+    # The network to continue (additive training), checked before any data is loaded: its shape
+    # and head, and that it is the named integer network's own weights.
+    init = None
+    if args.init is not None:
+        layers, imeta, n_init = read_init(args.init, widths, args.head)
+        init = {"layers": layers, "meta": imeta, "n_out": n_init,
+                "record": {"float": args.init, "float_sha256": sha256_file(args.init), "widths": widths,
+                           "trick": imeta.get("trick"), "head": imeta.get("head"), "int_sha256": None}}
+        if args.init_int:
+            got, want = requantised_sha256(layers, imeta), sha256_file(args.init_int)
+            if got != want:
+                raise SystemExit(f"--init {args.init} quantises to an integer network with sha256 {got}, not "
+                                 f"--init-int {args.init_int} ({want}): the float file is not that network's weights")
+            init["record"]["int_sha256"] = want
 
     t0 = time.time()
     torch.manual_seed(args.seed)
@@ -1106,6 +1334,9 @@ def main(argv=None):
         print(f"training on {facts['gpu_name']} (compute capability {facts['capability']}, "
               f"torch {facts['torch']}, CUDA {facts['torch_cuda']})", flush=True)
     progress = Progress(args.progress, t0, facts["device"])
+    if init is not None and args.epochs == 0:
+        evaluate_init(args, init, widths, device, facts, progress, t0)
+        return
     progress(step="load")
 
     load_threads = args.load_threads if args.load_threads > 0 else load_threads_default()
@@ -1140,7 +1371,9 @@ def main(argv=None):
         stream = {"watch_dir": args.watch_dir, "expect": args.expect, "partial_epochs_cap": args.partial_epochs,
                   "parts": [], "waited_s": round(time.time() - t0, 3)}
     n_out = v if args.head == "outcome" else 4
-    head_name = "outcome-v1" if args.head == "outcome" else "money4"
+    head_name = head_name_of(args.head)
+    if init is not None:
+        check_init_trick(args, init, trick, v)
 
     def add_parts(new, epoch):
         """The streamed shards ``new`` (their tricks checked) joined in place to the columns
@@ -1197,8 +1430,18 @@ def main(argv=None):
     # Wall-clock seconds: loading, each epoch's training loop (not its validation), the integer
     # check; and each epoch's milliseconds per batch.
     seconds = {"load": round(time.time() - t0, 3), "epochs": [], "ms_per_batch": []}
-    # Initialised on the CPU under the seed (the same weights on every device), then moved.
-    model = Net(widths, n_out).to(device)
+    # Initialised on the CPU under the seed (the same weights on every device), then moved. With
+    # --init the stored network's weights replace the fresh ones (and are shrunk and perturbed
+    # there, on the CPU, with --shrink-perturb).
+    model = Net(widths, n_out)
+    if init is not None:
+        set_layers(model, init["layers"])
+        if args.shrink_perturb is not None:
+            seed = args.perturb_seed if args.perturb_seed is not None else args.seed
+            sig = shrink_perturb(model, args.shrink_perturb, seed)
+            init["record"]["shrink_perturb"] = {"lambda": args.shrink_perturb, "seed": seed, "sigma_rule": SIGMA_RULE,
+                                                "sigma": sig}
+    model = model.to(device)
     # The training step (class Step): a CUDA graph on a GPU unless --cuda-graph off, once a trial
     # on copies of the network agrees with eager steps; else eager, as before.
     graphed, why, trial = False, "the CPU", None
@@ -1367,6 +1610,14 @@ def main(argv=None):
     }
     if "train_weights" in weighting:
         meta["train_weights"] = json.dumps(weighting["train_weights"])
+    # The network it continued (additive training): part of its identity.
+    if init is not None:
+        meta["init_float_sha256"] = init["record"]["float_sha256"]
+        if init["record"]["int_sha256"]:
+            meta["init_int_sha256"] = init["record"]["int_sha256"]
+        if "shrink_perturb" in init["record"]:
+            sp = init["record"]["shrink_perturb"]
+            meta["shrink_perturb"] = json.dumps({"lambda": sp["lambda"], "seed": sp["seed"]})
     # Only when a row weighs other than 1: a sidecar of all 1 trains the same network, which then
     # stays the same file.
     if any(r is not None and r["rows_not_1"] for r in weighting.get("train_row_weights", [])):
@@ -1414,6 +1665,8 @@ def main(argv=None):
     }
     if stream is not None:
         report["stream"] = stream
+    if init is not None:
+        report["init"] = dict(init["record"], evaluated_only=False)
     with open(os.path.join(args.out, "report.json"), "w") as f:
         json.dump(report, f, indent=1)
     progress(step="done", best_epoch=best[2], int_sha256=report["int"]["sha256"])

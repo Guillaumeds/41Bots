@@ -37,6 +37,7 @@
 //!                  [--harvest-tricks K-1 | --harvest-tricks 2,3] [--harvest-net WEIGHTS]
 //!                  [--harvest-strata 1,2,3,4] [--harvest-race-classes 2,4 [--harvest-race-cap 256]]
 //!                  [--harvest-keep PRED.json [--keep-cap 256]] [--max-decisions N]
+//!                  [--seat-weights 2,1,1]
 //! search hybrid-check --trick T --cut K --net WEIGHTS --equity TABLE
 //!                  [--decisions FILE | --count N] [--seed 1] [--start-hands 20000]
 //!                  [--first I] [--last J] [--ids …] [--to 320] [--label 1]
@@ -93,6 +94,11 @@
 //! rows, the same for any thread count; the shard is otherwise byte-identical), and a harvest's
 //! sidecar says `rows` (written), `decisions_played`, `max_decisions` and `bounded`. Every shard's sidecar counts its
 //! rows by race class (`rows_by_race_class`); a harvest's records its strata and race settings.
+//! `--seat-weights w12,w34,w58` (harvest only; the audit loop's leader focus,
+//! docs/m3-hybrid/audit-loop.md §10) gives each row the loss weight of its decision's seat band
+//! (positions 1–2, 3–4, 5–8; multiples of 1/256): the per-row weights `FILE.npy.rowweights`
+//! (`nn::rowweights`), written before the shard is renamed into place, and `seat_weights` in the
+//! sidecar (the weights, the file's SHA-256, the rows by position).
 //! `hybrid-check` measures the hybrid H_K (exact to the start of trick K, the oracle network
 //! there) against exact search on the same worlds (docs/M3-HYBRID-SPEC.md §3, `search::hybrid`):
 //! decision loss with its bootstrap 95% upper bound, value error and agreement, overall, per
@@ -1493,8 +1499,9 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
     use search::oracle_labels::{
         CHUNK_ROWS, Driver, GOLDEN_SEED, HARVEST_CAP, HARVEST_SHARES, HARVEST_STRATA,
         HARVEST_TT_MB, HarvestJob, KEEP_CAP, LabelJob, PredKeep, RACE_CAP, RaceKeep, Source,
-        default_max_decisions, parse_band_shares, parse_race_classes, parse_strata,
-        position_schedule, reheader_shard, write_harvest_shard_upto, write_label_shard,
+        default_max_decisions, parse_band_shares, parse_race_classes, parse_seat_weights,
+        parse_strata, position_schedule, reheader_shard, seat_row_weights,
+        write_harvest_shard_upto, write_label_shard,
     };
     let trick = a.num("--trick", 4)? as u8;
     if !(2..=5).contains(&trick) {
@@ -1525,7 +1532,14 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         "--harvest-keep",
         "--keep-cap",
         "--max-decisions",
+        "--seat-weights",
     ];
+    // The rows' loss weights by their decision's seat band, written beside the shard
+    // (`NAME.npy.rowweights`) before it is renamed into place.
+    let seat_weights = match a.get("--seat-weights") {
+        Some(w) if job.source == Source::Harvest => Some((w.to_string(), parse_seat_weights(w)?)),
+        _ => None,
+    };
     let harvest = if job.source == Source::Harvest {
         let keep = match a.get("--harvest-keep") {
             None => {
@@ -1755,6 +1769,17 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
                 .map_err(|e| format!("{}: {e}", part.display()))?;
         }
         drop(file);
+        if let Some((_, w)) = &seat_weights {
+            let weights = seat_row_weights(&summary.decisions, *w);
+            if weights.len() as u64 != summary.rows {
+                return Err(format!(
+                    "--seat-weights: {} weights for {} rows",
+                    weights.len(),
+                    summary.rows
+                ));
+            }
+            nn::rowweights::write(&out, &weights)?;
+        }
         std::fs::rename(&part, &out).map_err(|e| format!("{}: {e}", out.display()))?;
         Ok::<_, String>(summary)
     })?;
@@ -1803,6 +1828,15 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
     });
     if job.source != Source::Rules {
         side["rows_by_position"] = serde_json::json!(&by_position[1..]);
+    }
+    if let Some((text, w)) = &seat_weights {
+        let path = nn::rowweights::path_for(&out);
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        side["seat_weights"] = serde_json::json!({
+            "weights": text, "fixed_256": w,
+            "rowweights": path.file_name().map(|n| n.to_string_lossy().into_owned()),
+            "rowweights_sha256": equity::sha256::sha256_hex(&bytes),
+            "rows_by_position": &by_position[1..] });
     }
     if let Some((h, shares, weights, keep_file, max)) = &harvest {
         // Rows written and decisions played: fewer rows than `count` only when the bound on
