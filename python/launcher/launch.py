@@ -1102,6 +1102,10 @@ def load_bad_machines(a) -> None:
 
 
 NO_START_PREFIX = "no heartbeat within"  # the reasons watch() gives when the first heartbeat never came
+# The reason watch() gives when the first heartbeat shows far fewer usable threads than the run's floor (2026-10-17: an
+# offer listed as 384 threads gave its container a CPU quota of 46): destroyed at once, recorded, and replaced.
+THIN_PREFIX = "too few usable threads"
+THIN_SHARE = 0.9  # a machine is refused when its container gets fewer than this share of the thread floor
 
 
 def start_failure_kind(reason: str) -> str | None:
@@ -1111,6 +1115,8 @@ def start_failure_kind(reason: str) -> str | None:
         return "container failed to start"
     if reason.startswith(NO_START_PREFIX):
         return "never heartbeated"
+    if reason.startswith(THIN_PREFIX):
+        return THIN_PREFIX
     return None
 
 
@@ -1904,7 +1910,7 @@ def rent_and_watch(a, run_id: str, best: dict | None, resumable: bool, run_start
             # Its container did not start, or it never heartbeated: no search takes this machine again for 24 hours.
             record_bad_machine(run_id, instance_id, best, kind, reason)
         # A container that never started ran nothing, so even a format-1 run is safe to retry.
-        start_failed = reason.startswith(START_FAILED)
+        start_failed = reason.startswith(START_FAILED) or reason.startswith(THIN_PREFIX)
         if final or not ((resumable and replaceable) or start_failed):
             break
         if len(attempts) > MAX_REPLACEMENTS:
@@ -2235,6 +2241,7 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
     the run's earlier machines."""
     low_since, last_key, last_change = None, None, created
     last_hb: dict | None = None
+    threads_checked = False
     warned: set[str] = set()
     silent_logged = False
     eta_warned = False
@@ -2324,6 +2331,17 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
         if state == "dying":
             log(f"instance {instance_id} looks dead ({live.detail}); not yet confirmed")
         hb = hb or {}
+        if not threads_checked and isinstance(hb.get("usable_cores"), (int, float)):
+            # The runner's first heartbeat says how many threads its container really gets (the cgroup CPU quota):
+            # far below the floor, the offer was not what it said, and the machine goes at once (nothing of value
+            # has run yet), recorded so that no search takes it again for 24 hours, and another is rented.
+            threads_checked = True
+            usable, floor = float(hb["usable_cores"]), float(getattr(a, "min_cores", 0) or 0)
+            if floor > 0 and usable < THIN_SHARE * floor:
+                log(f"::warning::instance {instance_id} gives the run only {usable:.0f} usable threads (its CPU quota), "
+                    f"below {THIN_SHARE:.0%} of the floor of {floor:.0f}: destroying it and renting another machine")
+                return "", (f"{THIN_PREFIX}: the container gets {usable:.0f} usable threads, below {THIN_SHARE:.0%} of "
+                            f"the floor of {floor:.0f} threads"), True, False
         cpu = hb.get("cpu_util_pct")
         if cpu is None:
             cpu = hb.get("host_cpu_busy_pct")

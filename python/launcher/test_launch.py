@@ -89,8 +89,8 @@ class World:
                 if inst["alive"]:
                     self.step(inst)
 
-    def heartbeat(self, phase: str, cpu: float) -> None:
-        hb = {"seq": self.hb_seq, "phase": phase, "cpu_util_pct": cpu}
+    def heartbeat(self, phase: str, cpu: float, **extra) -> None:
+        hb = {"seq": self.hb_seq, "phase": phase, "cpu_util_pct": cpu, **extra}
         if self.progress is not None:
             hb["progress"] = self.progress
         self.store[f"runs/{RUN}/heartbeat/{self.hb_seq:06}.json"] = json.dumps(hb).encode()
@@ -101,6 +101,15 @@ class World:
         kind, *args = inst["script"].split(":")
         n = int(args[0])
         if kind in ("never", "broken"):
+            return
+        if kind == "thin":
+            # Heartbeats at full CPU, but its container gets only n usable threads (its CPU quota); with a second
+            # number m, done after m polls.
+            self.heartbeat("chunk", 99.0, usable_cores=float(n))
+            if len(args) > 1 and inst["polls"] >= int(args[1]):
+                self.store.update(self.outputs)
+                self.store[f"runs/{RUN}/DONE"] = b"{}"
+                inst["alive"] = False
             return
         if kind in ("work", "idle"):
             # Works on and on (at full CPU, or at 10%), never finishing by itself.
@@ -1127,6 +1136,24 @@ class LauncherTest(unittest.TestCase):
     def bad_entry(self, w: World, machine: int, hours_ago: float, host: int = 60400, reason: str = "container failed to start"):
         return {"machine_id": machine, "host_id": host, "offer_id": 1, "instance_id": 5, "run_id": "old", "reason": reason,
                 "detail": "x", "utc": launch.epoch_to_utc(w.t - hours_ago * 3600)}
+
+    def test_a_machine_with_far_fewer_usable_threads_than_listed_is_replaced_and_recorded(self):
+        # 2026-10-17: an offer listed as 384 threads gave its container a CPU quota of 46. The first heartbeat shows it:
+        # destroyed at once, recorded for 24 hours, and the next offer is rented; one at 90% of the floor is kept.
+        w = World([offer(1, 11, 1.0, host_id=60400, cpu_cores_effective=384),
+                   offer(2, 12, 1.5, host_id=60500, cpu_cores_effective=128)], ["thin:46", "done:2"])
+        code, report = self.run_launch(w, self.FORMAT1, "--min-cores", "120")
+        self.assertEqual((code, w.created_on, report["outcome"]), (0, [1, 2], "DONE"))
+        self.assertIn("too few usable threads: the container gets 46 usable threads, below 90% of the floor of 120",
+                      report["attempts"][0]["ended"])
+        self.assertLessEqual(w.destroyed_at[100] - w.instances_created_at(100), 3 * launch.POLL_S + 1)
+        d = json.loads(w.store[self.BAD])
+        self.assertEqual([(e["machine_id"], e["reason"]) for e in d["machines"]], [(11, "too few usable threads")])
+        # Exactly 90% of the floor (108 of 120) is kept: it works on until the run ends.
+        w = World([offer(1, 11, 1.0, cpu_cores_effective=128)], ["thin:108:3"])
+        code, report = self.run_launch(w, self.FORMAT1, "--min-cores", "120")
+        self.assertEqual((code, w.created_on, report["outcome"]), (0, [1], "DONE"))
+        self.assertNotIn("too few usable threads", json.dumps(report))
 
     def test_a_machine_whose_container_did_not_start_is_recorded(self):
         w = World([offer(1, 11, 1.0, host_id=60400), offer(2, 12, 1.5, host_id=60500)], ["broken:0", "done:2"])
