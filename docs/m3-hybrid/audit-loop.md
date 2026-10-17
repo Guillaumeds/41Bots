@@ -307,3 +307,32 @@ What it taught, and what changed before the overnight loops:
 - Networks retrained from scratch differ from round to round (round 3 was worse than round 2 on the golden set): the
   loop now reports the best round's network as its result (eng-auditscale).
 - A mini set that keeps only a few decisions is "unmeasurable" (fewer than `audit_mini_min`, 30), never a pass.
+
+### The second mechanism test, and the start of the overnight loops (2026-10-16/17 night)
+
+Run `m3-hybrid-t4-audit-mech-2` (binary fcb3e73, every build merged; AMD EPYC 7B12, 122 threads, $0.67/h; stopped by
+hand after round 2's audit, about $1.25): gamma 0.0001 on a 4M-row audit shard, the generated 4,000-decision golden
+set, the start shape 1024-1024-512-128, at most 400 mini sets a round of 100 decisions.
+
+| step (round 1, 122 threads) | time |
+|---|---|
+| golden set, 4,000 decisions x 320 exact worlds | 0.7 min |
+| audit shard, 4M rows | 0.2 min |
+| training, 9M rows | 4.8 min |
+| auditor, 4M rows at gamma 0.0001 (544 found, 401 confirmed) | 2.2 min |
+| golden slices on 4,000 decisions | 2.1 min |
+| targeted harvest, 2M rows | 4 s |
+| a mini golden set (100 decisions) | about 17 s each, several hundred a round |
+
+Round 1's network on the 4,000-decision golden set: mean decision loss 0.0031%, 95% upper bound 0.0049% (seats 1-2
+0.0131%, 3-4 0.0047%, 5-8 0.0017%). Round 2 trained beside round 1's mini sets: the trainer waited for its data while
+the CPU built them and the stall watch left it alone (the risk the eng-runfix build addressed). Round 2: 443 confirmed,
+48 failing at the decision level. A stopped run keeps its rounds in the partial uploads (`partial/rung/000000/out/`)
+and every round's network content-addressed; there is no final bundle.
+
+The overnight trick-4 loop's first run (`m3-hybrid-t4-loop-1`, 10M-row audit shards) confirmed **1,551 groups** in
+round 1 (4,858 candidates; 92.5% of positions inside a confirmed group; overall SD 0.773%, race class 4 SD 2.39%). At
+about 20 s a mini set, 400 a round would have spent most of the night measuring rather than improving, so the loop was
+relaunched with at most 60 new mini sets a round (the groups with the largest weight x SD^2 first; the rest wait and are
+reported as not yet measured), and with a patient price ladder after a relaunch climbed to $1.97/h in ten minutes
+(`m3-hybrid-t4-loop-3`: AMD EPYC 7B13, 122 threads, 504 GB, $0.73/h).
