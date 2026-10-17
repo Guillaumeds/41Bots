@@ -594,6 +594,29 @@ def named_text(o: dict) -> str:
             f"rel {num('reliability2', fmt='{:.3f}')}, link {num('inet_down')} Mbps, {o.get('geolocation')}")
 
 
+def why_offer_missing(oid: int) -> str:
+    """When the lookup by id finds nothing, a few wider searches (any host, external listings, not
+    rentable, interruptible) to say why (2026-10-17: four offers the owner named all read as gone).
+    Returns text to append to the refusal; never raises."""
+    tries = (("any host, external and unrentable listings included", f"id={oid} verified=any external=any rentable=any", "on-demand"),
+             ("interruptible", f"id={oid} verified=any external=any rentable=any", "bid"))
+    found = []
+    for label, q, kind in tries:
+        try:
+            rows = vast("search", "offers", q, "--type", kind, "--limit", "5")
+        except RuntimeError as e:
+            found.append(f"{label}: the search failed ({redact(str(e))[:120]})")
+            continue
+        hit = next((o for o in rows if isinstance(o, dict) and o.get("id") == oid), None) if isinstance(rows, list) else None
+        if hit:
+            found.append(f"{label}: found ({named_text(hit)}; rentable {hit.get('rentable')}, rented {hit.get('rented')}, "
+                         f"external {hit.get('external')}, interruptible {hit.get('is_bid')})")
+    if not found:
+        return ("; no wider search finds it either (any host, external, unrentable, interruptible): the number may not be "
+                "an offer id (vast's offer id is the number to rent by; the m: number is the machine)")
+    return "; " + "; ".join(found)
+
+
 def lookup_offer(a) -> dict:
     """The one offer the owner named (--offer-id), read back from vast by its id (one search,
     `id=N`, on-demand) and checked like every searched offer (`offer_check_failures`). Stops the
@@ -611,7 +634,8 @@ def lookup_offer(a) -> dict:
         sys.exit(f"launch: offer {oid} could not be checked (vast's search answered {LAST_VAST_OUTPUT!r}); nothing was rented")
     row = next((o for o in rows if isinstance(o, dict) and o.get("id") == oid), None)
     if row is None:
-        sys.exit(f"launch: offer {oid} is not on offer (on-demand) any more; nothing was rented")
+        sys.exit(f"launch: offer {oid} is not on offer (on-demand) any more; nothing was rented"
+                 f"{why_offer_missing(oid)}")
     log(f"named offer {oid}: {named_text(row)}")
     verified_only = bool(getattr(a, "verified_only", False))
     failed = offer_check_failures(row, float(a.min_reliability), verified_only)

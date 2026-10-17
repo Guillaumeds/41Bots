@@ -1184,6 +1184,17 @@ class LauncherTest(unittest.TestCase):
         self.assertIn("host unverified", self.log)
         self.assertIn("accepted, because the owner named it", self.log)
 
+    def test_a_named_offer_that_is_gone_says_why_after_wider_searches(self):
+        # Not found by the plain lookup: wider searches (any host, external, unrentable, interruptible) say why;
+        # here nothing finds it, and the refusal says the number may not be an offer id.
+        w = World([], ["done:1"])
+        w.forbid_search = True
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, self.FORMAT1, "--offer-id", "501")
+        self.assertIn("offer 501 is not on offer (on-demand) any more", str(e.exception))
+        self.assertIn("no wider search finds it either", str(e.exception))
+        self.assertEqual((w.created_on, w.id_lookups), ([], 3))
+
     def test_container_error_is_replaced_at_once(self):
         # The container cannot start: destroyed at the first poll (not after --startup-minutes)
         # and the next offer is rented, for a format-1 run too (nothing ran on the first).
