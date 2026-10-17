@@ -1,0 +1,71 @@
+{
+ "format": 2,
+ "run_id": "m3-hybrid-t2-loop-1",
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "Trick-2 audit loop (O_2, cut 2), scratch mode as the overnight trick-3 and trick-4 loops (owner, 2026-10-17): exact labels, a fresh network each round, the capacity ladder from 2048-1024-256, the auditor at gamma 0.001 on 200,000 fresh trick-2 positions a round, targeted harvests of 250,000, at most 4 rounds. No trick-1 golden set (owner, 2026-10-16): flat when a round's audit confirms no weak group; the saved trick-1 worlds are a rough test, reported only. Every label is stored for later runs: the base shards (upload_shards), every audit shard (shared before it is deleted) and every targeted shard. No harvest_net: no O_2 exists yet, and O_3 cannot drive a trick-2 harvest (search labels refuses a network of another trick; the runner now checks it at the start), so round 1's audit shard is made after round 1's training, driven by that network; base labels are random play and rules-v1 self-play only. partial_epochs 2: each round's training starts beside the round before's targeted harvest (hours at trick 2) and waits after 2 epochs for its shard (docs/m3-hybrid/overlap.md). Labels: 1.2M random play (s511), 300,000 rules-v1 (s512), 50,000 validation (s601); per round 200,000 audit + 250,000 targeted (3 targeted harvests in 4 rounds): 3.1M labels in all. Machine (owner, 2026-10-17): a cheap one with at least 300 threads, any GPU of 20 GB. Cost from the build VM's trick-2 measurements with item A (random 3.65, rules 3.5-4.2, harvested 1.4-3.5 thread-seconds a label) and a rented thread 1.0-1.3 times slower: base labels 5.2-7.0 h on 300 threads, 4.1-5.5 h on 384; an audit shard 0.26-0.83 / 0.20-0.65 h; a targeted harvest 0.32-1.04 / 0.25-0.81 h; about 2 h of setup, round-1 training, the round-1 rough test (its verification sample) and the auditors. All 4 rounds: 9.2-15.5 h on 300 threads ($9-15 at $1.00/h, $13-22 at $1.40/h, $18-31 at $2.00/h), 7.6-12.5 h on 384 ($8-13, $11-18, $15-25); flat after round 1: 6.7-9.0 h on 300 ($7-18), 5.5-7.3 h on 384 ($5-15). Launch with --max-dollars 35 (the owner's trick-2 budget): no corner of the projection reaches it. Memory: labels hold about 200 MB a thread (256 MB tables: at most 98 GB at 384 threads), the trainer about 3 GB of rows and the rough test's verification table 8 GB: 192 GB keeps a margin. Disk: about 4 GB of shards.",
+ "machine": {
+  "gpus": 1,
+  "min_gpu_ram_gb": 20,
+  "min_compute_cap": 600,
+  "min_cores": 300,
+  "min_ram_gb": 192,
+  "disk_gb": 80,
+  "min_inet_down": 100,
+  "max_dph": 2.0,
+  "price_steps": [1.4, 1.7, 2.0],
+  "tries_per_step": 10
+ },
+ "streams": [
+  {
+   "name": "rung",
+   "priority": 1,
+   "kind": "hybrid_rung",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "cut": 2,
+    "labels_random": 1200000,
+    "labels_random_seed": 511,
+    "labels_rules": 300000,
+    "labels_rules_seed": 512,
+    "val_count": 50000,
+    "val_seed": 601,
+    "widths": "2048,1024,256",
+    "head": "outcome",
+    "epochs": 40,
+    "patience": 6,
+    "batch": 1024,
+    "lr": 0.001,
+    "train_seed": 1,
+    "max_minutes": 0,
+    "device": "cuda",
+    "overlap": true,
+    "partial_epochs": 2,
+    "upload_shards": true,
+    "audit_rounds": 4,
+    "audit_rows": 200000,
+    "audit_seed": 221,
+    "audit_gamma": 0.001,
+    "audit_target_rows": 250000,
+    "audit_weight": 2,
+    "audit_shapes": "<widths>;2048,2048,1024,256;4096,2048,1024,256",
+    "t1_decisions_input": "inputs/sha256/b23c8b0d48ea90773adc21290e600eeea290530bdc49d7c1573a62516cbb7e37",
+    "t1_saved_inputs": [
+     { "run": "m3-t1-tables-1", "input": "inputs/sha256/b788224c346692af3e82d021c9564b7e1909a8c0b3924f1a842413eb70e1b832" },
+     { "run": "m3-t1-leader-layouts-1", "input": "inputs/sha256/8a9bd83e8c4dcda2603aefd4d8ab79f7ce85cc1f3123ca12d4b017661292b029" },
+     { "run": "m3-t1-leader-layouts-9654", "input": "inputs/sha256/96420885a545ae17c34cbc5dc1affb146b9ee1c45e764d6d8237e39138eff768" },
+     { "run": "m3-t1-leader-layouts (worlds file)", "input": "inputs/sha256/df3e4d4a1b29a23a80a8af065182aca10c7ccb9e7b947d62e4e1b6d040339df9" },
+     { "run": "m3-agree-t1-ab1", "input": "inputs/sha256/ca74c2acf6fbe189cd46408bbd39e9cfc529ed5f87ca186019246f5264ed476c" }
+    ],
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  }
+ ]
+}

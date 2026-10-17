@@ -50,7 +50,7 @@
 //!                  [--verify-pct 0] [--verify-rule all|rules-v1|searched]
 //!                  [--verify-solve-threads 1] [--verify-tt-mb M] [--threads T] [--tt-mb 64]
 //!                  [--boot 1000] [--boot-seed 1] [--json OUT] [--progress FILE] [--plan-only]
-//!                  [--standard 0.01]
+//!                  [--slices PRED.json [--slice-share 0.5]] [--standard 0.01]
 //! ```
 //! `labels` writes training labels for the oracle network O_K (docs/M3-HYBRID-SPEC.md §5,
 //! `search::oracle_labels`): a label shard (`nn::shard`, `.npy` records: encoded features, the exact
@@ -122,13 +122,15 @@
 //! search copied up to each candidate, with the network's outcome probabilities there;
 //! `--explain-json FILE` writes every world (the principal positions of the
 //! `--explain-worlds` most misleading ones only).
-//! `--slices PRED.json` (not with `--saved` or `--explain`; docs/m3-hybrid/audit-loop.md §3 item
-//! 2, `search::hybrid::slices`): the hybrid's own search in every world also records the distinct
+//! `--slices PRED.json` (not with `--explain`; docs/m3-hybrid/audit-loop.md §3 item 2,
+//! `search::hybrid::slices`): the hybrid's own search in every world also records the distinct
 //! frontier positions it reaches and their groups (never changing a value); a decision is in a
 //! group when at least `--slice-share` (0.5) of the positions its worlds' searches reach are in
 //! it. The report adds the §3 table per group and for the decisions in no group (reported, not
 //! judged), and the standard then also asks every group's slice with decisions to pass the
-//! decision-loss bound (JSON: `slices`, `pass` with them, `pass_without_slices`).
+//! decision-loss bound (JSON: `slices`, `pass` with them, `pass_without_slices`). With `--saved`
+//! (the audit loop's rough test at trick 2) each set gets its own slices, in its JSON entry
+//! under `sets`.
 //! `--standard PCT` (default 0.01, a percentage of money chance; owner, 2026-10-16 night: the
 //! audit loop's push standards 0.005 at trick 4 and 0.0075 at trick 3) is the standard every
 //! verdict uses: the overall, band and position rows' decision-loss bound and bias, and every
@@ -2147,9 +2149,27 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
     };
     let boots = a.num("--boot", 1000)?;
     let boot_seed = a.num("--boot-seed", 1)?;
-    if a.has("--saved") && a.has("--slices") {
-        return Err("--slices is for a golden set's check, not --saved worlds".into());
-    }
+    let slice_preds = match a.get("--slices") {
+        None => {
+            if a.has("--slice-share") {
+                return Err("--slice-share is for --slices PRED.json".into());
+            }
+            None
+        }
+        Some(f) => {
+            if a.has("--explain") {
+                return Err("--slices is for the check, not --explain".into());
+            }
+            let p = nn::predicate::Predicates::load(Path::new(f))?;
+            if p.is_empty() {
+                return Err(format!("--slices {f}: the file has no groups"));
+            }
+            Some((p, f.to_string()))
+        }
+    };
+    let share_text = a.get("--slice-share").unwrap_or("0.5");
+    let share =
+        nn::predicate::parse_share(share_text).map_err(|e| format!("--slice-share: {e}"))?;
     if a.has("--saved") {
         return hybrid_check_saved(
             a,
@@ -2165,6 +2185,9 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
                 boots,
                 boot_seed,
                 t0,
+                slices: slice_preds
+                    .as_ref()
+                    .map(|(p, f)| (p, f.as_str(), share_text, share)),
             },
         );
     }
@@ -2195,27 +2218,6 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             r.id
         ));
     }
-    let slice_preds = match a.get("--slices") {
-        None => {
-            if a.has("--slice-share") {
-                return Err("--slice-share is for --slices PRED.json".into());
-            }
-            None
-        }
-        Some(f) => {
-            if a.has("--explain") {
-                return Err("--slices is for the check, not --explain".into());
-            }
-            let p = nn::predicate::Predicates::load(Path::new(f))?;
-            if p.is_empty() {
-                return Err(format!("--slices {f}: the file has no groups"));
-            }
-            Some((p, f.to_string()))
-        }
-    };
-    let share_text = a.get("--slice-share").unwrap_or("0.5");
-    let share =
-        nn::predicate::parse_share(share_text).map_err(|e| format!("--slice-share: {e}"))?;
     if let Some(ids) = a.get("--explain") {
         return hybrid_explain(a, ids, &ds, &stored, &job, &ctx, &oracle);
     }
@@ -2576,14 +2578,19 @@ struct SavedRun<'a> {
     boots: u64,
     boot_seed: u64,
     t0: Instant,
+    /// `--slices`: the predicate file, its path, the share as written and in millionths.
+    slices: Option<(&'a nn::predicate::Predicates, &'a str, &'a str, u64)>,
 }
 
 /// `search hybrid-check --saved LABEL=FILE …`: H_K against the exact values earlier runs saved
 /// (`search::saved`; docs/M3-HYBRID-SPEC.md §3, "Trick-1 checks"), one set per burn rule, each
 /// checked with the matching `rules_robber_burn`; per world, per decision, the §3 tables per
-/// set, and the `--hard` worlds on their own lines with the saved exact times.
+/// set, and the `--hard` worlds on their own lines with the saved exact times. With `--slices`
+/// (the audit loop at trick 2, docs/m3-hybrid/audit-loop.md), each set also gets the slices of
+/// the golden-set check (`search::hybrid::slices`: a decision is in a group when at least the
+/// share of the frontier positions its hybrid searches reach are in it), judged the same way.
 fn hybrid_check_saved(a: &Args, r: SavedRun) -> Result<(), String> {
-    use search::hybrid::{CheckProgress, CheckRun, check_worlds, report};
+    use search::hybrid::{CheckProgress, CheckRun, check_worlds_with, report};
     use search::saved::{BurnRule, join_saved, parse_pairs, plan, read_saved, saved_sets};
     for k in ["--worlds", "--recompute", "--to"] {
         if a.has(k) {
@@ -2790,13 +2797,14 @@ fn hybrid_check_saved(a: &Args, r: SavedRun) -> Result<(), String> {
                 }
             }
         });
+        let preds = r.slices.map(|x| x.0);
         let handles: Vec<_> = work
             .iter()
             .zip(progs)
             .map(|(w, p)| {
                 s.spawn(move || {
                     let t = Instant::now();
-                    let run = check_worlds(&w.2, &w.4, r.ctx, r.oracle, Some(p));
+                    let run = check_worlds_with(&w.2, &w.4, r.ctx, r.oracle, Some(p), preds);
                     (run, t.elapsed().as_secs_f64())
                 })
             })
@@ -3004,10 +3012,42 @@ fn hybrid_check_saved(a: &Args, r: SavedRun) -> Result<(), String> {
         }
         let std_txt = format!("{}%", std_pct.trim());
         print_groups(&groups, &std_txt);
+        let sl = r.slices.map(|(p, _, text, share)| {
+            let mut sl = search::hybrid::slices(&run, p, share, r.boots, r.boot_seed);
+            // Judged by `--standard`, as the golden-set check's slices.
+            for x in &mut sl {
+                search::hybrid::judge(&mut x.summary, standard);
+                if x.pass.is_some() {
+                    x.pass = Some(x.summary.loss_pass);
+                }
+            }
+            print_slices(&sl, text, &std_txt);
+            sl
+        });
         let time = check_time(&run, sjob.threads, wall);
         print_time(&time);
-        let (pass, line) = verdict(&groups, &std_txt);
-        println!("{line}");
+        let (bands_pass, line) = verdict(&groups, &std_txt);
+        let failing: Vec<&str> = sl
+            .iter()
+            .flatten()
+            .filter(|x| x.group.is_some() && x.pass == Some(false))
+            .map(|x| x.name.as_str())
+            .collect();
+        let pass = bands_pass && failing.is_empty();
+        match &sl {
+            None => println!("{line}"),
+            Some(_) => println!(
+                "{}; every slice's decision loss 95% upper bound <= {std_txt}: {}{}; with the slices: {}",
+                line.trim_end_matches("; PASS").trim_end_matches("; FAIL"),
+                if failing.is_empty() { "yes" } else { "no" },
+                if failing.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (failing: {})", failing.join(", "))
+                },
+                if pass { "PASS" } else { "FAIL" }
+            ),
+        }
         let o = doc.as_object_mut().expect("an object");
         o.insert(
             "values".into(),
@@ -3024,6 +3064,26 @@ fn hybrid_check_saved(a: &Args, r: SavedRun) -> Result<(), String> {
                 .collect(),
         );
         o.insert("pass".into(), serde_json::json!(pass));
+        o.insert("pass_without_slices".into(), serde_json::json!(bands_pass));
+        if let (Some(sl), Some((p, f, text, share))) = (&sl, r.slices) {
+            o.insert(
+                "slices".into(),
+                serde_json::json!({
+                    "what": "a decision is in a group when at least `share` of the distinct frontier \
+                             positions the hybrid's searches over its saved worlds reach are in it \
+                             (search::audit::GroupRecorder, nn::predicate); `no group`: the others",
+                    "predicates_file": f,
+                    "predicates_sha256": p.sha256,
+                    "share": text,
+                    "share_millionths": share,
+                    "groups": sl,
+                    "pass": failing.is_empty(),
+                    "failing": failing,
+                    "empty": sl.iter().filter(|x| x.group.is_some() && x.pass.is_none()).map(|x| x.name.clone()).collect::<Vec<_>>(),
+                    "judged": "the groups' slices (every one with decisions must pass); `no group` is reported only (the overall row covers it)",
+                }),
+            );
+        }
         o.insert("time".into(), time_json(&time, 0.0));
         o.insert("decisions".into(), serde_json::json!(run.decisions));
         o.insert("worlds".into(), serde_json::json!(worlds_json));

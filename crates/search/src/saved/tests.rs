@@ -339,6 +339,64 @@ fn saved_check_is_the_hybrid_check() {
     assert!(plan(&moved, &sets[0], 5, src.name(), "t", &|_, _| true).is_err());
 }
 
+/// Slices on saved worlds (the audit loop's decision-level stage at trick 2,
+/// docs/m3-hybrid/audit-loop.md): the check of a saved set with a predicate file gives the
+/// values of the plain check, the reaches and slices of the golden-set check with slices on the
+/// same worlds, and the same on 1 and 3 threads.
+#[test]
+fn saved_check_slices_are_the_golden_checks() {
+    use crate::hybrid::{check_worlds_with, run_check_slices, slices};
+    let starts = collect_starts(300, 3);
+    let ds = build_decisions(3, 8, 5, &starts);
+    let l = leaf();
+    let src = BeliefSource::new();
+    let ctx = Ctx {
+        leaf: &*l,
+        source: &src,
+        rules: engine::game::Rules::HOUSE,
+    };
+    let cfg = SearchConfig {
+        tt_mb: 4,
+        ..SearchConfig::default()
+    };
+    let f = FnFrontier(by_cards as fn(&CanonPos, &MatchCtx) -> MoneyChance);
+    let rows: Vec<WorldRows> = ds
+        .iter()
+        .map(|d| world_rows(d, Method::ExactPimc, 1, 5, 0, 4, "t", &ctx, &cfg))
+        .collect();
+    let mut text = String::new();
+    for (d, r) in ds.iter().zip(&rows) {
+        for (w, v) in r.rows.iter().enumerate() {
+            text += &ckpt_line(d, src.name(), 5, w as u64, v);
+            text.push('\n');
+        }
+    }
+    let (worlds, _) = parse_saved(&text, "t3").expect("parses");
+    let sets = saved_sets(join_saved(worlds).expect("joins")).expect("sets");
+    let (pl, _) = plan(&ds, &sets[0], 5, src.name(), "t", &|_, _| true).expect("plan");
+    let preds = format!(
+        r#"[{{"name": "next team no trick", "conditions": [{{"feature": {}, "op": "==", "value": 1}}]}}]"#,
+        nn::encode::OFF_TRICKS + 5
+    );
+    let p = nn::predicate::Predicates::parse(preds.as_bytes()).expect("parses");
+    let plain = check_worlds(&pl, &job(4, 5, 4, 2), &ctx, &f, None).expect("runs");
+    let one = check_worlds_with(&pl, &job(4, 5, 4, 1), &ctx, &f, None, Some(&p)).expect("runs");
+    let three = check_worlds_with(&pl, &job(4, 5, 4, 3), &ctx, &f, None, Some(&p)).expect("runs");
+    let stored: BTreeMap<u64, WorldRows> = rows.iter().map(|r| (r.id, r.clone())).collect();
+    let golden =
+        run_check_slices(&ds, &stored, &job(4, 5, 4, 2), &ctx, &f, Some(&p)).expect("runs");
+    assert_eq!(key(&one), key(&plain), "slices never change a value");
+    assert_eq!(key(&one), key(&golden));
+    let reach = |r: &CheckRun| -> Vec<_> { r.decisions.iter().map(|d| d.reach.clone()).collect() };
+    assert_eq!(reach(&one), reach(&golden));
+    assert_eq!(reach(&one), reach(&three));
+    let sl = |r: &CheckRun| serde_json::to_string(&slices(r, &p, 500_000, 50, 1)).expect("json");
+    assert_eq!(sl(&one), sl(&golden));
+    let s = slices(&one, &p, 500_000, 50, 1);
+    assert_eq!(s.len(), 2);
+    assert_eq!(s[0].ids.len() + s[1].ids.len(), 8, "a partition here");
+}
+
 /// The burn rule reaches the solves: a set valued with the `rules-v1` burn is checked with
 /// `rules_robber_burn` in the hybrid's solves (and in the exact ones, `CheckJob::config`). At
 /// trick 1, with the frontier at trick 2 (cheap), in worlds where a seat after the decider robs,
