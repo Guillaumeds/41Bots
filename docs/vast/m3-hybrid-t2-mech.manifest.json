@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "run_id": "m3-hybrid-t2-mech-2",
+  "run_id": "m3-hybrid-t2-mech-3",
   "run_seed": 1,
   "threads": null,
   "benchmark_seconds": 0,
@@ -9,6 +9,7 @@
   "note": "Trick-2 audit loop, mechanism test on real hardware (2026-10-17) before the long run: the same settings at a tiny size (25,000 base labels, 5,000-row audit and targeted shards, two rounds, a small network), so every cut-2 step runs once: base labels and their upload, training on the GPU, the audit shard driven by round 1's own network, the auditor, the trick-1 rough test with its verification sample (about half an hour), the targeted harvest, uploads before deletion, round 2, the kept round.",
   "machine": {
     "gpus": 1,
+    "blackwell": true,
     "min_gpu_ram_gb": 16,
     "min_compute_cap": 600,
     "min_cores": 120,
