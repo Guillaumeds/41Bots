@@ -42,15 +42,23 @@
 //! 2, … in order, cut at the row count. Each decision's search runs on one thread (the
 //! sequential solver), so the positions it reaches, and the order it reaches them in, never
 //! depend on the thread count; a network's per-thread caches never change a value
-//! (`nn::oracle`).
+//! (`nn::oracle`). Each label is a pure function of its position (the exact value; the solver's
+//! table never changes it), so where and with what a label is solved never changes a row
+//! ([`LabelExec`]: the table's size and the [`HarvestSchedule`]; tested).
 //!
 //! **Streaming** ([`write_label_shard`], [`write_harvest_shard`]): a shard of millions of rows is
-//! never held in memory. Workers make chunks of consecutive rows (or harvest decisions), each
-//! claimed as a worker comes free (`crate::ordered`), already as the shard's bytes; the chunks are
-//! hashed (SHA-256, for the sidecar) in row order as they arrive and written in that order by a
-//! writer thread, so hashing and writing overlap the making of later rows instead of following
-//! it. The bytes and the hash are those of [`nn::shard::to_npy`] of [`label_rows`] /
-//! [`harvest_rows`] (tested), for any thread count and chunk size.
+//! never held in memory. Workers make chunks of consecutive rows, each claimed as a worker comes
+//! free (`crate::ordered`), already as the shard's bytes; the chunks are hashed (SHA-256, for the
+//! sidecar) in row order as they arrive and written in that order by a writer thread, so hashing
+//! and writing overlap the making of later rows instead of following it. A harvest's decisions
+//! are searched and sampled one per worker, in order, and their sampled positions pooled into one
+//! list whose labels every worker takes in turn (`crate::ordered::pooled`, the default
+//! [`HarvestSchedule::Pooled`]): at trick 2, where a label takes seconds to minutes and a
+//! decision has 16 to 270 of them, no thread is left with one decision's labels while the others
+//! wait (measured 2026-10-17 on 245 threads: the per-decision schedule ran at 7% of the plain
+//! labels' speed), and no label is made for a decision past the row count. The bytes and the hash
+//! are those of [`nn::shard::to_npy`] of [`label_rows`] / [`harvest_rows`] (tested), for any
+//! thread count, chunk size and schedule.
 //!
 //! **Disjoint from the golden sets**: the golden decision sets use seed 1; seed 1 is refused.
 
@@ -365,19 +373,17 @@ fn labelled_row(
     }
 }
 
-/// Row `i` of a job, labelled, and its facts.
+/// Row `i` of a job, labelled (its exact solve with a table of `tt_mb` megabytes), and its facts.
 fn make_row(
     job: &LabelJob,
     i: u64,
     starts: &[Vec<HandStartState>; 4],
     source: &dyn WorldSource,
     leaf: &SharedLeaf,
+    tt_mb: usize,
     mem: &mut SolveMem,
 ) -> (Row, RowInfo) {
-    let opts = FastOptions {
-        tt_mb: tt_mb_for(job.trick),
-        ..FastOptions::default()
-    };
+    let opts = label_opts(tt_mb);
     let (pos, ctx, mut info) = row_position(job, i, starts, source);
     let (v, nodes) = exact_value(&pos, ctx, leaf, opts, mem);
     info.nodes = nodes;
@@ -419,7 +425,7 @@ pub fn label_rows(
         window_for(job.threads),
         SolveMem::new,
         |mem, i| {
-            let r = make_row(job, i, starts, &source, leaf, mem);
+            let r = make_row(job, i, starts, &source, leaf, tt_mb_for(job.trick), mem);
             if let Some(p) = progress {
                 p.fetch_add(1, Ordering::Relaxed);
             }
@@ -435,9 +441,17 @@ pub fn label_rows(
 }
 
 /// Rows a unit of [`write_label_shard`]'s work makes by default: small enough that the last
-/// units leave no long tail on hundreds of threads (32 rows are about 10 ms of work), large
-/// enough that handing them over costs nothing.
+/// units leave no long tail on hundreds of threads (32 rows are about 10 ms of work at trick 4),
+/// large enough that handing them over costs nothing. Trick 2 takes 1 ([`chunk_rows_for`]).
 pub const CHUNK_ROWS: u64 = 32;
+
+/// The default rows a unit of [`write_label_shard`]'s work at frontier trick `k` (`search labels
+/// --chunk-rows`): [`CHUNK_ROWS`], but 1 at trick 2, where one exact label takes seconds (32 of
+/// them are minutes on one thread, the tail of a short shard on hundreds of threads). The shard
+/// is the same bytes for any chunk size (tested).
+pub fn chunk_rows_for(k: u8) -> u64 {
+    if k <= 2 { 1 } else { CHUNK_ROWS }
+}
 
 /// Chunks queued for the writer thread before the hashing waits for the disk.
 const WRITE_QUEUE: usize = 64;
@@ -616,6 +630,31 @@ pub fn write_label_shard<W: Write + Send>(
     chunk_rows: u64,
     out: &mut W,
 ) -> Result<ShardSummary, String> {
+    write_label_shard_with(
+        job,
+        LabelExec::for_trick(job.trick),
+        starts,
+        leaf,
+        progress,
+        chunk_rows,
+        out,
+    )
+}
+
+/// [`write_label_shard`] with the exact solves' table of `exec.tt_mb` megabytes: the same bytes,
+/// hash and counts apart from the solves' node counts (the table never changes a value).
+///
+/// # Panics
+/// As [`label_rows`].
+pub fn write_label_shard_with<W: Write + Send>(
+    job: &LabelJob,
+    exec: LabelExec,
+    starts: &[Vec<HandStartState>; 4],
+    leaf: &SharedLeaf,
+    progress: Option<&AtomicUsize>,
+    chunk_rows: u64,
+    out: &mut W,
+) -> Result<ShardSummary, String> {
     check_label_job(job);
     let (n, v) = (job.count, nn::outcome::vocab(job.trick));
     let chunk = chunk_rows.max(1);
@@ -632,7 +671,7 @@ pub fn write_label_shard<W: Write + Send>(
                 let mut bytes = Vec::with_capacity((hi - lo) as usize * row_bytes_for(v));
                 let mut cnt = RowCounts::default();
                 for i in lo..hi {
-                    let (row, info) = make_row(job, i, starts, &source, leaf, mem);
+                    let (row, info) = make_row(job, i, starts, &source, leaf, exec.tt_mb, mem);
                     assert_eq!(row.outcomes.len(), v, "every row has the trick's outcomes");
                     row_bytes(&row, &mut bytes);
                     cnt.add(&info);
@@ -1138,43 +1177,196 @@ pub fn harvest_root(
     (d, cands, m, rng)
 }
 
-/// Harvest decision `j` ([`harvest_root`]): the hybrid's search from it for every candidate
-/// (`crate::pimc::exact_world` with a frontier at the start of `job.trick` and the [`Recorder`]
-/// there, valuing the frontier as `driver` says), the distinct reached positions, a seeded sample
-/// of at most `job.cap` of them (kept in reach order), each labelled with its exact value (from
-/// the search with [`Driver::Exact`]; solved now, and only these, with [`Driver::Net`]). The
-/// decision's exact solves share one table (`solver::SolveFamily`): the same values as solves
-/// from empty tables, fewer nodes.
-pub fn harvest_decision(
+/// How many of a decision's sampled positions make one unit of label work at frontier trick `k`
+/// (the harvests' pooled schedule, [`HarvestSchedule::Pooled`]): the unit's positions are solved
+/// in reach order on one table and leaf memo shared by the decision's family
+/// (`solver::SolveFamily`), each unit from empty tables.
+///
+/// - Trick 2: **1**. A trick-2 solve takes seconds (36 M nodes on average, heavy-tailed to
+///   minutes), so each label is its own unit and every thread takes the next label of the pooled
+///   list, whichever decision it came from: the run ends about one label's time after the last
+///   is claimed, however many labels one decision has (16 to 270). Sharing a table across a
+///   decision's labels saved nothing measurable at trick 2 (docs/ENGINEERING-2026-10-17.md item
+///   A: 2% for every lever together at trick 2, against 8% for the random labels' levers alone;
+///   the sampled positions of one decision share little of their futures).
+/// - Tricks 3–5: **all of the decision's**. A solve takes milliseconds or less, so a decision's
+///   labels are one short unit, and sharing the table saves a quarter to three quarters of the
+///   nodes (item A): exactly the solves, and the node counts, of the per-decision schedule.
+///
+/// The value of a label never depends on this (the shared table holds exact values only; tested).
+pub fn label_group_for(k: u8) -> usize {
+    if k <= 2 { 1 } else { usize::MAX }
+}
+
+/// The options of the exact label solves with a table of `tt_mb` megabytes (by default
+/// [`tt_mb_for`] the trick; the table never changes a value).
+fn label_opts(tt_mb: usize) -> FastOptions {
+    FastOptions {
+        tt_mb: tt_mb.max(1),
+        ..FastOptions::default()
+    }
+}
+
+/// How a label run is carried out over its threads and memory; never changes a row, a harvest
+/// decision's facts or their order (tested), only the time and the solves' node counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LabelExec {
+    /// The exact label solves' table, megabytes a thread ([`tt_mb_for`] the trick unless lowered
+    /// to fit the machine's memory: `search labels --tt-mb`). A harvest's own search keeps its
+    /// fixed table ([`HARVEST_TT_MB`]: what it reaches may depend on it).
+    pub tt_mb: usize,
+    /// A harvest's schedule.
+    pub schedule: HarvestSchedule,
+    /// A pooled harvest's positions a unit of label work ([`label_group_for`]).
+    pub group: usize,
+}
+
+impl LabelExec {
+    /// The defaults at frontier trick `k`.
+    pub fn for_trick(k: u8) -> LabelExec {
+        LabelExec {
+            tt_mb: tt_mb_for(k),
+            schedule: HarvestSchedule::Pooled,
+            group: label_group_for(k),
+        }
+    }
+}
+
+/// How a harvest's work is shared out over its threads; never changes a row, a decision's facts
+/// or the order of either (tested), only the time, and the label solves' node counts at trick 2
+/// ([`label_group_for`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HarvestSchedule {
+    /// The default. Each decision's search and sample on one thread (decisions claimed in
+    /// order, at most a window ahead); the sampled positions of the decisions taken, in order,
+    /// form one list whose labels ([`label_group_for`] positions a unit) are made by every
+    /// thread, a label before any further decision (`crate::ordered::pooled`). No label is made
+    /// for a decision past the row count, and no thread waits on one long decision.
+    #[default]
+    Pooled,
+    /// Before 2026-10-17: each decision's search, sample and every one of its labels on one
+    /// thread, decisions claimed in order up to a window of `4 × threads + 16` ahead
+    /// (`crate::ordered::ordered`), the decisions being made when the row count is reached
+    /// finished and dropped. At trick 2 a decision's labels take minutes to hours on one
+    /// thread, so the run waits on its slowest decisions while the others make decisions that
+    /// are thrown away (measured on a 245-thread EPYC 7742: 7% of the plain labels' speed).
+    /// Kept for the identity tests and timing comparisons (`search labels --harvest-schedule
+    /// decision`).
+    PerDecision,
+}
+
+impl HarvestSchedule {
+    /// Its name on the command line (`--harvest-schedule`).
+    pub fn name(self) -> &'static str {
+        match self {
+            HarvestSchedule::Pooled => "pooled",
+            HarvestSchedule::PerDecision => "decision",
+        }
+    }
+
+    /// Parse a command-line name.
+    pub fn parse(s: &str) -> Result<HarvestSchedule, String> {
+        match s {
+            "pooled" => Ok(HarvestSchedule::Pooled),
+            "decision" => Ok(HarvestSchedule::PerDecision),
+            _ => Err(format!("unknown harvest schedule {s} (pooled or decision)")),
+        }
+    }
+}
+
+/// One sampled frontier position of a harvest decision, its label still to make.
+#[derive(Clone, Copy, Debug)]
+pub struct Sampled {
+    /// The position as the search first reached it.
+    pub pos: Position,
+    /// The match around it.
+    pub ctx: MatchCtx,
+    /// Its exact value and the nodes of its solve when the search already solved it
+    /// ([`Driver::Exact`]); `None` with a network driver (solved for the label).
+    pub exact: Option<(MoneyChance, u64)>,
+}
+
+/// A harvest decision searched and sampled ([`harvest_plan`]), its labels still to make.
+pub struct DecisionPlan {
+    /// The decision's facts (`rows`: the positions sampled).
+    pub info: HarvestDecision,
+    /// The sampled positions, in reach order.
+    pub sample: Vec<Sampled>,
+    /// A targeted harvest: each sampled position's groups (ascending; empty for one in none),
+    /// in sample order (empty for other runs).
+    pub row_groups: Vec<Vec<u32>>,
+    /// A targeted harvest: distinct reached positions in each group (empty for other runs).
+    pub reached_groups: Vec<u32>,
+    /// The family whose solves may share a table: every frontier position the decision's
+    /// search reaches in its world descends from it (`None`: each solve from empty tables).
+    pub family: Option<SolveFamily>,
+    /// Time in the search and sample (reports only).
+    pub search_time: Duration,
+}
+
+impl DecisionPlan {
+    /// The facts of the rows `RowInfo` shares (stratum, decision trick, decider position).
+    fn row_base(&self) -> RowInfo {
+        RowInfo {
+            stratum: self.info.stratum,
+            root_trick: self.info.trick,
+            position: self.info.position,
+            ..RowInfo::default()
+        }
+    }
+}
+
+/// One unit of label work: consecutive sampled positions of one decision ([`label_group_for`]).
+pub struct LabelItem {
+    /// The positions, in reach order.
+    pub sample: Vec<Sampled>,
+    /// Their decision's family ([`DecisionPlan::family`]).
+    pub family: Option<SolveFamily>,
+    /// Their rows' shared facts.
+    base: RowInfo,
+}
+
+/// Harvest decision `j` ([`harvest_root`]) searched and sampled: the hybrid's search from it for
+/// every candidate (`crate::pimc::exact_world` with a frontier at the start of `job.trick` and
+/// the [`Recorder`] there, valuing the frontier as `driver` says), the distinct reached positions
+/// (returned too, in first-visit order), and a seeded sample of at most `job.cap` of them (kept in
+/// reach order; with [`Driver::Exact`] each already valued exactly by the search). `search_mem`
+/// is the search's memory; with the exact driver, the reached positions are solved on
+/// `label_mem` with a table of `label_tt_mb`, shared by the decision's family
+/// (`solver::SolveFamily`: the same values as solves from empty tables, fewer nodes). A pure function of (seed, trick, `j`), the job's settings and
+/// the driver; the memories never change a value or a count.
+#[allow(clippy::too_many_arguments)]
+pub fn harvest_plan(
     job: &HarvestJob,
     j: u64,
     starts: &[Vec<HandStartState>; 4],
     leaf: &SharedLeaf,
     source: &dyn WorldSource,
     driver: Driver<'_>,
-    mem: &mut SolveMem,
-) -> DecisionHarvest {
+    label_tt_mb: usize,
+    search_mem: &mut SolveMem,
+    label_mem: &mut SolveMem,
+) -> (DecisionPlan, Vec<Reached>) {
     let k = job.trick;
+    let t0 = Instant::now();
     let (d, cands, m, mut rng) = harvest_root(job, j, starts, source);
     let (t, st, pos) = (d.trick, usize::from(d.stratum - 1), usize::from(d.position));
-    let opts = FastOptions {
-        tt_mb: tt_mb_for(k),
-        ..FastOptions::default()
-    };
     // The exact solves of the decision's frontier positions (every reached one with the exact
-    // driver, the sampled ones with a network) share one table and leaf memo: they all descend
-    // from the decision in this one world (`solver::SolveFamily`: the values are those of
-    // solves from empty tables; only the node counts in the rows' facts change).
-    let mut label_mem = SolveMem::new();
-    if let Some(f) = SolveFamily::of_match(&m) {
-        label_mem.share(f);
+    // driver, the sampled ones with a network) may share one table and leaf memo: they all
+    // descend from the decision in this one world (`solver::SolveFamily`: the values are those
+    // of solves from empty tables; only the node counts in the rows' facts change).
+    let family = SolveFamily::of_match(&m);
+    let mut lm = std::mem::take(label_mem);
+    match family {
+        Some(f) => lm.share(f),
+        None => lm.unshare(),
     }
     let rec = Recorder {
         leaf,
-        opts,
+        opts: label_opts(label_tt_mb),
         driver,
         state: Mutex::new(RecState {
-            mem: label_mem,
+            mem: lm,
             seen: BTreeMap::new(),
             list: Vec::new(),
             evals: 0,
@@ -1190,26 +1382,24 @@ pub fn harvest_decision(
         ..SearchConfig::default()
     };
     let mut run = WorldSolve::default();
-    let t0 = Instant::now();
     exact_world(
         &m,
         &cands,
         &ctx,
         &cfg,
         None,
-        mem,
+        search_mem,
         &mut run,
         Some(FrontierCut::new(k, &rec)),
     )
     .expect("nothing stops a harvest search");
-    let search_time = t0.elapsed();
-    let t1 = Instant::now();
     let RecState {
-        mem: mut label_mem,
+        mem: lm,
         seen: _,
         list,
         evals,
     } = rec.state.into_inner().unwrap_or_else(|e| e.into_inner());
+    *label_mem = lm;
     let n = list.len();
     // A seeded sample of `take` of `idx` (a partial Fisher–Yates shuffle on the decision's
     // stream).
@@ -1262,36 +1452,26 @@ pub fn harvest_decision(
         }
     };
     chosen.sort_unstable();
-    let take = chosen.len();
-    let mut rows = Vec::with_capacity(take);
-    let mut positions = Vec::with_capacity(take);
-    for &i in &chosen {
-        let r = &list[i];
-        let (value, nodes) = match driver {
-            Driver::Exact => (r.value, r.nodes),
-            Driver::Net(_) => exact_value(&r.pos, r.ctx, leaf, opts, &mut label_mem),
-        };
-        let row = labelled_row(&r.pos, &r.ctx, value, SOURCE_HARVEST, leaf);
-        let class = row.race_class();
-        rows.push((
-            row,
-            RowInfo {
-                stratum: st as u8 + 1,
-                root_trick: t,
-                position: pos as u8 + 1,
-                retries: 0,
-                nodes,
-                class,
-            },
-        ));
-        positions.push((r.pos, r.ctx));
-    }
+    let samples: Vec<Sampled> = chosen
+        .iter()
+        .map(|&i| {
+            let r = &list[i];
+            Sampled {
+                pos: r.pos,
+                ctx: r.ctx,
+                exact: match driver {
+                    Driver::Exact => Some((r.value, r.nodes)),
+                    Driver::Net(_) => None,
+                },
+            }
+        })
+        .collect();
     let row_groups = if members.is_empty() {
         Vec::new()
     } else {
         chosen.iter().map(|&i| members[i].clone()).collect()
     };
-    DecisionHarvest {
+    let plan = DecisionPlan {
         info: HarvestDecision {
             id: j,
             trick: t,
@@ -1300,17 +1480,140 @@ pub fn harvest_decision(
             cands: cands.len(),
             evals,
             distinct: n as u32,
-            rows: take as u32,
+            rows: samples.len() as u32,
             search_nodes: run.stats.nodes,
             race_distinct,
             keep_distinct,
         },
-        rows,
-        positions,
-        reached: list,
+        sample: samples,
         row_groups,
         reached_groups,
-        search_time,
+        family,
+        search_time: t0.elapsed(),
+    };
+    (plan, list)
+}
+
+/// The rows of a unit of label work, in order: each position's exact value (the search's with
+/// [`Driver::Exact`], else solved now on `mem` with a table of `tt_mb`, the unit's solves sharing
+/// one table by its decision's family, the first from empty tables), encoded with its outcomes
+/// ([`labelled_row`]). A pure function of the item; `mem` never changes a value or a count.
+pub fn label_item(
+    item: &LabelItem,
+    leaf: &SharedLeaf,
+    tt_mb: usize,
+    mem: &mut SolveMem,
+) -> Vec<(Row, RowInfo)> {
+    let opts = label_opts(tt_mb);
+    match item.family {
+        Some(f) => mem.share(f),
+        None => mem.unshare(),
+    }
+    item.sample
+        .iter()
+        .map(|s| {
+            let (value, nodes) = match s.exact {
+                Some(x) => x,
+                None => exact_value(&s.pos, s.ctx, leaf, opts, mem),
+            };
+            let row = labelled_row(&s.pos, &s.ctx, value, SOURCE_HARVEST, leaf);
+            let class = row.race_class();
+            (
+                row,
+                RowInfo {
+                    nodes,
+                    class,
+                    ..item.base
+                },
+            )
+        })
+        .collect()
+}
+
+/// The units of label work of a decision's first `keep` sampled positions, each with its
+/// weight (its rows): `group` positions a unit ([`label_group_for`]).
+fn label_items(plan: &DecisionPlan, keep: usize, group: usize) -> Vec<(LabelItem, u64)> {
+    let base = plan.row_base();
+    plan.sample[..keep]
+        .chunks(group.max(1))
+        .map(|c| {
+            (
+                LabelItem {
+                    sample: c.to_vec(),
+                    family: plan.family,
+                    base,
+                },
+                c.len() as u64,
+            )
+        })
+        .collect()
+}
+
+/// Harvest decision `j` whole on one thread: [`harvest_plan`], then every sampled position
+/// labelled in reach order on one table shared by the decision's family (fresh memory for the
+/// labels, as [`HarvestSchedule::PerDecision`] makes them; the same rows as any schedule, and at
+/// tricks 3–5 the same node counts). With [`Driver::Exact`] the labels' values come from the
+/// search; with [`Driver::Net`] only the sampled positions are solved exactly.
+pub fn harvest_decision(
+    job: &HarvestJob,
+    j: u64,
+    starts: &[Vec<HandStartState>; 4],
+    leaf: &SharedLeaf,
+    source: &dyn WorldSource,
+    driver: Driver<'_>,
+    mem: &mut SolveMem,
+) -> DecisionHarvest {
+    harvest_decision_with(
+        job,
+        j,
+        starts,
+        leaf,
+        source,
+        driver,
+        tt_mb_for(job.trick),
+        mem,
+    )
+}
+
+/// [`harvest_decision`] with the labels' table of `tt_mb` megabytes (the same rows).
+#[allow(clippy::too_many_arguments)]
+fn harvest_decision_with(
+    job: &HarvestJob,
+    j: u64,
+    starts: &[Vec<HandStartState>; 4],
+    leaf: &SharedLeaf,
+    source: &dyn WorldSource,
+    driver: Driver<'_>,
+    tt_mb: usize,
+    mem: &mut SolveMem,
+) -> DecisionHarvest {
+    let mut label_mem = SolveMem::new();
+    let (plan, reached) = harvest_plan(
+        job,
+        j,
+        starts,
+        leaf,
+        source,
+        driver,
+        tt_mb,
+        mem,
+        &mut label_mem,
+    );
+    let t1 = Instant::now();
+    let item = LabelItem {
+        sample: plan.sample.clone(),
+        family: plan.family,
+        base: plan.row_base(),
+    };
+    let rows = label_item(&item, leaf, tt_mb, &mut label_mem);
+    DecisionHarvest {
+        positions: plan.sample.iter().map(|s| (s.pos, s.ctx)).collect(),
+        info: plan.info,
+        rows,
+        reached,
+        row_groups: plan.row_groups,
+        reached_groups: plan.reached_groups,
+        search_time: plan.search_time,
         label_time: t1.elapsed(),
     }
 }
@@ -1355,41 +1658,133 @@ fn check_harvest_job(job: &HarvestJob) {
     assert!(!job.schedule.is_empty() && job.schedule.iter().all(|&p| p < 8));
 }
 
-/// Harvest decisions 0, 1, 2, … made on `job.threads` threads ([`harvest_decision`]) and handed
-/// to `take` in order with their rows (each worker with its own solver memory) until `take`
-/// returns `false` (decisions are claimed as workers come free, at most a window ahead of
-/// `take`: `crate::ordered`).
+/// The bytes of finished labels a pooled harvest holds at most beyond the next one it writes
+/// (`crate::ordered::pooled`'s item window, in rows of the trick's size, at least
+/// [`window_for`]`(threads)` rows): a label that takes long holds the writing up while every other
+/// thread goes on with the labels after it, up to this much.
+pub const LABEL_WINDOW_BYTES: u64 = 1 << 30;
+
+/// A harvest's run, whatever its schedule: decisions 0, 1, 2, … in order, each giving its sampled
+/// positions' rows, until `job.count` rows (the last decision cut short) or `max_decisions`
+/// decisions. `decision` gets each decision taken, in order, before any of its rows: its facts
+/// (`rows`: the rows it gives), its reached positions' groups and its rows' groups (a targeted
+/// harvest; empty otherwise). The rows are made in batches turned into `T` by `finish` (on the
+/// workers with [`HarvestSchedule::Pooled`]) and handed to `rows` in row order. Returns the time
+/// in the taken decisions' searches and in their labels, summed over threads.
 #[allow(clippy::too_many_arguments)]
-fn harvest_decisions<T: Send>(
+fn run_harvest<T: Send>(
     job: &HarvestJob,
+    exec: LabelExec,
+    max_decisions: Option<u64>,
     starts: &[Vec<HandStartState>; 4],
     leaf: &SharedLeaf,
     driver: Driver<'_>,
     progress: Option<&AtomicUsize>,
-    make: impl Fn(DecisionHarvest) -> T + Sync,
-    take: impl FnMut(u64, T) -> Result<bool, String>,
-) -> Result<(), String> {
+    finish: impl Fn(Vec<(Row, RowInfo)>) -> T + Sync,
+    mut decision: impl FnMut(&HarvestDecision, &[u32], &[Vec<u32>]),
+    mut rows: impl FnMut(T) -> Result<(), String>,
+) -> Result<(Duration, Duration), String> {
+    check_harvest_job(job);
+    assert!(max_decisions != Some(0), "a bound of at least one decision");
+    let (mut search_time, mut label_time) = (Duration::ZERO, Duration::ZERO);
+    if job.count == 0 {
+        return Ok((search_time, label_time));
+    }
     let source = BeliefSource::new();
-    ordered(
-        job.threads,
-        None,
-        window_for(job.threads),
-        SolveMem::new,
-        |mem, j| {
-            let out = harvest_decision(job, j, starts, leaf, &source, driver, mem);
-            if let Some(p) = progress {
-                p.fetch_add(out.rows.len(), Ordering::Relaxed);
-            }
-            make(out)
-        },
-        take,
-    )
+    let mut left = job.count;
+    let mut taken = 0u64;
+    // The rows a decision gives (the last one cut at the count), and whether to go on.
+    let mut keep = |n: usize| -> (usize, bool) {
+        let k = left.min(n as u64) as usize;
+        left -= k as u64;
+        taken += 1;
+        (k, left > 0 && max_decisions.is_none_or(|m| taken < m))
+    };
+    let groups_of = |g: &[Vec<u32>], k: usize| -> Vec<Vec<u32>> {
+        if g.is_empty() {
+            Vec::new()
+        } else {
+            g[..k].to_vec()
+        }
+    };
+    match exec.schedule {
+        HarvestSchedule::Pooled => {
+            let v = nn::outcome::vocab(job.trick);
+            let item_window =
+                (LABEL_WINDOW_BYTES / row_bytes_for(v) as u64).max(window_for(job.threads));
+            crate::ordered::pooled(
+                job.threads,
+                window_for(job.threads),
+                item_window,
+                || (SolveMem::new(), SolveMem::new()),
+                |(search_mem, label_mem), j| {
+                    let (plan, _) = harvest_plan(
+                        job, j, starts, leaf, &source, driver, exec.tt_mb, search_mem, label_mem,
+                    );
+                    plan
+                },
+                |_, plan| {
+                    let (k, go) = keep(plan.sample.len());
+                    let mut info = plan.info.clone();
+                    info.rows = k as u32;
+                    decision(&info, &plan.reached_groups, &groups_of(&plan.row_groups, k));
+                    search_time += plan.search_time;
+                    Ok((label_items(&plan, k, exec.group), go))
+                },
+                |(_, label_mem), item| {
+                    let t = Instant::now();
+                    let r = label_item(&item, leaf, exec.tt_mb, label_mem);
+                    if let Some(p) = progress {
+                        p.fetch_add(r.len(), Ordering::Relaxed);
+                    }
+                    (finish(r), t.elapsed())
+                },
+                |_, (out, t)| {
+                    label_time += t;
+                    rows(out)
+                },
+            )?;
+        }
+        HarvestSchedule::PerDecision => {
+            ordered(
+                job.threads,
+                None,
+                window_for(job.threads),
+                SolveMem::new,
+                |mem, j| {
+                    let out = harvest_decision_with(
+                        job, j, starts, leaf, &source, driver, exec.tt_mb, mem,
+                    );
+                    if let Some(p) = progress {
+                        p.fetch_add(out.rows.len(), Ordering::Relaxed);
+                    }
+                    out
+                },
+                |_, mut out| {
+                    let (k, go) = keep(out.rows.len());
+                    out.rows.truncate(k);
+                    out.info.rows = k as u32;
+                    decision(
+                        &out.info,
+                        &out.reached_groups,
+                        &groups_of(&out.row_groups, k),
+                    );
+                    search_time += out.search_time;
+                    label_time += out.label_time;
+                    rows(finish(out.rows))?;
+                    Ok(go)
+                },
+            )?;
+        }
+    }
+    Ok((search_time, label_time))
 }
 
 /// The rows of a harvest run and the facts of the decisions they came from: decisions 0, 1, 2, …
-/// in order, each giving its rows ([`harvest_decision`], the frontier valued as `driver` says),
-/// until `job.count` rows (the last decision cut short). Decisions run on `job.threads` threads;
-/// the result is byte-identical for any thread count.
+/// in order, each giving its rows ([`harvest_decision`]'s, the frontier valued as `driver` says),
+/// until `job.count` rows (the last decision cut short). Made on `job.threads` threads as
+/// [`HarvestSchedule::Pooled`] shares them out; the result is byte-identical for any thread
+/// count and schedule ([`harvest_rows_with`]).
 ///
 /// # Panics
 /// If `job.seed` is the golden-set seed, `job.trick` is not 2..=5, a decision trick is not
@@ -1401,35 +1796,54 @@ pub fn harvest_rows(
     driver: Driver<'_>,
     progress: Option<&AtomicUsize>,
 ) -> (Vec<(Row, RowInfo)>, Vec<HarvestDecision>) {
-    check_harvest_job(job);
-    let mut rows = Vec::with_capacity(job.count as usize);
+    harvest_rows_with(
+        job,
+        LabelExec::for_trick(job.trick),
+        starts,
+        leaf,
+        driver,
+        progress,
+    )
+}
+
+/// [`harvest_rows`] carried out as `exec` says (the same rows and facts; only the label solves'
+/// node counts depend on it).
+///
+/// # Panics
+/// As [`harvest_rows`].
+pub fn harvest_rows_with(
+    job: &HarvestJob,
+    exec: LabelExec,
+    starts: &[Vec<HandStartState>; 4],
+    leaf: &SharedLeaf,
+    driver: Driver<'_>,
+    progress: Option<&AtomicUsize>,
+) -> (Vec<(Row, RowInfo)>, Vec<HarvestDecision>) {
+    let mut out = Vec::with_capacity(job.count as usize);
     let mut decisions = Vec::new();
-    if job.count > 0 {
-        harvest_decisions(
-            job,
-            starts,
-            leaf,
-            driver,
-            progress,
-            |out| (out.info, out.rows),
-            |_, (mut info, mut got)| {
-                let keep = ((job.count - rows.len() as u64) as usize).min(got.len());
-                got.truncate(keep);
-                info.rows = keep as u32;
-                rows.extend(got);
-                decisions.push(info);
-                Ok((rows.len() as u64) < job.count)
-            },
-        )
-        .expect("collecting rows cannot fail");
-    }
-    debug_assert_eq!(rows.len() as u64, job.count);
-    (rows, decisions)
+    run_harvest(
+        job,
+        exec,
+        None,
+        starts,
+        leaf,
+        driver,
+        progress,
+        |r| r,
+        |d, _, _| decisions.push(d.clone()),
+        |r| {
+            out.extend(r);
+            Ok(())
+        },
+    )
+    .expect("collecting rows cannot fail");
+    debug_assert_eq!(out.len() as u64, job.count);
+    (out, decisions)
 }
 
 /// A harvest run's shard ([`nn::shard`]'s `.npy` bytes of [`harvest_rows`]) streamed to `out`:
-/// each decision's rows hashed and written in decision order as they come (module notes). The
-/// same bytes, hash, counts and decisions as [`harvest_rows`] for any thread count.
+/// the rows hashed and written in row order as they come (module notes). The same bytes, hash,
+/// counts and decisions as [`harvest_rows`] for any thread count.
 ///
 /// # Panics
 /// As [`harvest_rows`].
@@ -1476,69 +1890,88 @@ pub fn write_harvest_shard_upto<W: Write + Send>(
     progress: Option<&AtomicUsize>,
     out: &mut W,
 ) -> Result<ShardSummary, String> {
+    write_harvest_shard_with(
+        job,
+        LabelExec::for_trick(job.trick),
+        max_decisions,
+        starts,
+        leaf,
+        driver,
+        progress,
+        out,
+    )
+}
+
+/// [`write_harvest_shard_upto`] carried out as `exec` says: the same bytes, hash, decisions and
+/// counts for any schedule, table size and thread count, apart from the label solves' node counts
+/// (the rows' `nodes`); only the time differs.
+///
+/// # Panics
+/// As [`write_harvest_shard_upto`].
+#[allow(clippy::too_many_arguments)]
+pub fn write_harvest_shard_with<W: Write + Send>(
+    job: &HarvestJob,
+    exec: LabelExec,
+    max_decisions: Option<u64>,
+    starts: &[Vec<HandStartState>; 4],
+    leaf: &SharedLeaf,
+    driver: Driver<'_>,
+    progress: Option<&AtomicUsize>,
+    out: &mut W,
+) -> Result<ShardSummary, String> {
     check_harvest_job(job);
     assert!(max_decisions != Some(0), "a bound of at least one decision");
     let v = nn::outcome::vocab(job.trick);
     let rb = row_bytes_for(v);
     let mut counts = RowCounts::default();
     let mut decisions = Vec::new();
-    let mut left = job.count;
-    let (mut search_time, mut label_time) = (Duration::ZERO, Duration::ZERO);
     let mut groups = job.keep.as_ref().map(|k| GroupTally::new(k.preds.len()));
+    let mut times = (Duration::ZERO, Duration::ZERO);
     let fill = |sink: &mut ShardSink| {
-        if left == 0 {
-            return Ok(());
-        }
-        harvest_decisions(
+        times = run_harvest(
             job,
+            exec,
+            max_decisions,
             starts,
             leaf,
             driver,
             progress,
-            |out| {
-                let mut bytes = Vec::with_capacity(out.rows.len() * rb);
-                let mut infos = Vec::with_capacity(out.rows.len());
-                for (row, info) in &out.rows {
+            |rows| {
+                let mut bytes = Vec::with_capacity(rows.len() * rb);
+                let mut infos = Vec::with_capacity(rows.len());
+                for (row, info) in &rows {
                     assert_eq!(row.outcomes.len(), v, "every row has the trick's outcomes");
                     row_bytes(row, &mut bytes);
                     infos.push(*info);
                 }
-                (
-                    out.info,
-                    bytes,
-                    infos,
-                    (out.search_time, out.label_time),
-                    (out.row_groups, out.reached_groups),
-                )
+                (bytes, infos)
             },
-            |_, (mut info, mut bytes, infos, (ts, tl), (row_groups, reached_groups))| {
-                search_time += ts;
-                label_time += tl;
-                let keep = left.min(infos.len() as u64) as usize;
-                bytes.truncate(keep * rb);
-                for i in &infos[..keep] {
+            |info, reached_groups, row_groups| {
+                if let Some(t) = &mut groups {
+                    t.add(info, reached_groups, row_groups);
+                }
+                decisions.push(info.clone());
+            },
+            |(bytes, infos)| {
+                for i in &infos {
                     counts.add(i);
                 }
-                if let Some(t) = &mut groups {
-                    t.add(&info, &reached_groups, &row_groups[..keep]);
-                }
-                info.rows = keep as u32;
-                decisions.push(info);
-                left -= keep as u64;
-                sink.put(bytes)?;
-                Ok(left > 0 && max_decisions.is_none_or(|m| (decisions.len() as u64) < m))
+                sink.put(bytes)
             },
-        )
+        )?;
+        Ok(())
     };
     let ((), sha256, hash_time, write_time, bytes) = stream_shard_upto(out, job.count, v, fill)?;
-    let rows = job.count - left;
+    let rows = counts.rows;
     let want = nn::shard::header(job.count as usize, v).len() as u64 + rows * rb as u64;
-    if bytes != want || (left > 0 && max_decisions.is_none()) {
+    let given: u64 = decisions.iter().map(|d| u64::from(d.rows)).sum();
+    if bytes != want || given != rows || (rows < job.count && max_decisions.is_none()) {
         return Err(format!(
             "the shard has {bytes} bytes, but {rows} rows make {want} (of {} asked)",
             job.count
         ));
     }
+    let (search_time, label_time) = times;
     Ok(ShardSummary {
         rows,
         sha256,
@@ -2851,5 +3284,220 @@ mod tests {
             }
             assert!(same > 0, "some decisions compared");
         }
+    }
+
+    /// The facts of a summary that no schedule, table or thread count may change: the shard's
+    /// SHA-256 and rows, the decisions' facts, the group tallies, and the rows' counts apart from
+    /// the solves' nodes.
+    fn identity(sum: &ShardSummary) -> (String, u64, String, Option<GroupTally>, RowCounts) {
+        let mut counts = sum.counts;
+        counts.nodes = 0;
+        (
+            sum.sha256.clone(),
+            sum.rows,
+            serde_json::to_string(&sum.decisions).expect("json"),
+            sum.groups.clone(),
+            counts,
+        )
+    }
+
+    /// The identity of the schedules (`HarvestSchedule`): a harvest's shard, its SHA-256, its
+    /// decisions' facts, its group tallies and its rows' counts are byte-identical between the
+    /// per-decision schedule (before 2026-10-17) and the pooled one, on 1, 2 and 4 threads, with a
+    /// decision's labels as one unit or each its own, and with a 1 MB label table: exact driver
+    /// and network driver, tricks 3, 4 and 5, the race and targeted harvests and a harvest bounded
+    /// by its decisions. The node counts are the per-decision schedule's when a decision's labels
+    /// are one unit on the trick's table (tricks 3–5 by default), and with one position a unit
+    /// each row's nodes are those of its solve from empty tables.
+    #[test]
+    fn harvest_schedules_give_the_same_shard() {
+        let starts = collect_starts(400, 9);
+        let l = leaf();
+        let net3 = random_oracle(3, 31);
+        let net4 = random_oracle(4, 37);
+        let shares = parse_band_shares("0.4,0.4,0.2").expect("shares");
+        let base = |k: u8, cap: u32, count: u64| HarvestJob {
+            count,
+            ..harvest_job(k, vec![k - 1], shares, cap)
+        };
+        let race = RaceKeep {
+            classes: parse_race_classes("2,4").expect("classes"),
+            cap: 4,
+        };
+        let keep = PredKeep {
+            preds: test_predicates(),
+            cap: 4,
+        };
+        let cases: Vec<(&str, HarvestJob, Driver<'_>, Option<u64>)> = vec![
+            ("trick 4, exact", base(4, 5, 41), Driver::Exact, None),
+            ("trick 4, network", base(4, 4, 30), Driver::Net(&net4), None),
+            (
+                "trick 3, network",
+                HarvestJob {
+                    schedule: position_schedule(parse_band_shares("0,0,1").expect("shares")),
+                    ..base(3, 3, 10)
+                },
+                Driver::Net(&net3),
+                None,
+            ),
+            ("trick 5, exact", base(5, 4, 23), Driver::Exact, None),
+            (
+                "trick 4, race",
+                HarvestJob {
+                    race: Some(race),
+                    cap: 1,
+                    ..base(4, 1, 30)
+                },
+                Driver::Exact,
+                None,
+            ),
+            (
+                "trick 4, targeted",
+                HarvestJob {
+                    keep: Some(keep.clone()),
+                    cap: 1,
+                    ..base(4, 1, 30)
+                },
+                Driver::Exact,
+                None,
+            ),
+            ("trick 4, bounded", base(4, 5, 41), Driver::Exact, Some(4)),
+        ];
+        for (what, job, driver, max) in &cases {
+            let k = job.trick;
+            let run = |threads: usize, exec: LabelExec| {
+                let job = HarvestJob {
+                    threads,
+                    ..job.clone()
+                };
+                let mut out = Vec::new();
+                let sum = write_harvest_shard_with(
+                    &job, exec, *max, &starts, &*l, *driver, None, &mut out,
+                )
+                .expect("written");
+                assert_eq!(sum.sha256, equity::sha256::sha256_hex(&out), "{what}");
+                (out, sum)
+            };
+            let before = LabelExec {
+                schedule: HarvestSchedule::PerDecision,
+                ..LabelExec::for_trick(k)
+            };
+            let (want, want_sum) = run(1, before);
+            assert!(want_sum.rows > 0, "{what}");
+            let one_each = LabelExec {
+                group: 1,
+                ..LabelExec::for_trick(k)
+            };
+            let small = LabelExec {
+                tt_mb: 1,
+                ..LabelExec::for_trick(k)
+            };
+            for threads in [1, 2, 4] {
+                for (exec, same_nodes) in [
+                    (before, true),
+                    (LabelExec::for_trick(k), true),
+                    (one_each, false),
+                    (small, false),
+                ] {
+                    let (got, sum) = run(threads, exec);
+                    assert!(got == want, "{what}: {exec:?} on {threads} threads");
+                    assert_eq!(identity(&sum), identity(&want_sum), "{what}: {exec:?}");
+                    if same_nodes {
+                        assert_eq!(sum.counts, want_sum.counts, "{what}: {exec:?}");
+                    }
+                }
+            }
+            // In memory too ([`harvest_rows_with`]), the same rows.
+            if max.is_none() {
+                let rows = |exec| {
+                    let job = HarvestJob {
+                        threads: 3,
+                        ..job.clone()
+                    };
+                    harvest_rows_with(&job, exec, &starts, &*l, *driver, None)
+                };
+                let (a, da) = rows(before);
+                let (b, db) = rows(one_each);
+                let ra: Vec<Row> = a.iter().map(|x| x.0.clone()).collect();
+                let rb: Vec<Row> = b.iter().map(|x| x.0.clone()).collect();
+                assert!(
+                    nn::shard::to_npy(&ra, nn::outcome::vocab(k)) == want,
+                    "{what}"
+                );
+                assert!(ra == rb, "{what}");
+                assert_eq!(
+                    serde_json::to_string(&da).expect("json"),
+                    serde_json::to_string(&db).expect("json")
+                );
+                // One position a unit: each row's nodes are its solve's from empty tables.
+                if matches!(driver, Driver::Net(_)) {
+                    let src = BeliefSource::new();
+                    let mut mem = SolveMem::new();
+                    let mut at = 0;
+                    for d in &db {
+                        let out =
+                            harvest_decision(job, d.id, &starts, &*l, &src, *driver, &mut mem);
+                        for (p, c) in out.positions.iter().take(d.rows as usize) {
+                            let fresh = solve_fast_with(
+                                p,
+                                *c,
+                                &SyntheticLeaf,
+                                label_opts(tt_mb_for(k)),
+                                &mut SolveMem::new(),
+                            );
+                            assert_eq!(b[at].1.nodes, fresh.stats.nodes, "{what}: row {at}");
+                            at += 1;
+                        }
+                    }
+                    assert_eq!(at, b.len());
+                }
+            }
+        }
+    }
+
+    /// The label solves' table never changes a label: the plain sources' shards are
+    /// byte-identical with a 1 MB table and the trick's (only the solves' node counts may differ).
+    #[test]
+    fn label_table_size_never_changes_a_row() {
+        let starts = collect_starts(400, 9);
+        let l = leaf();
+        for (trick, source, count) in [(3, Source::Random, 12), (4, Source::Rules, 30)] {
+            let job = LabelJob {
+                trick,
+                count,
+                seed: 13,
+                source,
+                threads: 2,
+            };
+            let shard = |tt_mb| {
+                let mut out = Vec::new();
+                let exec = LabelExec {
+                    tt_mb,
+                    ..LabelExec::for_trick(trick)
+                };
+                let sum = write_label_shard_with(&job, exec, &starts, &*l, None, 4, &mut out)
+                    .expect("written");
+                (out, sum)
+            };
+            let (a, sa) = shard(tt_mb_for(trick));
+            let (b, sb) = shard(1);
+            assert!(a == b, "trick {trick}");
+            assert_eq!(identity(&sa), identity(&sb));
+        }
+    }
+
+    /// The pooled schedule's units: one position each at trick 2, a decision's at tricks 3-5.
+    #[test]
+    fn label_units_by_trick() {
+        assert_eq!(label_group_for(2), 1);
+        for k in 3..=5 {
+            assert_eq!(label_group_for(k), usize::MAX);
+        }
+        assert_eq!(LabelExec::for_trick(2).tt_mb, 256);
+        assert_eq!(LabelExec::for_trick(2).schedule, HarvestSchedule::Pooled);
+        for s in [HarvestSchedule::Pooled, HarvestSchedule::PerDecision] {
+            assert_eq!(HarvestSchedule::parse(s.name()), Ok(s));
+        }
+        assert!(HarvestSchedule::parse("fast").is_err());
     }
 }
