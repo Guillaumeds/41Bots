@@ -1918,6 +1918,13 @@ def rent_and_watch(a, run_id: str, best: dict | None, resumable: bool, run_start
             reason = f"{reason}; {MAX_REPLACEMENTS} replacements used, stopping"
             log(f"::error::{reason}")
             break
+        if operator_stopped(run_id):
+            # A person stopped the run (`launch.py stop`, the vast-stop workflow): its machine is gone because they
+            # destroyed it, not because it failed, so no replacement (2026-10-17: a stop during the image pull was
+            # read as a dead machine and replaced, twice).
+            reason = f"{reason}; stopped by an operator ({NO_REPLACE} is set): no replacement"
+            log(reason)
+            break
         # Another machine: the same host may have the same fault.
         a.exclude_machines.add(best.get("machine_id", best.get("id")))
         # A stop request written for the machine just destroyed (e.g. silent while busy) would
@@ -2205,6 +2212,19 @@ def request_stop(run_id: str, reason: str) -> None:
         log(f"could not ask run {run_id} to stop: {e}")
 
 
+NO_REPLACE = "NO-REPLACE"  # runs/<run_id>/NO-REPLACE: written by `launch.py stop`; the launcher rents no replacement
+
+
+def operator_stopped(run_id: str) -> bool:
+    """Whether a person stopped the run (`cmd_stop` wrote runs/<run_id>/NO-REPLACE). Unreadable counts as stopped:
+    renting a machine nobody wants costs more than ending a run that can be relaunched."""
+    try:
+        return bool(r2_exists(f"runs/{run_id}/{NO_REPLACE}"))
+    except RuntimeError as e:
+        log(f"::warning::could not read runs/{run_id}/{NO_REPLACE} ({e}); treating the run as stopped by an operator")
+        return True
+
+
 def clear_stop(run_id: str) -> None:
     """Removes runs/<run_id>/STOP (before a replacement machine is rented)."""
     try:
@@ -2416,6 +2436,12 @@ def cmd_stop(a) -> int:
     need_env("VAST_API_KEY", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET", "R2_S3_ENDPOINT")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", a.run_id):
         sys.exit("launch: run_id may only use letters, digits, - _ .")
+    # First: the run's own launcher must not rent a replacement for the machine destroyed here.
+    try:
+        r2_put(f"runs/{a.run_id}/{NO_REPLACE}", json.dumps({"reason": a.reason, "utc": datetime.now(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")}).encode())
+    except RuntimeError as e:
+        log(f"::warning::could not write runs/{a.run_id}/{NO_REPLACE} ({e}): the run's launcher may rent a replacement")
     marker = stop_and_wait(a.run_id, a.reason, a.wait_s)
     log(f"run {a.run_id}: {marker or 'no marker'}")
     if a.instance and destroy(int(a.instance)) != "verified":

@@ -97,6 +97,8 @@ class World:
         self.hb_seq += 1
 
     def step(self, inst: dict) -> None:
+        for key, value in getattr(self, "writes_at", {}).get(inst["polls"] + 1, {}).items():
+            self.store[key] = value  # written while the run is on (e.g. a person's stop request)
         inst["polls"] += 1
         kind, *args = inst["script"].split(":")
         n = int(args[0])
@@ -1169,6 +1171,20 @@ class LauncherTest(unittest.TestCase):
         self.assertIn("is a Xeon Phi (never rented", str(e.exception))
         self.assertEqual(launch.cpu_failures({"cpu_name": "AMD EPYC 7742 64-Core Processor"}), [])
 
+    def test_an_operator_stop_is_never_followed_by_a_replacement(self):
+        # 2026-10-17: a run stopped (vast-stop) during the image pull had its machine destroyed before the first
+        # heartbeat; its launcher read that as a dead machine and rented a replacement. With NO-REPLACE set, it ends.
+        fmt2 = {"format": 2, "run_id": RUN, "run_seed": 1, "streams": []}
+        w = World([offer(1, 11, 1.0), offer(2, 12, 1.5)], ["die:2", "done:1"])
+        w.writes_at = {2: {f"runs/{RUN}/NO-REPLACE": b'{"reason": "owner"}'}}
+        code, report = self.run_launch(w, fmt2)
+        self.assertEqual((w.created_on, report["replacements"]), ([1], 0))
+        self.assertIn("stopped by an operator (NO-REPLACE is set): no replacement", self.log)
+        # Without it, the same death is replaced as before.
+        w = World([offer(1, 11, 1.0), offer(2, 12, 1.5)], ["die:2", "done:1"])
+        code, report = self.run_launch(w, fmt2)
+        self.assertEqual((w.created_on, report["replacements"]), ([1, 2], 1))
+
     def test_a_machine_whose_container_did_not_start_is_recorded(self):
         w = World([offer(1, 11, 1.0, host_id=60400), offer(2, 12, 1.5, host_id=60500)], ["broken:0", "done:2"])
         code, report = self.run_launch(w, self.FORMAT1)
@@ -1617,6 +1633,7 @@ class LauncherTest(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(launch.main(["stop", RUN, "--instance", "100", "--wait-s", "60"]), 0)
             self.assertIn(f"runs/{RUN}/STOP", w.store)
+            self.assertIn(f"runs/{RUN}/NO-REPLACE", w.store)  # the run's launcher must not replace the machine
             self.assertIn(f"runs/{RUN}/FAILED", w.store)
             self.assertFalse(w.instances[100]["alive"])
             # A run that already ended is not asked again.
