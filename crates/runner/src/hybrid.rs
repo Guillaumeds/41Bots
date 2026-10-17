@@ -2116,6 +2116,17 @@ impl Rung<'_> {
         let Some(remote) = self.tools.remote.clone() else {
             return Ok(());
         };
+        // After a stop request the chunk ends at once: a dead upload link must not hold the
+        // paid machine through the retries (up to three attempts of up to 30 minutes a shard).
+        if let Some(why) = crate::stop::requested() {
+            let n = self.pending_shards.len();
+            self.warn(format!(
+                "upload_shards: {n} shard(s) not uploaded, and not retried at the end (stop \
+                 requested: {why})"
+            ));
+            self.pending_shards.clear();
+            return self.save();
+        }
         let t = Instant::now();
         let progress = self.progress(
             "upload shards (retry)",
