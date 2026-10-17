@@ -2252,6 +2252,7 @@ impl Rung<'_> {
         let own_driver = earlier.is_none() && own.is_some();
         let driver = earlier.or_else(|| own.map(Path::to_path_buf));
         let threads = self.fg_threads();
+        let (tt_args, tt_rec) = self.label_tt_args(threads, &format!("audit shard (round {r})"));
         let mut c = Command::new(&self.tools.search);
         c.args(["labels", "--trick", &self.p.cut.to_string()])
             .args([
@@ -2266,7 +2267,8 @@ impl Rung<'_> {
             .arg(&self.table)
             .args(["--threads", &threads.to_string()])
             .args(["--start-hands", &self.p.start_hands.to_string()])
-            .args(self.harvest_args());
+            .args(self.harvest_args())
+            .args(&tt_args);
         if let Some(n) = &driver {
             c.arg("--harvest-net").arg(n);
         }
@@ -2283,6 +2285,7 @@ impl Rung<'_> {
         let rdir = st.dir.join(format!("round-{r}"));
         write_json(&rdir.join(format!("{file}.json")), &side)?;
         let mut facts = json!({ "file": file, "rows": st.s.rows, "seed": seed, "threads": threads,
+                    "label_tables": tt_rec,
                     "shard_sha256": side["shard_sha256"],
                     "driver": driver.as_ref().map_or("exact".to_string(), |d| d.display().to_string()),
                     "rows_by_race_class": side["rows_by_race_class"] });
@@ -3326,6 +3329,8 @@ impl Rung<'_> {
             .map_or(search::oracle_labels::HARVEST_SHARES.to_string(), |w| {
                 w[1].clone()
             });
+        let threads = self.fg_threads();
+        let (tt_args, _) = self.label_tt_args(threads, &format!("targeted harvest (round {r})"));
         let mut c = Command::new(&self.tools.search);
         c.args(["labels", "--trick", &self.p.cut.to_string()])
             .args(["--count", &rows.to_string(), "--seed", &seed.to_string()])
@@ -3333,8 +3338,9 @@ impl Rung<'_> {
             .arg(&path)
             .arg("--equity")
             .arg(&self.table)
-            .args(["--threads", &self.fg_threads().to_string()])
+            .args(["--threads", &threads.to_string()])
             .args(["--start-hands", &self.p.start_hands.to_string()])
+            .args(&tt_args)
             .args(["--harvest-cap", "0", "--harvest-positions", &shares])
             .arg("--harvest-keep")
             .arg(preds)

@@ -8,8 +8,15 @@
 //! The workers run at most a window of units ahead of the next unit `take` needs, so the memory
 //! held is bounded however slowly `take` consumes (a slow disk, say), and `take` overlaps the
 //! making of later units (writing and hashing a shard while its later rows are still being made).
+//!
+//! [`pooled`] is the same pipeline with two kinds of work on one pool of threads: *plans* 0, 1,
+//! 2, … (a harvest's decisions: a search and a sample) taken in order turn into *items* (the
+//! sampled positions' exact labels) appended to one ordered list, and every thread takes the next
+//! item of that list, whichever plan it came from. A plan's items are therefore never left to the
+//! one thread that made the plan, so the run ends one item's time after the last item is
+//! claimed, not one plan's (`crate::oracle_labels`, the harvests).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::mpsc;
 use std::sync::{Condvar, Mutex, MutexGuard};
 
@@ -146,6 +153,227 @@ pub fn ordered<S, T: Send>(
     })
 }
 
+/// [`pooled`]'s shared state.
+struct Pool<I> {
+    /// The next plan to claim.
+    next_plan: u64,
+    /// Plans handed to `expand` so far.
+    plans_taken: u64,
+    /// No plan is claimed any more (`expand` said stop, or the run stops).
+    plans_done: bool,
+    /// Items not yet claimed, in list order: (index in the list, the item, the list's total
+    /// weight through it).
+    queue: VecDeque<(u64, I, u64)>,
+    /// Items in the list so far.
+    items_queued: u64,
+    /// Items handed to `take` so far (`0..items_taken`).
+    items_taken: u64,
+    /// The list's total weight through the last item handed to `take`.
+    weight_taken: u64,
+    /// The run stops (an error, a panic, or the end): no work is claimed any more.
+    stop: bool,
+}
+
+fn lock_pool<I>(m: &Mutex<Pool<I>>) -> MutexGuard<'_, Pool<I>> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A finished unit of [`pooled`]'s work, on its way to the calling thread.
+enum Made<P, R> {
+    Plan(u64, P),
+    Item(u64, u64, R),
+}
+
+/// What a worker of [`pooled`] does next.
+enum Claimed<I> {
+    Plan(u64),
+    Item(u64, u64, I),
+}
+
+/// Plans and items on one pool of `threads` workers (module notes), each worker with its own
+/// state from `init`:
+/// - plans 0, 1, 2, … are made by `plan` (claimed in order, at most `plan_window` ahead of the
+///   next one `expand` needs) and handed to `expand` on the calling thread in increasing order;
+///   `expand` returns the plan's items, each with a weight, appended in that order to one list,
+///   and whether more plans are wanted (`false`: none is claimed after that; plans still being
+///   made are dropped);
+/// - the list's items are made by `make` (claimed in list order, an item before any plan, while
+///   the list's weight through the item is within `item_window` of the weight already handed to
+///   `take`; the next item `take` needs is always claimable, however heavy) and handed to `take`
+///   on the calling thread in list order.
+///
+/// What a plan gives depends only on its index and what an item gives only on the item, so
+/// `expand` and `take` see the same sequences for any number of threads. The run ends once
+/// `expand` has said stop and every item of the list has been handed to `take`. An error from
+/// `expand` or `take` stops the run the same way (work being made is finished and dropped) and is
+/// returned.
+///
+/// # Panics
+/// If `plan` or `make` panics (on any worker), the other workers stop claiming and the panic is
+/// passed on once they have finished.
+#[allow(clippy::too_many_arguments)]
+pub fn pooled<S, P: Send, I: Send, R: Send>(
+    threads: usize,
+    plan_window: u64,
+    item_window: u64,
+    init: impl Fn() -> S + Sync,
+    plan: impl Fn(&mut S, u64) -> P + Sync,
+    mut expand: impl FnMut(u64, P) -> Result<(Vec<(I, u64)>, bool), String>,
+    make: impl Fn(&mut S, I) -> R + Sync,
+    mut take: impl FnMut(u64, R) -> Result<(), String>,
+) -> Result<(), String> {
+    let plan_window = plan_window.max(1);
+    let pool = Mutex::new(Pool {
+        next_plan: 0,
+        plans_taken: 0,
+        plans_done: false,
+        queue: VecDeque::new(),
+        items_queued: 0,
+        items_taken: 0,
+        weight_taken: 0,
+        stop: false,
+    });
+    let moved = Condvar::new();
+    let (tx, rx) = mpsc::channel::<Made<P, R>>();
+    std::thread::scope(|s| {
+        let mut workers = Vec::with_capacity(threads.max(1));
+        for _ in 0..threads.max(1) {
+            let tx = tx.clone();
+            let (pool, moved, init, plan, make) = (&pool, &moved, &init, &plan, &make);
+            workers.push(s.spawn(move || {
+                // A panicking worker stops the others (they may be waiting for work that
+                // never comes), so the panic reaches the caller.
+                struct StopOnPanic<'a, I>(&'a Mutex<Pool<I>>, &'a Condvar);
+                impl<I> Drop for StopOnPanic<'_, I> {
+                    fn drop(&mut self) {
+                        if std::thread::panicking() {
+                            lock_pool(self.0).stop = true;
+                            self.1.notify_all();
+                        }
+                    }
+                }
+                let _stop = StopOnPanic(pool, moved);
+                let mut state = init();
+                loop {
+                    let job = {
+                        let mut g = lock_pool(pool);
+                        loop {
+                            if g.stop {
+                                return;
+                            }
+                            if let Some(&(i, _, through)) = g.queue.front()
+                                && (i == g.items_taken
+                                    || through <= g.weight_taken.saturating_add(item_window))
+                            {
+                                let (i, item, through) = g.queue.pop_front().expect("a front");
+                                break Claimed::Item(i, through, item);
+                            }
+                            if !g.plans_done && g.next_plan < g.plans_taken + plan_window {
+                                g.next_plan += 1;
+                                break Claimed::Plan(g.next_plan - 1);
+                            }
+                            if g.plans_done && g.queue.is_empty() {
+                                return;
+                            }
+                            g = moved.wait(g).unwrap_or_else(|e| e.into_inner());
+                        }
+                    };
+                    let made = match job {
+                        Claimed::Plan(j) => Made::Plan(j, plan(&mut state, j)),
+                        Claimed::Item(i, through, item) => {
+                            Made::Item(i, through, make(&mut state, item))
+                        }
+                    };
+                    if tx.send(made).is_err() {
+                        return;
+                    }
+                }
+            }));
+        }
+        drop(tx);
+        let mut plans: BTreeMap<u64, P> = BTreeMap::new();
+        let mut items: BTreeMap<u64, (u64, R)> = BTreeMap::new();
+        let (mut plans_taken, mut items_taken) = (0u64, 0u64);
+        // The list's total weight so far.
+        let mut weight_queued = 0u64;
+        let mut plans_done = false;
+        let mut res = Ok(());
+        'recv: while let Ok(m) = rx.recv() {
+            match m {
+                Made::Plan(j, p) => {
+                    if !plans_done {
+                        plans.insert(j, p);
+                    }
+                    while !plans_done && let Some(p) = plans.remove(&plans_taken) {
+                        let (new, go) = match expand(plans_taken, p) {
+                            Ok(x) => x,
+                            Err(e) => {
+                                res = Err(e);
+                                break 'recv;
+                            }
+                        };
+                        plans_taken += 1;
+                        plans_done = !go;
+                        let mut g = lock_pool(&pool);
+                        for (item, w) in new {
+                            weight_queued = weight_queued.saturating_add(w);
+                            let i = g.items_queued;
+                            g.queue.push_back((i, item, weight_queued));
+                            g.items_queued += 1;
+                        }
+                        g.plans_taken = plans_taken;
+                        g.plans_done = plans_done;
+                        drop(g);
+                        moved.notify_all();
+                    }
+                    if plans_done {
+                        // Plans made past the stop are not wanted.
+                        plans.clear();
+                    }
+                }
+                Made::Item(i, through, r) => {
+                    items.insert(i, (through, r));
+                    while let Some((through, r)) = items.remove(&items_taken) {
+                        if let Err(e) = take(items_taken, r) {
+                            res = Err(e);
+                            break 'recv;
+                        }
+                        items_taken += 1;
+                        let mut g = lock_pool(&pool);
+                        g.items_taken = items_taken;
+                        g.weight_taken = through;
+                        drop(g);
+                        moved.notify_all();
+                    }
+                }
+            }
+            let g = lock_pool(&pool);
+            if g.plans_done && g.items_taken == g.items_queued {
+                break;
+            }
+        }
+        {
+            let mut g = lock_pool(&pool);
+            g.stop = true;
+            g.plans_done = true;
+        }
+        moved.notify_all();
+        // Workers still making something find the channel closed and stop.
+        drop(rx);
+        // The first panic, passed on with its own message.
+        let mut panicked = None;
+        for w in workers {
+            if let Err(p) = w.join() {
+                panicked.get_or_insert(p);
+            }
+        }
+        if let Some(p) = panicked {
+            std::panic::resume_unwind(p);
+        }
+        res
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,6 +491,157 @@ mod tests {
                 },
             );
             assert_eq!(e, Err("disk full".to_string()));
+        }
+    }
+
+    /// A plan's items: from 0 to 5 of them (plans 4, 10, 16, … have none), each with an uneven
+    /// weight.
+    fn plan_items(j: u64) -> Vec<(u64, u64)> {
+        (0..(j * 7 + 2) % 6)
+            .map(|i| (j * 100 + i, 1 + (j + i) % 3))
+            .collect()
+    }
+
+    /// One run of [`pooled`]: the plans `expand` saw, the items `take` saw (in order), and the
+    /// most weight any made item ran ahead of what `take` had taken when it was claimed.
+    fn run_pooled(threads: usize, window: u64, stop_after: u64) -> (Vec<u64>, Vec<u64>, u64) {
+        let ahead = std::sync::atomic::AtomicU64::new(0);
+        let taken_w = std::sync::atomic::AtomicU64::new(0);
+        let (mut plans, mut items) = (Vec::new(), Vec::new());
+        // The list's total weight through each item, by item value.
+        let through = Mutex::new(BTreeMap::new());
+        let mut queued_w = 0u64;
+        pooled(
+            threads,
+            3,
+            window,
+            || (),
+            |_, j| (j, unit(j) % 1000),
+            |j, (pj, _)| {
+                assert_eq!(j, pj, "plans in order");
+                plans.push(j);
+                let its = plan_items(j);
+                let mut t = through.lock().expect("lock");
+                for &(x, w) in &its {
+                    queued_w += w;
+                    t.insert(x, (queued_w, w));
+                }
+                Ok((its, j + 1 < stop_after))
+            },
+            |_, x| {
+                let (thr, w) = through.lock().expect("lock")[&x];
+                let over = thr.saturating_sub(taken_w.load(Ordering::SeqCst) + w);
+                ahead.fetch_max(over, Ordering::SeqCst);
+                (x, unit(x) % 7)
+            },
+            |_, (x, _)| {
+                items.push(x);
+                let (thr, _) = through.lock().expect("lock")[&x];
+                taken_w.store(thr, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .expect("runs");
+        (plans, items, ahead.load(Ordering::SeqCst))
+    }
+
+    /// `expand` sees plans 0, 1, 2, … and `take` the items of the list in order, the same for
+    /// any thread count and window; no plan is expanded after `expand` says stop; and no item is
+    /// claimed more than the window ahead of what `take` has (the next one excepted).
+    #[test]
+    fn pooled_plans_and_items_arrive_in_order() {
+        let want_items: Vec<u64> = (0..40)
+            .flat_map(|j| plan_items(j).into_iter().map(|x| x.0))
+            .collect();
+        for threads in [1, 2, 4, 7] {
+            for window in [1, 4, 1000] {
+                let (plans, items, ahead) = run_pooled(threads, window, 40);
+                assert_eq!(plans, (0..40).collect::<Vec<_>>(), "{threads} threads");
+                assert_eq!(items, want_items, "{threads} threads, window {window}");
+                assert!(ahead <= window, "{ahead} past a window of {window}");
+            }
+        }
+        // A stop at a plan with no items (plan 4).
+        let (plans, items, _) = run_pooled(4, 8, 5);
+        assert_eq!(plans, vec![0, 1, 2, 3, 4]);
+        assert_eq!(
+            items.len(),
+            (0..5).map(|j| plan_items(j).len()).sum::<usize>()
+        );
+    }
+
+    /// An error from `expand` or `take` stops the run and is returned; a panic in a plan or an
+    /// item is passed on.
+    #[test]
+    fn pooled_errors_stop_the_run() {
+        for threads in [1, 3] {
+            let e = pooled(
+                threads,
+                4,
+                10,
+                || (),
+                |_, j| j,
+                |j, _| {
+                    if j == 9 {
+                        Err("plan 9".to_string())
+                    } else {
+                        Ok((vec![(j, 1), (j, 1)], true))
+                    }
+                },
+                |_, x| x,
+                |_, _| Ok(()),
+            );
+            assert_eq!(e, Err("plan 9".to_string()));
+            let mut n = 0;
+            let e = pooled(
+                threads,
+                4,
+                10,
+                || (),
+                |_, j| j,
+                |j, _| Ok((vec![(j, 1)], true)),
+                |_, x| x,
+                |i, _| {
+                    n += 1;
+                    if i == 17 {
+                        Err("disk full".to_string())
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert_eq!(e, Err("disk full".to_string()));
+            assert_eq!(n, 18);
+        }
+        for (threads, in_plan) in [(1, true), (4, true), (1, false), (4, false)] {
+            let r = std::panic::catch_unwind(|| {
+                pooled(
+                    threads,
+                    4,
+                    10,
+                    || (),
+                    |_, j| {
+                        assert!(!(in_plan && j == 5), "plan 5");
+                        j
+                    },
+                    |j, _| Ok((vec![(j, 1)], j < 100)),
+                    |_, x| {
+                        assert!(in_plan || x != 7, "item 7");
+                        x
+                    },
+                    |_, _| Ok(()),
+                )
+            });
+            let msg = r.expect_err("the panic is passed on");
+            let msg = msg
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| msg.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_default();
+            assert!(
+                msg.contains(if in_plan { "plan 5" } else { "item 7" }),
+                "{msg}"
+            );
         }
     }
 

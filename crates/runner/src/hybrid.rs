@@ -1548,6 +1548,38 @@ struct Rung<'a> {
     pending_shards: Vec<PathBuf>,
 }
 
+/// The exact label solves' table of a `search labels` step at cut `cut` on `threads` threads,
+/// within `limit`: the cut's (`search::oracle_labels::tt_mb_for`, one table per thread), lowered
+/// only if those tables, beside the equity table (`equity_bytes`), the process's own memory and a
+/// pooled harvest's window of finished rows (`LABEL_WINDOW_BYTES`), would not fit (`crate::mem`;
+/// the table never changes a label, only its speed). Returns `--tt-mb N` when lowered (nothing
+/// otherwise) and the plan.
+fn label_tables(
+    cut: u8,
+    threads: u64,
+    equity_bytes: u64,
+    limit: &crate::mem::Limit,
+) -> (Vec<String>, crate::mem::Plan) {
+    use crate::mem::{PROCESS_BASE, Requested, STACK_PER_THREAD, Tables, plan};
+    let want = search::oracle_labels::tt_mb_for(cut) as u64;
+    let other = equity_bytes
+        + PROCESS_BASE
+        + threads * STACK_PER_THREAD
+        + search::oracle_labels::LABEL_WINDOW_BYTES;
+    let p = plan(
+        Requested::Mb(want),
+        Tables::Own { count: threads },
+        other,
+        limit,
+    );
+    let args = if p.tt_mb < want {
+        vec!["--tt-mb".to_string(), p.tt_mb.to_string()]
+    } else {
+        Vec::new()
+    };
+    (args, p)
+}
+
 impl Rung<'_> {
     fn threads(&self) -> u64 {
         self.ctx.threads as u64
@@ -1579,6 +1611,20 @@ impl Rung<'_> {
         eprintln!("runner: WARNING: hybrid_rung: {w}");
         self.warnings.push(w);
         self.rec.insert("warnings".into(), json!(self.warnings));
+    }
+
+    /// The exact label solves' table of a `search labels` step on `threads` threads
+    /// ([`label_tables`] on this machine); a lowering is a warning. Returns the arguments to add
+    /// (`--tt-mb`, none unless lowered, so the step's command is otherwise as before) and the
+    /// plan's record.
+    fn label_tt_args(&mut self, threads: u64, what: &str) -> (Vec<String>, Value) {
+        let limit = crate::mem::Sys::host().limit();
+        let equity = fs::metadata(&self.table).map_or(128 << 20, |m| m.len());
+        let (args, plan) = label_tables(self.p.cut as u8, threads, equity, &limit);
+        if let Some(w) = &plan.warning {
+            self.warn(format!("{what}: {w}"));
+        }
+        (args, plan.record)
     }
 
     /// Records a finished step and rewrites `rung.json`.
@@ -1990,6 +2036,7 @@ impl Rung<'_> {
                 .map_or(String::new(), |(k, n)| format!(" p{k}/{n}"));
             let step = format!("labels {}{part} ({} of {})", s.name, i + 1, jobs.len());
             let threads = self.step_threads();
+            let (tt_args, tt_rec) = self.label_tt_args(threads, &step);
             let mut c = Command::new(&self.tools.search);
             c.args(["labels", "--trick", &self.p.cut.to_string()])
                 .args([
@@ -2004,7 +2051,8 @@ impl Rung<'_> {
                 .arg(&self.table)
                 .args(["--threads", &threads.to_string()])
                 .args(["--start-hands", &self.p.start_hands.to_string()])
-                .args(&s.args);
+                .args(&s.args)
+                .args(&tt_args);
             // The network that drives the harvest's search (`harvest_net`), fetched and checked.
             let net = self
                 .inputs
@@ -2051,6 +2099,7 @@ impl Rung<'_> {
             if let Some(c) = side.get("rows_by_race_class") {
                 rec["rows_by_race_class"] = c.clone();
             }
+            rec["label_tables"] = tt_rec;
             recs.push(rec);
             self.rec.insert("labels".into(), json!(recs));
             self.done(&step, t)?;
@@ -2796,6 +2845,47 @@ mod tests {
 
     /// The additive mode and stored label shards reused (`hybrid/tests/additive.rs`).
     mod additive;
+
+    /// A machine of `gib` GiB (`MemTotal`, no cgroup limit).
+    fn machine(gib: u64) -> crate::mem::Limit {
+        crate::mem::Limit {
+            bytes: gib << 30,
+            source: "MemTotal",
+            cgroup: None,
+            mem_total: Some(gib << 30),
+            mem_available: None,
+        }
+    }
+
+    /// The label steps keep the trick's table (no `--tt-mb`) wherever one per thread fits: the
+    /// trick-2 run's 384-thread EPYC 9654 with 129 GB (120 GiB) holds 384 tables of 256 MB
+    /// (96 GiB) beside a harvest's window; a machine that cannot gets them lowered to fit, never
+    /// raised, with a warning.
+    #[test]
+    fn label_tables_fit_the_machine() {
+        let eq = 26 << 20;
+        for (cut, threads, gib) in [(2, 384, 120), (2, 245, 251), (3, 384, 64), (4, 384, 16)] {
+            let (args, p) = label_tables(cut, threads, eq, &machine(gib));
+            assert!(
+                args.is_empty(),
+                "cut {cut}, {threads} threads, {gib} GiB: {args:?}"
+            );
+            assert_eq!(p.tt_mb, search::oracle_labels::tt_mb_for(cut) as u64);
+            assert!(p.warning.is_none());
+        }
+        let (args, p) = label_tables(2, 384, eq, &machine(64));
+        assert!(p.tt_mb < 256 && p.tt_mb >= 64, "{}", p.tt_mb);
+        assert_eq!(args, vec!["--tt-mb".to_string(), p.tt_mb.to_string()]);
+        assert!(
+            p.warning
+                .as_deref()
+                .is_some_and(|w| w.contains("never a value"))
+        );
+        assert!(
+            p.record["tables_peak_mb"].as_u64().expect("peak")
+                <= p.record["budget_mb"].as_u64().expect("budget")
+        );
+    }
 
     #[test]
     fn defaults_are_the_rung1_workflow() {

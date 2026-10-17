@@ -32,11 +32,13 @@
 //!                  [--boot 1000] [--seed 1]
 //! search teacher   --hands N --out DIR --equity TABLE [--seed S] [--config NAME] [--start-hands H]
 //! search labels    --trick K --count N --seed S --source random|rules|harvest --out FILE.npy
-//!                  --equity TABLE [--threads T] [--start-hands 20000] [--chunk-rows 32]
+//!                  --equity TABLE [--threads T] [--start-hands 20000] [--chunk-rows 32 (1 at K=2)]
+//!                  [--tt-mb M]
 //!                  harvest only: [--harvest-cap 16] [--harvest-positions 0.25,0.25,0.5]
 //!                  [--harvest-tricks K-1 | --harvest-tricks 2,3] [--harvest-net WEIGHTS]
 //!                  [--harvest-strata 1,2,3,4] [--harvest-race-classes 2,4 [--harvest-race-cap 256]]
 //!                  [--harvest-keep PRED.json [--keep-cap 256]] [--max-decisions N]
+//!                  [--harvest-schedule pooled|decision]
 //!                  [--seat-weights 2,1,1]
 //! search hybrid-check --trick T --cut K --net WEIGHTS --equity TABLE
 //!                  [--decisions FILE | --count N] [--seed 1] [--start-hands 20000]
@@ -61,7 +63,11 @@
 //! (the golden sets') is refused. The shard is streamed
 //! (`search::oracle_labels::write_label_shard`): chunks of `--chunk-rows` rows are made on every
 //! thread, then hashed and written in row order as they come, under the name `FILE.npy.part`,
-//! renamed to `FILE.npy` once whole. The start states (`--start-hands`; `decisions` and
+//! renamed to `FILE.npy` once whole. `--tt-mb M` sets the exact label solves' table (megabytes a
+//! thread; default `oracle_labels::tt_mb_for` the trick, 256 at trick 2): the runner lowers it
+//! when the machine's memory would not hold one per thread; it never changes a row, only the
+//! solves' node counts (`solver_nodes`; the sidecar then records `label_tt_mb`). A harvest's own
+//! search keeps its fixed table. The start states (`--start-hands`; `decisions` and
 //! `hybrid-check` too) are played on `--threads` threads, the same states for any count
 //! (`search::measure::collect_starts_with`). `--source harvest` (spec §5 source (c),
 //! `search::oracle_labels::harvest_rows`): training decisions drawn by the yardstick's generator at the tricks `--harvest-tricks`
@@ -99,6 +105,14 @@
 //! (positions 1–2, 3–4, 5–8; multiples of 1/256): the per-row weights `FILE.npy.rowweights`
 //! (`nn::rowweights`), written before the shard is renamed into place, and `seat_weights` in the
 //! sidecar (the weights, the file's SHA-256, the rows by position).
+//! `--harvest-schedule` (harvest only) says how the work is shared out over the threads, which
+//! never changes a row, a decision's facts or their order (`search::oracle_labels::HarvestSchedule`):
+//! `pooled` (the default) searches and samples each decision on one thread and pools the sampled
+//! positions of every decision taken into one list whose exact labels every thread takes in turn
+//! (one position a unit at trick 2, a decision's at tricks 3-5: `label_group_for`), so no thread
+//! waits on one decision's labels; `decision` (before 2026-10-17, for comparisons) labels each
+//! decision's positions on the thread that searched it. Only the label solves' node counts at
+//! trick 2 (`solver_nodes`) depend on it. The sidecar's `harvest.label_solves` records it.
 //! `hybrid-check` measures the hybrid H_K (exact to the start of trick K, the oracle network
 //! there) against exact search on the same worlds (docs/M3-HYBRID-SPEC.md §3, `search::hybrid`):
 //! decision loss with its bootstrap 95% upper bound, value error and agreement, overall, per
@@ -1499,11 +1513,11 @@ fn binary_sha256() -> String {
 /// `search labels`: a label shard for the oracle network O_K and its sidecar.
 fn labels_cmd(a: &Args) -> Result<(), String> {
     use search::oracle_labels::{
-        CHUNK_ROWS, Driver, GOLDEN_SEED, HARVEST_CAP, HARVEST_SHARES, HARVEST_STRATA,
-        HARVEST_TT_MB, HarvestJob, KEEP_CAP, LabelJob, PredKeep, RACE_CAP, RaceKeep, Source,
-        default_max_decisions, parse_band_shares, parse_race_classes, parse_seat_weights,
-        parse_strata, position_schedule, reheader_shard, seat_row_weights,
-        write_harvest_shard_upto, write_label_shard,
+        Driver, GOLDEN_SEED, HARVEST_CAP, HARVEST_SHARES, HARVEST_STRATA, HARVEST_TT_MB,
+        HarvestJob, HarvestSchedule, KEEP_CAP, LabelExec, LabelJob, PredKeep, RACE_CAP, RaceKeep,
+        Source, chunk_rows_for, default_max_decisions, parse_band_shares, parse_race_classes,
+        parse_seat_weights, parse_strata, position_schedule, reheader_shard, seat_row_weights,
+        tt_mb_for, write_harvest_shard_with, write_label_shard_with,
     };
     let trick = a.num("--trick", 4)? as u8;
     if !(2..=5).contains(&trick) {
@@ -1535,6 +1549,7 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         "--keep-cap",
         "--max-decisions",
         "--seat-weights",
+        "--harvest-schedule",
     ];
     // The rows' loss weights by their decision's seat band, written beside the shard
     // (`NAME.npy.rowweights`) before it is renamed into place.
@@ -1681,7 +1696,7 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         None
     };
     let out = PathBuf::from(a.req("--out")?);
-    let chunk_rows = a.num("--chunk-rows", CHUNK_ROWS)?.max(1);
+    let chunk_rows = a.num("--chunk-rows", chunk_rows_for(trick))?.max(1);
     let t0 = Instant::now();
     let (table, table_sha) = load_equity_sha(a.req("--equity")?)?;
     let leaf: Arc<SharedLeaf> = Arc::new(table);
@@ -1709,6 +1724,14 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         None => None,
     };
     let driver = net.as_ref().map_or(Driver::Exact, |(o, _)| Driver::Net(o));
+    // How the run is carried out (never changes a row): the exact label solves' table
+    // (`--tt-mb`, the runner lowers it to fit the machine's memory) and how a harvest's work is
+    // shared out over the threads (`--harvest-schedule`: `pooled`, the default, or `decision`,
+    // before 2026-10-17, for comparisons).
+    let mut exec = LabelExec::for_trick(trick);
+    exec.tt_mb = a.num("--tt-mb", tt_mb_for(trick) as u64)?.max(1) as usize;
+    exec.schedule = HarvestSchedule::parse(a.get("--harvest-schedule").unwrap_or("pooled"))
+        .map_err(|e| format!("--harvest-schedule: {e}"))?;
     let start_hands = a.num("--start-hands", 20_000)?;
     let starts = collect_starts_with(start_hands, seed, job.threads);
     eprintln!(
@@ -1759,10 +1782,25 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
             .open(&part)
             .map_err(|e| format!("{}: {e}", part.display()))?;
         let mut summary = match &harvest {
-            Some((h, _, _, _, max)) => {
-                write_harvest_shard_upto(h, *max, &starts, &*leaf, driver, Some(done), &mut file)
-            }
-            None => write_label_shard(&job, &starts, &*leaf, Some(done), chunk_rows, &mut file),
+            Some((h, _, _, _, max)) => write_harvest_shard_with(
+                h,
+                exec,
+                *max,
+                &starts,
+                &*leaf,
+                driver,
+                Some(done),
+                &mut file,
+            ),
+            None => write_label_shard_with(
+                &job,
+                exec,
+                &starts,
+                &*leaf,
+                Some(done),
+                chunk_rows,
+                &mut file,
+            ),
         }
         .map_err(|e| format!("{}: {e}", part.display()))?;
         if summary.rows < job.count {
@@ -1831,6 +1869,10 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
     if job.source != Source::Rules {
         side["rows_by_position"] = serde_json::json!(&by_position[1..]);
     }
+    if exec.tt_mb != tt_mb_for(trick) {
+        // A table other than the trick's (`--tt-mb`): the solves' node counts are on it.
+        side["label_tt_mb"] = serde_json::json!(exec.tt_mb);
+    }
     if let Some((text, w)) = &seat_weights {
         let path = nn::rowweights::path_for(&out);
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -1863,6 +1905,25 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
             HARVEST_TT_MB,
             net.as_ref().map(|(o, p)| (o, p.as_str())),
         );
+        // The label solves (the search's own table is `search` above).
+        side["harvest"]["label_solves"] = serde_json::json!({
+            "table_mb": exec.tt_mb,
+            "schedule": exec.schedule.name(),
+            "positions_a_unit": match exec.group {
+                usize::MAX => serde_json::json!("all of a decision's"),
+                n => serde_json::json!(n),
+            },
+            "what": match exec.schedule {
+                HarvestSchedule::Pooled => "each sampled position solved exactly \
+                    (solver::solve_fast_with) with its own table of table_mb a thread; the \
+                    positions of positions_a_unit consecutive rows of one decision share one table \
+                    (solver::SolveFamily); the units of every decision taken form one list \
+                    labelled by every thread (search::ordered::pooled)",
+                HarvestSchedule::PerDecision => "each decision's search and every one of its \
+                    labels on one thread, its labels sharing one table of table_mb \
+                    (solver::SolveFamily)",
+            },
+        });
         if let (Some(k), Some(t)) = (&h.keep, &shard.groups) {
             side["harvest"]["keep"] = keep_record(k, keep_file.as_deref(), h.cap, &decisions, t);
             eprintln!(

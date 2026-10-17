@@ -365,3 +365,169 @@ Only the frontier interface and the hybrid's hook, no search logic:
 - Wrappers that pass batches on to their network: `search::hybrid::Timed` (counts the batch's
   time as evaluation time), `search::audit::GroupRecorder`, `search::oracle_labels::Recorder`
   (with a network driver only).
+
+## Harvest scheduling (branch `eng-harvestpar`, 2026-10-17)
+
+**Outcome.** The harvests (the audit loop's audit shards and targeted harvests, the base and race
+harvests) now share their exact labels out over every thread. Same shards byte for byte, same
+decisions and sidecar values, apart from the timing fields, the new `harvest.label_solves` record
+and, at trick 2 only, `solver_nodes`. On this VM a 200-row trick-2 harvest took 258 s instead of
+589 s, at 9.05 M solver nodes per thread-second instead of 3.69 M. A single-thread plain label
+does 9.7 M.
+
+### The cause (the trick-2 mechanism test, 245 threads, 2026-10-17)
+
+Each harvest decision's search, sample and every one of its labels ran on one thread
+(`ordered` over decisions, a window of `4 × threads + 16` decisions ahead). At trick 2 a label is
+seconds to minutes, so one decision's labels were 16 (audit shard) to 256 (targeted harvest,
+`audit_keep_cap`) solves in a row on one thread. Two things followed:
+- the shard is written in decision order, so it waited on its slowest decisions while the other
+  threads made decisions up to the window ahead, nearly all past the row count, and thrown away;
+- when the row count was reached, the decisions still being made ran to their end before the
+  step could finish.
+
+The logs show it (`hybrid/labels-audit-r1.log`, `labels-target-r1.log`):
+- The rows counter counts the rows of every decision finished, including those past the count.
+  It reached 5,000 at 100 s in the audit shard and at about 60 s in the targeted harvest.
+- The audit shard ran 1,751.7 s on 245 threads (429,000 thread-seconds). The labels of the 368
+  decisions it kept took 27,738 thread-seconds (6.5%) and their searches 160.
+- Nothing came after the rows: hashing 0.0 s, writing 0.0 s, sidecar 0.3 s after the last row.
+- The targeted harvest (237 threads) was still running at 5,823 s when the run was stopped.
+
+The labels' table was not the cause. The sidecar's "table 64 MB" is the harvest's own search table
+(`HARVEST_TT_MB`, fixed because what the search reaches may depend on it). The label solves always
+used the trick's table, as the plain labels do (`tt_mb_for`: 256 MB at trick 2). The trick-1
+searches with the network were cheap (0.6% of the thread time) and already ran in parallel, one
+decision per thread.
+
+### What changed (`search::ordered::pooled`, `oracle_labels::HarvestSchedule::Pooled`)
+
+- Decisions are still searched and sampled one per thread, in order, exactly as before.
+- The sampled positions of the decisions taken, cut at the row count, form one ordered list. Every
+  thread takes the next unit of that list, whichever decision it came from, and a label always goes
+  before a further decision.
+- Units are one position at trick 2 and all of a decision's positions at tricks 3–5
+  (`label_group_for`). At tricks 3–5 a label is milliseconds and sharing one table across a
+  decision's labels saves a quarter to three quarters of the nodes, so the node counts there are
+  exactly the old ones.
+- No label is made for a decision past the row count. Finished labels may run up to 1 GiB ahead of
+  the writing (`LABEL_WINDOW_BYTES`); a pending plan holds only its sampled positions.
+- The rows counter now counts labelled rows of the shard only.
+- The old schedule stays as `--harvest-schedule decision`, for comparisons and the tests.
+
+Also:
+- `search labels --chunk-rows` defaults to 1 at trick 2, 32 elsewhere. A trick-2 chunk of 32 rows
+  was minutes on one thread: the mechanism test's 5,000-row rules and validation shards were 157
+  chunks on 245 threads, one wave.
+- `search labels --tt-mb` sets the label solves' table, and the runner lowers it only if one table
+  per thread would not fit the machine (`hybrid::label_tables`, `crate::mem`).
+
+### Identity
+
+- Unit tests:
+  - `oracle_labels::tests::harvest_schedules_give_the_same_shard`: the shard, its SHA-256, the
+    decisions' facts, the group tallies and the row counts are identical between the old schedule
+    and the new one. It covers 1, 2 and 4 threads; one position or a whole decision a unit; a 1 MB
+    table; the exact and network drivers; tricks 3, 4 and 5; race, targeted and bounded harvests.
+    Node counts equal the old ones with whole-decision units, and with one position a unit each
+    row's nodes are its solve's from empty tables.
+  - `label_table_size_never_changes_a_row` and `ordered::tests::pooled_*`.
+- CLI (release binaries before = `4fd352d` and after, same seeds, `equity-v0.npy`):
+
+| run (seed, rows) | shard SHA-256, every run | runs | `solver_nodes` before → after |
+|---|---|---|---|
+| trick 2 harvest, network driver, cap 8 (231, 24) | `318e10eac2d5043c021fb95bab3d21603e5427aba715b48fddb81b3c2cef2882` | before (4 threads); after on 1, 2 and 4 threads, with `--harvest-schedule decision`, with `--tt-mb` 16, 64 and 128 | 1,434,573,927 → 1,449,543,129 on 1, 2 and 4 threads (+1.0%); `decision`: 1,434,573,927 |
+| trick 2 targeted harvest, the mechanism test's round-1 predicates, keep cap 8 (23151, 24) | `2edf4d97d2a4a4ef6a6f668f4994f554933de08bee44b44bf454ab0263605da0` | before; after on 1 and 4 threads | 635,436,146 → 642,348,210 (+1.1%) |
+| trick 3 harvest, network driver `o3-small`, cap 16 (103, 600) | `08abb6394e347f0e4fb64ad8d90e78f41c219e9742982a646b5e096c0161924d` | before; after on 1, 2 and 4 threads | 44,211,404, unchanged |
+| trick 4 harvest, exact driver, cap 16 (104, 3,000) | `d1d43771e3adaeb6fde252eb5cb982314f00c6a6d1aa6f75fd0bda16b4c485eb` | before; after on 1 and 4 threads | 429,724, unchanged |
+| trick 4 race harvest, classes 2,4 (105, 3,000) | `a183c4b3c7eb979464529593c2b3e31db320d469345af5e5d99a3f85fcf5d230` | before; after | 377,688, unchanged |
+| trick 2 random labels, chunk 32 before, 1 after (511, 12) | `93c0aaa6621a23944b8aed3f36d94e35eb29879139d6b94640ebb185b5eb0fe3` | before; after; after with `--tt-mb 16` | 317,173,637, unchanged (16 MB: +4%) |
+
+  Every sidecar key is the same as before's except `binary_sha256`, `seconds`, the new
+  `harvest.label_solves`, and `solver_nodes` where the table or the units changed (trick 2 pooled,
+  or another `--tt-mb`, then recorded as `label_tt_mb`). The 200-row and 64-row harvests below
+  have the same SHA-256 before and after too (`2eeb3c58…`, `5e966b27…`).
+- Against the rented machine: the new binary's first 48 rows of the mechanism test's round-1 audit shard
+  (seed 23101, its own network `6557aa67…`, 4 threads) are byte for byte the first 48 records of
+  the shard the old binary made on 245 threads (`1811345d…`, fetched from R2).
+
+### Speed (this VM, 4 threads, trick 2, network driver, cap 16, random 1024-512-128 O_2)
+
+| harvest | before: s | after: s | speed-up | nodes per thread-second | CPU core-seconds |
+|---|---|---|---|---|---|
+| 200 rows, 13 decisions | 588.7 | 257.8 | 2.3× | 3.69 M → 9.05 M | 2,173 → 991 |
+| 64 rows, 4 decisions | 543.8 | 86.7 | 6.3× | 1.36 M → 8.75 M | |
+| 24 rows, cap 8, 3 decisions | 208.9 | 48.4 | 4.3× | | |
+| targeted, 24 rows, keep cap 8 | 300.1 | 26.4 | 11.4× | | |
+| plain random labels, 12 rows (chunk 32 → 1) | 33.7 | 11.5 | 2.9× | | |
+
+- The 200-row run before: 4 cores busy until 525 s, then 2 cores until 589 s. The labels of the
+  rows kept took 1,230 thread-seconds; the other 940 core-seconds went to decisions thrown away.
+- After: 4 cores busy until 255 s of 258 s. The labels took 1,014 thread-seconds, all kept.
+- The pooled labels are faster per node too (9.2 M against 7.1 M nodes a thread-second while
+  labelling). The shared table of a decision's chain grew larger and missed the cache more, and
+  each decision allocated a new 256 MB table. That more than pays for the 1–7% more nodes of
+  solving each trick-2 label from an empty table.
+- The table at trick 2 (24-row harvest, 4 threads): 16 MB 93.7 s (+20% nodes), 64 MB 47.2 s
+  (+0.1%), 128 MB 46.2 s, 256 MB 48.4 s.
+
+**Why it scales.** Take `n` labels of mean time `c` on `N` threads, the longest single label
+`c_max`. With every label in one list, every thread is busy until the last label is claimed. The
+step then ends within `c_max`: about `n·c/N + c_max`. Under the old schedule the unit was a
+decision of `g` labels in a row (16 for an audit shard, up to 256 for a targeted harvest). The
+shard waited on the slowest decision in its order, and the decisions in flight at the end ran on.
+So its tail was the slowest decision's `g` labels, plus the work thrown away.
+
+The 4-core VM hides most of this: 13 decisions are already 3 a thread. At 245–384 threads a
+5,000-row shard is 1–1.5 decisions a thread, so the old schedule's time was its slowest decision.
+
+For the run's 200,000 audit rows at 384 threads (about 7.4 thread-seconds a label on the rented
+EPYC): `n·c/N` ≈ 3,850 s. The pooled tail is one trick-2 label, minutes at worst, against a
+decision of 16 labels in a row or, for a targeted harvest, up to 256 (half an hour or more).
+
+### Memory at 384 threads (the 129 GB EPYC 9654, offer #48544090)
+
+Per thread:
+- The label table: `tt_mb_for(2)` = 256 MiB at trick 2, 64 at trick 3, 8 at tricks 4–5. It is
+  reserved at its cap and its pages are touched as it grows; a thread keeps the largest size it
+  reached.
+- The network's memo, about 2.5 MB, and the stack, 2 MiB.
+- The harvest search's 64 MiB table is reserved but hardly touched (trick 1 has no trick boundary
+  to store).
+
+Shared: the equity table (26 MB), the network's weights (6–30 MB), finished labels ahead of the
+writer (at most 1 GiB), and the pending decisions' samples (small).
+
+Measured peaks:
+- 1,123 MB for the 200-row trick-2 harvest on 4 threads (1,125 MB before), against 78 MB for
+  the process alone. That is about 260 MB a thread: the table reaches its cap once a thread meets
+  a hard position.
+- 255 MB for 8 random labels.
+
+Expected at 384 threads, for every trick-2 label step (random, rules, validation, audit shard,
+targeted harvest), the same as before:
+- tables 384 × 256 MiB = 96 GiB (103 GB);
+- plus about 3 GB (memos, stacks, window, base);
+- about 106 GB in all.
+
+At trick 3 the tables take 24 GiB, at trick 4 3 GiB.
+
+On the 129 GB EPYC 9654 (about 120 GiB) the runner's budget (the limit less 10% less the
+process's other memory) is about 105 GiB. The tables fit, so the runner passes no `--tt-mb`
+(unit test `label_tables_fit_the_machine`).
+
+With the trainer beside (about 3 GB of host memory), the total is about 109 GB of 129 GB. When
+the rough test runs beside with its 8 GB verification table, the label step has fewer threads and
+fewer tables. The margin is about 10–15 GB. If more is wanted, a 128 MB table at trick 2 halves the
+label tables at no measured cost (above); that would change only `solver_nodes`, and is not done
+here.
+
+A machine with less memory gets its label tables lowered by the runner to fit: about 145 MB at
+384 threads on 64 GiB. It gets a warning, never a different label.
+
+### What is not verified here
+
+- No rented run: the speed-up at 245–384 threads follows from the argument above, not a
+  measurement. The longest single trick-2 label on the rented machines, which bounds the pooled
+  tail, is not known.
+- The runner's lowering of the table is unit-tested on stated machine sizes only.
