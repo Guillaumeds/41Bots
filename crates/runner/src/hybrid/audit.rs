@@ -175,6 +175,9 @@ use serde_json::{Map, Value, json};
 use super::{GOLDEN_SEED, Rung, label_progress, merge_beside, read_json, secs, write_json};
 use crate::remote::{input_hex, input_key, put_input};
 
+/// `train_mode` (scratch or additive) and the leader focus (docs/m3-hybrid/audit-loop.md §10).
+pub(super) mod additive;
+
 /// The audit loop's settings beside `audit_rounds`, refused when it is 0.
 const AUDIT_KEYS: [&str; 21] = [
     "audit_rows",
@@ -1148,6 +1151,7 @@ fn check_summary(hc: &Value) -> Value {
             "reached_share": x["reached_share"] })).collect::<Vec<_>>(),
         "slices_failing": failing.len(),
         "worst_slice": worst.map(|w| json!({ "name": w["name"], "loss_upper95": w["summary"]["loss_upper95"] })),
+        "bands": additive::bands_of(hc),
     })
 }
 
@@ -1736,7 +1740,8 @@ impl Rung<'_> {
             fs::create_dir_all(d).map_err(|e| format!("mkdir {}: {e}", d.display()))?;
         }
         let mut st = Loop {
-            train_rows: self.p.train.iter().map(|x| x.count).sum(),
+            train_rows: self.p.train.iter().map(|x| x.count).sum::<u64>()
+                + self.reused_train_rows(),
             s,
             groups: Vec::new(),
             train: train.to_vec(),
@@ -1761,6 +1766,7 @@ impl Rung<'_> {
             results: Vec::new(),
         };
         st.standard = st.s.standard;
+        self.additive_start(&mut st);
         self.audit_hb.insert(
             "standard".into(),
             json!(if st.s.rough.is_some() {
@@ -1779,10 +1785,11 @@ impl Rung<'_> {
         };
         self.audit_hb.insert("audit_stop".into(), json!(stop));
         // The chunk keeps the best round's network and check (`best_round`), also on a stop.
-        let best =
-            best_round(&st).map(|b| (b.r, b.level, b.overall, b.net.clone(), b.check.clone()));
+        // Additive mode: the latest adopted round, never the ranking (`additive`).
+        let kept = self.kept_round(&st);
+        let best = kept.map(|b| (b.r, b.level, b.overall, b.net.clone(), b.check.clone()));
         // Trick 2: the kept round's rough test (reported only).
-        let best_rough = best_round(&st).and_then(|b| b.rough.clone());
+        let best_rough = kept.and_then(|b| b.rough.clone());
         let at2 = st.s.rough.is_some();
         if let Some((r, level, overall, _, _)) = &best {
             st.lines.push(if at2 {
@@ -1812,7 +1819,11 @@ impl Rung<'_> {
                 )
             });
         }
-        if let Some(n) = best.as_ref().and_then(|b| b.3.clone()) {
+        if let Some(n) = best
+            .as_ref()
+            .and_then(|b| b.3.clone())
+            .or_else(|| self.additive_init_net())
+        {
             self.rec.insert("net".into(), n);
         }
         let unm = unmeasurable_groups(&st);
@@ -1947,7 +1958,10 @@ impl Rung<'_> {
                 json!(format!("{} of {}", st.step + 1, st.s.shapes.len())),
             );
             self.shape = Some(shape);
-            let bg = self.bg_train.is_some() || (self.device == "cuda" && self.p.overlap);
+            // Additive mode: one after another (a training starts from the network adopted after
+            // the previous round's checks).
+            let bg = self.bg_train.is_some()
+                || (self.device == "cuda" && self.p.overlap && self.p.additive.is_none());
             // The audit shard is made beside (or before) the training, driven by the previous
             // network; at trick 2 with no earlier network (round 1 without `harvest_net`) it is
             // made after the training, driven by this round's own network: an exact-driven
@@ -2200,13 +2214,20 @@ impl Rung<'_> {
     }
 
     /// The network a harvest's search uses in round `r` (`None`: exact values): exact at trick 4
-    /// and later; at trick 3 and earlier the latest network (`latest`), else `harvest_net`.
+    /// and later; at trick 3 and earlier the latest network (`latest`), else `init_net` (additive
+    /// mode), else `harvest_net`.
     fn harvest_driver(&self, latest: Option<&Path>) -> Option<PathBuf> {
         if self.p.cut >= 4 {
             return None;
         }
+        // Additive mode: the adopted best, never a rejected round's network.
+        if let Some(best) = self.additive_driver() {
+            return Some(best);
+        }
         latest
             .map(Path::to_path_buf)
+            // Additive mode: round 1's network is `init_net` itself.
+            .or_else(|| self.inputs.get("init_net").cloned())
             .or_else(|| self.inputs.get("harvest_net").cloned())
     }
 
@@ -2283,8 +2304,11 @@ impl Rung<'_> {
     /// harvest shard takes them.
     fn harvest_args(&self) -> Vec<String> {
         let from = self.p.train.iter().find(|s| s.name == "harvest");
-        match from {
-            Some(h) => h.args.clone(),
+        match from
+            .map(|h| &h.args)
+            .or(self.p.reused_harvest_args.as_ref())
+        {
+            Some(h) => h.clone(),
             None => vec![
                 "--harvest-cap".into(),
                 search::oracle_labels::HARVEST_CAP.to_string(),
@@ -2354,6 +2378,8 @@ impl Rung<'_> {
                 read_json(&adir.join("report.json")).unwrap_or(Value::Null)
             }
         };
+        // Additive mode at trick 2: the best network so far on the same shard (its adoption).
+        self.additive_pair(st, r, &net, &report, &shard)?;
         // Nothing after the auditor reads the audit shard (the capacity check, the calibration
         // and the slices read its report; the harvests make their own shards): it goes, its
         // sidecar stays in round-<r>/ (20M rows at trick 4 are about 22 GB). At trick 2 it is
@@ -2589,6 +2615,7 @@ impl Rung<'_> {
         let hc = read_json(&hc_json)
             .ok_or_else(|| format!("hybrid_rung: hybrid-check wrote no {}", hc_json.display()))?;
         let golden = check_summary(&hc);
+        self.additive_judge(st, p, &hc, (&hc_json, &hc_txt), tag);
         let overall_pass = golden["overall_pass"].as_bool().unwrap_or(false);
         let big = st.s.mini_decisions;
         // The mini golden sets of earlier rounds, re-measured with this network.
@@ -2600,6 +2627,7 @@ impl Rung<'_> {
         }
         let judged = judge(st, &golden, &minis, r);
         update_failing(st, &judged, r);
+        self.additive_failing(st, &judged, r);
         let mut targeted = None;
         let mut stop_dim = false;
         if !overall_pass || !failing(st).is_empty() {
@@ -2657,13 +2685,14 @@ impl Rung<'_> {
         // Every group at the decision level.
         let judged = judge(st, &golden, &minis, r);
         update_failing(st, &judged, r);
+        self.additive_failing(st, &judged, r);
         let remaining = judged
             .iter()
             .filter(|x| x["pass"].as_bool() == Some(false))
             .count();
         let pending = judged.iter().filter(|x| unmeasured(x)).count();
         let n_failing = failing(st).len();
-        let flat = overall_pass && n_failing == 0 && pending == 0;
+        let flat = overall_pass && n_failing == 0 && pending == 0 && self.additive_may_be_flat(r);
         let mut verdict = if flat { After::Flat } else { After::Go };
         if !flat
             && !stop_dim
@@ -2770,7 +2799,11 @@ impl Rung<'_> {
         let r = p.r;
         let rdir = st.dir.join(format!("round-{r}"));
         fs::create_dir_all(&rdir).map_err(|e| e.to_string())?;
-        let flat = p.confirmed.is_empty();
+        // Additive mode: adopted or not (the paired check on this round's audit shard); a round
+        // not adopted is never flat, and with nothing confirmed it has nothing new to train on.
+        self.additive_judge_rough(st, p);
+        let rejected = !self.additive_may_be_flat(r);
+        let flat = p.confirmed.is_empty() && !rejected;
         // Diminishing returns at the position level (the decision-level rule of 2026-10-16
         // night has nothing to read at trick 2): two rounds in a row on the largest shape of the
         // ladder whose worst confirmed group's SD fell by less than `audit_min_gain` (the
@@ -2860,6 +2893,15 @@ impl Rung<'_> {
                     n - 20
                 ));
             }
+            return Ok(After::Diminishing);
+        }
+        if rejected && p.confirmed.is_empty() {
+            // Additive mode: flat at the position level but worse than the best on the same
+            // positions, and nothing confirmed to harvest: nothing new to train on.
+            st.diminishing = Some(format!(
+                "round {r} confirmed no group on its audit shard but was not adopted (worse than \
+                 the best on the same positions): nothing new to train on"
+            ));
             return Ok(After::Diminishing);
         }
         Ok(if flat { After::Flat } else { After::Go })
@@ -3010,22 +3052,23 @@ impl Rung<'_> {
         rdir: &Path,
         watch: Option<&Path>,
     ) -> Result<Option<Value>, String> {
+        // In additive mode only the confirmed groups that are new or not passing.
+        let confirmed = self.additive_targets(st, p);
         let carried: Vec<usize> = failing(st)
             .into_iter()
-            .filter(|i| !p.confirmed.contains(i))
+            .filter(|i| !confirmed.contains(i))
             .collect();
-        if p.confirmed.is_empty() && carried.is_empty() {
+        if confirmed.is_empty() && carried.is_empty() {
             return Ok(None);
         }
-        let list: Vec<Value> = p
-            .confirmed
+        let list: Vec<Value> = confirmed
             .iter()
             .chain(&carried)
             .map(|&i| st.groups[i].entry.clone())
             .collect();
         let path = rdir.join("targets.json");
         write_json(&path, &Value::Array(list))?;
-        let why = match (p.confirmed.len(), carried.len()) {
+        let why = match (confirmed.len(), carried.len()) {
             (0, n) => format!("re-targeting {n} groups still failing"),
             (c, 0) => format!("{c} groups confirmed this round"),
             (c, n) => format!("{c} groups confirmed this round and {n} groups still failing"),
@@ -3038,7 +3081,7 @@ impl Rung<'_> {
         t["why"] = json!(why);
         t["targets"] = json!({
             "file": format!("audit/round-{}/targets.json", p.r),
-            "confirmed": p.confirmed.iter().map(|&i| st.groups[i].name.clone()).collect::<Vec<_>>(),
+            "confirmed": confirmed.iter().map(|&i| st.groups[i].name.clone()).collect::<Vec<_>>(),
             "failing": carried.iter().map(|&i| json!({ "group": st.groups[i].name,
                                                         "failing_since": st.groups[i].failing_since }))
                               .collect::<Vec<_>>(),
@@ -3299,6 +3342,10 @@ impl Rung<'_> {
         if let Some(n) = &driver {
             c.arg("--harvest-net").arg(n);
         }
+        // The rows' loss weights by seat band (`harvest_seat_weights`), beside the shard.
+        if let Some(w) = &self.p.seat_weights {
+            c.args(["--seat-weights", w]);
+        }
         self.audit_step(
             &format!("targeted harvest (round {r})"),
             c,
@@ -3325,6 +3372,10 @@ impl Rung<'_> {
         } else {
             None
         };
+        if self.p.upload_shards && (self.p.additive.is_some() || st.s.rough.is_some()) {
+            // Kept for a later run's training (`label_inputs`, set `extra`), with its sidecar.
+            self.share_targeted(&st.dir, &path, seed);
+        }
         st.train.push(path);
         // A harvest stopped by its bound on decisions writes fewer rows than asked
         // (`search labels --max-decisions`): count the rows written.
@@ -3419,6 +3470,7 @@ impl Rung<'_> {
             "flat": st.flat,
             "shared": keys,
         });
+        let rec = self.additive_fields(rec, r, golden);
         let json_path = st.dir.join(format!("round-{r}{tag}.json"));
         write_json(&json_path, &rec)?;
         // Plain English.
@@ -3664,6 +3716,7 @@ impl Rung<'_> {
                     .join("; ")
             );
         }
+        t += &self.additive_text(r, golden);
         let txt_path = st.dir.join(format!("round-{r}{tag}.txt"));
         fs::write(&txt_path, &t).map_err(|e| format!("write {}: {e}", txt_path.display()))?;
         let jk = self.share_file(st, &json_path);
@@ -3779,6 +3832,7 @@ impl Rung<'_> {
             "flat": st.flat,
             "shared": keys,
         });
+        let rec = self.additive_fields(rec, r, &Value::Null);
         let json_path = st.dir.join(format!("round-{r}.json"));
         write_json(&json_path, &rec)?;
         // Plain English.
@@ -3892,6 +3946,7 @@ impl Rung<'_> {
                 remaining.join("; ")
             }
         );
+        t += &self.additive_text(r, &Value::Null);
         let txt_path = st.dir.join(format!("round-{r}.txt"));
         fs::write(&txt_path, &t).map_err(|e| format!("write {}: {e}", txt_path.display()))?;
         let jk = self.share_file(st, &json_path);

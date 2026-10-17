@@ -399,3 +399,114 @@ What the night showed:
   network trained on hybrid labels against one on exact labels, same money, same exact checks) and only once trick 3 is
   near 0.005-0.0075%; the audit and every check stay exact. Errors carry forward and add along the chain, and with four
   teams a flipped near-tie can move the other teams' values in a label by more.
+
+## 10. Training modes, reused labels and the leader focus (build of 2026-10-17, branch `eng-additive`)
+
+The owner's decisions of §9, as run settings of `hybrid_rung` (module notes:
+`crates/runner/src/hybrid/audit/additive.rs`, `crates/runner/src/hybrid/reuse.rs`; trainer:
+`python/nn/fortyone_nn/train.py`, "Additive training").
+
+**`train_mode`** — `"scratch"` (the default: the loop exactly as it ran overnight, a fresh network each
+round, the capacity ladder; every existing test unchanged) or `"additive"`:
+- `init_net` (required): the stored integer network to continue, `inputs/sha256/<hex>` (`rung.json`'s
+  `net.int_key`); `init_net_float` (required): the same network's float weights (`net.float_key`).
+  Checked at step 0, before anything is installed: an integer network for the rung's trick and head,
+  taking the encoder's 909 features and giving the head's outputs at the cut; its hidden widths are the
+  rung's (`widths`, when given, must agree; otherwise they are taken from it); the float file has the
+  same layer shapes and the same training record. Then, once the Python environment is in and before
+  any label is made, the init check (`train.py --check-init-only`) proves, byte for byte, that the
+  float weights quantise to `init_net`: a wrong pair costs seconds, not hours of labels.
+- **Round 1 is `init_net` as it is** (`train.py --init --epochs 0`: copied and measured on the
+  validation shard; no training spent on what it already knows). Its audit, golden check, mini sets
+  and targeted harvest run as in scratch mode; at trick 3 and earlier its audit shard is driven by
+  `init_net` (no `harvest_net` needed). It is the best so far.
+- **Round r ≥ 2 continues the best network so far** on the base shards and every targeted shard so
+  far (old and new data together: new data alone makes a network forget), for `additive_epochs` (8)
+  at `additive_lr` (0.0003), early stopping on the validation shard as before. `shrink_perturb` (λ,
+  off by default; Ash & Adams, NeurIPS 2020): every weight λ·w + N(0, σ²) first, σ = (1 − λ) times the
+  standard deviation of the layer's fresh initialisation (σ = (1 − λ)/√(3·fan_in)), drawn on the CPU
+  from the seed `train_seed × 1000 + r`: the same seed gives the same network.
+- **Never lose a won pass, and no worse overall** (rule as amended by the review of 2026-10-17). On the
+  golden set, judged at the standard as the check judges `loss_pass` and `bias_pass`, round r is *worse*
+  than the best when (a) it loses a pass the best had: the overall bound, a seat band's bound
+  (positions 1-2, 3-4, 5-8) or a team's |bias| on the overall row; (b) a band or bias the best already
+  fails gets worse by more than the noise tolerance; or (c) its overall bound is worse than the best's by
+  more than the noise tolerance. Otherwise (ties and improvements included) it is adopted. The noise
+  tolerance is `adopt_tolerance`, default 0.002 percentage points of money chance: about the overnight
+  loops' round-to-round moves of the golden bound while the networks did not really change (trick 4:
+  0.0016, 0.0021, 0.0016, 0.0024%). The first form of the rule (every raw number no worse, no
+  tolerance) let noise reject most rounds, better ones included. A round not adopted leaves the best
+  as it was: the summary and the round's report say "NOT adopted" with every reason, its targeted data
+  still joins the next round, the failing groups are restored wholesale to the best's, and it cannot
+  end the loop as flat. Every harvest (audit shards, targeted harvests) is driven by the adopted best,
+  never by a rejected network. The chunk keeps the latest adopted round's network and never the
+  scratch ranking: an adopted round gets a provisional result at adoption, so a run stopped before the
+  round's judgement ends still keeps it; before round 1 is judged the chunk names `init_net`.
+- **At trick 2** (no golden set) the same rule reads the round's fresh audit shard, with both networks
+  on the same positions: right after round r's auditor, before the shard goes, the best network so far
+  is measured on it (`python -m fortyone_nn.audit --overall-only`, the full audit's `overall` numbers),
+  and the same rule reads it: a team's |bias| that loses its pass (within the standard) or, where the
+  best already fails it, grows by more than `adopt_tolerance`, or an overall SD (no standard there)
+  worse by more than `adopt_tolerance`, is worse. This is the measure the scratch trick-2 loop keeps its best round by (overall
+  SD on the audit shard), made paired, because each round's shard is a different sample and comparing
+  each network on its own shard would let sampling noise decide. No seat bands there (the shard's rows
+  do not record the decider) and no failing groups. A round not adopted that confirms no group ends
+  the loop ("nothing new to train on"). Cost: one network pass over the audit shard a round (the
+  auditor's first step; minutes).
+- The capacity ladder is off (the shape is `init_net`'s; `audit_shapes` refused). A step up to a larger
+  network is not built in additive mode (it would start fresh and is refused at parse): run it in
+  scratch mode. The rounds run
+  one after another (a training starts from the network adopted after the previous round's golden
+  check, so it cannot start beside that check; `overlap` refused). Also refused: `epochs`, `lr` (use
+  the additive ones), `label_parts` above 1; additive mode needs `audit_rounds` above 0.
+- **Focused harvest:** the targeted harvest takes the groups still failing, the groups confirmed this
+  round without a pass at the decision level (failing, not yet measured, unmeasurable) and the groups
+  confirmed for the first time; a known group that passes is not harvested again.
+
+**Float networks.** Until this build only the integer network was stored content-addressed; the float
+weights were only in each run's bundle and partial uploads. From now on every round's float network is
+shared too (`net.float_key`), and `upload_shards` shares every shard's sidecar: in both modes, for the
+owner's "store every label" and later additive starts. Neither can fail a step or stop a paid run:
+each upload is tried three times, and a final failure is a warning in the heartbeat (the files are in
+the run's bundle). Last night's networks: the float
+files are in the partial uploads and quantise, byte for byte, to the adopted integer networks
+(checked 2026-10-17):
+
+| network | init_net (integer) | init_net_float (float) | where the float file is |
+|---|---|---|---|
+| O_3, trick-3 round 2 | f5766aa98a1d… | b567967707852e8ae02f64890f4445ceac21eedd356b1beb7a570c157f64d447 | runs/m3-hybrid-t3-loop-1/partial/rung/000000/out/hybrid/audit/round-2/net/float.safetensors |
+| O_4, trick-4 round 1 | b28750e3d447… | 4b85237ee8e6ca3f925e43336f6a26ef493230889f3ef8a84c85c0d3f99e4046 | runs/m3-hybrid-t4-loop-3/partial/rung/000000/out/hybrid/net/float.safetensors |
+
+Neither float file is under `inputs/sha256/` yet (the build had read-only access): before launching
+`docs/vast/m3-hybrid-t3-additive.manifest.json` or `…-t4-additive…`, download the file and store it
+with `launch.py put-input FILE` (the launcher refuses the run until every stored input is there).
+
+**`label_inputs`** — stored shards reused instead of generated, a list of `{ "set", "seed", "shard",
+"sidecar" [, "rows", "weight", "rowweights"] }` (`set`: random, rules, harvest, race, val, or extra for
+any other training shard such as an earlier run's targeted harvest). A named set is not generated (its
+`labels_<set>` and seed settings are refused); each file's SHA-256 is its key, and the sidecar must
+record the shard's SHA-256, the format, this binary's encoder, feature count and values version, the
+rung's trick and outcomes, the entry's seed, a source that fits the set, and the shard header's rows.
+Reused seeds count in the seed-disjointness checks (training, validation, audit, targeted harvests,
+golden). With `upload_shards`, a run now also shares each shard's sidecar (and row weights) and writes
+ready-to-paste entries: `out/hybrid/shards.json` (`label_inputs`: the base shards that are stored; a
+shard whose upload failed waits in `label_inputs_pending`, its sidecar shared all the same, until the
+chunk's end retry stores it) and, in the audit
+loop (additive mode, or trick 2 where the targeted shards are shared anyway), `out/hybrid/audit/label_inputs.json`
+(every targeted harvest, set `extra`, with its weight).
+`label_inputs` works at every cut, trick 2 included (the sidecar must record the rung's trick and its
+outcome vocabulary). A run on a binary before this build (the trick-2 loop m3-hybrid-t2-loop-1 on
+27ccdc2) shares its shards with `upload_shards` but not their sidecars: to reuse them, store each
+sidecar from the run's bundle (`out/hybrid/labels/<file>.json`, `out/hybrid/audit/round-<r>/<file>.json`)
+with `launch.py put-input` and name it in the entry. Last night's runs had `upload_shards` false, so their base shards are made again from the same seeds
+(byte-identical) by the example manifests, which store them this time.
+
+**Leader focus (plan item 2d).** Every round report has a "Leader focus" line and `leader_focus` field:
+the golden check by the decider's seat band and position, with the own team's bias (seat 1 leads the
+trick). `harvest_seat_weights` (`"w12,w34,w58"`, e.g. `"2,1,1"`; multiples of 1/256) weighs every
+harvested row by its decision's seat band (the rung's harvest and race shards and the targeted
+harvests; not the audit shards), through the per-row weights `NAME.npy.rowweights` that
+`search labels --seat-weights` writes before the shard is renamed into place (its sidecar records the
+weights and the file's SHA-256). Not built: the audit shard's error by the decider's seat — the shard's
+rows do not record the decider (only the sidecar's counts by position), so the auditor cannot split
+its errors by seat; the golden check's bands are the decision-level measure.

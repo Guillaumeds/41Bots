@@ -4,7 +4,13 @@ positions where an integer oracle network is weak, without being told what to lo
     uv run python -m fortyone_nn.audit --net int.safetensors --shard AUDIT.npy [--shard ...]
         --out DIR [--gamma 0.001] [--alpha-bias 0.0025] [--alpha-sd 0.01] [--max-depth 6]
         [--max-conj 3] [--fdr 0.05] [--screen 0.01] [--seed 1] [--chunk 0] [--workers 0]
-        [--work DIR] [--keep-work]
+        [--work DIR] [--keep-work] [--overall-only]
+
+``--overall-only`` (docs/m3-hybrid/audit-loop.md §10): the network's errors and the whole shard's
+numbers only (``overall``: SD, bias per team, p99.9, by race class; the same function and the same
+rows as a full audit's ``overall``), no groups: the additive loop at trick 2 compares the best
+network so far and a new one on the same fresh audit shard. ``report.json`` then holds
+``overall_only: true`` and no ``audit``; no ``predicates.json`` is written.
 
 numpy only (no PyTorch), so it runs wherever the label shards are.
 
@@ -1806,6 +1812,8 @@ def main(argv=None):
     ap.add_argument("--keep-work", action="store_true", help="keep the work files")
     ap.add_argument("--parity-rows", type=int, default=512,
                     help="rows checked against the reference integer path (intnet.money_rows)")
+    ap.add_argument("--overall-only", action="store_true",
+                    help="only the network's overall numbers on the shards (no groups)")
     args = ap.parse_args(argv)
     t0 = time.time()
     seconds = {}
@@ -1833,6 +1841,11 @@ def main(argv=None):
             seconds["network"] = round(time.time() - t, 3)
             print(f"audit: {d.n} rows, trick {trick}, network {head} and error columns in {seconds['network']:.1f} s "
                   f"on {pool.n} worker(s)", flush=True)
+            if args.overall_only:
+                pool.close()
+                ov = overall(d)
+                write_overall_only(args, meta, head, shards, trick, ov, seconds, t0)
+                return
             body = audit_data(d, pool, gamma=args.gamma, alpha_bias=args.alpha_bias, alpha_sd=args.alpha_sd,
                               max_depth=args.max_depth, max_conj=args.max_conj, fdr=args.fdr, screen=args.screen,
                               log=lambda s: print(s, flush=True))
@@ -1867,6 +1880,25 @@ def main(argv=None):
     with open(os.path.join(args.out, "report.txt"), "w") as fh:
         fh.write(txt)
     print(txt, flush=True)
+
+
+def write_overall_only(args, meta, head, shards, trick, ov, seconds, t0):
+    """``--overall-only``'s report: the network, the shards and their ``overall`` numbers."""
+    seconds["total"] = round(time.time() - t0, 3)
+    rep = {
+        "format": FORMAT,
+        "encoder": "oracle-v2",
+        "overall_only": True,
+        "net": {"path": args.net, "sha256": sha256_file(args.net), "head": head, "trick": meta.get("trick")},
+        "shards": [{"path": p, "rows": int(len(s)), "sha256": sha256_file(p)} for p, s in zip(args.shard, shards)],
+        "trick": int(trick),
+        "teams": list(TEAMS),
+        "overall": ov,
+        "seconds": seconds,
+    }
+    with open(os.path.join(args.out, "report.json"), "w") as fh:
+        json.dump(rep, fh, indent=1)
+    print(f"overall: SD {100 * ov['sd']:.4f}%, bias {_fmt_bias(ov['bias'])} on {ov['rows']:,} rows", flush=True)
 
 
 if __name__ == "__main__":

@@ -1605,14 +1605,17 @@ def manifest_inputs(manifest: dict) -> dict[str, str]:
 # chunk fetches them itself from inputs/sha256/<hex>, so they are checked here with the
 # manifest's `inputs`, before anything is rented.
 HYBRID_INPUT_PARAMS = ("harvest_net", "golden_decisions_input", "golden_worlds_input",
-                       "audit_predicates_input", "t1_decisions_input")
+                       "audit_predicates_input", "t1_decisions_input", "init_net", "init_net_float")
 # The trick-2 loop's rough test: a list of {"run": LABEL, "input": KEY} (the saved trick-1 worlds).
 HYBRID_INPUT_LISTS = ("t1_saved_inputs",)
+# The keys of a `label_inputs` entry that name stored files (docs/m3-hybrid/audit-loop.md §10).
+LABEL_INPUT_KEYS = ("shard", "sidecar", "rowweights")
 
 
 def param_inputs(manifest: dict) -> dict[str, str]:
     """Stored inputs named in hybrid_rung streams' params: "<stream>.<param>" (a list's entries as
-    "<stream>.<param>[<run>]") -> lowercase sha256 hex. A value that is not
+    "<stream>.<param>[<run>]"; each reused label shard's files, `label_inputs`, as
+    "<stream>.label_inputs[<i>].<key>") -> lowercase sha256 hex. A value that is not
     "inputs/sha256/<64 hex>" (or "sha256:<64 hex>") stops the launch."""
     out = {}
     key = re.compile(r"(?:inputs/sha256/|sha256:)([0-9a-fA-F]{64})")
@@ -1630,6 +1633,14 @@ def param_inputs(manifest: dict) -> dict[str, str]:
             for e in entries:
                 run = e.get("run") if isinstance(e, dict) else None
                 named.append((f"{k}[{run}]", e.get("input") if isinstance(e, dict) else e))
+        entries = params.get("label_inputs")
+        if entries is not None:
+            if not isinstance(entries, list):
+                sys.exit(f"launch: stream {st.get('name')!r}: params.label_inputs must be a list")
+            for i, e in enumerate(entries):
+                if not isinstance(e, dict):
+                    sys.exit(f"launch: stream {st.get('name')!r}: params.label_inputs[{i}] must be an object")
+                named.extend((f"label_inputs[{i}].{k}", e.get(k)) for k in LABEL_INPUT_KEYS)
         for k, v in named:
             if v is None:
                 continue
