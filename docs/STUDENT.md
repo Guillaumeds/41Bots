@@ -150,9 +150,10 @@ stamps differ from the run's is refused unless explicitly allowed (`--allow-stam
 ## 4. The generator (`search teacher --trick 1|2`)
 
 ```text
-search teacher --trick 1|2 --count N --deals D --seed S --net FILE --equity FILE --out SHARD.npy
-               [--source rules|mixed|random] [--threads T] [--first I] [--role train|test]
-               [--start-hands 20000]
+search teacher --trick 1|2 --count N --deals D --seed S --net WEIGHTS|exact --equity TABLE
+               --out SHARD.npy [--source rules|mixed|random] [--first I] [--deal-from W]
+               [--role train|test] [--threads T] [--tt-mb 64] [--start-hands 20000]
+               [--progress FILE]
 ```
 
 - **Positions (round 0, as the oracle labels' sources):** `rules`: the yardstick's generator
@@ -236,8 +237,12 @@ sources.
   deal on average, **4.6 s of a thread per decision at D = 320**. On a 245-thread machine at
   $0.72/h that is about 190,000 decisions an hour, **about $4 per million decisions** (5.2 hours).
   The learning-curve plan's first 250k decisions: about 1.3 hours, about $1 plus the start-up.
-- **Teacher cost, trick 1** (H_2 with O_2): not measured; estimate 2–6 times trick 2's ($8–25 per
-  million), to be measured before any run.
+- **Teacher cost, trick 1** (H_2 with O_2; measured with random networks of O_2's possible sizes,
+  §11): 0.17 s of a thread a deal with a 1024-512-128 O_2, 0.57 s with a 2048-1024-256 one, 11 to
+  39 times trick 2's: **53–182 s a decision at D = 320, about $40–150 per million decisions** on
+  the same machine. The exact search of trick 1 reaches many more frontier positions than trick 2's,
+  and each costs a network evaluation, so O_2's width sets the price: trick-1 data is priced again
+  once O_2 exists.
 - **Records:** about 30 KB a trick-2 decision at D = 320 (values dominate: 320 deals × about 3
   candidates × 32 bytes), so 250k decisions are about 8 GB raw, compressed for transfer.
 - Measured on this VM (Stage 1): see §11.
@@ -271,4 +276,14 @@ relabelled; the raw positions are kept and reused.
 
 ## 11. Measurements and status
 
-(Filled in as the stages are built.)
+**Stage 1 (the generator), this VM (4 vCPU Xeon, release build, `search teacher`):**
+
+| What | Settings | Result |
+|---|---|---|
+| Trick 2, H_3 with the real O_3 (`f5766aa9…`, 2048-1024-256) | 64 decisions (8 per place, 16 per stratum), D = 320, 4 threads | 76.8 s: **3,000 decisions an hour**; 4.7 s of a thread a decision (the 4.6 s estimate of §8); 3.45 candidates a decision; 35 KB of values and 1.6 KB of record a decision |
+| Byte identity | 32 decisions, D = 16, 1 and 4 threads | records, values and sidecar files identical (SHA-256) |
+| Trick 1, H_2 with a random 2048-1024-256 O_2 | 32 decisions, D = 8, 4 threads | 0.57 s of a thread a deal (3 robs among the 32) |
+| Trick 1, H_2 with a random 1024-512-128 O_2 | the same | 0.17 s of a thread a deal |
+
+So a 245-thread machine makes about 187,000 trick-2 decisions an hour at D = 320 (245 × 3,600 /
+4.7 s): **about $3.80 per million decisions** at $0.72/h, the first 250k in about 1.3 hours.

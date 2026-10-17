@@ -31,6 +31,10 @@
 //! search score     --yardstick FILE --n N --method FILE:N [--method FILE:N …] [--json FILE]
 //!                  [--boot 1000] [--seed 1]
 //! search teacher   --hands N --out DIR --equity TABLE [--seed S] [--config NAME] [--start-hands H]
+//! search teacher   --trick 1|2 --count N --deals D --seed S --net WEIGHTS|exact --equity TABLE
+//!                  --out SHARD.npy [--source rules|mixed|random] [--first I] [--deal-from W]
+//!                  [--role train|test] [--threads T] [--tt-mb 64] [--start-hands 20000]
+//!                  [--progress FILE]
 //! search labels    --trick K --count N --seed S --source random|rules|harvest --out FILE.npy
 //!                  --equity TABLE [--threads T] [--start-hands 20000] [--chunk-rows 32 (1 at K=2)]
 //!                  [--tt-mb M]
@@ -55,6 +59,15 @@
 //!                  [--boot 1000] [--boot-seed 1] [--json OUT] [--progress FILE] [--plan-only]
 //!                  [--slices PRED.json [--slice-share 0.5]] [--standard 0.01]
 //! ```
+//! `teacher --trick` writes the student's teacher records (docs/STUDENT.md §3–§4,
+//! `search::student_teacher`): decisions `--first`..`--first + --count` at trick 1 or 2 from
+//! `--source` (stratum `i mod 4 + 1`, place `(i div 4) mod 8`), each valued by PIMC over deals
+//! `--deal-from`..`--deal-from + --deals` with the hybrid H_k (`--net`, an O_k with k after the
+//! trick; `exact` for exact search, tests and small runs), every candidate in every deal stored:
+//! `SHARD.npy` (records), `SHARD.values.npy` (values) and `SHARD.npy.json` (stamps, settings,
+//! both files' SHA-256), written as `.part` files and renamed once whole. Byte-identical for any
+//! `--threads`. `--role test` (the fixed test set) needs `student::STUDENT_TEST_SEED`, which a
+//! training shard may not use; seed 1 is refused. `--progress FILE` is rewritten every 2 s.
 //! `labels` writes training labels for the oracle network O_K (docs/M3-HYBRID-SPEC.md §5,
 //! `search::oracle_labels`): a label shard (`nn::shard`, `.npy` records: encoded features, the exact
 //! value as four u64, the source tag, the trick) and a JSON sidecar `FILE.npy.json` with the
@@ -1362,6 +1375,9 @@ fn score_cmd(a: &Args) -> Result<(), String> {
 }
 
 fn teacher(a: &Args) -> Result<(), String> {
+    if a.has("--trick") {
+        return student_teacher(a);
+    }
     let hands = a.num("--hands", 10)?;
     let seed = a.num("--seed", 1)?;
     let spec = PimcSpec::parse(a.get("--config").unwrap_or("pimc-teacher"))?;
@@ -1394,6 +1410,115 @@ fn teacher(a: &Args) -> Result<(), String> {
     std::fs::write(dir.join(format!("decisions-{}.npy", h(&npy))), &npy)
         .map_err(|e| e.to_string())?;
     println!("{hands} hands, {} decisions", rows.len());
+    Ok(())
+}
+
+/// `search teacher --trick 1|2`: a shard of the student's teacher records.
+fn student_teacher(a: &Args) -> Result<(), String> {
+    use search::student_teacher::{Teacher, TeacherJob, belief_ctx, write_teacher_shard};
+    let trick = a.num("--trick", 2)? as u8;
+    let seed: u64 = a
+        .req("--seed")?
+        .parse()
+        .map_err(|_| "--seed: not a number".to_string())?;
+    let threads = a.num("--threads", 1)?.max(1) as usize;
+    let role = a.get("--role").unwrap_or("train");
+    if role != "train" && role != "test" {
+        return Err("--role is train or test".into());
+    }
+    let job = TeacherJob {
+        trick,
+        count: a.num("--count", 0)?,
+        first: a.num("--first", 0)?,
+        deals: u32::try_from(a.num("--deals", 320)?).map_err(|_| "--deals")?,
+        deal_from: u32::try_from(a.num("--deal-from", 0)?).map_err(|_| "--deal-from")?,
+        seed,
+        source: student::record::parse_source(a.get("--source").unwrap_or("rules"))?,
+        threads,
+        tt_mb: a.num("--tt-mb", 64)? as usize,
+        start_hands: a.num("--start-hands", 20_000)?,
+    };
+    let (table, equity_sha) = load_equity_sha(a.req("--equity")?)?;
+    let leaf: Arc<SharedLeaf> = Arc::new(table);
+    let net_arg = a.req("--net")?;
+    let oracle = if net_arg == "exact" {
+        None
+    } else {
+        Some(nn::Oracle::load(Path::new(net_arg), leaf.clone())?)
+    };
+    let teacher = match &oracle {
+        None => Teacher::Exact,
+        Some(o) => Teacher::Hybrid {
+            net: o,
+            cut: o.trick,
+            sha256: &o.sha256,
+        },
+    };
+    search::student_teacher::check_job(&job, &teacher, role == "test")?;
+    let out = PathBuf::from(a.req("--out")?);
+    if !out.to_string_lossy().ends_with(".npy") {
+        return Err("--out must name a .npy file".into());
+    }
+    let t0 = Instant::now();
+    let starts = collect_starts_with(job.start_hands, seed, threads);
+    let source = BeliefSource::new();
+    let ctx = belief_ctx(&*leaf, &source);
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let progress = a.get("--progress").map(PathBuf::from);
+    let write = |finished: bool| {
+        if let Some(p) = &progress {
+            let v = serde_json::json!({
+                "kind": "student_teacher",
+                "done": done.load(Ordering::Relaxed),
+                "count": job.count,
+                "elapsed_s": t0.elapsed().as_secs(),
+                "finished": finished,
+            });
+            let tmp = PathBuf::from(format!("{}.tmp", p.display()));
+            if std::fs::write(&tmp, v.to_string()).is_ok() {
+                let _ = std::fs::rename(&tmp, p);
+            }
+        }
+    };
+    let info = std::thread::scope(|s| {
+        s.spawn(|| {
+            while !stop.load(Ordering::Relaxed) {
+                write(false);
+                for _ in 0..20 {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        });
+        let r = write_teacher_shard(
+            &job,
+            &starts,
+            &ctx,
+            teacher,
+            &equity_sha,
+            &binary_sha256(),
+            role,
+            &out,
+            Some(&done),
+        );
+        stop.store(true, Ordering::Relaxed);
+        r
+    })?;
+    write(true);
+    let secs = t0.elapsed().as_secs_f64();
+    println!(
+        "{} decisions at trick {trick} x {} deals ({}): key {}, {} value rows, {:.1} s on {threads} threads, {:.0} decisions an hour",
+        info.records,
+        job.deals,
+        teacher.stamp(),
+        info.key,
+        info.value_rows,
+        secs,
+        info.records as f64 * 3600.0 / secs.max(1e-9),
+    );
     Ok(())
 }
 

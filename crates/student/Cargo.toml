@@ -1,0 +1,28 @@
+[package]
+name = "student"
+version = "0.1.0"
+description = "The student network (docs/STUDENT.md): the teacher's stored records, the seat-view encoder (single source of truth), feature shards for training, and integer inference"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# engine (the seat's view), belief (the card tracker's certain facts), equity and nn (the money
+# type, the oracle's equity features, the integer scheme and safetensors), sha2 (already in the
+# lockfile, the search crate's) for the records' SHA-256, serde_json for the sidecars.
+[dependencies]
+engine = { path = "../engine", features = ["serde"] }
+belief = { path = "../belief" }
+equity = { path = "../equity" }
+nn = { path = "../nn" }
+solver = { path = "../solver" }
+bots = { path = "../bots" }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+
+[[bin]]
+name = "student"
+path = "src/bin/student.rs"
+
+[lints]
+workspace = true
