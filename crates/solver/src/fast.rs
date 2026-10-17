@@ -59,9 +59,9 @@
 //! setting, so per the plan ("prune only where provably safe") it is left out; shallow pruning
 //! plus the certain-win stop is what is used.
 
+use crate::clock::Stopwatch;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::time::Instant;
 
 use engine::cards::{Bits, Card, Suit, bit, has};
 use engine::game::{BONUS_FIRST, BONUS_LATER, Match, Phase, TRICK_POINTS};
@@ -561,7 +561,7 @@ struct Search<'a, L: Leaf, const T: bool> {
     leaves: &'a mut LeafCache,
     tt: Tt<'a>,
     stats: Stats,
-    start: Instant,
+    start: Stopwatch,
     aborted: bool,
     /// Live counters and the stop flag (parallel solves, and sequential solves given one).
     progress: Option<&'a ParProgress>,
@@ -826,7 +826,7 @@ impl<L: Leaf, const T: bool> Search<'_, L, T> {
         self.stats.nodes_by_trick[usize::from(p.hand.tricks_done.min(4))] += 1;
         if self.stats.nodes & 0xFFF == 0 {
             if let Some(cap) = self.opts.time_cap_ms
-                && self.start.elapsed().as_millis() as u64 >= cap
+                && self.start.elapsed_ms() >= cap
             {
                 self.aborted = true;
             }
@@ -1086,7 +1086,7 @@ fn solve_fast_cut_as<L: Leaf, const T: bool>(
         leaves,
         tt: table.map_or(Tt::Off, Tt::Own),
         stats: Stats::default(),
-        start: Instant::now(),
+        start: Stopwatch::start(),
         aborted: false,
         progress,
     };
@@ -1399,7 +1399,7 @@ fn par_solve_as<L: Leaf + Sync, const T: bool>(
     let pr = progress.unwrap_or(&own);
     // This (splitting) thread counts while it splits and combines, not while the workers run.
     let splitter = Active::enter(Some(pr));
-    let start = Instant::now();
+    let start = Stopwatch::start();
     let shared = mem.shared(if opts.tt { opts.tt_mb } else { 1 }, threads);
     let mut exp_leaves = LeafCache::new();
     let mut exp = Search::<L, T> {

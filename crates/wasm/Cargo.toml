@@ -1,7 +1,7 @@
 [package]
 name = "wasm"
 version = "0.1.0"
-description = "41 engine for WebAssembly: the native-versus-WASM determinism check (M0)"
+description = "41 engine for WebAssembly: the app's API (docs/WASM-API.md) and the native-versus-WASM determinism check (M0)"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -9,21 +9,35 @@ publish.workspace = true
 
 [lib]
 # cdylib: the .wasm module for wasm32-unknown-unknown. rlib: the same code, used natively by the
-# `wasm-native` binary and the tests.
+# `wasm-native` and `engine-native` binaries and the tests.
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
 name = "wasm-native"
 path = "src/bin/wasm_native.rs"
 
+[[bin]]
+name = "engine-native"
+path = "src/bin/engine_native.rs"
+
+# The API is a thin adapter over the engine's own crates (docs/WASM-API.md): the search (PIMC,
+# worlds, the hybrid), the solver, the networks, the card tracker and the equity table. JSON
+# through serde_json (already every crate's).
 [dependencies]
-engine = { path = "../engine" }
+engine = { path = "../engine", features = ["serde"] }
+belief = { path = "../belief" }
+equity = { path = "../equity" }
+solver = { path = "../solver" }
+nn = { path = "../nn" }
+search = { path = "../search" }
+serde_json = "1.0.154"
 
 # Not `[lints] workspace = true`. The workspace sets `unsafe_code = "forbid"`, and in edition 2024
 # exporting a function to WebAssembly needs the `#[unsafe(no_mangle)]` attribute, which that lint
 # rejects; a `forbid` cannot be lifted for one item (checked with rustc 1.99.0: error E0453).
-# So this crate denies the lint and allows it on exactly one item, the export in src/lib.rs.
-# There are no unsafe blocks or unsafe functions here. The clippy setting copies the workspace's.
+# So this crate denies the lint and allows it per item, on the exports only (src/lib.rs and
+# src/ffi.rs). There are no unsafe blocks or unsafe functions here. The clippy setting copies the
+# workspace's.
 [lints.rust]
 unsafe_code = "deny"
 

@@ -38,6 +38,7 @@
 //!
 //! Everything is whole-number: values are [`MoneyChance`] (units of 2^-32, summing to exactly 1).
 
+mod clock;
 pub mod denial;
 pub mod equiv;
 pub mod fast;
@@ -55,8 +56,8 @@ pub use frontier::{CanonPos, FnFrontier, Frontier, FrontierCut, canonical};
 pub use tt::{TableMemory, shared_table_memory, table_memory};
 pub use worlds::sample_world;
 
+use crate::clock::Stopwatch;
 use std::collections::HashMap;
-use std::time::Instant;
 
 use engine::cards::{Bits, Card, Suit, bit, has};
 use engine::game::{Match, Phase};
@@ -579,7 +580,7 @@ struct Search<'a, L: Leaf> {
     cut: Option<FrontierCut<'a>>,
     tt: HashMap<Key, MoneyChance>,
     stats: Stats,
-    start: Instant,
+    start: Stopwatch,
     aborted: bool,
 }
 
@@ -672,7 +673,7 @@ impl<L: Leaf> Search<'_, L> {
         self.stats.nodes += 1;
         if self.stats.nodes & 0xFFF == 0
             && let Some(cap) = self.opts.time_cap_ms
-            && self.start.elapsed().as_millis() as u64 >= cap
+            && self.start.elapsed_ms() >= cap
         {
             self.aborted = true;
         }
@@ -779,7 +780,7 @@ pub fn solve_cut<L: Leaf>(
         cut,
         tt: HashMap::new(),
         stats: Stats::default(),
-        start: Instant::now(),
+        start: Stopwatch::start(),
         aborted: false,
     };
     s.stats.nodes += 1;
