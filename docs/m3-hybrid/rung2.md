@@ -397,6 +397,12 @@ $1.1/h if a rented thread is as fast as this VM's; a hyper-threaded thread on a 
 may be up to half again slower (about 8 hours, $9). Training on the GPU adds up to `max_minutes`
 (200). To be priced with the owner before running (spec §5).
 
+**The trick-2 audit loop** (branch `m3-hybrid-t2loop`, merged on 2026-10-17 as `m3-hybrid-t2merge`
+with the overnight loops' builds; no trick-1 golden set, owner 2026-10-16): `docs/m3-hybrid/vast.md`,
+"The audit loop at trick 2 (O_2)": position-level stop, the saved trick-1 worlds above as a rough
+test reported every round (with a slice per group), the per-cut defaults, the manifest
+`docs/vast/m3-hybrid-t2-loop.manifest.json` and its projected cost.
+
 ## Adopted O_3 (owner, 2026-10-17)
 The overnight trick-3 audit loop's round 2 is the current O_3: 2048-1024-256, outcome head,
 `inputs/sha256/f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad`, trained on 40M trick-3 labels

@@ -389,6 +389,12 @@ What the night showed:
   trick 2 rent for CPU threads with any GPU; trick 4 in scratch mode is the one case that wants a fast GPU.
 - **Trick 2 runs the same design first** (scratch, exact labels, shards stored), and its data then feeds the additive
   phase.
+- **The trick-2 loop, merged** (2026-10-17, branch `m3-hybrid-t2merge`): the trick-2 design (no golden set,
+  position-level stop, the saved trick-1 worlds a rough test) on top of the overnight loops' builds. At trick 2
+  `audit_gamma` applies, the standards and the mini-set settings are refused, the best round is chosen at the
+  position level (flat first, then the lowest overall SD on its own fresh audit shard), diminishing returns read
+  the capacity check, and the audit and targeted shards are stored for later runs (an audit shard is deleted only
+  once shared). Its manifest and cost: `docs/m3-hybrid/vast.md`, "The audit loop at trick 2 (O_2)".
 - **Trick-2 labels from the trick-3 network** (bootstrapping, TreeStrap-style): allowed only through a gate (a trick-2
   network trained on hybrid labels against one on exact labels, same money, same exact checks) and only once trick 3 is
   near 0.005-0.0075%; the audit and every check stay exact. Errors carry forward and add along the chain, and with four
