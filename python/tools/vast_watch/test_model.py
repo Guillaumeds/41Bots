@@ -133,6 +133,13 @@ class Cost(unittest.TestCase):
         # all is still not found by the launcher's search (it asks num_gpus>=1).
         self.assertTrue(M.launcher_ok(offer(1, "x", 128, 100, 1.0, compute_cap=1200, cuda_max_good=12.0)))
         self.assertFalse(M.launcher_ok(offer(1, "x", 128, 100, 1.0, compute_cap=1200, cuda_max_good=12.0), cpu_only=False))
+        # Blackwell cards (owner, 2026-10-17) are opt-in per run: refused by default, whatever the driver, and rentable
+        # with the opt-in on a CUDA 13.0 driver (the cu130 build), not on 12.8.
+        bw = {**base, "compute_cap": 1200, "cuda_max_good": 13.0}
+        self.assertFalse(M.launcher_ok(offer(1, "x", 128, 100, 1.0, **bw), gpus=1, min_gpu_ram_gb=4))
+        self.assertTrue(M.launcher_ok(offer(1, "x", 128, 100, 1.0, **bw), gpus=1, min_gpu_ram_gb=4, allow_blackwell=True))
+        self.assertFalse(M.launcher_ok(offer(1, "x", 128, 100, 1.0, **{**bw, "cuda_max_good": 12.8}), gpus=1, min_gpu_ram_gb=4,
+                                       allow_blackwell=True))
         self.assertFalse(M.launcher_ok(offer(1, "x", 128, 100, 1.0, num_gpus=0)))
 
     def test_the_thresholds_are_the_launchers_own(self):

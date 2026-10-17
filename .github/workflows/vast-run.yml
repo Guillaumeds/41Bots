@@ -56,7 +56,7 @@ on:
         type: boolean
         default: true
       gpus:
-        description: "GPU job (network training): at least this many GPUs (a 2-GPU box is fine, the trainer uses one), with the PyTorch cu126 filters (0 = as the manifest's machine.gpus says, none otherwise)"
+        description: "GPU job (network training): at least this many GPUs (a 2-GPU box is fine, the trainer uses one), with the PyTorch cu126 filters: compute capability 6.0 or newer and below 10.0, a driver that supports CUDA 12.6. Blackwell cards (10.0 and above: RTX 50-series, B200; the cu130 build) are opt-in per run: the manifest's machine.blackwell: true (see docs/vast/cu130-smoke.manifest.json), then a driver that supports CUDA 13.0 (0 = as the manifest's machine.gpus says, none otherwise)"
         default: "0"
       min_gpu_ram_gb:
         description: "GPU job: memory per GPU in GB (0 = as the manifest says)"

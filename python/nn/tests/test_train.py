@@ -137,6 +137,20 @@ class DeviceTest(unittest.TestCase):
         self.assertTrue(device.arch_supported((9, 0), ["sm_90a"]))
         self.assertFalse(device.arch_supported((9, 1), ["sm_90a"]))  # arch-specific code: exactly 9.0
 
+    def test_arch_rule_for_the_two_cuda_builds(self):
+        # The architectures torch.cuda.get_arch_list() reports for the two locked builds (read from the installed
+        # 2.14.1+cu126 and 2.14.1+cu130): the runner gives a card of compute capability 10.0 and above the cu130
+        # build and every card below it the cu126 build, and each build accepts exactly the cards given to it.
+        cu126 = ["sm_50", "sm_60", "sm_70", "sm_75", "sm_80", "sm_86", "sm_90"]
+        cu130 = ["sm_75", "sm_80", "sm_86", "sm_90", "sm_100", "sm_120"]
+        for cap in [(5, 2), (6, 1), (7, 0), (7, 5), (8, 6), (8, 9), (9, 0)]:
+            self.assertTrue(device.arch_supported(cap, cu126), cap)
+        for cap in [(10, 0), (10, 3), (12, 0), (12, 1)]:  # B200, B300, RTX 50-series, GB10
+            self.assertTrue(device.arch_supported(cap, cu130), cap)
+            self.assertFalse(device.arch_supported(cap, cu126), cap)
+        for cap in [(5, 2), (6, 1), (7, 0)]:  # CUDA 13 drops the cards older than Turing: cu126 stays for them
+            self.assertFalse(device.arch_supported(cap, cu130), cap)
+
     def test_cpu_answers(self):
         f = device.probe("cpu")
         self.assertEqual((f["device"], f["want"]), ("cpu", "cpu"))

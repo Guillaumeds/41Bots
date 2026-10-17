@@ -22,8 +22,18 @@ Rules applied:
   (--cpu-match, GPU needs, price caps, exclusions, the reliability floor) is the search repeated
   with the verified filter lifted (`verified=any`) and the best of those taken, with a log line
   saying so. The same holds for each replacement machine. Each offer's line shows its host
-  status. `--verified-only` (workflow input `verified_only`) keeps the strict behaviour. The
-  GPU filter stays `compute_cap<1000`: no Blackwell cards (owner, 2026-10-16).
+  status. `--verified-only` (workflow input `verified_only`) keeps the strict behaviour.
+- Blackwell GPU cards (compute capability 10.0 and above: RTX 50-series, B200) are OPT-IN per run (owner,
+  2026-10-17), until a smoke test has proven the image that holds both PyTorch builds (cu126 for cards below
+  10.0, cu130 for Blackwell): a run dispatched with an older runner binary knows only cu126 and would fail on
+  such a card. Without the opt-in (the default) the rules are exactly what they were before the cu130 build: the
+  GPU query carries `compute_cap<1000` and a Blackwell offer is refused, a named one included ("Blackwell card
+  (compute capability 1200): this run did not opt in ..."). A run opts in with `"blackwell": true` in the
+  manifest's `machine` object (docs/vast/cu130-smoke.manifest.json) or with `--allow-blackwell`, and must use a
+  runner binary from eng-cu130 or later. Then the query has no upper compute-capability limit and keeps
+  `cuda_vers>=12.6`, and the launcher drops, with a log line naming the offer and why (once per offer), any
+  Blackwell offer whose host driver supports a CUDA below 13.0 (`cuda_max_good`), in every search and for
+  --offer-id (which is refused with the reason).
 - Rank by estimated dollars per unit of work: dph / (effective cores x measured matches per second
   per core for that CPU model, from R2 bench/; unknown models use the median of known ones, or 1).
 - Owner's rule: among offers within 20% (--premium) of the cheapest cost per unit of work, take
@@ -127,11 +137,12 @@ Rules applied:
 - GPU jobs (network training, docs/m3-hybrid/vast.md): --gpus N (at least N GPUs on the machine; the price is
   per machine, a 2-GPU box is fine, the trainer uses cuda:0),
   --min-gpu-ram-gb, --min-compute-cap (vast's units: 600 = compute capability 6.0, the lowest the
-  PyTorch 2.14.1+cu126 build supports), always with compute_cap<1000 and cuda_vers>=12.6 (the
-  driver must support CUDA 12.6; no Blackwell). A manifest may carry the same needs, and the
+  PyTorch 2.14.1+cu126 build supports), always with compute_cap<1000 (no Blackwell) unless the run opts in
+  (above) and cuda_vers>=12.6 (the driver must support CUDA 12.6; an opted-in Blackwell card needs one that
+  supports CUDA 13.0, checked after the search). A manifest may carry the same needs, and the
   machine's, in a top-level "machine" object: {"gpus": 1, "min_gpu_ram_gb": 4,
   "min_compute_cap": 600, "min_cores": 128, "min_ram_gb": 64, "disk_gb": 80,
-  "min_inet_down": 100}; each minimum is the larger of the manifest's and the command line's, so a
+  "min_inet_down": 100, "blackwell": false}; each minimum is the larger of the manifest's and the command line's, so a
   manifest can raise min_cores above the 190 default but not lower it (to run on smaller machines lower
   the min_cores input; except min_inet_down, in Mbps: the manifest's value replaces the default of 100,
   0 = no filter, and the larger wins only if --min-inet-down is given too). Also "max_dph" (the price cap
@@ -199,8 +210,9 @@ from datetime import datetime, timedelta, timezone
 # The thresholds and checks for which offers may be rented live in offer_rules.py (next to this file),
 # shared with the market tools so that their "the launcher can rent it" labels cannot drift.
 from offer_rules import (  # noqa: E402,F401  (some names are re-exported for the tests)
-    MAX_COMPUTE_CAP, MAX_DPH, MAX_NET_COST, MIN_COMPUTE_CAP, MIN_CUDA, MIN_INET_DOWN, MIN_RELIABILITY, SLOW_LINK_MBPS,
-    check_failures, gpu_failures, gpu_name_failures, host_status, inet_down_of, is_verified, link_factor)
+    BLACKWELL_COMPUTE_CAP, MAX_DPH, MAX_NET_COST, MIN_COMPUTE_CAP, MIN_CUDA, MIN_CUDA_BLACKWELL, MIN_INET_DOWN,
+    MIN_RELIABILITY, SLOW_LINK_MBPS, blackwell_driver_failure, blackwell_optin_failure, check_failures, gpu_failures,
+    gpu_name_failures, host_status, inet_down_of, is_verified, link_factor)
 
 POLL_S = 60  # default; --poll-s overrides
 HEARTBEAT_STALE_S = 180
@@ -303,18 +315,26 @@ def gpu_job(a) -> bool:
     return bool(getattr(a, "gpus", 0))
 
 
+def allow_blackwell(a) -> bool:
+    """Whether this run opted in to Blackwell cards (the manifest's machine.blackwell, or --allow-blackwell)."""
+    return bool(getattr(a, "allow_blackwell", False))
+
+
 def offer_query(a, verified: bool = True) -> str:
+    # Without the opt-in the query keeps its upper compute-capability token (`compute_cap<1000`: no Blackwell), as
+    # before the cu130 build. With it there is none, and since vast's query language has no "this card needs that
+    # driver", `search_offers` drops a Blackwell offer whose driver is below CUDA 13.0.
+    below = [] if allow_blackwell(a) else [f"compute_cap<{BLACKWELL_COMPUTE_CAP}"]
     # `verified=any`, not simply leaving the token out: `vastai search offers` adds `verified=true`
     # to every query by itself (its default query), and only `verified=any` removes that filter.
     gpus = int(getattr(a, "gpus", 0) or 0)
     if gpus:
         cc = max(MIN_COMPUTE_CAP, int(getattr(a, "min_compute_cap", MIN_COMPUTE_CAP) or MIN_COMPUTE_CAP))
-        gpu = [f"num_gpus>={gpus}", f"compute_cap>={cc}", f"compute_cap<{MAX_COMPUTE_CAP}", f"cuda_vers>={MIN_CUDA}"]
+        gpu = [f"num_gpus>={gpus}", f"compute_cap>={cc}", *below, f"cuda_vers>={MIN_CUDA}"]
         if getattr(a, "min_gpu_ram_gb", 0):
             gpu.append(f"gpu_ram>={a.min_gpu_ram_gb}")
     else:
-        gpu = ["num_gpus>=1"] + ([] if a.cpu_only else [f"compute_cap>={MIN_COMPUTE_CAP}",
-                                                        f"compute_cap<{MAX_COMPUTE_CAP}", f"cuda_vers>={MIN_CUDA}"])
+        gpu = ["num_gpus>=1"] + ([] if a.cpu_only else [f"compute_cap>={MIN_COMPUTE_CAP}", *below, f"cuda_vers>={MIN_CUDA}"])
     return " ".join([
         f"reliability>{a.min_reliability}", gpu[0], "gpu_frac=1", "rentable=true",
         "verified=true" if verified else "verified=any",
@@ -344,9 +364,43 @@ def gpu_check_failures(o: dict, a) -> list[str]:
     compute_cap x 100), and, whatever the job, the GPU models the run accepts (--gpu-names or the
     manifest's gpu_names; offer_rules.gpu_name_failures). Empty for an offer that passes."""
     failed = []
+    allow = allow_blackwell(a)
     if gpu_job(a):
-        failed = gpu_failures(o, int(a.gpus), getattr(a, "min_gpu_ram_gb", 0), getattr(a, "min_compute_cap", MIN_COMPUTE_CAP))
+        failed = gpu_failures(o, int(a.gpus), getattr(a, "min_gpu_ram_gb", 0), getattr(a, "min_compute_cap", MIN_COMPUTE_CAP),
+                              allow)
+    elif allow and not getattr(a, "cpu_only", True) and (why := blackwell_driver_failure(o)):
+        # A job that is not CPU-only but names no GPU count: the query carries the compute-capability and CUDA
+        # floors (and, without the opt-in, `compute_cap<1000`, which is all the check there is, as before); an
+        # opted-in Blackwell card on a driver below CUDA 13.0 is refused here like in a GPU job.
+        failed = [why]
     return failed + gpu_name_failures(o, getattr(a, "gpu_names", None))
+
+
+def blackwell_drops_logged(a) -> set:
+    """The ids of the offers `note_blackwell_drop` has named in this run. Created on `a` before any `copy.copy(a)`
+    (`with_price`, `closest_miss`; apply_machine does it), so that every copy shares the one set."""
+    seen = getattr(a, "_blackwell_drops_logged", None)
+    if seen is None:
+        seen = a._blackwell_drops_logged = set()
+    return seen
+
+
+def note_blackwell_drop(a, o: dict, failed: list[str]) -> None:
+    """Log, once per offer and run, a Blackwell offer that was dropped for nothing but its host's driver (below CUDA
+    13.0): the line names the offer and the reason, so the owner can see a cheap RTX 50-series box was passed over."""
+    why = blackwell_driver_failure(o)
+    if not why or failed != [why]:
+        return
+    seen = blackwell_drops_logged(a)
+    if o.get("id") in seen:
+        return
+    seen.add(o.get("id"))
+    try:
+        price = f"${float(o['dph_total']):.3f}/h, "
+    except (KeyError, TypeError, ValueError):
+        price = ""
+    log(f"offer {o.get('id')} dropped ({price}{o.get('num_gpus')}x {o.get('gpu_name')}, cc {o.get('compute_cap')}, "
+        f"CUDA {o.get('cuda_max_good')}, host {host_status(o)}): {why}")
 
 
 def parse_gpu_names(text: str) -> list[str]:
@@ -359,7 +413,7 @@ def parse_gpu_names(text: str) -> list[str]:
 
 # The keys of a manifest's "machine" object (what the launcher rents for it).
 MACHINE_KEYS = ("gpus", "min_gpu_ram_gb", "min_compute_cap", "min_cores", "min_ram_gb", "disk_gb", "min_inet_down",
-                "max_dph", "wait_for_offer_min", "offer_poll_s", "price_steps", "tries_per_step", "gpu_names")
+                "max_dph", "wait_for_offer_min", "offer_poll_s", "price_steps", "tries_per_step", "gpu_names", "blackwell")
 
 
 def apply_machine(a, manifest: dict) -> None:
@@ -369,7 +423,10 @@ def apply_machine(a, manifest: dict) -> None:
     floor of 100, and is the larger of the two when --min-inet-down is given too. The settings that
     are not minimums (max_dph, wait_for_offer_min, offer_poll_s, price_steps, tries_per_step, gpu_names) are the
     command line's when it gave one, else the manifest's, else the default (finalize_settings; gpu_names: none).
+    machine.blackwell (true or false, default false) opts the run in to Blackwell cards, like --allow-blackwell:
+    either one sets `a.allow_blackwell`.
     Exits (nothing rented) on an unknown key or a bad value (negative numbers included)."""
+    blackwell_drops_logged(a)
     m = manifest.get("machine")
     if m is None:
         return
@@ -388,8 +445,10 @@ def apply_machine(a, manifest: dict) -> None:
         if not isinstance(names, list) or not names or any(not isinstance(x, str) or not x.strip() for x in names):
             sys.exit(f"launch: machine.gpu_names must be a list of GPU model names as vast reports them, like "
                      f"[\"RTX 4090\", \"RTX 5090\"] (got {names!r})")
+    if "blackwell" in m and not isinstance(m["blackwell"], bool):
+        sys.exit(f"launch: machine.blackwell must be true or false (got {m['blackwell']!r})")
     for k, v in m.items():
-        if k in ("price_steps", "gpu_names"):
+        if k in ("price_steps", "gpu_names", "blackwell"):
             continue
         if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
             sys.exit(f"launch: machine.{k} must be a number, 0 or more (got {v!r})")
@@ -421,6 +480,7 @@ def apply_machine(a, manifest: dict) -> None:
         a.price_steps = sorted({float(x) for x in steps})
     if "gpu_names" in m and getattr(a, "gpu_names", None) is None:
         a.gpu_names = list(names)
+    a.allow_blackwell = allow_blackwell(a) or m.get("blackwell") is True
     if gpu_job(a) and a.cpu_only:
         log(f"the run needs {a.gpus} GPU(s): the GPU filters apply (--cpu-only is ignored)")
         a.cpu_only = False
@@ -433,16 +493,24 @@ def search_offers(a, verified: bool = True) -> list[dict]:
     # below a floor (threads, RAM, download link, price) or of a GPU model outside gpu_names (checked only here, by
     # `gpu_check_failures`: the query does not carry it) is never rented, in a replacement search either.
     floor = inet_floor(a)
-    return [o for o in (rows or []) if not o.get("is_bid") and o.get("dph_total") and o.get("cpu_cores_effective")
-            and (not a.max_dph or float(o["dph_total"]) <= a.max_dph)
-            and float(o["cpu_cores_effective"]) >= a.min_cores
-            and (o.get("cpu_ram") is None or float(o["cpu_ram"]) >= a.min_ram_gb * 1000)
-            and (floor <= 0 or inet_down_of(o) is None or inet_down_of(o) >= floor)
-            and (not a.cpu_match or re.search(a.cpu_match, o.get("cpu_name") or "", re.I))
-            and o.get("id") not in getattr(a, "exclude_offers", set())
-            and o.get("machine_id", o.get("id")) not in getattr(a, "exclude_machines", set())
-            and o.get("machine_id", o.get("id")) not in getattr(a, "bad_machines", {})
-            and not gpu_check_failures(o, a)]
+    kept = []
+    for o in rows or []:
+        if not (not o.get("is_bid") and o.get("dph_total") and o.get("cpu_cores_effective")
+                and (not a.max_dph or float(o["dph_total"]) <= a.max_dph)
+                and float(o["cpu_cores_effective"]) >= a.min_cores
+                and (o.get("cpu_ram") is None or float(o["cpu_ram"]) >= a.min_ram_gb * 1000)
+                and (floor <= 0 or inet_down_of(o) is None or inet_down_of(o) >= floor)
+                and (not a.cpu_match or re.search(a.cpu_match, o.get("cpu_name") or "", re.I))
+                and o.get("id") not in getattr(a, "exclude_offers", set())
+                and o.get("machine_id", o.get("id")) not in getattr(a, "exclude_machines", set())
+                and o.get("machine_id", o.get("id")) not in getattr(a, "bad_machines", {})):
+            continue
+        failed = gpu_check_failures(o, a)
+        if failed:
+            note_blackwell_drop(a, o, failed)
+        else:
+            kept.append(o)
+    return kept
 
 
 # ------------------------------------------------------------------ R2 (aws CLI, S3 API)
@@ -851,6 +919,7 @@ def closest_miss(a, rung: float) -> str:
     lifts the price to the cap and halves the thread floor (so the cheapest 200 offers are not all small machines):
     the cheapest offer that meets everything but this step's price, the biggest one under the thread floor, and, when
     the run names GPU models (gpu_names), the cheapest offer that meets everything at this step but its GPU model."""
+    blackwell_drops_logged(a)  # made before the copy, so that this look and the searches share it
     b = copy.copy(a)
     floor = int(a.min_cores)
     b.min_cores = max(1, floor // 2)
@@ -2386,7 +2455,11 @@ def build_parser() -> argparse.ArgumentParser:
                             "e.g. \"RTX 4090,RTX 5090\" (case and extra spaces ignored); the manifest's machine.gpu_names "
                             "applies when this is not given; checked on every offer, --offer-id included")
         s.add_argument("--min-compute-cap", type=int, default=MIN_COMPUTE_CAP,
-                       help="GPU job: lowest compute capability x 100 (default 600 = 6.0, Pascal; below 1000 always)")
+                       help="GPU job: lowest compute capability x 100 (default 600 = 6.0, Pascal; below 1000 unless --allow-blackwell)")
+        s.add_argument("--allow-blackwell", action="store_true",
+                       help="GPU job: also rent Blackwell cards (compute capability 10.0 and above: RTX 50-series, B200) on a host "
+                            "whose driver supports CUDA 13.0; the same as the manifest's machine.blackwell: true. Needs a runner "
+                            "binary from eng-cu130 or later (the cu130 PyTorch build). Without it a Blackwell offer is refused")
         s.add_argument("--verified-only", action="store_true",
                        help="rent only from vast.ai-verified hosts (the strict behaviour). Without it, verified hosts are "
                             "still preferred, but when no verified offer fits, unverified or deverified hosts are searched "
