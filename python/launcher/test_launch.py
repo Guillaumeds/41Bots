@@ -1192,7 +1192,7 @@ class LauncherTest(unittest.TestCase):
             self.run_launch(w, self.FORMAT1, "--offer-id", "501")
         self.assertIn("offer 501 is not on offer (on-demand) any more", str(e.exception))
         self.assertIn("no wider search finds it", str(e.exception))
-        self.assertIn("the whole market (0 offers), matched here by id: not there either", str(e.exception))
+        self.assertIn("the market's 150+ thread offers (0), matched here by id: not there either", str(e.exception))
         self.assertEqual((w.created_on, w.id_lookups, w.searches), ([], 3, 1))
 
     def test_container_error_is_replaced_at_once(self):

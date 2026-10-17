@@ -611,17 +611,19 @@ def why_offer_missing(oid: int) -> str:
         if hit:
             found.append(f"{label}: found ({named_text(hit)}; rentable {hit.get('rentable')}, rented {hit.get('rented')}, "
                          f"external {hit.get('external')}, interruptible {hit.get('is_bid')})")
-    # The whole on-demand market, matched by id here rather than by vast's filter.
+    # The on-demand market's big machines, matched by id here rather than by vast's filter (vast answers at most
+    # 512 offers a search, so the whole market cannot be read at once).
     try:
-        rows = vast("search", "offers", "verified=any external=any rentable=any", "--type", "on-demand", "--limit", "20000")
+        rows = vast("search", "offers", "verified=any external=any rentable=any cpu_cores_effective>=150", "--type",
+                    "on-demand", "--limit", "512")
         n = len(rows) if isinstance(rows, list) else 0
         hit = next((o for o in rows if isinstance(o, dict) and o.get("id") == oid), None) if n else None
         if hit:
-            found.append(f"the whole market ({n} offers), matched here by id: found ({named_text(hit)}; rentable "
+            found.append(f"the market's 150+ thread offers ({n}), matched here by id: found ({named_text(hit)}; rentable "
                          f"{hit.get('rentable')}, rented {hit.get('rented')}, external {hit.get('external')}): vast's id "
                          f"filter missed it")
         else:
-            found.append(f"the whole market ({n} offers), matched here by id: not there either")
+            found.append(f"the market's 150+ thread offers ({n}), matched here by id: not there either")
     except RuntimeError as e:
         found.append(f"the whole-market search failed ({redact(str(e))[:120]})")
     if not any(": found (" in f for f in found):
