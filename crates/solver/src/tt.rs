@@ -50,7 +50,10 @@ pub struct TtKey {
     /// Every card still in a hand (the trick is empty at a boundary).
     cards: Bits,
     /// leader (3 bits) | tricks per team (4 × 3 bits) | five played (1) | best present (1) |
-    /// best rank (4) | best team (2) | flags (4): 27 bits.
+    /// best rank (4) | best team (2) | flags (4): 27 bits. The turned partnerships
+    /// ([`Position::turned`]) are not in the key: like the trump suit they are fixed for a whole
+    /// solve (no partnership is ever turned inside a search), and a family of solves sharing a
+    /// table admits only roots with its own (`SolveFamily::admits`).
     meta: u32,
 }
 

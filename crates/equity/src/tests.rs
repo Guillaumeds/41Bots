@@ -290,6 +290,7 @@ fn engine_parity_on_self_play_hands() {
                 GameEndReason::FortyOneByImmediateBonus => 1,
                 GameEndReason::FortyOneByEndBonus => 2,
                 GameEndReason::Jink => 3,
+                GameEndReason::FortyOneByPassedTrick => panic!("nobody is turned in legal play"),
             }] += 1;
         }
     }

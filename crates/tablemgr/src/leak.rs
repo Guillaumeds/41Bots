@@ -63,7 +63,9 @@ pub fn event_cards(e: &Event) -> Bits {
         | Event::TrickWon { .. }
         | Event::GameWon { .. }
         | Event::HandEnd { .. }
-        | Event::MatchWon { .. } => 0,
+        | Event::MatchWon { .. }
+        | Event::PairTurned { .. }
+        | Event::TrickPassed { .. } => 0,
     }
 }
 
@@ -145,7 +147,7 @@ const CARD_KEYS: [&str; 4] = ["card", "table_card", "Play", "Burn"];
 /// Keys whose value is a set of cards (a bitboard number).
 const BITS_KEYS: [&str; 4] = ["hand", "own_burns", "played", "cards"];
 /// Keys that hold no card directly (their value is searched further).
-const PLAIN_KEYS: [&str; 58] = [
+const PLAIN_KEYS: [&str; 62] = [
     // SeatView and PublicState
     "seat",
     "public",
@@ -172,6 +174,7 @@ const PLAIN_KEYS: [&str; 58] = [
     "robber",
     "proved_no_ace",
     "ace_undealt",
+    "turned_teams",
     // Phase
     "AwaitBurn",
     "AwaitPlay",
@@ -198,6 +201,9 @@ const PLAIN_KEYS: [&str; 58] = [
     "aborted",
     "MatchWon",
     "money",
+    "PairTurned",
+    "score",
+    "TrickPassed",
     // Messages (hello, act, ready, action, abort) and the rules
     "v",
     "type",

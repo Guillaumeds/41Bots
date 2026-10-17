@@ -129,6 +129,13 @@ pub struct Position {
     /// A rob still to be made in the current trick (`None` once made, or when there is none).
     /// [`from_match`] leaves it `None`; a caller sets it from the pending seat it returns.
     pub rob: Option<Rob>,
+    /// Partnerships turned this hand (bit `t` for team `t`; rules 39-41 and 34,
+    /// docs/APP-ENGINE-CONTRACT.md §7): their seats hold no cards here and are skipped in the
+    /// play order, a trick is complete when every seat still in play has played, and `hand` and
+    /// `best` already count only the partnerships still in play (the engine passed the turned
+    /// pair's tricks and took its points away when it was turned). 0 when nobody is turned;
+    /// such a position is never valued by a frontier evaluator (see [`frontier`]).
+    pub turned: u8,
 }
 
 /// The order children are tried in (the tie rule: the first strictly best is kept).
@@ -227,7 +234,18 @@ pub fn from_match(m: &Match) -> Result<(Position, MatchCtx, Option<u8>), FromMat
     }
     let p = m.public();
     let trump = p.trump.ok_or(FromMatchError::NoTrump)?;
-    let hands = m.truth().hands;
+    let mut turned = 0u8;
+    for (t, &out) in p.turned_teams.iter().enumerate() {
+        turned |= u8::from(out) << t;
+    }
+    // A turned seat's cards are face down and out of play (rule 40).
+    let hands: [Bits; SEATS] = core::array::from_fn(|s| {
+        if turned & (1 << team_of(s as u8)) == 0 {
+            m.truth().hands[s]
+        } else {
+            0
+        }
+    });
     let mut trick = [0 as Card; SEATS];
     for (slot, &(_, c)) in trick.iter_mut().zip(&p.trick_cards) {
         *slot = c;
@@ -256,6 +274,7 @@ pub fn from_match(m: &Match) -> Result<(Position, MatchCtx, Option<u8>), FromMat
                 .best_trump
                 .map(|(c, s)| (trump_rank(c, trump), team_of(s))),
             rob: None,
+            turned,
         },
         MatchCtx {
             games: p.games_won,
@@ -282,7 +301,16 @@ impl Position {
     /// solver keeps its own copy of these few lines, and both are parity-tested against the
     /// engine.
     pub fn play(&self, c: Card) -> Step {
-        let seat = self.to_act();
+        if self.turned == 0 {
+            self.play_plain(c)
+        } else {
+            self.play_turned(c)
+        }
+    }
+
+    /// [`Position::play`] when nobody is turned: exactly the code the solver always ran.
+    pub(crate) fn play_plain(&self, c: Card) -> Step {
+        let seat = (self.leader + self.n_played) % SEATS as u8;
         let mut q = *self;
         q.hands[usize::from(seat)] &= !bit(c);
         q.trick[usize::from(q.n_played)] = c;
@@ -318,6 +346,45 @@ impl Position {
         }
     }
 
+    /// [`Position::play`] when a partnership is turned (rule 40: the trick is played by the seats
+    /// still in play only), kept out of the hot path of hands where nobody is turned.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn play_turned(&self, c: Card) -> Step {
+        let seat = self.seat_at_turned(self.n_played);
+        let mut q = *self;
+        q.hands[usize::from(seat)] &= !bit(c);
+        q.trick[usize::from(q.n_played)] = c;
+        q.n_played += 1;
+        let r = ranks::trump_rank_of(c, q.trump);
+        if r > 0 && q.best.is_none_or(|(b, _)| r > b) {
+            q.best = Some((r, team_of(seat)));
+        }
+        if q.n_played < q.seats_in_play() {
+            return Step::Next(q);
+        }
+        let w = ranks::trick_winner_of(&q.trick[..usize::from(q.n_played)], q.trump);
+        let winner = q.seat_at_turned(w as u8);
+        // As in `play_plain`: the trick's points, the 5's bonus, then the next trick or the end.
+        let five_here = q.trick[w] == five_of(q.trump);
+        match q
+            .hand
+            .play_trick(team_of(winner), five_here, Scoring::HOUSE)
+        {
+            AfterTrick::GameWon(t, _) => Step::GameWon(t),
+            AfterTrick::Next(h) => {
+                q.hand = h;
+                q.leader = winner;
+                q.n_played = 0;
+                Step::Next(q)
+            }
+            AfterTrick::TricksDone(h) => match h.finish(q.best.map(|(_, t)| t), Scoring::HOUSE) {
+                AfterHand::GameWon(t, _) => Step::GameWon(t),
+                AfterHand::HandOver(s) => Step::HandOver(s),
+            },
+        }
+    }
+
     /// Every card still in a hand or on the table in the current trick.
     pub fn live(&self) -> Bits {
         let mut live = self.hands.iter().fold(0, |a, &h| a | h);
@@ -333,8 +400,57 @@ impl Position {
     }
 
     /// The seat to play next.
+    #[inline]
     pub fn to_act(&self) -> u8 {
-        (self.leader + self.n_played) % SEATS as u8
+        if self.turned == 0 {
+            (self.leader + self.n_played) % SEATS as u8
+        } else {
+            self.seat_at_turned(self.n_played)
+        }
+    }
+
+    /// Is the seat still in play (its partnership not turned)?
+    #[inline]
+    pub fn in_play(&self, seat: u8) -> bool {
+        self.turned & (1 << team_of(seat)) == 0
+    }
+
+    /// How many seats play to each trick: 8, or 6 or 4 with turned partnerships.
+    #[inline]
+    pub fn seats_in_play(&self) -> u8 {
+        if self.turned == 0 {
+            SEATS as u8
+        } else {
+            SEATS as u8 - 2 * self.turned.count_ones() as u8
+        }
+    }
+
+    /// The seat that plays the `i`-th card (from 0) of the current trick: the `i`-th seat still
+    /// in play from the leader, going left (the leader is always in play).
+    #[inline]
+    pub fn seat_at(&self, i: u8) -> u8 {
+        if self.turned == 0 {
+            (self.leader + i) % SEATS as u8
+        } else {
+            self.seat_at_turned(i)
+        }
+    }
+
+    /// [`Position::seat_at`] when a partnership is turned (kept out of the hot path).
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn seat_at_turned(&self, i: u8) -> u8 {
+        let mut s = self.leader;
+        let mut k = i;
+        loop {
+            if self.in_play(s) {
+                if k == 0 {
+                    return s;
+                }
+                k -= 1;
+            }
+            s = (s + 1) % SEATS as u8;
+        }
     }
 
     /// When the seat to act must rob first: its hand with the turned card taken, and the cards it
@@ -366,6 +482,54 @@ impl Position {
         let led = (self.n_played > 0).then(|| self.trick[0]);
         legal_plays(self.hands[usize::from(self.to_act())], led, self.trump)
     }
+
+    // The optimised solver's hot path, for a solve known to have no turned partnership
+    // (`T = false`: exactly the code it always ran) or known to have one (`T = true`). Within a
+    // solve the turned partnerships never change, so the solver picks `T` once, at the root.
+
+    /// [`Position::to_act`] (the seat to play) for a solve with (`T`) or without turned
+    /// partnerships.
+    #[inline(always)]
+    pub(crate) fn mover_as<const T: bool>(&self) -> u8 {
+        debug_assert_eq!(T, self.turned != 0);
+        if T {
+            self.seat_at_turned(self.n_played)
+        } else {
+            (self.leader + self.n_played) % SEATS as u8
+        }
+    }
+
+    /// [`Position::play`] for a solve with (`T`) or without turned partnerships.
+    #[inline(always)]
+    pub(crate) fn play_as<const T: bool>(&self, c: Card) -> Step {
+        if T {
+            self.play_turned(c)
+        } else {
+            self.play_plain(c)
+        }
+    }
+
+    /// [`Position::burn_choice`] for a solve with (`T`) or without turned partnerships.
+    #[inline(always)]
+    pub(crate) fn burn_choice_as<const T: bool>(&self) -> Option<(Bits, Bits)> {
+        let r = self.rob?;
+        if r.seat != self.mover_as::<T>() {
+            return None;
+        }
+        let h = self.hands[usize::from(r.seat)] | bit(r.card);
+        Some((h, legal_burns(h, Some(self.trump))))
+    }
+
+    /// [`Position::legal`] for a solve with (`T`) or without turned partnerships.
+    #[inline(always)]
+    pub(crate) fn legal_as<const T: bool>(&self) -> Bits {
+        let led = (self.n_played > 0).then(|| self.trick[0]);
+        legal_plays(
+            self.hands[usize::from(self.mover_as::<T>())],
+            led,
+            self.trump,
+        )
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -378,6 +542,7 @@ struct Key {
     tricks_done: u8,
     five_played: bool,
     best: Option<(u8, u8)>,
+    turned: u8,
 }
 
 impl Key {
@@ -395,6 +560,7 @@ impl Key {
             tricks_done: p.hand.tricks_done,
             five_played: p.hand.five_played,
             best: p.best,
+            turned: p.turned,
         }
     }
 }
@@ -463,12 +629,23 @@ impl<L: Leaf> Search<'_, L> {
         if r > 0 && q.best.is_none_or(|(b, _)| r > b) {
             q.best = Some((r, team_of(seat)));
         }
-        if usize::from(q.n_played) < SEATS {
+        // The seats that play to this trick, in order from the leader: all eight, or those of
+        // the partnerships not turned (rule 40).
+        let mut order = [0u8; SEATS];
+        let mut n = 0;
+        for i in 0..SEATS as u8 {
+            let s = (q.leader + i) % SEATS as u8;
+            if q.turned >> team_of(s) & 1 == 0 {
+                order[n] = s;
+                n += 1;
+            }
+        }
+        if usize::from(q.n_played) < n {
             return self.node(&q);
         }
-        let w = trick_winner(&q.trick, q.trump);
-        let winner = (q.leader + w as u8) % SEATS as u8;
-        let five_here = q.trick.contains(&five_of(q.trump));
+        let w = trick_winner(&q.trick[..n], q.trump);
+        let winner = order[w];
+        let five_here = q.trick[..n].contains(&five_of(q.trump));
         match q
             .hand
             .play_trick(team_of(winner), five_here, Scoring::HOUSE)

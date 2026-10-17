@@ -264,11 +264,12 @@ impl SolveMem {
 /// It holds the trump suit, the match context, the cards each seat may hold in any descendant
 /// (the ancestor's hands, the turned card with the seat that must rob it; one set per seat,
 /// disjoint) and the ancestor's scoring state ([`InHand`]: scores, flags, tricks per team,
-/// whether the 5 of trumps is in a completed trick, tricks done). [`SolveFamily::admits`] a root
-/// `R` when: the trump suit and the context are the family's; no rob is pending; every seat's
-/// cards are within its set; the cards in hands and in the current trick number
-/// `8 × (5 − tricks done)` (the hand's invariant); each team's tricks are at least the
-/// ancestor's and the tricks done are the ancestor's plus the tricks won since; and `R`'s scores
+/// whether the 5 of trumps is in a completed trick, tricks done), and its turned partnerships.
+/// [`SolveFamily::admits`] a root `R` when: the trump suit, the context and the turned
+/// partnerships are the family's; no rob is pending; every seat's cards are within its set; the
+/// cards in hands and in the current trick number `k × (5 − tricks done)`, `k` the seats still
+/// in play (8 unless a partnership is turned; the hand's invariant); each team's tricks are at
+/// least the ancestor's and the tricks done are the ancestor's plus the tricks won since; and `R`'s scores
 /// and flags are exactly what those tricks give from the ancestor's: 5 a trick to its winner,
 /// plus, if the 5 of trumps has been played since (in a completed trick), its bonus (6, or 5
 /// when that team's flag was already set at the ancestor) to the team of the best trump and that
@@ -281,8 +282,9 @@ impl SolveMem {
 /// with equal keys. (1) Hands: a card only ever leaves a hand, so each hand of `Q_i` is within
 /// the same seat's set; the sets are disjoint, so the key's card set splits into the eight hands
 /// one way only, and both positions have those hands. (2) Tricks done: playing keeps the
-/// invariant, so both have `5 − cards / 8`. (3) Scores and flags: from `R_i` on, a trick adds 5
-/// to its winner, and the trick with the 5 of trumps (always won by the team that played it,
+/// invariant, so both have `5 − cards / k` (the same `k`: the turned partnerships are the
+/// family's, and none is turned during a solve). (3) Scores and flags: from `R_i` on, a trick
+/// adds 5 to its winner, and the trick with the 5 of trumps (always won by the team that played it,
 /// the best trump from then on) adds its bonus by that team's flag, which is still the
 /// ancestor's (flags change only through that bonus before the hand ends). Since `R_i`'s scores
 /// and flags are the ancestor's plus exactly the same rule's, `Q_i`'s are the ancestor's plus
@@ -300,6 +302,9 @@ pub struct SolveFamily {
     ctx: MatchCtx,
     hands: [Bits; SEATS],
     base: InHand,
+    /// The partnerships turned (rules 39-41): a root is admitted only with the same ones, and
+    /// the hand's invariant counts the seats still in play.
+    turned: u8,
 }
 
 impl SolveFamily {
@@ -311,7 +316,7 @@ impl SolveFamily {
         if let Some(r) = anc.rob {
             hands[usize::from(r.seat)] |= bit(r.card);
         }
-        SolveFamily::checked(anc.trump, ctx, hands, anc.hand)
+        SolveFamily::checked(anc.trump, ctx, hands, anc.hand, anc.turned)
     }
 
     /// The family of the positions that descend from the match's current position, whatever is
@@ -324,7 +329,19 @@ impl SolveFamily {
         }
         let p = m.public();
         let trump = p.trump?;
-        let mut hands = m.truth().hands;
+        let mut turned = 0u8;
+        for (t, &out) in p.turned_teams.iter().enumerate() {
+            turned |= u8::from(out) << t;
+        }
+        // As `crate::from_match`: a turned seat's cards are out of play.
+        let hands0 = m.truth().hands;
+        let mut hands: [Bits; SEATS] = core::array::from_fn(|s| {
+            if turned & (1 << team_of(s as u8)) == 0 {
+                hands0[s]
+            } else {
+                0
+            }
+        });
         if let Some(tc) = p.table_card
             && let Some(s) = hands.iter().position(|&h| has(h, ace_of_trumps(trump)))
         {
@@ -340,7 +357,7 @@ impl SolveFamily {
             games: p.games_won,
             dealer_team: p.dealer % 4,
         };
-        SolveFamily::checked(trump, ctx, hands, hand)
+        SolveFamily::checked(trump, ctx, hands, hand, turned)
     }
 
     fn checked(
@@ -348,6 +365,7 @@ impl SolveFamily {
         ctx: MatchCtx,
         hands: [Bits; SEATS],
         base: InHand,
+        turned: u8,
     ) -> Option<SolveFamily> {
         let all = hands.iter().fold(0, |a, &h| a | h);
         let n: u32 = hands.iter().map(|h| h.count_ones()).sum();
@@ -356,13 +374,14 @@ impl SolveFamily {
             ctx,
             hands,
             base,
+            turned,
         })
     }
 
     /// Does the family admit `r` (in the match `ctx`) as a root that may share the table? (The
     /// conditions are listed at [`SolveFamily`].)
     pub fn admits(&self, r: &Position, ctx: MatchCtx) -> bool {
-        if r.trump != self.trump || ctx != self.ctx || r.rob.is_some() {
+        if r.trump != self.trump || ctx != self.ctx || r.rob.is_some() || r.turned != self.turned {
             return false;
         }
         let mut cards = u32::from(r.n_played);
@@ -374,7 +393,9 @@ impl SolveFamily {
         }
         let (h, b) = (&r.hand, &self.base);
         if h.tricks_done > engine::game::TRICKS_PER_HAND
-            || cards != 8 * u32::from(engine::game::TRICKS_PER_HAND - h.tricks_done)
+            || cards
+                != u32::from(r.seats_in_play())
+                    * u32::from(engine::game::TRICKS_PER_HAND - h.tricks_done)
         {
             return false;
         }
@@ -530,7 +551,7 @@ impl LeafCache {
     }
 }
 
-struct Search<'a, L: Leaf> {
+struct Search<'a, L: Leaf, const T: bool> {
     ctx: MatchCtx,
     leaf: &'a L,
     opts: FastOptions,
@@ -577,7 +598,7 @@ fn order_key(c: Card, p: &Position, winner: Option<(Card, u8, EffSuit)>, team: u
     }
 }
 
-impl<L: Leaf> Search<'_, L> {
+impl<L: Leaf, const T: bool> Search<'_, L, T> {
     fn game_won(&mut self, team: u8) -> MoneyChance {
         self.stats.leaves += 1;
         let stamp = self.leaves.stamp;
@@ -624,7 +645,7 @@ impl<L: Leaf> Search<'_, L> {
     }
 
     fn child(&mut self, p: &Position, c: Card, cut: Option<Cut>) -> Res {
-        match p.play(c) {
+        match p.play_as::<T>(c) {
             Step::Next(q) => self.node(&q, cut),
             Step::GameWon(t) => Res::Exact(self.game_won(t)),
             Step::HandOver(s) => Res::Exact(self.hand_over(s)),
@@ -633,14 +654,14 @@ impl<L: Leaf> Search<'_, L> {
 
     /// The cards to search at `p`, in the order to try them (at most 16).
     fn candidates(&mut self, p: &Position, out: &mut [Card; 16]) -> usize {
-        self.candidates_of(p, p.legal(), out)
+        self.candidates_of(p, p.legal_as::<T>(), out)
     }
 
     /// [`Search::candidates`] with the legal set already computed.
     fn candidates_of(&mut self, p: &Position, legal: Bits, out: &mut [Card; 16]) -> usize {
-        let seat = p.to_act();
+        let seat = p.mover_as::<T>();
         let hand = p.hands[usize::from(seat)];
-        debug_assert_eq!(legal, p.legal());
+        debug_assert_eq!(legal, p.legal_as::<T>());
         debug_assert!(legal != 0, "the legal set is never empty");
         let set: Bits = if self.opts.equiv && legal.count_ones() >= 2 {
             let r = self
@@ -659,7 +680,11 @@ impl<L: Leaf> Search<'_, L> {
         if self.opts.ordering && n >= 2 {
             let winner = (p.n_played > 0).then(|| {
                 let w = crate::trick_winner_index(&p.trick[..usize::from(p.n_played)], p.trump);
-                let wseat = (p.leader + w as u8) % 8;
+                let wseat = if T {
+                    p.seat_at_turned(w as u8)
+                } else {
+                    (p.leader + w as u8) % 8
+                };
                 (
                     p.trick[w],
                     team_of(wseat),
@@ -692,16 +717,16 @@ impl<L: Leaf> Search<'_, L> {
         let mut legal = legal;
         loop {
             self.stats.forced += 1;
-            match q.play(legal.trailing_zeros() as Card) {
+            match q.play_as::<T>(legal.trailing_zeros() as Card) {
                 Step::Next(r) => q = r,
                 Step::GameWon(t) => return Err(self.game_won(t)),
                 Step::HandOver(s) => return Err(self.hand_over(s)),
             }
-            if q.burn_choice().is_some() {
+            if q.burn_choice_as::<T>().is_some() {
                 // A pending robber's burn is a choice: stop here (its legal set is unused).
                 return Ok((q, 0));
             }
-            legal = q.legal();
+            legal = q.legal_as::<T>();
             if q.n_played == 0 || legal.count_ones() != 1 {
                 return Ok((q, legal));
             }
@@ -720,10 +745,10 @@ impl<L: Leaf> Search<'_, L> {
         debug_assert_eq!(p.hand.tricks_done, engine::game::TRICKS_PER_HAND - 1);
         let mut q = *p;
         loop {
-            let only = q.hands[usize::from(q.to_act())];
+            let only = q.hands[usize::from(q.mover_as::<T>())];
             debug_assert_eq!(only.count_ones(), 1, "one card per hand in the last trick");
             self.stats.forced += 1;
-            match q.play(only.trailing_zeros() as Card) {
+            match q.play_as::<T>(only.trailing_zeros() as Card) {
                 Step::Next(r) => q = r,
                 Step::GameWon(t) => return self.game_won(t),
                 Step::HandOver(s) => return self.hand_over(s),
@@ -772,9 +797,9 @@ impl<L: Leaf> Search<'_, L> {
     /// cards the search plays (each group of equivalent cards through its first card, as
     /// [`Search::candidates_of`]; forced cards included), at most [`GATHER_CAP`]. Counts nothing.
     fn gather(&self, p: &Position, cut: FrontierCut, out: &mut Vec<CanonPos>) {
-        let legal = p.legal();
+        let legal = p.legal_as::<T>();
         let set = if self.opts.equiv && legal.count_ones() >= 2 {
-            let hand = p.hands[usize::from(p.to_act())];
+            let hand = p.hands[usize::from(p.mover_as::<T>())];
             self.classes
                 .representatives(hand, legal, p.live(), self.opts.order)
         } else {
@@ -784,12 +809,12 @@ impl<L: Leaf> Search<'_, L> {
             if out.len() >= GATHER_CAP {
                 return;
             }
-            if let Step::Next(q) = p.play(c) {
+            if let Step::Next(q) = p.play_as::<T>(c) {
                 if q.n_played == 0 {
-                    if cut.applies(&q) {
+                    if cut.at_boundary(&q) {
                         out.push(canonical(&q));
                     }
-                } else if q.burn_choice().is_none() {
+                } else if q.burn_choice_as::<T>().is_none() {
                     self.gather(&q, cut, out);
                 }
             }
@@ -824,10 +849,10 @@ impl<L: Leaf> Search<'_, L> {
         if self.aborted {
             return Res::Abort;
         }
-        if p.burn_choice().is_some() {
+        if p.burn_choice_as::<T>().is_some() {
             return self.burn_node(p);
         }
-        let mut legal = p.legal();
+        let mut legal = p.legal_as::<T>();
         let chained;
         let arrival = p;
         let p = if p.n_played > 0 && legal.count_ones() == 1 {
@@ -842,7 +867,7 @@ impl<L: Leaf> Search<'_, L> {
         } else {
             p
         };
-        if p.burn_choice().is_some() {
+        if p.burn_choice_as::<T>().is_some() {
             return self.burn_node(p);
         }
         self.prefetch_ahead(arrival, p, false);
@@ -855,7 +880,7 @@ impl<L: Leaf> Search<'_, L> {
             }
         }
         if let Some(cut) = self.cut
-            && cut.applies(p)
+            && cut.at_boundary(p)
         {
             // A frontier position: the evaluator's value, stored in the table like a searched
             // value (it is a function of the key within this solve: see `crate::frontier`).
@@ -873,7 +898,7 @@ impl<L: Leaf> Search<'_, L> {
             }
             return Res::Exact(v);
         }
-        let team = team_of(p.to_act());
+        let team = team_of(p.mover_as::<T>());
         // The parent's bound applies only when the parent's team differs from ours.
         let cut = cut.filter(|c| c.team != team);
         let mut cards = [0 as Card; 16];
@@ -941,12 +966,12 @@ impl<L: Leaf> Search<'_, L> {
     /// Values are exact, so the parent's bound is not needed (an exact value is always a valid
     /// answer to a bounded call).
     fn burn_node(&mut self, p: &Position) -> Res {
-        let (h, burns) = p.burn_choice().expect("a burn is due");
-        let team = team_of(p.to_act());
+        let (h, burns) = p.burn_choice_as::<T>().expect("a burn is due");
+        let team = team_of(p.mover_as::<T>());
         let order = self.opts.order;
         let set = if self.opts.equiv {
             let mut q = *p;
-            q.hands[usize::from(p.to_act())] = h;
+            q.hands[usize::from(p.mover_as::<T>())] = h;
             let mut g = [0 as Bits; 16];
             let n = self.classes.groups(h, q.live(), &mut g);
             let mut reps: Bits = 0;
@@ -1027,15 +1052,36 @@ pub fn solve_fast_cut<L: Leaf>(
     mem: &mut SolveMem,
     progress: Option<&ParProgress>,
 ) -> Solution {
+    // The search is compiled twice: for hands where nobody is turned (exactly the code it always
+    // ran) and for hands with a turned partnership (rule 40's play order). The turned
+    // partnerships never change during a solve.
+    if pos.turned == 0 {
+        solve_fast_cut_as::<L, false>(pos, ctx, leaf, opts, cut, mem, progress)
+    } else {
+        solve_fast_cut_as::<L, true>(pos, ctx, leaf, opts, cut, mem, progress)
+    }
+}
+
+fn solve_fast_cut_as<L: Leaf, const T: bool>(
+    pos: &Position,
+    ctx: MatchCtx,
+    leaf: &L,
+    opts: FastOptions,
+    cut: Option<FrontierCut>,
+    mem: &mut SolveMem,
+    progress: Option<&ParProgress>,
+) -> Solution {
     let _active = Active::enter(progress);
     let (table, leaves) = mem.begin(pos, ctx, opts, cut.is_some());
     // Overwrites counted from here: a table shared with earlier solves of a family has some.
     let replaced0 = table.as_ref().map_or(0, |t| t.replaced);
-    let mut s = Search {
+    let mut s = Search::<L, T> {
         ctx,
         leaf,
         opts,
-        cut,
+        // A turned position is never valued by the evaluator (`FrontierCut::applies`): its
+        // solve has no frontier and is exact to the end of the hand.
+        cut: if T { None } else { cut },
         classes: Classes::shared(pos.trump),
         leaves,
         tt: table.map_or(Tt::Off, Tt::Own),
@@ -1155,17 +1201,17 @@ pub const PAR_TASKS_PER_THREAD: usize = 16;
 
 /// Expand the open position `q` by one card `c`: a finished line is valued now, an open
 /// position joins the frontier. Returns the new node's index.
-fn par_push<L: Leaf>(
+fn par_push<L: Leaf, const T: bool>(
     nodes: &mut Vec<PNode>,
     frontier: &mut Vec<usize>,
-    exp: &mut Search<'_, L>,
+    exp: &mut Search<'_, L, T>,
     q: &Position,
     c: Card,
 ) -> usize {
-    let n = match q.play(c) {
+    let n = match q.play_as::<T>(c) {
         Step::Next(r) => match exp.cut {
             // A hybrid frontier position is valued here, never split or searched.
-            Some(cut) if cut.applies(&r) => {
+            Some(cut) if cut.at_boundary(&r) => {
                 exp.stats.frontier += 1;
                 PNode::Done(cut.value(&r, &exp.ctx))
             }
@@ -1308,6 +1354,46 @@ fn par_solve<L: Leaf + Sync>(
     mem: &mut SolveMem,
     cut: Option<FrontierCut>,
 ) -> Solution {
+    // As `solve_fast_cut`: one search for hands where nobody is turned, one for turned hands.
+    if pos.turned == 0 {
+        par_solve_as::<L, false>(
+            pos,
+            ctx,
+            leaf,
+            opts,
+            threads,
+            tasks_per_thread,
+            progress,
+            mem,
+            cut,
+        )
+    } else {
+        par_solve_as::<L, true>(
+            pos,
+            ctx,
+            leaf,
+            opts,
+            threads,
+            tasks_per_thread,
+            progress,
+            mem,
+            cut,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn par_solve_as<L: Leaf + Sync, const T: bool>(
+    pos: &Position,
+    ctx: MatchCtx,
+    leaf: &L,
+    opts: FastOptions,
+    threads: usize,
+    tasks_per_thread: usize,
+    progress: Option<&ParProgress>,
+    mem: &mut SolveMem,
+    cut: Option<FrontierCut>,
+) -> Solution {
     let threads = threads.max(1);
     let own = ParProgress::default();
     let pr = progress.unwrap_or(&own);
@@ -1316,11 +1402,11 @@ fn par_solve<L: Leaf + Sync>(
     let start = Instant::now();
     let shared = mem.shared(if opts.tt { opts.tt_mb } else { 1 }, threads);
     let mut exp_leaves = LeafCache::new();
-    let mut exp = Search {
+    let mut exp = Search::<L, T> {
         ctx,
         leaf,
         opts,
-        cut,
+        cut: if T { None } else { cut },
         classes: Classes::shared(pos.trump),
         leaves: &mut exp_leaves,
         tt: Tt::Off,
@@ -1390,11 +1476,11 @@ fn par_solve<L: Leaf + Sync>(
                 sc.spawn(move || {
                     let _active = Active::enter(Some(pr));
                     let mut leaves = LeafCache::new();
-                    let mut s = Search {
+                    let mut s = Search::<L, T> {
                         ctx,
                         leaf,
                         opts,
-                        cut,
+                        cut: if T { None } else { cut },
                         classes: Classes::shared(pos.trump),
                         leaves: &mut leaves,
                         tt: if opts.tt { Tt::Shared(shared) } else { Tt::Off },

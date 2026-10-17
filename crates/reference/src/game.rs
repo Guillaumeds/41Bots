@@ -98,6 +98,8 @@ pub struct Public {
     pub robber: Option<u8>,
     pub proved_no_ace: [bool; 8],
     pub ace_undealt: bool,
+    /// The partnerships turned this hand (rules 39-41 and 34).
+    pub turned_teams: [bool; 4],
 }
 
 /// Internal: what we are waiting for, and from whom.
@@ -121,6 +123,8 @@ enum GameEnd {
     ImmediateBonus,
     EndBonus,
     Jink,
+    /// Tricks passed from a turned partnership took a team to 41 (rules 32 and 39).
+    PassedTrick,
 }
 
 impl GameEnd {
@@ -130,6 +134,7 @@ impl GameEnd {
             GameEnd::ImmediateBonus => "immediate_bonus",
             GameEnd::EndBonus => "end_bonus",
             GameEnd::Jink => "jink",
+            GameEnd::PassedTrick => "passed_trick",
         }
     }
 }
@@ -201,6 +206,15 @@ pub struct Match {
     proved_no_ace: [bool; 8],
     ace_undealt: bool,
 
+    // Turned partnerships (rules 34 and 39-41).
+    /// Which partnerships the app has turned this hand.
+    teams_out: [bool; 4],
+    /// The partnership holding each finished trick now (its winner's, or the one it passed to).
+    holders: Vec<usize>,
+    /// The scores and bonus flags when this hand started (rule 41 restores a turned pair's).
+    start_scores: [u8; 4],
+    start_bonus: [bool; 4],
+
     /// Every event as a canonical string; `Some(seat)` marks a private event.
     events: Vec<(Option<u8>, String)>,
 }
@@ -241,6 +255,10 @@ impl Match {
             five_played: false,
             proved_no_ace: [false; 8],
             ace_undealt: false,
+            teams_out: [false; 4],
+            holders: Vec::new(),
+            start_scores: [0; 4],
+            start_bonus: [false; 4],
             events: Vec::new(),
         };
         m.emit_public(format!("MatchStart first_dealer={first_dealer}"));
@@ -417,6 +435,7 @@ impl Match {
             robber: self.robber,
             proved_no_ace: self.proved_no_ace,
             ace_undealt: self.ace_undealt,
+            turned_teams: self.teams_out,
         }
     }
 
@@ -536,6 +555,10 @@ impl Match {
         self.five_played = false;
         self.proved_no_ace = [false; 8];
         self.ace_undealt = false;
+        self.teams_out = [false; 4];
+        self.holders = Vec::new();
+        self.start_scores = self.scores;
+        self.start_bonus = self.bonus_taken;
     }
 
     /// Turns a card face up on the table.
@@ -733,11 +756,25 @@ impl Match {
             self.five_played = true;
         }
 
-        if self.trick.len() == 8 {
+        if self.trick.len() == self.players_in() {
             self.finish_trick();
         } else {
-            self.give_turn(left_of(seat));
+            self.give_turn(self.next_player_in(seat));
         }
+    }
+
+    /// How many players are still in play: two for each partnership not turned (8 normally).
+    fn players_in(&self) -> usize {
+        2 * self.teams_out.iter().filter(|t| !**t).count()
+    }
+
+    /// The first seat to the left of `seat` whose partnership is not turned.
+    fn next_player_in(&self, seat: u8) -> u8 {
+        let mut next = left_of(seat);
+        while self.teams_out[team_of(next)] {
+            next = left_of(next);
+        }
+        next
     }
 
     /// Step 8: the eighth card of a trick has been played.
@@ -752,6 +789,7 @@ impl Match {
             self.trick_no, winner, team
         ));
         self.tricks_won[team] += 1;
+        self.holders.push(team);
         self.scores[team] += 5;
         let score_before_bonus = self.scores[team];
 
@@ -778,8 +816,9 @@ impl Match {
 
         // After trick 1, nobody robbing means the ace of trumps is out of play: undealt, or
         // burned by the dealer after a turned Joker, before trumps were known (nothing is
-        // forbidden then, H3).
-        if self.trick_no == 1 && self.robber.is_none() {
+        // forbidden then, H3). Only once all eight have played to trick 1 without robbing
+        // (RULES, "Ace-of-trumps facts"): a player turned before its first card proved nothing.
+        if self.trick_no == 1 && self.robber.is_none() && self.proved_no_ace.iter().all(|p| *p) {
             let ace = order::ace_of_trumps(trump);
             let dealer = self.dealer;
             assert!(
@@ -818,22 +857,30 @@ impl Match {
 
     /// Step 9: after trick 5.
     fn end_of_hand(&mut self) {
-        // Rule 33: a jink wins the game at once.
+        // Rule 33: a jink wins the game at once. The tricks a team holds include those passed
+        // to it from a turned partnership (rules 34 and 39).
         for team in 0..4 {
-            if self.tricks_won[team] == 5 {
+            if self.holders.iter().filter(|h| **h == team).count() == 5 {
                 self.end_game(team, GameEnd::Jink);
                 return;
             }
         }
 
         // Rule 30: without the 5, the bonus goes to the trick that held the
-        // highest trump played. Rule 31: no trump played, no bonus.
-        if !self.five_played {
-            let trump = self.trump.expect("trumps are known during play");
-            let mut best: Option<(Card, u8)> = None; // (trump, winner of its trick)
-            for (cards, winner) in &self.finished_tricks {
-                for (_, card) in cards {
-                    if !order::is_trump(*card, trump) {
+        // highest trump played. Rule 31: no trump played, no bonus. Rule 39: the
+        // cards of a turned partnership do not count (its 5 included).
+        let trump = self.trump.expect("trumps are known during play");
+        let five = order::five_of_trumps(trump);
+        let five_counts = self.finished_tricks.iter().any(|(cards, _)| {
+            cards
+                .iter()
+                .any(|(seat, card)| *card == five && !self.teams_out[team_of(*seat)])
+        });
+        if !five_counts {
+            let mut best: Option<(Card, usize)> = None; // (trump, index of its trick)
+            for (i, (cards, _)) in self.finished_tricks.iter().enumerate() {
+                for (seat, card) in cards {
+                    if !order::is_trump(*card, trump) || self.teams_out[team_of(*seat)] {
                         continue;
                     }
                     let better = match best {
@@ -841,12 +888,13 @@ impl Match {
                         Some((b, _)) => order::trump_beats(*card, b, trump),
                     };
                     if better {
-                        best = Some((*card, *winner));
+                        best = Some((*card, i));
                     }
                 }
             }
-            if let Some((card, winner)) = best {
-                let team = team_of(winner);
+            if let Some((card, i)) = best {
+                // The bonus goes to whoever holds that trick now.
+                let team = self.holders[i];
                 self.award_bonus(team, card, "end");
                 if self.scores[team] >= 41 {
                     self.end_game(team, GameEnd::EndBonus);
@@ -898,5 +946,188 @@ impl Match {
             self.hand_index += 1;
             self.waiting = Waiting::Deck;
         }
+    }
+}
+
+// ----------------------------------------------------------------------
+// Turned partnerships (rules 34, 39, 40 and 41)
+// ----------------------------------------------------------------------
+
+/// The seat that played the strongest card of a finished trick among the
+/// players not turned, judged against the suit led (rule 39): the best trump
+/// of theirs, else their best card of the suit the first card was led in.
+/// `None` when none of their cards is a trump or of that suit.
+fn strongest_card_in_play(trick: &[(u8, Card)], trump: Suit, turned: &[bool; 4]) -> Option<u8> {
+    let theirs: Vec<(u8, Card)> = trick
+        .iter()
+        .copied()
+        .filter(|(seat, _)| !turned[team_of(*seat)])
+        .collect();
+    let mut best_trump: Option<(u8, Card)> = None;
+    for &(seat, card) in &theirs {
+        if !order::is_trump(card, trump) {
+            continue;
+        }
+        let better = match best_trump {
+            None => true,
+            Some((_, b)) => order::trump_beats(card, b, trump),
+        };
+        if better {
+            best_trump = Some((seat, card));
+        }
+    }
+    if let Some((seat, _)) = best_trump {
+        return Some(seat);
+    }
+    // No trump of theirs: the suit led decides; a trump led leaves nothing.
+    let led_suit = order::plain_suit(trick[0].1, trump)?;
+    let ranking = order::plain_order(led_suit, trump);
+    let mut best: Option<(u8, usize)> = None;
+    for &(seat, card) in &theirs {
+        let Some(pos) = ranking.iter().position(|o| *o == card) else {
+            continue;
+        };
+        if best.is_none_or(|(_, b)| pos < b) {
+            best = Some((seat, pos));
+        }
+    }
+    best.map(|(seat, _)| seat)
+}
+
+impl Match {
+    /// The partnerships turned this hand.
+    pub fn turned_teams(&self) -> [bool; 4] {
+        self.teams_out
+    }
+
+    /// Turns partnership `team` now, before the play the match is waiting
+    /// for, and carries on under rules 39, 40, 41 and 34. Refused (nothing
+    /// changes) with a message starting with a code word: `no_such_team`,
+    /// `not_before_a_play`, `already_turned`, and the cases the rules leave
+    /// open: `led_trick_in_progress` (the pair led the trick being played),
+    /// `no_standing_winner` (a trick would pass but no card left in it can
+    /// win it) and `several_reach_41` (two teams would reach 41 at once).
+    pub fn turn_team(&mut self, team: u8) -> Result<(), String> {
+        if team >= 4 {
+            return Err("no_such_team: teams are 0 to 3".to_string());
+        }
+        let seat_to_play = match self.waiting {
+            Waiting::Play(seat) => seat,
+            _ => return Err("not_before_a_play: no play is awaited".to_string()),
+        };
+        let team = team as usize;
+        if self.teams_out[team] {
+            return Err("already_turned: that team is already turned".to_string());
+        }
+        if let Some((leader, _)) = self.trick.first()
+            && team_of(*leader) == team
+        {
+            return Err("led_trick_in_progress: the team led this trick".to_string());
+        }
+        let trump = self.trump.expect("trumps are known during play");
+        let mut turned = self.teams_out;
+        turned[team] = true;
+        let in_play: Vec<usize> = (0..4).filter(|t| !turned[*t]).collect();
+
+        // Rule 39 (rule 34 with one team left): where each of its tricks goes.
+        let mut moves: Vec<(usize, usize)> = Vec::new();
+        let mut scores = self.scores;
+        scores[team] = self.start_scores[team];
+        for (i, (cards, _)) in self.finished_tricks.iter().enumerate() {
+            if self.holders[i] != team {
+                continue;
+            }
+            let to = if in_play.len() == 1 {
+                in_play[0]
+            } else {
+                match strongest_card_in_play(cards, trump, &turned) {
+                    Some(seat) => team_of(seat),
+                    None => {
+                        return Err(format!(
+                            "no_standing_winner: no card left in trick {} can win it",
+                            i + 1
+                        ));
+                    }
+                }
+            };
+            moves.push((i, to));
+            scores[to] += 5;
+        }
+        let at_41: Vec<usize> = in_play
+            .iter()
+            .copied()
+            .filter(|t| scores[*t] >= 41)
+            .collect();
+        if at_41.len() >= 2 {
+            return Err("several_reach_41: two teams would reach 41 at once".to_string());
+        }
+
+        // Rule 41: the turned team scores nothing for this hand.
+        self.teams_out = turned;
+        self.scores[team] = self.start_scores[team];
+        self.bonus_taken[team] = self.start_bonus[team];
+        self.tricks_won[team] = 0;
+        self.emit_public(format!(
+            "PairTurned team={} score={}",
+            team, self.scores[team]
+        ));
+        for (i, to) in moves {
+            self.holders[i] = to;
+            self.tricks_won[to] += 1;
+            self.scores[to] += 5;
+            self.emit_public(format!("TrickPassed trick={} team={} points=5", i + 1, to));
+        }
+        // Rule 40: its cards leave the trick being played.
+        self.trick.retain(|(seat, _)| !turned[team_of(*seat)]);
+        // Rule 39: its cards no longer count for the best trump or the 5.
+        let five = order::five_of_trumps(trump);
+        let mut best: Option<(Card, u8)> = None;
+        let mut five_played = false;
+        let everything = self
+            .finished_tricks
+            .iter()
+            .flat_map(|(cards, _)| cards.iter())
+            .chain(self.trick.iter());
+        for &(seat, card) in everything {
+            if turned[team_of(seat)] {
+                continue;
+            }
+            if card == five {
+                five_played = true;
+            }
+            if order::is_trump(card, trump)
+                && best.is_none_or(|(b, _)| order::trump_beats(card, b, trump))
+            {
+                best = Some((card, seat));
+            }
+        }
+        self.best_trump = best;
+        self.five_played = five_played;
+
+        // Rule 32: 41 by passed tricks ends the game. Rule 34: alone, a jink.
+        if let Some(&t) = at_41.first() {
+            self.end_game(t, GameEnd::PassedTrick);
+            return Ok(());
+        }
+        if in_play.len() == 1 {
+            self.end_game(in_play[0], GameEnd::Jink);
+            return Ok(());
+        }
+
+        // Rule 40: the play goes on without the turned players.
+        if self.teams_out[team_of(seat_to_play)] {
+            if self.trick.is_empty() {
+                // The player to lead is turned: the next one to the left leads.
+                let leader = self.next_player_in(seat_to_play);
+                self.leader = leader;
+                self.give_turn(leader);
+            } else if self.trick.len() == self.players_in() {
+                self.finish_trick();
+            } else {
+                let next = self.next_player_in(seat_to_play);
+                self.give_turn(next);
+            }
+        }
+        Ok(())
     }
 }

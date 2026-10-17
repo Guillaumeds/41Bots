@@ -12,7 +12,10 @@
 //!
 //! Rules 25, 26, 34 and 37–41 are penalties for illegal play. House rule H1 makes illegal play
 //! impossible, so their tests assert that the engine refuses the illegal action and leaves the
-//! match unchanged, and that it performs every forced action (robbing) itself.
+//! match unchanged, and that it performs every forced action (robbing) itself. Since the owner's
+//! decision of 2026-10-17 (docs/APP-ENGINE-CONTRACT.md §7) the app can hand the engine a position
+//! in which it has turned a pair (`Match::turn_team`); rules 34 and 39–41 then apply, and their
+//! tests for such positions are in `tests/turned_pairs.rs` (one per rule, named after it).
 
 use engine::cards::{
     ACE, ALL_CARDS, Bits, Card, DECK_SIZE, JACK, JOKER, KING, QUEEN, Suit, bit, card, cards, count,
@@ -1995,8 +1998,9 @@ fn rule_33_jink_wins_the_game() {
 /// every trick of the hand, the turned partnerships' tricks included under rule 39, and that is
 /// a jink: it wins the game."
 ///
-/// Impossible under H1: no partnership is ever turned. In a whole random match every trick is
-/// played by all eight seats in turn, and every jink is a team winning the five tricks itself.
+/// Impossible under H1 in legal play: no partnership is ever turned. In a whole random match every
+/// trick is played by all eight seats in turn, and every jink is a team winning the five tricks
+/// itself. (A pair the app turns: `tests/turned_pairs.rs`, rule 34.)
 #[test]
 fn rule_34_no_partnership_is_ever_turned() {
     let m = random_match(34, Rules::default(), |_| {});
@@ -2179,8 +2183,9 @@ fn rule_38_rules_cannot_be_broken_on_purpose() {
 /// the bonus goes to the highest trump played in the hand by a partnership that is not turned,
 /// and counts for that partnership as rule 28 says."
 ///
-/// Impossible under H1: no trick ever passes. Over a whole random match each team's score is
-/// exactly 5 per trick it won plus its own bonuses, after every action.
+/// Impossible under H1 in legal play: no trick ever passes. Over a whole random match each team's
+/// score is exactly 5 per trick it won plus its own bonuses, after every action. (A pair the app
+/// turns: `tests/turned_pairs.rs`, rule 39.)
 #[test]
 fn rule_39_tricks_never_pass_to_another_team() {
     random_match(39, Rules::default(), |m| {
@@ -2211,9 +2216,9 @@ fn rule_39_tricks_never_pass_to_another_team() {
 /// other players without the turned cards. If the player who was to lead is turned, the lead
 /// passes to the next player on the left who is still in."
 ///
-/// Impossible under H1: every trick of a whole random match has all eight cards, in seat order,
-/// led by the seat left of the dealer or by the previous winner, and no hand ends in the middle
-/// of a trick.
+/// Impossible under H1 in legal play: every trick of a whole random match has all eight cards, in
+/// seat order, led by the seat left of the dealer or by the previous winner, and no hand ends in
+/// the middle of a trick. (A pair the app turns: `tests/turned_pairs.rs`, rule 40.)
 #[test]
 fn rule_40_every_trick_completes_with_all_eight() {
     let mut longest = 0;
@@ -2227,9 +2232,10 @@ fn rule_40_every_trick_completes_with_all_eight() {
 
 /// Rule 41: "The turned partnership scores nothing for that hand."
 ///
-/// Impossible under H1: an illegal action is refused and leaves the match exactly as it was
-/// (events, public state, hidden cards, recorded actions), so nobody is ever turned; and within a
-/// game no team's score ever goes down.
+/// Impossible under H1 in legal play: an illegal action is refused and leaves the match exactly as
+/// it was (events, public state, hidden cards, recorded actions), so nobody is ever turned; and
+/// within a game no team's score ever goes down. (A pair the app turns: `tests/turned_pairs.rs`,
+/// rule 41.)
 #[test]
 fn rule_41_turned_pair_scores_nothing() {
     let mut last = (0u8, [0u8; 4]);

@@ -189,3 +189,44 @@ caught, and then rules 39-41 (and 34) apply for the rest of the hand. Decision:
   the networks, which have never seen such a position. A separate network for turned hands, or a "turned" input added
   to a network with zero-initialised weights and trained additively, only if measurement shows search is not enough.
 - Until this is built and released, the app's own bot plays any hand after a turn.
+
+### 7.1 Built (branch `eng-turned`, 2026-10-17)
+- **Engine** (`crates/engine`): `Match::turn_team(team)` turns a partnership before the play the
+  match awaits (between tricks or mid-trick). Public events `PairTurned { team, score }` (its
+  score goes back to its hand-start score, rule 41) and `TrickPassed { trick, team, points }`
+  (rule 39, or rule 34 when one pair is left), game-end reason `passed_trick`; `turned_teams` in
+  the public state (left out of the JSON when nobody is turned, so normal views are byte for byte
+  unchanged); the record is `actions()` plus `turns()`, replayed by `Match::apply_record` /
+  `Match::replay_record`. Hands where nobody is turned are unchanged (every test, the WASM
+  hashes and the normal differential output are identical to the parent commit).
+- **As implemented** (read from rules 28-41, not refused): a trick passes to the pair that played
+  the strongest card in it among the pairs still in play, judged against the suit led (best
+  trump, else best card of the suit led; the led card may be a turned one); passed tricks count
+  as the receiver's tricks (a jink needs all five, passed ones included); all of a pair's tricks
+  pass at one moment, then the 41 check (game won by `passed_trick`), then rule 34 (`jink`);
+  the turned pair's 5 of trumps and other trumps no longer count, so the bonus is paid at the
+  end of the hand (rule 30) to the highest trump of a pair still in play, as that pair's 11 or
+  10, and not at all if none of them played a trump; a turned pair's bonus flag returns to its
+  hand-start value (its 11 is not spent); after trick 1, "the ace of trumps is out of play" is
+  announced only when all eight seats played to trick 1 (a seat turned before its first card
+  proved nothing); a turned seat keeps its unplayed cards face down (still in `hand_sizes`).
+- **Refused, owner's questions** (`TurnRefusal`, the match unchanged; the app's own bot plays
+  on): (1) the turned pair led the trick in progress (`led_trick_in_progress`): which suit must
+  the players still to play follow, and against which card is the trick won? (2) a trick to pass
+  holds no card of a pair still in play that is a trump or of the suit led, with two or more
+  pairs still in play (`no_standing_winner`): who takes it? (3) the passed tricks take two pairs
+  to 41 at once (`several_reach_41`): who wins the game? Also refused: a turn while a burn is due
+  (the engine robs by itself at the robber's turn, so "turn the robber's pair before its rob" has
+  no engine moment).
+- **Reference** (`crates/reference`): the same, written separately; the differential test
+  (`difftest --turns N`) turns random pairs at random moments (two or three in a hand, the last
+  pair left) and compares every event, the full state and the refusals; 20,000 matches with
+  257,435 turns agree, and every match replays from its record.
+- **Solver and search**: `solver::Position::turned`; `from_match` takes the turned pairs (their
+  cards out of play), the solvers play the tricks among the seats still in play, and a turned
+  position is never shown to a network: `FrontierCut::applies` refuses it and `canonical`
+  panics on it, so every hybrid solve searches it exactly. `search::worlds::rebuild` replays the
+  turns, so PIMC works from a turned seat's view. Exact solve cost on this VM (one thread,
+  default switches): trick 2 mean 3.0 s with 8 seats, 68 ms with 6, 0.9 ms with 4; trick 3
+  6.7 / 0.5 / 0.04 ms; trick 4 under 0.03 ms; trick 1 with 6 seats 17 s (max 42 s), with 4
+  seats 29 ms (`cargo run --release -p solver --example turned_cost`).

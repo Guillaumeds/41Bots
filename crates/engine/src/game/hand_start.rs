@@ -106,6 +106,7 @@ impl Match {
             phase: Phase::MatchOver,
             events: Vec::new(),
             actions: Vec::new(),
+            turns: Vec::new(),
             truth: Truth {
                 deck: identity_deck(),
                 hands: [0; SEATS],
@@ -141,16 +142,29 @@ pub fn current_hand_start_of(view: &crate::view::SeatView) -> HandStartState {
         .unwrap_or(0);
     let mut games = p.games_won;
     let mut game_index = p.game_index;
+    // Partnerships turned this hand (rule 41): their score is their hand-start score from the
+    // turn on, so their earlier points this hand are not undone (they were taken away).
+    let mut fixed = [false; TEAMS];
     for e in view.events[start..].iter().rev() {
         match *e {
-            Event::TrickWon { team, points, .. } => {
-                scores[usize::from(team)] -= points;
+            Event::TrickWon { team, points, .. } | Event::TrickPassed { team, points, .. } => {
+                if !fixed[usize::from(team)] {
+                    scores[usize::from(team)] -= points;
+                }
             }
             Event::Bonus { team, points, .. } => {
-                scores[usize::from(team)] -= points;
-                if points == super::BONUS_FIRST {
-                    bonus[usize::from(team)] = false;
+                if !fixed[usize::from(team)] {
+                    scores[usize::from(team)] -= points;
+                    if points == super::BONUS_FIRST {
+                        bonus[usize::from(team)] = false;
+                    }
                 }
+            }
+            Event::PairTurned { team, score } => {
+                let t = usize::from(team);
+                scores[t] = score;
+                bonus[t] = score % 5 == 1;
+                fixed[t] = true;
             }
             Event::GameWon {
                 team, scores: s, ..

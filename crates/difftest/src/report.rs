@@ -63,7 +63,41 @@ pub struct Report {
     pub match_wins: [u64; 4],
     /// Money won (positive) or lost by each team over all matches.
     pub money: [i64; 4],
+    /// Runs with turned partnerships only (`--turns`; docs/APP-ENGINE-CONTRACT.md §7): turns
+    /// attempted (both implementations asked to turn the same partnership at the same moment).
+    pub turn_attempts: u64,
+    /// Turns refused by both implementations, by refusal code ([`TURN_REFUSALS`] order).
+    pub turn_refusals: [u64; 6],
+    /// Partnerships turned (applied by both).
+    pub pairs_turned: u64,
+    /// Hands in which a third partnership was turned, leaving one in play (rule 34).
+    pub last_pair_left: u64,
+    /// Tricks passed from a turned partnership (rule 39).
+    pub tricks_passed: u64,
+    /// Games won by reaching 41 with passed tricks (per game).
+    pub won_by_passed_trick: u64,
 }
+
+/// The printed names of the turn refusals, in [`TURN_REFUSALS`] order.
+const TURN_LABELS: [&str; 6] = [
+    "turn refused: no such team",
+    "turn refused: no play awaited",
+    "turn refused: already turned",
+    "turn refused: led trick (open)",
+    "turn refused: no card can win (open)",
+    "turn refused: two at 41 (open)",
+];
+
+/// The refusal codes of [`Match::turn_team`](engine::game::Match::turn_team), in the order of
+/// [`Report::turn_refusals`].
+pub const TURN_REFUSALS: [&str; 6] = [
+    "no_such_team",
+    "not_before_a_play",
+    "already_turned",
+    "led_trick_in_progress",
+    "no_standing_winner",
+    "several_reach_41",
+];
 
 /// What a branch count is a fraction of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,6 +162,14 @@ impl Report {
             self.match_wins[t] += o.match_wins[t];
             self.money[t] += o.money[t];
         }
+        self.turn_attempts += o.turn_attempts;
+        for (a, b) in self.turn_refusals.iter_mut().zip(&o.turn_refusals) {
+            *a += b;
+        }
+        self.pairs_turned += o.pairs_turned;
+        self.last_pair_left += o.last_pair_left;
+        self.tricks_passed += o.tricks_passed;
+        self.won_by_passed_trick += o.won_by_passed_trick;
     }
 
     /// Counts one finished match from its event log.
@@ -174,6 +216,7 @@ impl Report {
                         }
                         GameEndReason::FortyOneByEndBonus => self.won_by_end_bonus += 1,
                         GameEndReason::Jink => self.jink += 1,
+                        GameEndReason::FortyOneByPassedTrick => self.won_by_passed_trick += 1,
                     }
                 }
                 Event::HandEnd { aborted, .. } => {
@@ -197,6 +240,14 @@ impl Report {
                         self.ace_burned += 1;
                     }
                 }
+                Event::PairTurned { .. } => {
+                    self.pairs_turned += 1;
+                    hand.pairs_out += 1;
+                    if hand.pairs_out == 3 {
+                        self.last_pair_left += 1;
+                    }
+                }
+                Event::TrickPassed { .. } => self.tricks_passed += 1,
                 Event::MatchStart { .. }
                 | Event::Dealt { .. }
                 | Event::BurnDone { .. }
@@ -217,7 +268,7 @@ impl Report {
             minimum_per_mille,
             must_be_zero: false,
         };
-        vec![
+        let mut lines = vec![
             line("turned Joker", self.turned_joker, Per::Hand, h, Some(15)),
             line(
                 "Joker then turned ace",
@@ -307,7 +358,31 @@ impl Report {
             ),
             line("five-game match", self.five_game_match, Per::Match, m, None),
             line("ace burned", self.ace_burned, Per::Hand, h, None),
-        ]
+        ];
+        if self.turn_attempts > 0 {
+            lines.extend([
+                line("pair turned", self.pairs_turned, Per::Hand, h, None),
+                line(
+                    "last pair left (rule 34)",
+                    self.last_pair_left,
+                    Per::Hand,
+                    h,
+                    None,
+                ),
+                line("trick passed", self.tricks_passed, Per::Hand, h, None),
+                line(
+                    "41 by passed tricks",
+                    self.won_by_passed_trick,
+                    Per::Game,
+                    g,
+                    None,
+                ),
+            ]);
+            for (label, &n) in TURN_LABELS.iter().zip(&self.turn_refusals) {
+                lines.push(line(label, n, Per::Hand, h, None));
+            }
+        }
+        lines
     }
 
     /// Coverage problems, in plain English: a branch that must never happen did, or (when
@@ -348,6 +423,8 @@ struct HandTally {
     plays: u32,
     tricks: u32,
     trump_played: bool,
+    /// Partnerships turned this hand.
+    pairs_out: u32,
 }
 
 impl HandTally {
@@ -388,7 +465,8 @@ impl HandTally {
             Some(_) if dealer_at_once => r.dealer_robbed_at_once += 1,
             Some(_) => r.dealer_robbed_in_turn += 1,
         }
-        if self.tricks == 5 && !self.trump_played {
+        // Rule 31's argument (40 cards in play) holds only when nobody is turned.
+        if self.tricks == 5 && !self.trump_played && self.pairs_out == 0 {
             r.no_trump_hand += 1;
         }
     }

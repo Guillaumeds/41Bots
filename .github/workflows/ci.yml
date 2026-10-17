@@ -142,6 +142,13 @@ jobs:
           SEED=$(( ${{ github.run_id }} * 16 + ${{ matrix.shard }} ))
           mkdir -p out
           ./target/release/difftest "$GAMES" "$SEED" | tee "out/shard-${{ matrix.shard }}.txt"
+      - name: Run shard with turned partnerships (rules 34, 39-41; docs/APP-ENGINE-CONTRACT.md §7)
+        if: steps.gate.outputs.run == 'true' && env.skip != 'true'
+        shell: bash
+        run: |
+          GAMES="${{ github.event.inputs.games || '200000' }}"
+          SEED=$(( ${{ github.run_id }} * 16 + ${{ matrix.shard }} + 8 ))
+          ./target/release/difftest $(( GAMES / 10 )) "$SEED" --turns 12 | tee "out/shard-${{ matrix.shard }}-turns.txt"
       - uses: actions/upload-artifact@v4
         if: steps.gate.outputs.run == 'true' && env.skip != 'true'
         with:

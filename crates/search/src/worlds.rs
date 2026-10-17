@@ -139,8 +139,12 @@ pub fn rebuild(
     orig[usize::from(me)] = view.hand;
     let mut k = 0usize;
     let mut actions = Vec::new();
+    // Partnerships the app turned this hand (rules 39-41), with the number of the hand's actions
+    // before each: replayed at the same moments (`Match::apply_record`).
+    let mut turns: Vec<(u32, u8)> = Vec::new();
     for e in evs {
         match *e {
+            Event::PairTurned { team, .. } => turns.push((actions.len() as u32, team)),
             Event::Played { seat, card } => {
                 orig[usize::from(seat)] |= bit(card);
                 actions.push(Action::Play(card));
@@ -199,10 +203,8 @@ pub fn rebuild(
         Ok(m) => m,
         Err(e) => return err(e.0),
     };
-    for a in actions {
-        if m.apply(a).is_err() {
-            return err("a recorded action is illegal in this world");
-        }
+    if m.apply_record(&actions, &turns).is_err() {
+        return err("a recorded action or turn is refused in this world");
     }
     Ok(m)
 }

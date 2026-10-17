@@ -73,11 +73,14 @@ pub struct PublicState {
     pub trick_cards: Vec<(u8, Card)>,
     /// The seat that won each completed trick of this hand.
     pub trick_winners: Vec<u8>,
-    /// Tricks each team has won this hand.
+    /// Tricks each team holds this hand: the tricks it won, plus those passed to it from a turned
+    /// partnership (rule 39); 0 for a turned partnership.
     pub tricks_won: [u8; 4],
-    /// The highest trump played so far this hand, and who played it.
+    /// The highest trump played so far this hand, and who played it. Once a partnership is
+    /// turned, only cards of partnerships still in play count (rule 39).
     pub best_trump: Option<(Card, u8)>,
-    /// Whether the 5 of trumps has been played this hand.
+    /// Whether the 5 of trumps has been played this hand (by a partnership still in play, once
+    /// one is turned: a turned partnership's 5 no longer counts, rule 39).
     pub five_played: bool,
     /// The seat that robbed (took a turned card other than the Joker), so holds or held the ace of
     /// trumps or took the turned ace.
@@ -87,6 +90,22 @@ pub struct PublicState {
     /// Whether everyone has played to trick 1 without a rob, proving the ace of trumps out of play:
     /// undealt, or in the dealer's burn after a turned Joker (made before trumps were known, H3).
     pub ace_undealt: bool,
+    /// Partnerships turned this hand (rules 39-41 and 34; the app turns them through
+    /// [`Match::turn_team`](crate::game::Match::turn_team)): they play no more cards this hand and
+    /// their cards no longer count. A turned seat keeps its unplayed cards face down (still in
+    /// `hand_sizes`), and its cards in the trick in progress leave `trick_cards`. All `false` in
+    /// a hand where nobody is turned (and then left out of the JSON form, which is unchanged).
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "no_team_turned")
+    )]
+    pub turned_teams: [bool; 4],
+}
+
+/// Is no partnership turned? (The JSON form leaves `turned_teams` out then.)
+#[cfg(feature = "serde")]
+fn no_team_turned(t: &[bool; 4]) -> bool {
+    !t.iter().any(|&x| x)
 }
 
 /// One seat's view: the public state plus that seat's private knowledge.

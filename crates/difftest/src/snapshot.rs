@@ -95,6 +95,8 @@ pub struct PublicSnap {
     pub robber: Option<u8>,
     pub proved_no_ace: [bool; 8],
     pub ace_undealt: bool,
+    /// Partnerships turned this hand (rules 39-41, 34).
+    pub turned_teams: [bool; 4],
 }
 
 /// Everything in a snapshot except the event lists.
@@ -207,6 +209,7 @@ impl PublicSnap {
             robber: p.robber,
             proved_no_ace: p.proved_no_ace,
             ace_undealt: p.ace_undealt,
+            turned_teams: p.turned_teams,
         }
     }
 
@@ -239,6 +242,7 @@ impl PublicSnap {
             robber: p.robber,
             proved_no_ace: p.proved_no_ace,
             ace_undealt: p.ace_undealt,
+            turned_teams: p.turned_teams,
         }
     }
 }
@@ -368,6 +372,7 @@ impl State {
             ),
             ("public.proved_no_ace".into(), seats_text(&p.proved_no_ace)),
             ("public.ace_undealt".into(), p.ace_undealt.to_string()),
+            ("public.turned_teams".into(), list_text(&p.turned_teams)),
         ];
         for (s, h) in self.hands.iter().enumerate() {
             f.push((format!("hand[{s}]"), cards_text(h)));

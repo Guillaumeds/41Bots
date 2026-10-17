@@ -1,4 +1,4 @@
-//! `difftest <matches> [seed] [--threads N]`
+//! `difftest <matches> [seed] [--threads N] [--turns N]`
 //!
 //! Plays `matches` random matches through the engine and the reference, comparing them after
 //! every action, then prints the rule-branch counts. Exits with status 1 on any disagreement, or
@@ -11,20 +11,24 @@ use std::time::Instant;
 use difftest::{COVERAGE_MIN_MATCHES, Per, Report};
 use engine::game::Rules;
 
-const USAGE: &str = "usage: difftest <matches> [seed] [--threads N]\n\
+const USAGE: &str = "usage: difftest <matches> [seed] [--threads N] [--turns N]\n\
     \x20 matches        number of matches to play\n\
     \x20 seed           run seed (default 0)\n\
-    \x20 --threads      worker threads (default: all cores); the report does not depend on it";
+    \x20 --threads      worker threads (default: all cores); the report does not depend on it\n\
+    \x20 --turns        also turn partnerships at random, one chance in N before each play\n\
+    \x20                (rules 34, 39-41; docs/APP-ENGINE-CONTRACT.md §7; 12 is the test default)";
 
 struct Options {
     matches: u64,
     seed: u64,
     threads: usize,
+    turns: Option<u64>,
 }
 
 fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut positional = Vec::new();
     let mut threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let mut turns = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -35,6 +39,15 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                     .ok()
                     .filter(|&n| n > 0)
                     .ok_or(format!("--threads: not a positive number: {v}"))?;
+            }
+            "--turns" => {
+                let v = it.next().ok_or("--turns needs a value")?;
+                turns = Some(
+                    v.parse()
+                        .ok()
+                        .filter(|&n| n > 0)
+                        .ok_or(format!("--turns: not a positive number: {v}"))?,
+                );
             }
             "-h" | "--help" => return Err(String::new()),
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
@@ -57,6 +70,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         matches,
         seed,
         threads,
+        turns,
     })
 }
 
@@ -146,8 +160,14 @@ fn main() -> ExitCode {
         o.threads,
         if o.threads == 1 { "" } else { "s" }
     );
+    if let Some(n) = o.turns {
+        println!("turning partnerships at random: one chance in {n} before each play");
+    }
     let start = Instant::now();
-    let result = difftest::run_threads(o.seed, o.matches, rules, o.threads);
+    let result = match o.turns {
+        None => difftest::run_threads(o.seed, o.matches, rules, o.threads),
+        Some(n) => difftest::run_turns_threads(o.seed, o.matches, rules, n, o.threads),
+    };
     let secs = start.elapsed().as_secs_f64();
     let report = match result {
         Ok(r) => r,
@@ -161,6 +181,14 @@ fn main() -> ExitCode {
         "no disagreements: the engine and the reference agreed after every action, and every \
          match replayed identically from its seed and actions"
     );
+    if o.turns.is_some() {
+        println!(
+            "turns: {} attempted, {} partnerships turned; both implementations accepted or \
+             refused each alike",
+            grouped(report.turn_attempts),
+            grouped(report.pairs_turned)
+        );
+    }
     println!(
         "time {secs:.1} s, {:.1} matches per second",
         if secs > 0.0 {
