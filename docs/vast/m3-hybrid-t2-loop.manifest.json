@@ -17,7 +17,8 @@
   "min_inet_down": 100,
   "max_dph": 2.0,
   "price_steps": [1.4, 1.7, 2.0],
-  "tries_per_step": 10
+  "tries_per_step": 10,
+    "wait_for_offer_min": 300
  },
  "streams": [
   {
