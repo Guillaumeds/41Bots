@@ -36,6 +36,8 @@ The rules (owner, 2026-10-16, unless dated otherwise):
 
 from __future__ import annotations
 
+import re
+
 MIN_RELIABILITY = 0.90  # owner, 2026-10-16: hosts with reliability of at least 90% are accepted, for every rental
 MAX_NET_COST = 0.10  # $/GB up or down (owner 2026-10-14: 0.10; our traffic is tiny)
 MIN_INET_DOWN = 100.0  # Mbps of download speed an offer must report (owner, 2026-10-16: 100; 0 = no filter)
@@ -93,6 +95,16 @@ def link_factor(o: dict) -> float:
     return 1.0 + (SLOW_LINK_MBPS - max(mbps, 0.0)) / SLOW_LINK_MBPS
 
 
+def cpu_failures(o: dict) -> list[str]:
+    """Why an offer's CPU is never rented, whatever its price: a Xeon Phi (owner, 2026-10-17: a 2016 many-core
+    accelerator chip, 1.3 GHz, about a tenth of an EPYC's work per thread for our branchy search; unmeasured, the
+    ranking's assumed rate made it look like the cheapest machine on the market)."""
+    name = str(o.get("cpu_name") or "")
+    if re.search(r"xeon\W*phi", name, re.I):
+        return [f"CPU {name.strip()} is a Xeon Phi (never rented: about a tenth of an EPYC's work per thread)"]
+    return []
+
+
 def check_failures(o: dict, floor: float = MIN_RELIABILITY, verified_only: bool = False) -> list[str]:
     """Why an offer fails the launcher's safety checks (what the search query filters on, applied
     to one offer's record): reliability at least `floor` (0.90), the whole machine (no sharing),
@@ -116,7 +128,7 @@ def check_failures(o: dict, floor: float = MIN_RELIABILITY, verified_only: bool 
         failed.append("an interruptible (bid) offer, not on-demand")
     if o.get("rentable") is False:
         failed.append("not rentable")
-    return failed
+    return failed + cpu_failures(o)
 
 
 def gpu_name_key(name) -> str:

@@ -1155,6 +1155,20 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual((code, w.created_on, report["outcome"]), (0, [1], "DONE"))
         self.assertNotIn("too few usable threads", json.dumps(report))
 
+    def test_a_xeon_phi_is_never_rented(self):
+        # 2026-10-17: unmeasured, the ranking's assumed rate made a 256-thread Xeon Phi 7210 at $0.27/h look like the
+        # cheapest machine; it does about a tenth of an EPYC's work per thread. Never rented, named or searched.
+        w = World([offer(1, 11, 0.27, cpu_name="Xeon Phi\u2122 7210 ", cpu_cores_effective=256),
+                   offer(2, 12, 0.8, cpu_cores_effective=128)], ["done:1"])
+        code, report = self.run_launch(w, self.FORMAT1, "--min-cores", "120")
+        self.assertEqual((code, w.created_on), (0, [2]))
+        w = World([offer(1, 11, 0.27, cpu_name="Intel Xeon Phi 7250", cpu_cores_effective=272)], ["done:1"])
+        w.forbid_search = True
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, self.FORMAT1, "--offer-id", "1")
+        self.assertIn("is a Xeon Phi (never rented", str(e.exception))
+        self.assertEqual(launch.cpu_failures({"cpu_name": "AMD EPYC 7742 64-Core Processor"}), [])
+
     def test_a_machine_whose_container_did_not_start_is_recorded(self):
         w = World([offer(1, 11, 1.0, host_id=60400), offer(2, 12, 1.5, host_id=60500)], ["broken:0", "done:2"])
         code, report = self.run_launch(w, self.FORMAT1)

@@ -211,7 +211,7 @@ from datetime import datetime, timedelta, timezone
 # shared with the market tools so that their "the launcher can rent it" labels cannot drift.
 from offer_rules import (  # noqa: E402,F401  (some names are re-exported for the tests)
     BLACKWELL_COMPUTE_CAP, MAX_DPH, MAX_NET_COST, MIN_COMPUTE_CAP, MIN_CUDA, MIN_CUDA_BLACKWELL, MIN_INET_DOWN,
-    MIN_RELIABILITY, SLOW_LINK_MBPS, blackwell_driver_failure, blackwell_optin_failure, check_failures, gpu_failures,
+    MIN_RELIABILITY, SLOW_LINK_MBPS, blackwell_driver_failure, blackwell_optin_failure, check_failures, cpu_failures, gpu_failures,
     gpu_name_failures, host_status, inet_down_of, is_verified, link_factor)
 
 POLL_S = 60  # default; --poll-s overrides
@@ -503,7 +503,8 @@ def search_offers(a, verified: bool = True) -> list[dict]:
                 and (not a.cpu_match or re.search(a.cpu_match, o.get("cpu_name") or "", re.I))
                 and o.get("id") not in getattr(a, "exclude_offers", set())
                 and o.get("machine_id", o.get("id")) not in getattr(a, "exclude_machines", set())
-                and o.get("machine_id", o.get("id")) not in getattr(a, "bad_machines", {})):
+                and o.get("machine_id", o.get("id")) not in getattr(a, "bad_machines", {})
+                and not cpu_failures(o)):
             continue
         failed = gpu_check_failures(o, a)
         if failed:
