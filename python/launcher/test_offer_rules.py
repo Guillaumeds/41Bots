@@ -24,7 +24,9 @@ class OfferRulesTest(unittest.TestCase):
     def test_thresholds(self):
         self.assertEqual((R.MIN_RELIABILITY, R.MAX_NET_COST, R.MIN_INET_DOWN, R.SLOW_LINK_MBPS, R.MAX_DPH),
                          (0.90, 0.10, 100.0, 200.0, 1.70))
-        self.assertEqual((R.MIN_COMPUTE_CAP, R.MAX_COMPUTE_CAP, R.MIN_CUDA), (600, 1000, 12.6))
+        self.assertEqual((R.MIN_COMPUTE_CAP, R.BLACKWELL_COMPUTE_CAP, R.MIN_CUDA, R.MIN_CUDA_BLACKWELL),
+                         (600, 1000, 12.6, 13.0))
+        self.assertFalse(hasattr(R, "MAX_COMPUTE_CAP"))   # no upper compute-capability limit any more (2026-10-17)
 
     def test_a_good_offer_passes_every_check(self):
         self.assertEqual(R.check_failures(offer()), [])
@@ -85,8 +87,10 @@ class OfferRulesTest(unittest.TestCase):
     def test_gpu_job_limits(self):
         gpu = dict(num_gpus=1, gpu_ram=6138, compute_cap=860, cuda_max_good=12.8)
         self.assertEqual(R.search_failures(offer(**gpu), gpus=1, min_gpu_ram_gb=4), [])
-        for kw, word in (({"num_gpus": 0}, "0 GPUs, fewer than the 1 asked for"), ({"compute_cap": 1200}, "compute capability 1200 outside 600..999"),
-                         ({"compute_cap": 599}, "compute capability 599"), ({"cuda_max_good": 12.4}, "driver supports CUDA 12.4"),
+        for kw, word in (({"num_gpus": 0}, "0 GPUs, fewer than the 1 asked for"),
+                         ({"compute_cap": 1200}, "compute capability 1200 (Blackwell) runs the PyTorch 2.14.1+cu130 build, "
+                                                 "which needs a driver that supports CUDA 13.0; this host's supports 12.8"),
+                         ({"compute_cap": 599}, "compute capability 599 below 600"), ({"cuda_max_good": 12.4}, "driver supports CUDA 12.4"),
                          ({"gpu_ram": 3000}, "GPU memory 3000 MB, below --min-gpu-ram-gb 4")):
             why = R.search_failures(offer(**{**gpu, **kw}), gpus=1, min_gpu_ram_gb=4)
             self.assertTrue(any(word in w for w in why), (kw, why))
@@ -97,7 +101,33 @@ class OfferRulesTest(unittest.TestCase):
         # A CPU-only job leaves the compute-capability and CUDA limits out; a job that is not CPU-only keeps them.
         blackwell = offer(compute_cap=1200, cuda_max_good=12.0)
         self.assertEqual(R.search_failures(blackwell), [])
-        self.assertEqual(len(R.search_failures(blackwell, cpu_only=False)), 2)
+        self.assertEqual(len(R.search_failures(blackwell, cpu_only=False)), 1)   # the CUDA 12.6 floor (no second Blackwell line)
+
+    def test_blackwell_cards_need_a_cuda_13_driver(self):
+        # Owner, 2026-10-17: compute capability 10.0 and above (B200, RTX 50-series) is rentable, with a driver that
+        # supports CUDA 13.0 (the PyTorch 2.14.1+cu130 build); every card below 10.0 is as before (cu126).
+        gpu = dict(num_gpus=1, gpu_ram=16311, compute_cap=1200, cuda_max_good=13.1)
+        for cc in (1000, 1030, 1200, 1210):
+            for cuda, ok in ((13.1, True), (13.0, True), (12.9, False), (12.8, False), (12.6, False)):
+                o = offer(**{**gpu, "compute_cap": cc, "cuda_max_good": cuda})
+                self.assertEqual(R.search_failures(o, gpus=1, min_gpu_ram_gb=4) == [], ok, (cc, cuda))
+                self.assertEqual(R.blackwell_driver_failure(o) is None, ok, (cc, cuda))
+        why = R.search_failures(offer(**{**gpu, "cuda_max_good": 12.8}), gpus=1, min_gpu_ram_gb=4)
+        self.assertEqual(why, ["compute capability 1200 (Blackwell) runs the PyTorch 2.14.1+cu130 build, which needs a "
+                               "driver that supports CUDA 13.0; this host's supports 12.8"])
+        # Below 10.0 nothing changed: cc 8.6 and 9.0 on a CUDA 12.6 driver are fine, 12.4 is not.
+        for cc in (600, 750, 860, 890, 900):
+            self.assertEqual(R.search_failures(offer(**{**gpu, "compute_cap": cc, "cuda_max_good": 12.6}), gpus=1), [], cc)
+            self.assertIsNone(R.blackwell_driver_failure(offer(**{**gpu, "compute_cap": cc, "cuda_max_good": 12.6})))
+            self.assertEqual(len(R.search_failures(offer(**{**gpu, "compute_cap": cc, "cuda_max_good": 12.4}), gpus=1)), 1)
+        # An offer that reports no compute capability fails the generic check, never the Blackwell line; one that
+        # reports a Blackwell card and no CUDA version fails the generic driver check once.
+        self.assertIsNone(R.blackwell_driver_failure(offer(cuda_max_good=12.0)))
+        no_cuda = R.search_failures(offer(**{**gpu, "cuda_max_good": None}), gpus=1)
+        self.assertEqual(len(no_cuda), 1)
+        self.assertIn("driver supports CUDA None, below 12.6", no_cuda[0])
+        # A raised floor still applies below the Blackwell range.
+        self.assertTrue(R.search_failures(offer(**{**gpu, "compute_cap": 860, "cuda_max_good": 12.8}), gpus=1, min_compute_cap=890))
 
     def test_gpu_names_accept_only_the_listed_models(self):
         # The names are spelled as vast reports them in an offer's gpu_name; case and runs of spaces do not matter.

@@ -29,7 +29,8 @@ checked against its published SHA-256), all hash-checked by the boot script.
 
 The image changes (owner, 2026-10-16): it now carries `uv` 0.13.0 (checksum-verified) and a uv cache
 with Python 3.14 and the whole cu126 group of `python/nn/uv.lock` (torch 2.14.1+cu126, by hash)
-already in it, so `uv sync --locked` on the machine installs from disk in seconds instead of
+already in it (since 2026-10-17 the cu130 group as well: see "Two CUDA builds" below), so
+`uv sync --locked` on the machine installs from disk in seconds instead of
 downloading about 3.7 GB (`UV_CACHE_DIR` and `UV_PYTHON_INSTALL_DIR` are fixed in the image's ENV).
 If the lock used by a run differs from the one baked in, uv downloads only what differs; the run
 still works. Rebuild the image (Actions → image) whenever `python/nn/uv.lock` changes. Image tag:
@@ -37,13 +38,37 @@ still works. Rebuild the image (Actions → image) whenever `python/nn/uv.lock` 
 vast.ai pull is not billed. Its `nvidia/cuda:12.6.3-base` base is enough:
 the PyTorch cu126 packages bring their own CUDA libraries (cuBLAS, cuDNN and the rest, about 3.7 GB
 downloaded per run), and only the GPU driver comes from the host, which the launcher's filter
-`cuda_vers>=12.6` guarantees is new enough. `uv` installs Python 3.14 and the packages as the
+`cuda_vers>=12.6` guarantees is new enough (for a Blackwell card, which uses the cu130 build, the
+launcher also checks for CUDA 13.0: see below). `uv` installs Python 3.14 and the packages as the
 image's normal user; nothing needs root. The locked PyTorch build (`torch-2.14.1+cu126`, SHA-256
 `eb7564fd…`) is compiled for GPU generations sm_50, 60, 70, 75, 80, 86 and 90 (read from its
 `libtorch_cuda.so` on this VM): the RTX A2000 (8.6) is covered, as are Pascal, Volta, Turing, Ada
-(8.9 runs the 8.6 code) and Hopper; Blackwell (10.0 and 12.0) is not, hence the launcher's
-`compute_cap<1000`. (Checked by reasoning and on this VM without a GPU; the smoke run below is the
-first real test.)
+(8.9 runs the 8.6 code) and Hopper; Blackwell (10.0 and 12.0) is not, which is why those cards get
+the cu130 build (next paragraph). (Checked by reasoning and on this VM without a GPU; the smoke run
+below is the first real test.)
+
+**Two CUDA builds of the same PyTorch (owner, 2026-10-17).** The image holds two builds of PyTorch
+2.14.1 in its uv cache, `cu126` (CUDA 12.6) and `cu130` (CUDA 13.0), each a dependency group of
+`python/nn/uv.lock` with its own hashes (`cpu`, `cu126` and `cu130` exclude one another). The runner
+reads the compute capability of the first GPU `nvidia-smi` lists (the one the trainer uses) and installs
+`cu130` for 10.0 and above (Blackwell: RTX 50-series such as the 5060 Ti and 5090, and the B200) and
+`cu126` for every card below it. CUDA 13 drops the cards older than Turing (7.5), so cu126 stays for the
+GTX 10-series and the V100. A capability that cannot be read keeps cu126 and puts a warning in
+`rung.json`; its `python_env` records the group and the compute capability. The launcher rents a
+Blackwell card only on a host whose driver supports CUDA 13.0 (vast's `cuda_max_good` of 13.0 or more) and
+drops, with a log line naming the offer and why, a Blackwell offer with an older driver; the search still
+asks for `cuda_vers>=12.6` and has no upper compute-capability limit. Training runs in floats only, and
+what the rest of the system validates, byte for byte, is the integer network that comes out of it (named by
+its SHA-256), so no result depends on the card or the build: another card may train a slightly different
+float network, as two older cards already may. The locked cu130 build (`torch-2.14.1+cu130`) was installed
+from the lock on this VM and reports CUDA 13.0 and the architectures sm_75, 80, 86, 90, 100 and 120 (so the
+B200 at 10.0 and the RTX 50-series at 12.0 are covered, the Volta and Pascal cards are not, which is why
+cu126 stays); the GPU check (`fortyone_nn.device`) accepts 10.0 to 12.1 against that list. Not yet tried on a
+real Blackwell card, and the image was not rebuilt with both groups here (no Docker daemon on this VM): the
+first smoke run on a Blackwell card is the real test, and the image has to be rebuilt (Actions → image)
+before the runner finds `cu130` in the cache. The cache, and so the image, is
+larger by the cu130 packages (about 2.75 GB of wheels not shared with cu126, which in the cache may be
+roughly 4.7 GB on disk).
 
 Then Actions → vast-run → Run workflow, first with `dry_run` ticked (it only prints the machine it
 would rent), then without:
@@ -60,9 +85,10 @@ would rent), then without:
 
 The manifests carry the machine's needs in a `machine` object: at least one GPU (`gpus` 1; a machine with
 two GPUs is fine, the price is per machine, and the trainer uses one, `cuda:0`) with at least 4 GB,
-compute capability 6.0 or newer (and below 10.0: the cu126 build has no Blackwell), 32 GB of RAM and
-80 GB of disk. These apply even with the workflow's default `cpu_only` box ticked; the `gpus`,
-`min_gpu_ram_gb` and `disk_gb` inputs can raise them. An offer picked by `offer_id` is checked against
+compute capability 6.0 or newer (a card of 10.0 and above, Blackwell, is fine on a host whose driver
+supports CUDA 13.0; the runner gives it the cu130 build), 32 GB of RAM and 80 GB of disk. These apply
+even with the workflow's default `cpu_only` box ticked; the `gpus`, `min_gpu_ram_gb` and `disk_gb`
+inputs can raise them. An offer picked by `offer_id` is checked against
 the same needs.
 
 **Floors and waiting (owner rules of 2026-10-16, 18:10-18:30 Mauritius).** The launcher wants at least 190
@@ -554,9 +580,10 @@ byte: checked on this VM for both heads, both feeds, 1–4 threads and the real 
   (`intnet.exact_matmul`, the same integers, ~25-50x faster than numpy's int64 product); the
   training step (`Step`, `--cuda-graph auto|off`: a CUDA graph on a GPU after `graph_trial`,
   eager otherwise; `Feed.inputs/put/read` give the graph its batch).
-- `python/nn/pyproject.toml`, `uv.lock`: PyTorch in two dependency groups, `cpu` (the default:
-  `uv sync`, this VM, the laptop, GitHub) and `cu126` (`uv sync --locked --no-default-groups
-  --group cu126`), both pinned with hashes.
+- `python/nn/pyproject.toml`, `uv.lock`: PyTorch in three dependency groups, `cpu` (the default:
+  `uv sync`, this VM, the laptop, GitHub), `cu126` (`uv sync --locked --no-default-groups
+  --group cu126`: cards below compute capability 10.0) and `cu130` (`--group cu130`: Blackwell,
+  10.0 and above; added 2026-10-17), all pinned with hashes.
 - `python/launcher/launch.py`: `--gpus`, `--min-gpu-ram-gb`, `--min-compute-cap` and the
   manifest's `machine` object; the step of each running chunk in the log line.
 - `.github/workflows/release-binaries.yml` (uv and `python/nn` in the bundle),

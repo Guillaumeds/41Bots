@@ -38,11 +38,19 @@ RUN set -eu; cd /tmp; \
 RUN useradd --create-home --shell /bin/bash app
 
 # Pre-populated uv cache (PLAN section 11.2): Python 3.14 and every package of python/nn's uv.lock
-# cu126 group (torch 2.14.1+cu126, about 3.7 GB, by hash) are fetched once here, as the normal user,
-# so the runner's `uv sync --locked --no-default-groups --group cu126 --python 3.14` on the machine
-# finds everything locally. The cache and the managed Python live at fixed paths set by ENV (not
+# cu126 group (torch 2.14.1+cu126, about 3.7 GB of wheels) AND of its cu130 group (torch 2.14.1+cu130,
+# about 3.0 GB of wheels, 2.75 GB of them not shared with cu126) are fetched once here, as the normal
+# user, by hash, so the runner's `uv sync --locked --no-default-groups --group <cu126|cu130> --python 3.14`
+# on the machine finds everything locally. Size: the cu126 cache alone was 6.3 GB on disk (wheels plus
+# their unpacked copies, build of 2026-10-16); the same ratio on the 2.75 GB of new wheels is about
+# 4.7 GB more on disk, so expect roughly 11 GB of cache and a compressed image several GB larger than
+# before (an estimate from the lock's wheel sizes, no image was built for it; the `du` line below and
+# image.yml's `du` of the cache give the real numbers). The runner picks the group by the first GPU's
+# compute capability: cu130 from 10.0 (Blackwell: RTX 50-series, B200), cu126 for every card below it
+# (CUDA 13 drops the cards older than Turing, so cu126 stays). Same PyTorch 2.14.1 in both; the image
+# holds both builds, so one image serves every card. The cache and the managed Python live at fixed paths set by ENV (not
 # $HOME), and the runner's child process inherits them. If the run's uv.lock differs from this
-# one, uv simply downloads what is missing. The throwaway environment is deleted; only the cache
+# one, uv simply downloads what is missing. The throwaway environments are deleted; only the cache
 # stays. No project code and no secrets are in the image: only the two lock inputs.
 ENV UV_CACHE_DIR=/home/app/.cache/uv \
     UV_PYTHON_INSTALL_DIR=/home/app/.local/share/uv/python \
@@ -51,10 +59,13 @@ ENV UV_CACHE_DIR=/home/app/.cache/uv \
 COPY --chown=app:app python/nn/pyproject.toml python/nn/uv.lock /tmp/nnlock/
 USER app
 RUN set -eu; \
-    UV_PROJECT_ENVIRONMENT=/tmp/nnenv uv sync --locked --no-default-groups --group cu126 \
-        --python 3.14 --project /tmp/nnlock; \
-    /tmp/nnenv/bin/python -c 'import torch; assert torch.__version__.startswith("2.14.1+cu126"), torch.__version__'; \
-    rm -rf /tmp/nnenv /tmp/nnlock; \
+    for build in cu126 cu130; do \
+        UV_PROJECT_ENVIRONMENT=/tmp/nnenv uv sync --locked --no-default-groups --group "$build" \
+            --python 3.14 --project /tmp/nnlock; \
+        /tmp/nnenv/bin/python -c 'import sys, torch; want = "2.14.1+" + sys.argv[1]; assert torch.__version__.startswith(want), (torch.__version__, want)' "$build"; \
+        rm -rf /tmp/nnenv; \
+    done; \
+    rm -rf /tmp/nnlock; \
     du -sh /home/app/.cache/uv /home/app/.local/share/uv/python
 
 USER root

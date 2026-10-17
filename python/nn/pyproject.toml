@@ -8,19 +8,23 @@ dependencies = [
 ]
 
 # PyTorch is pinned to 2.14.1 (never 2.15+, which drops the Pascal/Volta GPUs we rent: PLAN §11.2),
-# in one of two builds, chosen by dependency group (both locked, with hashes, in uv.lock):
+# in one of three builds, chosen by dependency group (all locked, with hashes, in uv.lock):
 # - `cpu` (the default group: plain `uv sync` / `uv run`, this VM, the laptop, GitHub Actions);
-# - `cu126` (rented GPU machines, docs/m3-hybrid/vast.md):
-#   `uv sync --locked --no-default-groups --group cu126`.
-# The two groups conflict, so asking for both is an error rather than a silent mix.
+# - `cu126` (rented GPU machines with a card of compute capability below 10.0, Pascal to Hopper,
+#   docs/m3-hybrid/vast.md): `uv sync --locked --no-default-groups --group cu126`;
+# - `cu130` (rented GPU machines with a Blackwell card, compute capability 10.0 and above: RTX 50-series,
+#   B200): `uv sync --locked --no-default-groups --group cu130`. CUDA 13 drops the cards below Turing
+#   (7.5), which is why cu126 stays; the host driver must support CUDA 13.0 (vast's `cuda_max_good`).
+# The groups conflict, so asking for two is an error rather than a silent mix.
 [dependency-groups]
 cpu = ["torch==2.14.1"]
 cu126 = ["torch==2.14.1"]
+cu130 = ["torch==2.14.1"]
 
 [tool.uv]
 package = false
 default-groups = ["cpu"]
-conflicts = [[{ group = "cpu" }, { group = "cu126" }]]
+conflicts = [[{ group = "cpu" }, { group = "cu126" }, { group = "cu130" }]]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
@@ -32,8 +36,14 @@ name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
 [tool.uv.sources]
 torch = [
     { index = "pytorch-cpu", group = "cpu" },
     { index = "pytorch-cu126", group = "cu126" },
+    { index = "pytorch-cu130", group = "cu130" },
 ]

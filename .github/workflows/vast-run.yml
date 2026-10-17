@@ -56,7 +56,7 @@ on:
         type: boolean
         default: true
       gpus:
-        description: "GPU job (network training): at least this many GPUs (a 2-GPU box is fine, the trainer uses one), with the PyTorch cu126 filters (0 = as the manifest's machine.gpus says, none otherwise)"
+        description: "GPU job (network training): at least this many GPUs (a 2-GPU box is fine, the trainer uses one), with the PyTorch filters: compute capability 6.0 or newer and a driver that supports CUDA 12.6 (the cu126 build runs every card below 10.0), and for a Blackwell card (10.0 and above: RTX 50-series, B200; the runner installs the cu130 build) a driver that supports CUDA 13.0 (0 = as the manifest's machine.gpus says, none otherwise)"
         default: "0"
       min_gpu_ram_gb:
         description: "GPU job: memory per GPU in GB (0 = as the manifest says)"

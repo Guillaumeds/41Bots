@@ -90,9 +90,15 @@
 //!    recorded hash, else built from the model in the repository; hash-checked).
 //! 2. **Python environment**: `uv sync --locked` of `python/nn` (the release bundle carries the
 //!    source, its `pyproject.toml` and `uv.lock`, and `uv` itself, all hash-checked at boot) into
-//!    a fresh environment, with the dependency group `cu126` (PyTorch 2.14.1+cu126, pinned with
-//!    hashes in the lock) when `nvidia-smi` lists a GPU and `device` is not `cpu`, else `cpu`.
-//!    Up to 3 attempts. Records uv's version, the group, and the lock's SHA-256.
+//!    a fresh environment, with a dependency group of the lock (PyTorch 2.14.1, pinned with
+//!    hashes): when `nvidia-smi` lists a GPU and `device` is not `cpu`, `cu130` (2.14.1+cu130)
+//!    if the first GPU (the one the trainer uses) has compute capability 10.0 or above
+//!    (Blackwell: RTX 50-series, B200), else `cu126` (2.14.1+cu126, Pascal to Hopper; CUDA 13
+//!    drops the cards below Turing, so cu126 stays, and it is also what a capability that
+//!    cannot be read gets, with a warning); else `cpu`. Training is in floats only and the
+//!    integer network is what is checked, byte for byte, so the result does not depend on the
+//!    build or the card. Up to 3 attempts. Records uv's version, the group, the first GPU's
+//!    compute capability, and the lock's SHA-256.
 //! 3. **GPU check** (`python -m fortyone_nn.device`; PLAN §12.3 step 5): `nvidia-smi`,
 //!    `torch.cuda.is_available()`, the compute capability against the build's architectures, one
 //!    tiny training step. With `device` `auto` a failed check means training on the CPU with all
@@ -1037,6 +1043,90 @@ fn gpus_listed(nvidia_smi: &Path) -> Option<Vec<String>> {
     (!lines.is_empty()).then_some(lines)
 }
 
+/// The first compute capability that needs the CUDA 13 build of PyTorch (`cu130`): Blackwell is
+/// 10.0 (B200) and 12.0 (RTX 50-series). Every card below it runs the CUDA 12.6 build (`cu126`),
+/// which CUDA 13 cannot replace for cards older than Turing (7.5).
+const CU130_MIN_COMPUTE_MAJOR: u32 = 10;
+
+/// The compute capability of a `gpus_listed` line (`name, memory, driver, compute_cap`: its last
+/// field, e.g. `8.6` or `12.0`) as (major, minor), or `None` when that field is not one.
+fn compute_cap_of(line: &str) -> Option<(u32, u32)> {
+    let (major, minor) = line.rsplit(',').next()?.trim().split_once('.')?;
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// The dependency group of `python/nn`'s lock for a chunk, and what to record and warn about.
+#[derive(Debug, PartialEq)]
+struct EnvChoice {
+    group: &'static str,
+    /// The first GPU's compute capability as `major.minor` (`None`: no GPU used, or it could not
+    /// be read).
+    compute_cap: Option<String>,
+    warnings: Vec<String>,
+}
+
+/// The group for `device` and the GPUs `nvidia-smi` listed: `cpu` for the CPU (or without a GPU
+/// on `auto`); with a GPU `cu130` when the first one (the trainer uses it) has compute
+/// capability 10.0 or above, else `cu126`, which is also the choice, with a warning, when that
+/// capability cannot be read (today's behaviour).
+fn choose_group(device: Device, gpus: &Option<Vec<String>>) -> Result<EnvChoice, String> {
+    let gpu_lines = match (device, gpus.as_deref()) {
+        (Device::Cpu, _) | (Device::Auto, None | Some([])) => {
+            return Ok(EnvChoice {
+                group: "cpu",
+                compute_cap: None,
+                warnings: Vec::new(),
+            });
+        }
+        (Device::Cuda, None | Some([])) => {
+            return Err(
+                "hybrid_rung: device \"cuda\" was asked for, but nvidia-smi is \
+                            missing or lists no GPU"
+                    .into(),
+            );
+        }
+        (_, Some(lines)) => lines,
+    };
+    let first = &gpu_lines[0];
+    let mut warnings = Vec::new();
+    let (group, compute_cap) = match compute_cap_of(first) {
+        Some((major, minor)) => (
+            if major >= CU130_MIN_COMPUTE_MAJOR {
+                "cu130"
+            } else {
+                "cu126"
+            },
+            Some(format!("{major}.{minor}")),
+        ),
+        None => {
+            warnings.push(format!(
+                "the first GPU's compute capability cannot be read from nvidia-smi ({first:?}): \
+                 installing the cu126 build, the choice for every card below 10.0"
+            ));
+            ("cu126", None)
+        }
+    };
+    // A machine that mixes the two kinds of card: the trainer takes CUDA's device 0, which is
+    // nvidia-smi's first only when CUDA orders the cards the same way, so say so, don't guess.
+    let kind = |l: &String| compute_cap_of(l).map(|(m, _)| m >= CU130_MIN_COMPUTE_MAJOR);
+    if let Some(first_kind) = kind(first)
+        && gpu_lines
+            .iter()
+            .any(|l| kind(l).is_some_and(|k| k != first_kind))
+    {
+        warnings.push(format!(
+            "the GPUs mix compute capabilities below and above 10.0 ({}): the {group} build \
+             is installed for the first, which the trainer uses",
+            gpu_lines.join("; ")
+        ));
+    }
+    Ok(EnvChoice {
+        group,
+        compute_cap,
+        warnings,
+    })
+}
+
 /// The decisions at trick `trick` in a decisions file (`search decisions`' JSON lines).
 fn decisions_at(path: &Path, trick: u64) -> Result<u64, String> {
     let text =
@@ -1548,22 +1638,18 @@ impl Rung<'_> {
     fn python_env(&mut self) -> Result<(), String> {
         let t = Instant::now();
         let gpus = gpus_listed(&self.tools.nvidia_smi);
-        let group = match (self.p.device, &gpus) {
-            (Device::Cpu, _) => "cpu",
-            (_, Some(_)) => "cu126",
-            (Device::Cuda, None) => {
-                return Err(
-                    "hybrid_rung: device \"cuda\" was asked for, but nvidia-smi is \
-                            missing or lists no GPU"
-                        .into(),
-                );
-            }
-            (Device::Auto, None) => "cpu",
-        };
+        let EnvChoice {
+            group,
+            compute_cap,
+            warnings,
+        } = choose_group(self.p.device, &gpus)?;
+        for w in warnings {
+            self.warn(w);
+        }
         let env_dir = self.work.join(format!("pyenv-{group}"));
         let progress = self.progress(
             "python environment",
-            json!({ "group": group, "gpus": gpus }),
+            json!({ "group": group, "compute_cap": compute_cap, "gpus": gpus }),
         );
         self.ctx.set_phase("chunk", progress);
         let version = Command::new(&self.tools.uv)
@@ -1610,8 +1696,9 @@ impl Rung<'_> {
         let lock = sha256_file(&self.tools.python_dir.join("uv.lock"))?.0;
         self.rec.insert(
             "python_env".into(),
-            json!({ "uv": uv_version, "group": group, "uv_lock_sha256": lock,
-                    "attempts": attempts, "nvidia_smi": gpus, "seconds": secs(t) }),
+            json!({ "uv": uv_version, "group": group, "compute_cap": compute_cap,
+                    "uv_lock_sha256": lock, "attempts": attempts, "nvidia_smi": gpus,
+                    "seconds": secs(t) }),
         );
         self.done("python environment", t)
     }
@@ -3597,6 +3684,173 @@ esac
         }
     }
 
+    /// The Python group follows the first GPU's compute capability: below 10.0 (RTX 30-series 8.6,
+    /// Pascal, Hopper 9.0) `cu126`, from 10.0 (B200) and 12.0 (RTX 50-series) `cu130`, a
+    /// capability that cannot be read `cu126` with a warning, the CPU `cpu`.
+    #[test]
+    fn the_group_follows_the_first_gpus_compute_capability() {
+        let gpu = |name: &str, cap: &str| format!("{name}, 24576 MiB, 595.84, {cap}");
+        let listed = |l: &[String]| Some(l.to_vec());
+        let pick = |d: Device, g: &[String]| choose_group(d, &listed(g)).expect("a choice");
+
+        for (cap, group) in [
+            ("6.0", "cu126"),
+            ("6.1", "cu126"),
+            ("7.0", "cu126"),
+            ("7.5", "cu126"),
+            ("8.6", "cu126"),
+            ("8.9", "cu126"),
+            ("9.0", "cu126"),
+            ("10.0", "cu130"),
+            ("10.3", "cu130"),
+            ("12.0", "cu130"),
+        ] {
+            for d in [Device::Auto, Device::Cuda] {
+                let c = pick(d, &[gpu("NVIDIA GPU", cap)]);
+                assert_eq!(c.group, group, "{cap} on {d:?}");
+                assert_eq!(c.compute_cap.as_deref(), Some(cap));
+                assert!(c.warnings.is_empty(), "{cap}: {:?}", c.warnings);
+            }
+        }
+        // The CPU never installs a CUDA build, whatever the card.
+        let c = pick(Device::Cpu, &[gpu("NVIDIA GeForce RTX 5090", "12.0")]);
+        assert_eq!((c.group, c.compute_cap, c.warnings.len()), ("cpu", None, 0));
+        // No GPU: the CPU on `auto`, an error on `cuda`.
+        let c = choose_group(Device::Auto, &None).expect("cpu");
+        assert_eq!((c.group, c.compute_cap), ("cpu", None));
+        let e = choose_group(Device::Cuda, &None).expect_err("no GPU");
+        assert!(e.contains("\"cuda\" was asked for"), "{e}");
+        // An empty list is no GPU either.
+        assert_eq!(
+            choose_group(Device::Auto, &Some(vec![]))
+                .expect("cpu")
+                .group,
+            "cpu"
+        );
+        assert!(choose_group(Device::Cuda, &Some(vec![])).is_err());
+        // A capability that cannot be read keeps today's cu126, with a warning that says so.
+        for bad in ["[N/A]", "", "N/A", "twelve"] {
+            let c = pick(Device::Auto, &[gpu("NVIDIA GPU", bad)]);
+            assert_eq!(c.group, "cu126", "{bad:?}");
+            assert_eq!(c.compute_cap, None);
+            assert_eq!(c.warnings.len(), 1, "{bad:?}");
+            assert!(
+                c.warnings[0].contains("compute capability cannot be read")
+                    && c.warnings[0].contains("cu126"),
+                "{:?}",
+                c.warnings
+            );
+        }
+        // The first GPU decides; a mixed machine says so.
+        let both = [
+            gpu("NVIDIA GeForce RTX 3090", "8.6"),
+            gpu("NVIDIA GeForce RTX 5090", "12.0"),
+        ];
+        let c = pick(Device::Auto, &both);
+        assert_eq!((c.group, c.compute_cap.as_deref()), ("cu126", Some("8.6")));
+        assert_eq!(c.warnings.len(), 1);
+        assert!(c.warnings[0].contains("mix"), "{:?}", c.warnings);
+        let c = pick(Device::Auto, &[both[1].clone(), both[0].clone()]);
+        assert_eq!((c.group, c.compute_cap.as_deref()), ("cu130", Some("12.0")));
+        // Two cards of one kind: no warning.
+        let c = pick(Device::Auto, &[both[1].clone(), both[1].clone()]);
+        assert_eq!(c.group, "cu130");
+        assert!(c.warnings.is_empty());
+        // The capability is the last field, whatever the name holds.
+        assert_eq!(
+            compute_cap_of("NVIDIA RTX, 5090, 1 MiB, 1.0, 12.0"),
+            Some((12, 0))
+        );
+        assert_eq!(compute_cap_of("12.0"), Some((12, 0)));
+        assert_eq!(
+            compute_cap_of("NVIDIA A100, 81920 MiB, 570.86, 8.0\n"),
+            Some((8, 0))
+        );
+    }
+
+    /// The Python environment step on a fake `nvidia-smi` printing `smi`: the `uv sync` it ran,
+    /// and the chunk record's `python_env` and warnings.
+    #[cfg(unix)]
+    fn python_env_on(tag: &str, smi: &str) -> (String, Value, Value) {
+        let f = fakes(tag);
+        let gpu = fake_script(&f.bin, "nvidia-smi-cap", &format!("echo '{smi}'\n"));
+        let tools = Tools {
+            search: f.search.clone(),
+            uv: f.uv.clone(),
+            python_dir: f.py.clone(),
+            nvidia_smi: gpu,
+            remote: None,
+        };
+        let p = parse(&json!({})).expect("defaults");
+        let root = f.base.join("root");
+        let mut ctx = Ctx::local("hybrid-test", &root, 4);
+        let mut r = test_rung(&mut ctx, &p, &tools, &root);
+        r.python_env().expect("python environment");
+        let rung = read_json(&r.out.join("rung.json")).expect("rung.json");
+        let sync = fs::read_to_string(&f.calls)
+            .expect("calls")
+            .lines()
+            .find(|l| l.starts_with("uv sync"))
+            .expect("uv sync")
+            .to_string();
+        let _ = fs::remove_dir_all(&f.base);
+        (sync, rung["python_env"].clone(), rung["warnings"].clone())
+    }
+
+    /// The chunk installs the group the card needs and records it, with the capability, in
+    /// `rung.json`: an RTX 50-series (12.0) gets `cu130`, an RTX 30-series (8.6) `cu126`, an
+    /// unreadable capability `cu126` and a warning.
+    #[cfg(unix)]
+    #[test]
+    fn the_environment_is_installed_for_the_cards_capability() {
+        let (sync, env, warnings) = python_env_on(
+            "cap-bw",
+            "NVIDIA GeForce RTX 5060 Ti, 16311 MiB, 580.82, 12.0",
+        );
+        assert!(
+            sync.starts_with("uv sync --locked --no-default-groups --group cu130 "),
+            "{sync}"
+        );
+        assert_eq!(
+            (&env["group"], &env["compute_cap"]),
+            (&json!("cu130"), &json!("12.0"))
+        );
+        assert_eq!(warnings, json!([]));
+
+        let (sync, env, warnings) = python_env_on(
+            "cap-ampere",
+            "NVIDIA GeForce RTX 3090, 24576 MiB, 595.84, 8.6",
+        );
+        assert!(
+            sync.starts_with("uv sync --locked --no-default-groups --group cu126 "),
+            "{sync}"
+        );
+        assert_eq!(
+            (&env["group"], &env["compute_cap"]),
+            (&json!("cu126"), &json!("8.6"))
+        );
+        assert_eq!(warnings, json!([]));
+
+        let (sync, env, warnings) = python_env_on(
+            "cap-unreadable",
+            "NVIDIA GeForce RTX 3090, 24576 MiB, 595.84, [N/A]",
+        );
+        assert!(
+            sync.starts_with("uv sync --locked --no-default-groups --group cu126 "),
+            "{sync}"
+        );
+        assert_eq!(
+            (&env["group"], &env["compute_cap"]),
+            (&json!("cu126"), &Value::Null)
+        );
+        assert!(
+            warnings.as_array().is_some_and(
+                |w| w.len() == 1 && w[0].as_str().is_some_and(|w| w.contains("cannot be read"))
+            ),
+            "{warnings}"
+        );
+    }
+
     /// Step sequencing with fake programs ([`fakes`]). Without a GPU (`nvidia-smi` missing) the
     /// chunk installs the `cpu` group, warns, and trains on the CPU with every thread; with a fake
     /// GPU it installs `cu126` and trains on it with at most 8 threads, then (compare_cpu) once
@@ -3922,6 +4176,7 @@ esac
             0.0
         );
         assert_eq!(rung["python_env"]["group"], "cu126");
+        assert_eq!(rung["python_env"]["compute_cap"], "8.6");
 
         // 3. "cuda" asked for with no GPU: refused before anything is installed.
         let tools = Tools {

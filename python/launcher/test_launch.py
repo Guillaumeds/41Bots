@@ -491,10 +491,12 @@ class LauncherTest(unittest.TestCase):
         self.assertNotIn("verified=true", w.queries[1].split())
         self.assertIn("no verified offer matches; using unverified/deverified offers (owner rule 2026-10-16)", self.log)
         self.assertIn("host NOT verified (deverified)", self.log)
-        # Every other filter is unchanged in the second search, the Blackwell cut-off included.
+        # Every other filter is unchanged in the second search, the GPU driver floor included (and no upper
+        # compute-capability limit: Blackwell cards are rentable, see the Blackwell tests).
         first, second = w.queries
         self.assertEqual(first.replace("verified=true", "verified=any"), second)
-        self.assertIn("compute_cap<1000", second.split())
+        self.assertIn("cuda_vers>=12.6", second.split())
+        self.assertFalse([x for x in second.split() if x.startswith("compute_cap<")], second)
         self.assertIn("reliability>0.9", second.split())
 
     def test_fallback_search_with_nothing_either_stops_the_run(self):
@@ -1666,10 +1668,13 @@ class LauncherTest(unittest.TestCase):
             min_reliability=0.90, min_cores=128, min_ram_gb=64, disk_gb=80, max_net_cost=0.1, max_dph=None,
             cpu_only=True, gpus=1, min_gpu_ram_gb=4, min_compute_cap=600)
         q = launch.offer_query(a).split()
-        for want in ("num_gpus>=1", "gpu_ram>=4", "compute_cap>=600", "compute_cap<1000", "cuda_vers>=12.6",
+        for want in ("num_gpus>=1", "gpu_ram>=4", "compute_cap>=600", "cuda_vers>=12.6",
                      "gpu_frac=1", "verified=true", "rentable=true", "reliability>0.9", "cpu_cores_effective>=128",
                      "cpu_ram>=64", "disk_space>=80"):
             self.assertIn(want, q)
+        # No upper compute-capability limit (owner, 2026-10-17: Blackwell cards are rentable; the launcher drops
+        # the ones whose driver is below CUDA 13.0 after the search).
+        self.assertFalse([x for x in q if x.startswith("compute_cap<")], q)
         self.assertFalse([x for x in q if x.startswith("num_gpus=")], q)   # at least N, never exactly N (owner, 2026-10-16)
         a.gpus = 2
         self.assertIn("num_gpus>=2", launch.offer_query(a).split())
@@ -1690,7 +1695,7 @@ class LauncherTest(unittest.TestCase):
     def test_manifest_machine_needs_rent_one_gpu_machine(self):
         # The hybrid rung's manifest asks for 1 GPU with 4 GB, 128 cores and 80 GB of disk. Under the
         # workflow's default --cpu-only the GPU filters still apply; offers without a usable GPU
-        # (too little memory, a Blackwell card the cu126 build cannot run, an old driver) are skipped
+        # (too little memory, a Blackwell card whose driver is below CUDA 13.0, an old driver) are skipped
         # even though the search returned them, and the cheapest one that fits is rented. A machine with
         # two GPUs fits a one-GPU job (owner, 2026-10-16: the price is per machine; the trainer uses cuda:0).
         a2000 = dict(num_gpus=1, gpu_name="RTX A2000", gpu_ram=6138, compute_cap=860, cuda_max_good=12.8,
@@ -1711,18 +1716,27 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(w.created_on, [4])    # the two-GPU box at $0.70, cheaper than the one-GPU machines
         self.assertEqual(w.disks, ["80"])
         q = w.queries[0].split()
-        for want in ("num_gpus>=1", "gpu_ram>=4", "compute_cap>=600", "compute_cap<1000", "cuda_vers>=12.6",
+        for want in ("num_gpus>=1", "gpu_ram>=4", "compute_cap>=600", "cuda_vers>=12.6",
                      "cpu_cores_effective>=128", "disk_space>=80", "gpu_frac=1", "verified=true"):
             self.assertIn(want, q)
+        self.assertFalse([x for x in q if x.startswith("compute_cap<")], q)
         self.assertIn("--cpu-only is ignored", self.log)
+        # The RTX 5090 (cc 12.0) on a CUDA 12.8 driver was dropped, and the log says which offer and why.
+        self.assertIn("offer 2 dropped ($0.500/h, 1x RTX 5090, cc 1200, CUDA 12.8, host verified): compute capability "
+                      "1200 (Blackwell) runs the PyTorch 2.14.1+cu130 build, which needs a driver that supports "
+                      "CUDA 13.0; this host's supports 12.8", self.log)
+        self.assertEqual(self.log.count("offer 2 dropped"), 1)
         self.assertIn("2x RTX A2000 (6138 MB, cc 860, CUDA 12.8)", self.log)
 
     def test_offer_chosen_by_id_must_meet_the_gpu_needs(self):
         a2000 = dict(num_gpus=1, gpu_name="RTX A2000", gpu_ram=6138, compute_cap=860, cuda_max_good=12.8)
         m = {"run_id": RUN, "machine": {"gpus": 1, "min_gpu_ram_gb": 4},
              "chunk": {"difftest": {"matches": 1, "seed": 1}}}
-        cases = [({"compute_cap": 1200}, "compute capability 1200 outside 600..999"),
-                 ({"compute_cap": 520}, "compute capability 520"),
+        cases = [({"compute_cap": 1200}, "compute capability 1200 (Blackwell) runs the PyTorch 2.14.1+cu130 build, "
+                                         "which needs a driver that supports CUDA 13.0; this host's supports 12.8"),
+                 ({"compute_cap": 1000}, "compute capability 1000 (Blackwell)"),
+                 ({"compute_cap": 1200, "cuda_max_good": 12.9}, "this host's supports 12.9"),
+                 ({"compute_cap": 520}, "compute capability 520 below 600"),
                  ({"gpu_ram": 3000}, "GPU memory 3000 MB, below --min-gpu-ram-gb 4"),
                  ({"num_gpus": 0}, "0 GPUs, fewer than the 1 asked for"),
                  ({"cuda_max_good": 12.2}, "driver supports CUDA 12.2, below 12.6")]
@@ -1737,6 +1751,14 @@ class LauncherTest(unittest.TestCase):
         w.forbid_search = True
         code, _ = self.run_launch(w, m, "--offer-id", "500")
         self.assertEqual((code, w.created_on), (0, [500]))
+        # A Blackwell card (the runner installs the cu130 build for it) is rented by id when the host's driver
+        # supports CUDA 13.0 or newer: an RTX 5060 Ti (12.0), a B200 (10.0), and the same on a CUDA 13.1 driver.
+        for cc, cuda in ((1200, 13.0), (1200, 13.1), (1000, 13.0), (1000, 13.2)):
+            w = World([offer(500, 50, 1.0, **{**a2000, "gpu_name": "RTX 5060 Ti", "compute_cap": cc, "cuda_max_good": cuda})],
+                      ["done:1"])
+            w.forbid_search = True
+            code, _ = self.run_launch(w, m, "--offer-id", "500")
+            self.assertEqual((code, w.created_on), (0, [500]), (cc, cuda))
         # At least the GPUs asked for: a 4-GPU machine is fine for a 1-GPU job, a 1-GPU one is refused for 2.
         w = World([offer(500, 50, 1.0, **{**a2000, "num_gpus": 4})], ["done:1"])
         w.forbid_search = True
@@ -1754,6 +1776,71 @@ class LauncherTest(unittest.TestCase):
             self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}},
                             "--offer-id", "500", "--gpus", "1", "--min-gpu-ram-gb", "4")
         self.assertEqual(w.created_on, [])
+
+    def test_blackwell_offers_are_rented_only_on_a_cuda_13_driver(self):
+        # Owner, 2026-10-17: the newest cards (compute capability 10.0 and above) are rentable. The search carries no
+        # upper compute-capability limit and keeps cuda_vers>=12.6; the launcher then drops, with a log line naming the
+        # offer and why, a Blackwell offer whose driver supports a CUDA below 13.0. Older cards are unchanged.
+        card = dict(num_gpus=1, gpu_name="RTX 5060 Ti", gpu_ram=16311, cuda_max_good=13.1, compute_cap=1200,
+                    cpu_cores_effective=224, cpu_name="AMD EPYC 9654 96-Core Processor")
+        m = {"format": 2, "run_id": RUN, "run_seed": 1,
+             "machine": {"gpus": 1, "min_gpu_ram_gb": 4, "min_cores": 128, "disk_gb": 80},
+             "streams": [{"name": "rung", "priority": 1, "kind": "hybrid_rung", "chunks": 1,
+                          "params": {"threads": "all"}}]}
+
+        def rent(offers, *extra):
+            w = World(offers, ["done:2"])
+            code, report = self.run_launch(w, m, "--cheapest", *extra)
+            return w, code, report
+
+        # cc 12.0 on a CUDA 13.1 driver is rentable, and the cheapest offer wins whatever its card.
+        w, code, report = rent([offer(1, 11, 0.4, **card)])
+        self.assertEqual((code, report["outcome"], w.created_on), (0, "DONE", [1]))
+        self.assertNotIn("dropped", self.log)
+        w, code, _ = rent([offer(1, 11, 0.4, **card), offer(2, 12, 0.5, **{**card, "compute_cap": 860, "cuda_max_good": 12.8})])
+        self.assertEqual(w.created_on, [1])
+        # The same card on a CUDA 12.8 driver is dropped, the dearer cc 8.6 box is rented, the log says why, once.
+        w, code, _ = rent([offer(1, 11, 0.4, **{**card, "cuda_max_good": 12.8}),
+                           offer(2, 12, 0.5, **{**card, "compute_cap": 860, "cuda_max_good": 12.8})])
+        self.assertEqual((code, w.created_on), (0, [2]))
+        self.assertIn("offer 1 dropped ($0.400/h, 1x RTX 5060 Ti, cc 1200, CUDA 12.8, host verified): compute capability "
+                      "1200 (Blackwell) runs the PyTorch 2.14.1+cu130 build, which needs a driver that supports CUDA 13.0; "
+                      "this host's supports 12.8", self.log)
+        self.assertNotIn("offer 2 dropped", self.log)
+        self.assertEqual(self.log.count("offer 1 dropped"), 1)
+        # B200 (10.0): the same rule at its own number; exactly CUDA 13.0 is enough.
+        w, code, _ = rent([offer(1, 11, 0.4, **{**card, "compute_cap": 1000, "cuda_max_good": 12.9}),
+                           offer(2, 12, 0.5, **{**card, "compute_cap": 1000, "cuda_max_good": 13.0})])
+        self.assertEqual(w.created_on, [2])
+        # Nothing else fits: the run stops (there is no searching with the rule lifted), the drop is still logged.
+        with self.assertRaises(SystemExit) as e:
+            rent([offer(1, 11, 0.4, **{**card, "cuda_max_good": 12.8})])
+        self.assertIn("no offer matches the filters", str(e.exception))
+        self.assertEqual(self.log.count("offer 1 dropped"), 1)   # both searches (verified, then any) log it once
+        # A card that does not report its CUDA version fails the generic driver check, not a Blackwell line.
+        with self.assertRaises(SystemExit):
+            rent([offer(1, 11, 0.4, **{**card, "cuda_max_good": None})])
+        self.assertNotIn("dropped", self.log)
+
+        # The unverified fallback keeps the rule.
+        w, code, _ = rent([offer(1, 11, 0.4, verification="unverified", **{**card, "cuda_max_good": 12.8}),
+                           offer(2, 12, 0.5, verification="unverified", **card)])
+        self.assertEqual(w.created_on, [2])
+
+    def test_waiting_search_logs_a_dropped_blackwell_offer_once(self):
+        # The launcher waits for an offer and searches again every minute: the cheap RTX 5090 on a CUDA 12.8 driver
+        # is named once, not at every search, and the machine that fits when it appears is rented.
+        card = dict(num_gpus=1, gpu_name="RTX 5090", gpu_ram=32000, compute_cap=1200, cuda_max_good=12.8)
+        w = World([big(1, 11, 0.4, **card)], ["done:2"])
+        w.offer_appears = [(1_000_000.0 + 300, big(2, 12, 0.6, **{**card, "cuda_max_good": 13.0}))]
+        m = {"format": 2, "run_id": RUN, "run_seed": 1,
+             "machine": {"gpus": 1, "min_gpu_ram_gb": 4, "min_cores": 190, "disk_gb": 80},
+             "streams": [{"name": "rung", "priority": 1, "kind": "hybrid_rung", "chunks": 1,
+                          "params": {"threads": "all"}}]}
+        code, _ = self.run_launch(w, m, "--cheapest", *NEW, legacy=False)
+        self.assertEqual((code, w.created_on), (0, [2]))
+        self.assertGreater(w.searches, 3)
+        self.assertEqual(self.log.count("offer 1 dropped"), 1, self.log)
 
     def test_manifest_machine_object_is_checked_before_renting(self):
         base = {"run_id": RUN, "chunk": {"difftest": {"matches": 1, "seed": 1}}}

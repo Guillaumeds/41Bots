@@ -645,8 +645,8 @@ These address SPARTA's warning that partners searching independently can mislead
 | Python | **3.14.x** (not 3.15) | 3.14 line | 3.15.0 came out on 9 Oct 2026 and isn't yet covered by onnxruntime or `torch.compile`. 3.14 is the newest fully supported line. |
 | Env and package manager | **uv** | 0.13.0 (2026-10-09) | One cross-platform `uv.lock` for Windows and Linux; it also installs Python itself. uv 0.13 defaults to 3.15, so 3.14 is pinned in `.python-version` and `requires-python = "==3.14.*"`. |
 | Deep learning | **PyTorch 2.14.1 exactly** | 2026-09-30 | **Deliberately not 2.15** (due ~2026-10-28), which drops Pascal and Volta GPUs (GTX 1080 Ti, P40, P100, V100), common cheap vast.ai cards. |
-| — GPU build (vast.ai default) | `torch==2.14.1+cu126` | — | Supports GPU generations Maxwell to Hopper (compute capability 5.0–9.0). Needs a host driver that supports CUDA 12.6 (filter `cuda_vers>=12.6`). **No RTX 50-series (Blackwell)**; filter `compute_cap<1000`. [**CUDA**: NVIDIA's GPU software layer; each GPU generation needs a matching build] |
-| — Newest-GPU build (optional) | `torch==2.14.1` for CUDA 13.0 | — | Only for Blackwell hosts (driver ≥580) |
+| — GPU build (vast.ai default) | `torch==2.14.1+cu126` | — | Supports GPU generations Maxwell to Hopper (compute capability 5.0–9.0). Needs a host driver that supports CUDA 12.6 (filter `cuda_vers>=12.6`). Does not run RTX 50-series (Blackwell) cards: those get the build below. [**CUDA**: NVIDIA's GPU software layer; each GPU generation needs a matching build] |
+| — Newest-GPU build (Blackwell: RTX 50-series, B200; owner, 2026-10-17) | `torch==2.14.1+cu130` | — | Same PyTorch 2.14.1 for CUDA 13.0 (dependency group `cu130` of `python/nn/uv.lock`, in the same image as `cu126`). The runner picks it when the first GPU's compute capability is 10.0 or above and `cu126` below that (CUDA 13 drops cards older than Turing, 7.5, so `cu126` stays for the GTX 10-series and V100). Needs a host driver that supports CUDA 13.0 (vast's `cuda_max_good` ≥ 13.0), which the launcher checks for a Blackwell offer. |
 | — Laptop | `torch==2.14.1+cpu` | — | Windows wheel confirmed |
 | Number formats by GPU | FP32 on Pascal (1080 Ti/P40); FP16 autocast on Volta/Turing; BF16 + TF32 on Ampere+ | — | **Mixed precision** [using smaller number formats for speed where the GPU handles them well]. The trainer picks automatically from the detected GPU. `torch.compile` is not relied on (it won't run on Pascal). |
 | ONNX export (transformer challenger only) | onnx 1.23.2; onnxscript 0.7.2; onnxruntime 1.31.0 (validation) | 2026-10 | The new exporter (`dynamo=True`, the default). Target opset 18–20, `external_data=False` (single file for tract/WASM), `dynamic_shapes` |
@@ -684,7 +684,7 @@ These address SPARTA's warning that partners searching independently can mislead
   |---|---|
   | `cpu_cores_effective >= N` | Only the cores actually rented count |
   | `gpu_frac=1` | **Renting all of a machine's GPUs is what gives you its full CPU.** Renting 1 of 4 GPUs gives only about ¼ of the CPUs. |
-  | `compute_cap>=600 compute_cap<1000 cuda_vers>=12.6` | Matches our PyTorch build |
+  | `compute_cap>=600 cuda_vers>=12.6` (and for compute capability 10.0 or above, `cuda_max_good` ≥ 13.0, checked by the launcher after the search) | Matches our PyTorch builds (cu126 below 10.0, cu130 from 10.0) |
   | `reliability>0.9` | Avoids flaky hosts (owner, 2026-10-16: the floor is 90%; it was 98%) |
   | low `inet_up_cost` / `inet_down_cost` | Hosts charge per GB, and we upload results |
 
