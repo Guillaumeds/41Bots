@@ -1,0 +1,62 @@
+{
+  "format": 2,
+  "run_id": "cu130-smoke-1",
+  "run_seed": 1,
+  "threads": null,
+  "benchmark_seconds": 0,
+  "upload_every_s": 300,
+  "heartbeat_every_s": 30,
+  "note": "Smoke test of the PyTorch cu130 build on a Blackwell card (RTX 50-series, RTX PRO 6000, B200), 2026-10-17. Blackwell is opt-in per run (machine.blackwell: true) until this has passed. Train only, cut 4, a tiny network on 20,000 labels, 3 epochs, device cuda (the chunk fails if the GPU check fails): it proves that the machine installs the cu130 group from the image, that torch sees the card and trains on it, and that rung.json records python_env.group cu130 with the compute capability (10.0 or 12.0) and device.json the GPU. Needs: an image built (Actions: image) from eng-cu130 or later, the release binaries of that commit as bin_sha, and the vast-run inputs min_cores 16 (the input's default of 190 would otherwise win over this manifest's 16), max_dollars 2, cheapest ticked. Not a measure of strength.",
+  "machine": {
+    "gpus": 1,
+    "min_gpu_ram_gb": 8,
+    "min_cores": 16,
+    "min_ram_gb": 32,
+    "disk_gb": 60,
+    "blackwell": true,
+    "max_dph": 1.0,
+    "gpu_names": [
+      "RTX 5090",
+      "RTX 5080",
+      "RTX 5070 Ti",
+      "RTX 5070",
+      "RTX 5060 Ti",
+      "RTX PRO 6000 S",
+      "RTX PRO 6000 WS",
+      "RTX PRO 6000 Max-Q",
+      "B200"
+    ]
+  },
+  "streams": [
+    {
+      "name": "rung",
+      "priority": 1,
+      "kind": "hybrid_rung",
+      "chunks": 1,
+      "params": {
+        "threads": "all",
+        "cut": 4,
+        "check": false,
+        "labels_random": 20000,
+        "labels_random_seed": 101,
+        "labels_rules": 0,
+        "val_count": 5000,
+        "val_seed": 201,
+        "widths": "256,128",
+        "head": "outcome",
+        "epochs": 3,
+        "batch": 1024,
+        "lr": 0.001,
+        "patience": 5,
+        "train_seed": 1,
+        "max_minutes": 15,
+        "device": "cuda",
+        "upload_shards": false,
+        "table": {
+          "hands": 1000000,
+          "seed": 1
+        }
+      }
+    }
+  ]
+}

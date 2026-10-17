@@ -54,10 +54,16 @@ reads the compute capability of the first GPU `nvidia-smi` lists (the one the tr
 `cu130` for 10.0 and above (Blackwell: RTX 50-series such as the 5060 Ti and 5090, and the B200) and
 `cu126` for every card below it. CUDA 13 drops the cards older than Turing (7.5), so cu126 stays for the
 GTX 10-series and the V100. A capability that cannot be read keeps cu126 and puts a warning in
-`rung.json`; its `python_env` records the group and the compute capability. The launcher rents a
-Blackwell card only on a host whose driver supports CUDA 13.0 (vast's `cuda_max_good` of 13.0 or more) and
-drops, with a log line naming the offer and why, a Blackwell offer with an older driver; the search still
-asks for `cuda_vers>=12.6` and has no upper compute-capability limit. Training runs in floats only, and
+`rung.json`; its `python_env` records the group and the compute capability. **Blackwell is opt-in per run
+until a smoke test has proven the new image**, because a run dispatched with a runner binary from before
+this change knows only cu126 and would fail on such a card. A run opts in with `"blackwell": true` in the
+manifest's `machine` object (or the launcher's `--allow-blackwell`) and must use release binaries from
+`eng-cu130` or later and an image rebuilt from it. Without the opt-in (the default, and every existing
+manifest) the launcher behaves exactly as before: `compute_cap<1000` in the search, and a Blackwell offer,
+a named one included, is refused ("Blackwell card (compute capability 1200): this run did not opt in …").
+With it the search has no upper compute-capability limit and still asks for `cuda_vers>=12.6`, and the
+launcher rents a Blackwell card only on a host whose driver supports CUDA 13.0 (vast's `cuda_max_good` of
+13.0 or more), dropping, with a log line naming the offer and why, one with an older driver. Training runs in floats only, and
 what the rest of the system validates, byte for byte, is the integer network that comes out of it (named by
 its SHA-256), so no result depends on the card or the build: another card may train a slightly different
 float network, as two older cards already may. The locked cu130 build (`torch-2.14.1+cu130`) was installed
@@ -66,7 +72,13 @@ B200 at 10.0 and the RTX 50-series at 12.0 are covered, the Volta and Pascal car
 cu126 stays); the GPU check (`fortyone_nn.device`) accepts 10.0 to 12.1 against that list. Not yet tried on a
 real Blackwell card, and the image was not rebuilt with both groups here (no Docker daemon on this VM): the
 first smoke run on a Blackwell card is the real test, and the image has to be rebuilt (Actions → image)
-before the runner finds `cu130` in the cache. The cache, and so the image, is
+before the runner finds `cu130` in the cache. **The smoke test** is `docs/vast/cu130-smoke.manifest.json`:
+train only at cut 4, widths 256,128, 20,000 labels and 3 epochs on `device: "cuda"`, on one RTX 50-series,
+RTX PRO 6000 or B200 card (`gpu_names`, up to $1.00 an hour). Dispatch vast-run with that manifest, the
+rebuilt image, `bin_sha` of an `eng-cu130` commit's release, `min_cores` 16 (the input's default of 190
+beats the manifest's 16), `max_dollars` 2, `cheapest` and `dry_run` off. It passes when `rung.json` says
+`python_env.group` `cu130` with `compute_cap` 10.0 or 12.0, `device.json` names the card and the chunk
+trained on it. Only then should other manifests get `"blackwell": true`. The cache, and so the image, is
 larger by the cu130 packages (about 2.75 GB of wheels not shared with cu126, which in the cache may be
 roughly 4.7 GB on disk).
 
@@ -85,8 +97,9 @@ would rent), then without:
 
 The manifests carry the machine's needs in a `machine` object: at least one GPU (`gpus` 1; a machine with
 two GPUs is fine, the price is per machine, and the trainer uses one, `cuda:0`) with at least 4 GB,
-compute capability 6.0 or newer (a card of 10.0 and above, Blackwell, is fine on a host whose driver
-supports CUDA 13.0; the runner gives it the cu130 build), 32 GB of RAM and 80 GB of disk. These apply
+compute capability 6.0 or newer and below 10.0 (a Blackwell card, 10.0 and above, only with
+`"blackwell": true` in the same object, on a host whose driver supports CUDA 13.0: see "Two CUDA builds"),
+32 GB of RAM and 80 GB of disk. These apply
 even with the workflow's default `cpu_only` box ticked; the `gpus`, `min_gpu_ram_gb` and `disk_gb`
 inputs can raise them. An offer picked by `offer_id` is checked against
 the same needs.

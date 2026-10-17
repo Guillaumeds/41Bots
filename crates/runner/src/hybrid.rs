@@ -3097,6 +3097,54 @@ mod tests {
         assert!(rungs >= 6, "{rungs} hybrid rungs");
     }
 
+    /// The cu130 smoke manifest (docs/vast/cu130-smoke.manifest.json) trains only, on the GPU,
+    /// a tiny network on a few labels, with no audit loop and no golden set, and asks the launcher
+    /// for one Blackwell-class GPU (`machine.blackwell`, a boolean the runner ignores).
+    #[test]
+    fn cu130_smoke_manifest_is_a_tiny_train_only_gpu_run() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/vast/cu130-smoke.manifest.json");
+        let v: Value = serde_json::from_str(&fs::read_to_string(&path).expect("read"))
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert_eq!(v["run_id"], "cu130-smoke-1");
+        let m = crate::sched::parse_v2(&v).expect("the runner accepts it");
+        assert_eq!(m.streams.len(), 1);
+        let s = &m.streams[0];
+        assert_eq!((s.kind.as_str(), s.threads_all), ("hybrid_rung", true));
+        let p = parse(&s.params).expect("settings");
+        assert_eq!((p.cut, p.check), (4, false));
+        assert_eq!(p.device, Device::Cuda);
+        assert_eq!(p.train.iter().map(|s| s.count).sum::<u64>(), 20_000);
+        assert_eq!(p.train.len(), 1, "random labels only");
+        assert_eq!(p.val.count, 5_000);
+        assert_eq!(
+            (p.widths_arg().as_str(), p.epochs, p.upload_shards),
+            ("256,128", 3, false)
+        );
+        assert!(p.audit.is_none() && !p.compare_cpu);
+        let mach = &v["machine"];
+        assert_eq!(
+            (&mach["gpus"], &mach["min_gpu_ram_gb"], &mach["min_cores"]),
+            (&json!(1), &json!(8), &json!(16))
+        );
+        assert_eq!(
+            (&mach["min_ram_gb"], &mach["disk_gb"], &mach["max_dph"]),
+            (&json!(32), &json!(60), &json!(1.0))
+        );
+        assert_eq!(mach["blackwell"], json!(true));
+        let names: Vec<&str> = mach["gpu_names"]
+            .as_array()
+            .expect("gpu_names")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(
+            names.contains(&"RTX 5090") && names.contains(&"B200"),
+            "{names:?}"
+        );
+        assert!(v.get("bin_sha").is_none(), "the launcher sets bin_sha");
+    }
+
     /// The committed manifests (docs/vast/m3-hybrid-*.manifest.json) are runnable: the runner
     /// accepts them (their hybrid settings included) and they ask the launcher for one GPU.
     #[test]

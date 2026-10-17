@@ -54,15 +54,12 @@ jobs:
         run: |
           set -euo pipefail
           vastai show user --raw | python3 -c 'import json,sys; u=json.load(sys.stdin); print({k:u.get(k) for k in ("id","username","balance","credit","balance_threshold","billaddress_country") if k in u})'
-      # Blackwell cards (compute_cap 1000 and above: RTX 50-series, B200) are in the list (owner, 2026-10-17); the
-      # launcher rents one only when its host driver supports CUDA 13.0 (cuda<= shown below), because the runner
-      # installs the PyTorch cu130 build for it. Vast's query cannot say that, so the check shows cc and cuda.
       - name: Cheapest on-demand offers matching the plan's filters
         shell: bash
         run: |
           set -euo pipefail
           for MIN in 16 48 96 160; do
-            vastai search offers "reliability>0.9 num_gpus>=1 gpu_frac=1 cpu_cores_effective>=$MIN cpu_ram>=32 compute_cap>=600 cuda_vers>=12.6 rentable=true" --order 'dph_total' --limit 6 --raw > "offers-$MIN.json"
+            vastai search offers "reliability>0.9 num_gpus>=1 gpu_frac=1 cpu_cores_effective>=$MIN cpu_ram>=32 compute_cap>=600 compute_cap<1000 cuda_vers>=12.6 rentable=true" --order 'dph_total' --limit 6 --raw > "offers-$MIN.json"
           done
           python3 - <<'PY'
           import json
@@ -76,8 +73,7 @@ jobs:
                   print(
                       f"id={o.get('id')} ${dph:.3f}/h  ${per_core*100:.2f} per 100 core-h  {o.get('num_gpus')}x {o.get('gpu_name')}  "
                       f"cores_eff={cores:.0f} ram={o.get('cpu_ram')}MB cpu={o.get('cpu_name')}  rel={o.get('reliability2', 0):.3f}  "
-                      f"net down=${o.get('inet_down_cost')}/GB up=${o.get('inet_up_cost')}/GB  disk={o.get('disk_space', 0):.0f}GB  "
-                      f"cc={o.get('compute_cap')} cuda<={o.get('cuda_max_good')}"
+                      f"net down=${o.get('inet_down_cost')}/GB up=${o.get('inet_up_cost')}/GB  disk={o.get('disk_space', 0):.0f}GB"
                   )
           PY
           echo "No instance was created."
