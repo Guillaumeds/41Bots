@@ -95,7 +95,8 @@
 //!   --net <o2> --worlds <the worlds file>`, with `--reference silver --reference-net <o3>` when
 //!   the chunk's reference is silver, `--verify-pct` of the stored worlds recomputed first and
 //!   required byte-identical, `--race-groups` (default true: the score and race groups), into
-//!   `out/measure/hc-t<trick>-o<cut>-<silver|exact>.json` and the printed tables in `.txt`;
+//!   `out/measure/hc-t<trick>-o<cut>-<silver|exact>.json` and the printed tables in `.txt`
+//!   (`verify_solve_threads`: threads inside each recomputed reference solve, default 1);
 //!   `result.json`'s `checks` give each verdict and the overall and band rows. A check's cut must
 //!   be before the reference's. Not with an extension (`from` above 0). Without `reference` the
 //!   worlds are exact and so is each check's reference.
@@ -328,6 +329,9 @@ pub(crate) struct NetRef {
 pub(crate) struct CheckSpec {
     pub net: NetRef,
     pub verify_pct: f64,
+    /// Threads inside each recomputed reference solve (`--verify-solve-threads`: the parallel
+    /// solver, the same values; a heavy trick-1 world on one thread can take hours).
+    pub verify_solve_threads: u64,
     pub tt_mb: u64,
     pub standard: String,
     pub boot: u64,
@@ -349,11 +353,12 @@ pub(crate) struct Silver {
 
 /// The keys of `reference` and of `check` (any other is refused).
 const REFERENCE_KEYS: [&str; 3] = ["cut", "net_input", "net"];
-const CHECK_KEYS: [&str; 8] = [
+const CHECK_KEYS: [&str; 9] = [
     "cut",
     "net_input",
     "net",
     "verify_pct",
+    "verify_solve_threads",
     "tt_mb",
     "standard",
     "boot",
@@ -474,6 +479,11 @@ pub(crate) fn parse_silver(p: &Value) -> Result<Silver, String> {
             CheckSpec {
                 net,
                 verify_pct,
+                verify_solve_threads: v
+                    .get("verify_solve_threads")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1)
+                    .max(1),
                 tt_mb: v.get("tt_mb").and_then(Value::as_u64).unwrap_or(64).max(1),
                 standard,
                 boot: v.get("boot").and_then(Value::as_u64).unwrap_or(1000),
@@ -1018,6 +1028,10 @@ fn check_command(
         c.arg("--race-groups");
     }
     c.args(["--verify-pct", &cs.verify_pct.to_string()])
+        .args([
+            "--verify-solve-threads",
+            &cs.verify_solve_threads.to_string(),
+        ])
         .args(["--threads", &threads.to_string()])
         .args(["--tt-mb", &cs.tt_mb.to_string()])
         .args(["--boot", &cs.boot.to_string()])
@@ -1350,7 +1364,7 @@ esac
                 && h.contains(&format!(
                     "--reference silver --reference-cut 3 --reference-net {o3}"
                 ))
-                && h.contains("--race-groups --verify-pct 3")
+                && h.contains("--race-groups --verify-pct 3 --verify-solve-threads 1")
                 && h.contains("silver-t1-c3-n4.jsonl"),
             "{h}"
         );

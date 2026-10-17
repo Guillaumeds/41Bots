@@ -3669,6 +3669,43 @@ mod tests {
         }
         assert_eq!(files[0], files[1], "1 and 2 threads");
         assert_eq!(files[0], files[2], "1 and 4 threads");
+        // Each world split over several threads (the parallel solver with the frontier): the same
+        // bytes.
+        {
+            let l: Arc<SharedLeaf> = Arc::new(nn::synthetic::SyntheticLeaf);
+            let src = crate::worlds::BeliefSource::new();
+            let ctx = Ctx {
+                leaf: &*l,
+                source: &src,
+                rules: Rules::HOUSE,
+            };
+            let p = tmp("silver-par");
+            clean(&p);
+            let cfg = SearchConfig {
+                threads: 2,
+                solve_threads: 3,
+                tt_mb: 4,
+                ..SearchConfig::default()
+            };
+            worlds_file_net(
+                &p,
+                &ds,
+                &job,
+                &ctx,
+                &cfg,
+                &Schedule::Fixed,
+                None,
+                |_, _| {},
+                net,
+            )
+            .expect("runs");
+            assert_eq!(
+                std::fs::read(&p).expect("written"),
+                files[0],
+                "3 threads a world"
+            );
+            clean(&p);
+        }
         // The position-aware schedule takes the plain workers for a hybrid run: the same bytes.
         let l: Arc<SharedLeaf> = Arc::new(nn::synthetic::SyntheticLeaf);
         let src = crate::worlds::BeliefSource::new();

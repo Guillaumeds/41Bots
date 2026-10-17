@@ -6,7 +6,7 @@
  "benchmark_seconds": 0,
  "upload_every_s": 300,
  "heartbeat_every_s": 30,
- "note": "A given O_2 checked at the decision level against the stored trick-1 silver set (docs/m3-hybrid/silver.md): the silver worlds file of m3-hybrid-t1-silver-1 (worlds_input) is copied in and the worlds step finds every world there (no H_3 solve); search hybrid-check --trick 1 --cut 2 --net <O_2> --reference silver --reference-net <O_3>: decision loss of H_2's choice under H_3's means, its 95% upper bound overall, by seat band and position, bias per team, agreement, and the score (stratum) and race groups; 1% of the silver worlds recomputed with H_3 first and required byte-identical. Fill in the silver set's SHA-256 (result.json shared.worlds.sha256 of the silver run) and the O_2 to check (an integer network's SHA-256, rung.json net.int_key).",
+ "note": "A given O_2 checked at the decision level against the stored trick-1 silver set (docs/m3-hybrid/silver.md): the silver worlds file of m3-hybrid-t1-silver-1 (worlds_input) is copied in and the worlds step finds every world there (no H_3 solve); search hybrid-check --trick 1 --cut 2 --net <O_2> --reference silver --reference-net <O_3>: decision loss of H_2's choice under H_3's means, its 95% upper bound overall, by seat band and position, bias per team, agreement, and the score (stratum) and race groups; 1% of the silver worlds recomputed with H_3 first and required byte-identical. Fill in the silver set's SHA-256 (result.json shared.worlds.sha256 of the silver run) and the O_2 to check (an integer network's SHA-256, rung.json net.int_key). The 1% verification sample is about 1,280 H_3 worlds (about 1% of the silver set's cost, 30-60 minutes), each solved on 8 threads.",
  "machine": {
   "min_cores": 190,
   "min_ram_gb": 64,
@@ -48,7 +48,8 @@
      "net_input": "o2",
      "verify_pct": 1,
      "tt_mb": 64,
-     "race_groups": true
+     "race_groups": true,
+     "verify_solve_threads": 8
     },
     "table": {
      "hands": 1000000,

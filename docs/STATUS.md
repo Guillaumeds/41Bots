@@ -321,3 +321,26 @@ each round records, so that it confirms the groups that can matter for decisions
 retraining from scratch (warm start, or several seeds); (c) a targeted study of trick 3's leader positions and own-team
 bias; (d) adopt O_4 round 1 and O_3 round 2 as the current best. Not started: the trick-2 loop (branch `m3-hybrid-t2loop`,
 built), items C and D.
+
+## 2026-10-17: the trick-1 silver set (branch `eng-silver`, nothing rented)
+
+O_2 checked at the decision level on trick-1 decisions without exact trick-1 solves
+(`docs/m3-hybrid/silver.md`). The reference is H_3 [exact search through tricks 1 and 2, the adopted
+O_3 at the start of trick 3] on the golden sets' own decisions and deals; the thing tested is H_2
+[exact trick 1, O_2 at the start of trick 2] on the same deals; the score is the money H_2's choice
+loses under H_3's values, with the golden checks' statistics plus score and race groups.
+- **Built:** `search worlds --method hybrid --cut 3 --net O3` (resumable, byte-identical for any
+  thread count; records marked `hybrid` with the network's SHA-256, refused wherever an exact golden
+  set is required); `search hybrid-check --reference silver --reference-net O3 [--allow-exact]
+  [--race-groups]`; the runner's `search_measure` chunk takes `reference`, `share`, `worlds_input`
+  and `check`. Manifests, not launched: `m3-hybrid-t1-silver-mech` (16 × 8, about $1),
+  `m3-hybrid-t1-silver` (400 × 320), `m3-hybrid-t1-silver-check` (a given O_2 against the stored
+  set), `m3-hybrid-t1-anchor` (optional exact anchor, about $3).
+- **Pilot (build VM):** H_3 at trick 1 is almost all network time: a leader world asks the
+  2048-1024-256 O_3 about 10 million times (10–30+ thread-minutes here); seat 2 averages about 5.5
+  minutes, seat 3 3.5, seats 4–8 seconds. **Price on an AMD EPYC 9654 (368 threads, $1.01/h):
+  400 × 320 about 42–81 hours, $42–82; 400 × 160 or 200 × 320 $21–41; 200 × 160 $11–21; 400 × 80
+  $5–10.** Worlds are nested, so a small set extends later. The mechanism test should confirm the
+  rate on the real machine first.
+- **For the owner:** which size to run (or a smaller first stage), and whether to add the exact
+  anchor that measures the silver's own error at trick 1.
