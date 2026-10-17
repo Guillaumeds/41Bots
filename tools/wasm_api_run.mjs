@@ -29,11 +29,12 @@ let repeat = 1;
 const args = [];
 for (let i = 0; i < rest.length; i++) {
   const a = rest[i];
-  if (a === "--equity" || a === "--net") {
+  if (a === "--equity" || a === "--net" || a === "--student") {
     const f = rest[++i] ?? fail(`${a} needs a file`);
     const bytes = readFileSync(f);
     const t = performance.now();
-    const j = a === "--equity" ? engine.loadEquity(bytes) : engine.loadNet(bytes);
+    const j =
+      a === "--equity" ? engine.loadEquity(bytes) : a === "--student" ? engine.loadStudent(bytes) : engine.loadNet(bytes);
     console.error(`loaded ${f} in ${(performance.now() - t).toFixed(0)} ms: ${JSON.stringify(j)}`);
   } else if (a === "--repeat") {
     repeat = Number(rest[++i]);
@@ -50,7 +51,8 @@ if (cmd === "eval") {
   const k = Number(files.shift());
   for (const f of files) {
     const req = JSON.parse(readFileSync(f, "utf8"));
-    const shards = Math.min(k, req.deals);
+    // A student request is one call (no deals to split): it is merged alone.
+    const shards = req.method === "student" ? 1 : Math.min(k, req.deals);
     const parts = [];
     for (let i = shards - 1; i >= 0; i--) parts.push(engine.evaluate({ ...req, shard: i, shards }));
     console.log(engine.merge(parts));

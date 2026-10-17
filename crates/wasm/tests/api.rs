@@ -914,3 +914,116 @@ fn lines_merge_to_the_same_bytes_and_add_up() {
         );
     }
 }
+
+/// A seeded random student network (the plumbing only, never a bot's strength).
+fn student_bytes(seed: u64) -> Vec<u8> {
+    let net = student::net::random_net(seed, &[32, 16], 12);
+    student::net::write_net(net.layers(), &BTreeMap::new())
+}
+
+/// `method: "student"` (docs/STUDENT.md, docs/WASM-API.md §3): at tricks 1-2 with all eight seats
+/// in play each candidate's values are the student's own (the native encoder and integer network on
+/// the seat's view), best first, with no deals; at trick 3, a forced card or a pair turned, the
+/// result is the search's, byte for byte; it is one call (merging it alone gives the same bytes);
+/// the refusals.
+#[test]
+fn the_student_method_values_with_the_student() {
+    let mut e = engine(false);
+    let req_of = |m: &Match, deals: u32| {
+        let mut r = app_request(m, deals, 77, Mask::SeatOwnBurns);
+        r["method"] = json!("student");
+        r
+    };
+    let plain = |m: &Match| !any_turned(m) && m.reneges().is_empty();
+    let t2 = find(41, 0, &|m| plain(m) && playing(m, 2));
+    // Not loaded: refused.
+    assert_eq!(code(&e.evaluate(&req_of(&t2, 4).to_string())), "no_student");
+    assert_eq!(
+        e.load_student(b"nonsense").map_err(|r| r.code),
+        Err("bad_file")
+    );
+    let sha = e.load_student(&student_bytes(5)).expect("loads");
+    assert_eq!(parse(&e.info(None))["student"], json!(sha));
+    let net = student::net::StudentNet::from_bytes(&student_bytes(5)).expect("loads");
+    let rob = find(42, 0, &|m| {
+        let p = m.public();
+        matches!(p.phase, Phase::AwaitBurn(_)) && p.trick_no == 1
+    });
+    let t1 = find(43, 0, &|m| plain(m) && playing(m, 1));
+    for (k, m) in [&t2, &rob, &t1].into_iter().enumerate() {
+        let out = e.evaluate(&req_of(m, 4).to_string());
+        let v = parse(&out);
+        assert_eq!(v["status"], "ok", "case {k}: {out}");
+        assert_eq!(v["method"], "student");
+        assert_eq!(v["worlds"], 0);
+        assert!(
+            v["engine"]
+                .as_str()
+                .expect("a string")
+                .contains(&format!("student:{sha}"))
+        );
+        // The native student on the seat's own view.
+        let seat = m.to_act().expect("a decision");
+        let view = m.view(seat);
+        let (_, mut cands) = candidates(&view, &m.legal_actions());
+        let p = m.public();
+        if matches!(p.phase, Phase::AwaitBurn(_)) {
+            let taken = p.turned.last().map(|&(c, _)| c);
+            cands.retain(
+                |&(a, _)| !(matches!(a, engine::game::Action::Burn(c) if Some(c) == taken)),
+            );
+        }
+        let f = student::encode::encode_view(&view, &*leaf()).expect("encodes");
+        let cf: Vec<Vec<u16>> = cands
+            .iter()
+            .map(|&c| student::encode::encode_cand(&view, c))
+            .collect();
+        let vals = net.evaluate(&f, &cf);
+        let mut native: Vec<_> = cands
+            .iter()
+            .zip(&vals)
+            .map(|(&(a, t), &x)| (a, t, x))
+            .collect();
+        native.sort_by_key(|x| (x.0, x.1));
+        assert_eq!(api_means(&v), native, "case {k}");
+        let best = student::net::choose(&vals, team_of(seat));
+        let first = &v["candidates"][0]["action"];
+        let card = first["card"]
+            .as_i64()
+            .or(first["discard"].as_i64())
+            .expect("a card");
+        assert_eq!(engine_card(card), Some(cands[best].0.card()), "case {k}");
+        // One call: merged alone, the same bytes.
+        assert_eq!(merge(&format!("[{out}]")), out);
+    }
+    // Elsewhere the search's result, byte for byte.
+    let t3 = find(44, 0, &|m| plain(m) && playing(m, 3));
+    let forced = find(18, 0, &|m| {
+        let p = m.public();
+        matches!(p.phase, Phase::AwaitPlay(_)) && p.trick_no == 2 && m.legal_actions().len() == 1
+    });
+    for m in [&t3, &forced] {
+        let plain_req = app_request(m, 8, 77, Mask::SeatOwnBurns);
+        assert_eq!(
+            e.evaluate(&req_of(m, 8).to_string()),
+            e.evaluate(&plain_req.to_string())
+        );
+    }
+    // Refusals: shards, lines, an unknown method.
+    let mut r = req_of(&t2, 4);
+    r["shards"] = json!(2);
+    assert_eq!(code(&e.evaluate(&r.to_string())), "bad_request");
+    let mut r = req_of(&t2, 4);
+    r["lines"] = json!(true);
+    assert_eq!(code(&e.evaluate(&r.to_string())), "bad_request");
+    let mut r = req_of(&t2, 4);
+    r["method"] = json!("guess");
+    assert_eq!(code(&e.evaluate(&r.to_string())), "bad_request");
+    // `method: "search"` is the plain request.
+    let mut r = req_of(&t3, 8);
+    r["method"] = json!("search");
+    assert_eq!(
+        e.evaluate(&r.to_string()),
+        e.evaluate(&app_request(&t3, 8, 77, Mask::SeatOwnBurns).to_string())
+    );
+}

@@ -732,6 +732,7 @@ dependencies = [
  "search",
  "serde_json",
  "solver",
+ "student",
 ]
 
 [[package]]

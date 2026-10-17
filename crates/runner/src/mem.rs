@@ -394,7 +394,7 @@ pub(crate) fn chunk_need(
                 _ => whole,
             }
         }
-        "solver_spike" | "t1bench" | "hybrid_rung" | "hybrid_t1check" => whole,
+        "solver_spike" | "t1bench" | "hybrid_rung" | "hybrid_t1check" | "student_teacher" => whole,
         _ => 0,
     }
 }

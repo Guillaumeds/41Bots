@@ -3,13 +3,18 @@
 //! same bytes) and the speed measurements.
 //!
 //! ```text
-//! engine-native [--equity FILE] [--net FILE]... eval REQUEST.json...    one result per line
+//! engine-native [--equity FILE] [--net FILE]... [--student FILE] eval REQUEST.json...
+//!                                                                       one result per line
 //! engine-native merge RESULTS.json                                      a JSON array of results
 //! engine-native time [--equity F] [--net F]... [--repeat R] REQUEST.json...
 //! engine-native fixtures DIR                                            write the check's requests
 //! engine-native bench DIR [DEALS [PER_PLACE]]                           write the speed requests
 //! engine-native info [--equity F] [--net F]...
+//! engine-native random-student OUT [SEED]                              a random student network
 //! ```
+//! `random-student` writes a seeded random student network (`student::net::random_net`, hidden
+//! 64-32) for `tools/wasm_check.sh`: it tests that the student's values are the same bytes
+//! natively and as WebAssembly, never a bot's strength.
 
 use std::process::ExitCode;
 use std::time::Instant;
@@ -21,6 +26,7 @@ fn load(flag: &str, path: &str) -> Result<(), String> {
     let n = ffi::set_input(&bytes);
     let status = match flag {
         "--equity" => ffi::load_equity(n),
+        "--student" => ffi::load_student(n),
         _ => ffi::load_net(n),
     };
     let out = String::from_utf8(ffi::output()).unwrap_or_default();
@@ -44,7 +50,7 @@ fn run(args: &[String]) -> Result<(), String> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            f @ ("--equity" | "--net") => {
+            f @ ("--equity" | "--net" | "--student") => {
                 let p = args.get(i + 1).ok_or(format!("{f} needs a file"))?;
                 load(f, p)?;
                 i += 2;
@@ -122,6 +128,13 @@ fn run(args: &[String]) -> Result<(), String> {
                 std::fs::write(&p, format!("{req}\n")).map_err(|e| format!("{p}: {e}"))?;
                 eprintln!("wrote {p}");
             }
+        }
+        "random-student" => {
+            let out = files.first().ok_or("random-student needs a file")?;
+            let seed = files.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
+            let net = student::net::random_net(seed, &[64, 32], 12);
+            let bytes = student::net::write_net(net.layers(), &std::collections::BTreeMap::new());
+            std::fs::write(out, bytes).map_err(|e| format!("{out}: {e}"))?;
         }
         "info" => {
             ffi::info();

@@ -213,12 +213,34 @@ pub fn requests() -> Vec<(String, String)> {
         .map(|(n, m, d)| (format!("{n}-lines"), m.clone(), (*d).min(8)))
         .collect();
     out.extend(with_lines);
+    // The student's method (docs/STUDENT.md) on the same positions: valued by the student at
+    // tricks 1-2, and as before elsewhere (exact at trick 3, forced, a pair turned).
+    let with_student: Vec<(String, Match, u32)> = out
+        .iter()
+        .filter(|(n, _, _)| {
+            [
+                "t1-rob",
+                "t1-play",
+                "t2-hybrid",
+                "t2-hybrid-b",
+                "t3-exact",
+                "t2-forced",
+                "t2-turned",
+            ]
+            .contains(&n.as_str())
+        })
+        .map(|(n, m, d)| (format!("{n}-student"), m.clone(), *d))
+        .collect();
+    out.extend(with_student);
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out.into_iter()
         .map(|(name, m, deals)| {
             let mut req = app_request(&m, deals, 20_261_017, Mask::SeatOwnBurns);
             if name.ends_with("-lines") {
                 req["lines"] = serde_json::Value::Bool(true);
+            }
+            if name.ends_with("-student") {
+                req["method"] = serde_json::Value::from("student");
             }
             (name, req.to_string())
         })

@@ -25,7 +25,7 @@ use engine::rng::Rng;
 use serde_json::{Value, json};
 
 /// Kinds a format-2 stream may run.
-pub const KINDS: [&str; 13] = [
+pub const KINDS: [&str; 14] = [
     "difftest",
     "equity_sweep",
     "benchmark",
@@ -39,6 +39,7 @@ pub const KINDS: [&str; 13] = [
     "belief_bench",
     "hybrid_rung",
     "hybrid_t1check",
+    "student_teacher",
 ];
 
 /// The keys of a stream object; everything else goes in `params`.
@@ -376,6 +377,19 @@ pub fn parse_v2(v: &Value) -> Result<Manifest2, String> {
                 if !inputs.iter().any(|(i, _)| *i == n) {
                     return Err(format!(
                         "stream `{name}`: hybrid_t1check names input `{n}`, which the manifest's \
+                         inputs do not list"
+                    ));
+                }
+            }
+        }
+        // The student's teacher records name their network among the manifest's inputs.
+        if kind == "student_teacher" {
+            for n in
+                crate::student::input_names(&params).map_err(|e| format!("stream `{name}`: {e}"))?
+            {
+                if !inputs.iter().any(|(i, _)| *i == n) {
+                    return Err(format!(
+                        "stream `{name}`: student_teacher names input `{n}`, which the manifest's \
                          inputs do not list"
                     ));
                 }

@@ -23,6 +23,7 @@ the work (tested, §10).
 | Tricks 3–5 | exact solve to the end of the hand | none |
 | After a pair was turned | exact among the seats still in play (networks never see these); trick 1 with six seats in play is refused (`too_slow`) | none |
 | One legal action | nothing searched (`method: "forced"`) | none |
+| Tricks 1–2, all 8 seats in play, with `method: "student"` | the student network (docs/STUDENT.md): every candidate valued from the seat's view in milliseconds, no deals | the student |
 
 The search is the engine's own PIMC [Perfect-Information Monte Carlo: value every candidate in many
 guessed deals as if the cards were face up, and average], exactly as the native search runs it:
@@ -39,6 +40,7 @@ import { load } from "./engine.mjs";
 const engine = await load(wasmBytesOrModule);          // ArrayBuffer | typed array | WebAssembly.Module
 engine.loadEquity(equityBytes, "64740dab…");            // -> { sha256, bytes }; SHA-256 checked when given
 engine.loadNet(o3Bytes, "f5766aa9…");                   // -> { sha256, trick: 3, bytes }
+engine.loadStudent(studentBytes);                        // -> { sha256, bytes } (method "student")
 const resultJson = engine.evaluate(requestObjectOrJson); // -> string (JSON)
 const mergedJson = engine.merge([result0, result1]);     // objects or JSON strings -> string (JSON)
 engine.info();  // -> { engine, api: 1, valuesVersion: 2, equity, nets: { "3": sha }, memoryBytes }
@@ -76,6 +78,7 @@ one copy each way, so even the 26 MB table loads in a quarter of a second.
 | `expect_sha256` | `(len) -> u32` | the input (64 lowercase hex digits) is the SHA-256 the next loaded file must have: 0, or 1 with a refusal in the output |
 | `load_equity` | `(len) -> u32` | the input is the equity table: 0 (output `{sha256, bytes}`) or 1 (output: a refusal) |
 | `load_net` | `(len) -> u32` | the input is a network: 0 (output `{sha256, trick, bytes}`) or 1 (output: a refusal) |
+| `load_student` | `(len) -> u32` | the input is the student network: 0 (output `{sha256, bytes}`) or 1 (output: a refusal) |
 | `evaluate` | `(len) -> u32` | the input is a request (UTF-8 JSON); the result goes to the output; returns its length |
 | `merge` | `(len) -> u32` | the input is a JSON array of results; the merged result goes to the output |
 | `info` | `() -> u32` | the engine's version, the loaded files and the memory in use, as JSON in the output |
@@ -100,6 +103,7 @@ const request = { v: 1, seat, deals: 64, seed: String(seed), match: maskMatch(m,
 | `shard`, `shards` | optional, default 0 and 1; `shards` ≤ `deals` | this call values shard `shard` of `shards` (§6) |
 | `ttMb` | optional, 1..1024, default 16 | the exact search's memory table in MB: only the speed, never a value (measured: 2 to 64 MB change the time by about 10%) |
 | `ownBurns` | optional, app card ids, oldest first | the cards this seat burned this hand, when `match.hand.discards` hides them |
+| `method` | optional: `"search"` (the default) or `"student"` | `"student"` values a decision at trick 1 or 2 with all eight seats in play by the student network (the bots' fast player, docs/STUDENT.md): no deals, `shards` must be 1, no `lines`; every other decision is valued as without it (exact at tricks 3–5, forced, a pair turned), byte for byte. Needs `loadStudent` (`no_student`). |
 | `lines` | optional, default false | also the coach's fields from each deal's principal line (§4.1): every candidate then has its own row. Costs about 10% more at trick 2 and about 3× at tricks 3–5 (measured, §8); the bots leave it off. |
 | `match` | the app's `MatchState` | the seat's view: `maskMatch(m, seat)`. The unmasked match gives the same bytes (tested): the engine reads nothing a seat may not see. |
 
@@ -216,7 +220,7 @@ and the three other candidates shortened):
 | `key` | SHA-256 of what the engine read (its version string, the seat's view as the engine rebuilt it, the seat, `deals`, `seed`): equal for every shard of one search; `merge` refuses different keys |
 | `seat`, `pair` | the viewer and its pair (`seat % 4`, the app's `pairOf`) |
 | `trick` | 1..5 (1 also for the dealer's burn before trick 1) |
-| `method` | `"hybrid"` (H_k), `"exact"` (to the end of the hand) or `"forced"` |
+| `method` | `"hybrid"` (H_k), `"exact"` (to the end of the hand), `"forced"`, or `"student"` (the student network: `worlds` 0, `worldCount` null, `meanHorizon` null; each candidate its own row with the student's `mean`/`mean_fp`/`value`, `se` null, `n` and `ess` 0, `sum_fp` the value, `sumsq_fp` null; the `engine` string names `student:<SHA-256>`) |
 | `meanHorizon` | tricks searched exactly before the network takes over (`k − trick`: 1 at trick 2 with O_3), or `null` when exact to the end of the hand or forced |
 | `deals`, `shard`, `shards`, `dealsFrom`, `dealsTo` | the request's N and the deals this result covers (end excluded) |
 | `worlds` | `n` of the best candidate; **0 for a forced card** |
@@ -278,13 +282,14 @@ The app's own bot plays any refused decision.
 | `not_to_act` | `seat` is not the seat to act (a view from another seat: coming) |
 | `no_equity` | the equity table is not loaded |
 | `no_network_for_trick` | the decision needs a network not loaded: trick 1 needs O_2, trick 2 (all eight seats in play) needs O_3 |
+| `no_student` | `method: "student"` at trick 1 or 2 without the student network loaded |
 | `not_built` | the dealer's burn before trick 1 (`steal`, or robbing a turned ace at once) |
 | `too_slow` | after a turn, a trick-1 decision with six seats in play (an exact deal takes about 17 s natively) |
 | `led_trick_in_progress` | contract §7.1 Q1: the view needs a pair turned while the trick it led is being played (open rules question) |
 | `own_burns_hidden` | the seat burned a card and neither `ownBurns` nor the seat's `discards` says which |
 | `inconsistent_view` | the view cannot happen under the rules (no deal fits it, the engine refuses one of its steps, or the replay disagrees with the app's own state), or the seat itself has a renege nobody has caught |
 | `merge_mismatch` | `merge`: results of different searches (`key`), shards missing or twice, or refusals that differ (identical refusals merge to that refusal) |
-| `bad_file`, `sha256_mismatch` | `loadEquity` / `loadNet`: not a complete table or a network this engine reads; not the expected SHA-256 |
+| `bad_file`, `sha256_mismatch` | `loadEquity` / `loadNet` / `loadStudent`: not a complete table or a network this engine reads (a student network made for another encoder name or hash included); not the expected SHA-256 |
 
 ## 6. Several Web Workers: shards and `merge`
 

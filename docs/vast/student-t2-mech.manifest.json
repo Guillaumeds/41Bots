@@ -1,0 +1,72 @@
+{
+  "format": 2,
+  "run_id": "student-t2-mech-1",
+  "run_seed": 1,
+  "threads": null,
+  "benchmark_seconds": 0,
+  "upload_every_s": 300,
+  "heartbeat_every_s": 30,
+  "note": "Mechanism test of the student's teacher data (docs/STUDENT.md §4) before the base run: the same streams at a tiny size (a 64-decision test part at 64 deals, two rules parts and one mixed part of 200 decisions at 32 deals), so every step runs once on real hardware: table v0, the O_3 input, search teacher on every thread, the shards' upload to inputs/sha256, the bundles. A few minutes.",
+  "machine": {
+    "min_cores": 190,
+    "min_ram_gb": 96,
+    "disk_gb": 40
+  },
+  "inputs": {
+    "o3": "sha256:f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad"
+  },
+  "streams": [
+    {
+      "name": "test",
+      "priority": 1,
+      "kind": "student_teacher",
+      "chunks": 1,
+      "params": {
+        "threads": "all",
+        "trick": 2,
+        "count": 64,
+        "deals": 64,
+        "seed": 32343,
+        "role": "test",
+        "source": "rules",
+        "net_input": "o3",
+        "tt_mb": 64,
+        "table": { "hands": 1000000, "seed": 1 }
+      }
+    },
+    {
+      "name": "rules",
+      "priority": 2,
+      "kind": "student_teacher",
+      "chunks": 2,
+      "params": {
+        "threads": "all",
+        "trick": 2,
+        "count": 200,
+        "deals": 32,
+        "seed": 9401,
+        "source": "rules",
+        "net_input": "o3",
+        "tt_mb": 64,
+        "table": { "hands": 1000000, "seed": 1 }
+      }
+    },
+    {
+      "name": "mixed",
+      "priority": 3,
+      "kind": "student_teacher",
+      "chunks": 1,
+      "params": {
+        "threads": "all",
+        "trick": 2,
+        "count": 200,
+        "deals": 32,
+        "seed": 9402,
+        "source": "mixed",
+        "net_input": "o3",
+        "tt_mb": 64,
+        "table": { "hands": 1000000, "seed": 1 }
+      }
+    }
+  ]
+}

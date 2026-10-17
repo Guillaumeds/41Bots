@@ -56,6 +56,8 @@
 //! - `hybrid_t1check` (`t1check.rs`, format 2 only): its `net_input`, `decisions_input` and
 //!   `saved[].input` name inputs whose paths are added to its params (`net`, `decisions`,
 //!   `saved[].path`).
+//! - `student_teacher` (`student.rs`, format 2 only): part `first_part + index` of a stream of
+//!   the student's teacher records; its `net_input` names an input whose path is added (`net`).
 //!
 //! The equity input is `inputs.equity` (or the input named by `params.equity_input`).
 //!
@@ -191,6 +193,20 @@ fn worker_inner(spec_path: &Path) -> Result<(), String> {
             json!({ "kind": kind, "seed": seed, "hands": hands })
         }
         "arena_blocks" => arena_blocks(&params, seed, index, &spec, &out, equity().ok())?,
+        "student_teacher" => {
+            // The network's path joins the settings; the chunk's index is its part of the stream
+            // (the generator's own seed is in the settings: a part is the same shard on any run).
+            let mut p = crate::student::resolve(&params, &inputs)?;
+            if let Ok(path) = equity()
+                && let Some(o) = p.as_object_mut()
+            {
+                let t = o.entry("table").or_insert_with(|| json!({}));
+                if let Some(t) = t.as_object_mut() {
+                    t.entry("path").or_insert(json!(path));
+                }
+            }
+            crate::student::chunk(&mut ctx, &p, index)?
+        }
         "suitability" | "agree" | "belief_bench" => {
             // The `search` subcommand of the same name (`belief_bench` → `belief-bench`), with
             // `--seed`, `--out`, the equity table when given, and `params.args` verbatim.

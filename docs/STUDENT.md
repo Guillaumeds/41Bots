@@ -10,7 +10,8 @@ that keeps values byte-identical and stored data reusable is taken and written d
 
 The engine's best player for the first two tricks is slow: for each decision it imagines a few
 hundred deals [complete guesses of the hidden cards consistent with what the seat has seen] and
-searches each one (exact search to the end of the trick, then the trick network O_k), which takes
+searches each one (exact search to the end of the current trick, then a network that values the
+rest of the hand), which takes
 seconds on a big machine and far longer on a phone. The **student** is a small network [a learned
 formula] that looks only at what one seat can see and gives every legal card its chance of the
 money in a few milliseconds. It learns by copying the slow player [the **teacher**] on many
@@ -34,8 +35,9 @@ student design, a bigger network or a better training method reuses everything a
 - **The bot's choice:** the candidate with the highest value for its own pair; ties to the first
   candidate in the engine's candidate order (cards by index; a robber's (burn, play) pairs by burn
   then play), the engine's one tie rule (contract §3).
-- **Candidates:** exactly the WASM API's (`search::pimc::candidates`, without the burn of the card
-  just taken, which has no app action: `docs/WASM-API.md` §3). A robber's rob is valued together
+- **Candidates:** exactly the WASM API's (`search::student_teacher::app_candidates`:
+  `search::pimc::candidates` without the burn of the card just taken, which has no app action:
+  `docs/WASM-API.md` §3). A robber's rob is valued together
   with the card it then plays (the joint decision of M3-SPEC §5.5). The dealer's burn before trick
   1 (trick 0) is not a student decision (the WASM API refuses it too, `not_built`).
 - **Where it plays:** tricks 1 and 2 with all eight seats in play. Positions after a pair is turned
@@ -243,8 +245,9 @@ sources.
   the same machine. The exact search of trick 1 reaches many more frontier positions than trick 2's,
   and each costs a network evaluation, so O_2's width sets the price: trick-1 data is priced again
   once O_2 exists.
-- **Records:** about 30 KB a trick-2 decision at D = 320 (values dominate: 320 deals × about 3
-  candidates × 32 bytes), so 250k decisions are about 8 GB raw, compressed for transfer.
+- **Records:** about 37 KB a trick-2 decision at D = 320 (measured: 35 KB of values, 320 deals ×
+  3.45 candidates × 32 bytes, and a 1.6 KB record), so 250k decisions are about 9.2 GB raw; the
+  feature shard of the same decisions about 0.7 GB.
 - Measured on this VM (Stage 1): see §11.
 
 ## 9. A teacher upgrade (a better O_k, a new equity table)
@@ -273,6 +276,14 @@ relabelled; the raw positions are kept and reused.
 8. The WASM API takes `"method": "student"`; without it every request is valued as before (the
    coach keeps the hybrid PIMC). With it, tricks 1–2 are valued by the student and tricks 3–5 by
    exact search exactly as today.
+9. A rented run adds data by parts of one generator stream (`first_part`, `skip_parts` in the
+   runner's `student_teacher` chunk): a part is a pure function of its settings, so a lost
+   machine's part is remade byte for byte and a later run never remakes a stored one; stored
+   shards are found by their keys (`<name>.inputs.json` beside each part's records).
+10. The trainer keeps a whole selection in memory (compact: about 1.2 KB a decision), enough for a
+    few million decisions on the rented machines; streaming from disk comes when the data needs it.
+11. The deal re-weighting hook is in `student encode` (Rust), so the weighted means are the same
+    integers everywhere; the trainer only sees targets.
 
 ## 11. Measurements and status
 
@@ -287,3 +298,62 @@ relabelled; the raw positions are kept and reused.
 
 So a 245-thread machine makes about 187,000 trick-2 decisions an hour at D = 320 (245 × 3,600 /
 4.7 s): **about $3.80 per million decisions** at $0.72/h, the first 250k in about 1.3 hours.
+
+**Stage 2 (encoder, feature shards, trainer, integer inference, the check):**
+
+- The encoder `student-v1`: 3,083 view features, 109 candidate features (3,192 binary), 100 dense;
+  3,292 inputs. At trick 2 a view has at most 80 active features in the 3,000 local decisions
+  (room for 448: §2's bound). Encoder hash `321d806d…` (`student hash` prints it and the layout).
+  `student encode` turns 3,000 records into a feature shard in 0.4 s; a shard of a record is
+  2,850 bytes.
+- Integer inference: the view's first-layer sum once, each candidate's rows added (tested equal to
+  the plain forward pass on real positions); Python's integer pass equals Rust's bit for bit
+  (`python/nn/tests/test_student.py`, `student eval`); the float and integer networks agree within
+  0.001 of a logit on random networks; a network for another encoder name or hash is refused.
+- `search student-check` (the measure, §7) agrees exactly with the trainer's own integer number
+  (0.36618% for the 256-128 student below, both ways).
+
+**The first tiny student (local, to prove the path; trick 2):** training data 3,000 decisions at
+only 16 deals (2,000 rules-bot positions, seed 201; 1,000 mixed, seed 202; 6 minutes on 4 threads),
+test set 512 decisions at 64 deals (seed `STUDENT_TEST_SEED`). Measured against the teacher's means
+on the test set (decision loss, % of money chance; bootstrap 95% upper bound; agreement):
+
+| Player | Loss | Upper 95% | Agreement |
+|---|---|---|---|
+| A random legal card | 0.520% | | |
+| The rules bot (`rules-v1`) | 0.351% | 0.461% | 50.4% |
+| Student 256-128 (19 epochs, 10 s) | 0.366% | 0.454% | 45.7% |
+| Student 512-256 (13 s) | 0.289% | 0.368% | 51.0% |
+
+It is weak, as expected from 3,000 decisions with 16 deals each (the targets are mostly the
+teacher's noise): it shows the path end to end, not a strength. Leaders (place 1) and the race
+for the money (stratum S4) are where both the rules bot and the student lose most.
+
+**Stage 3 (the app and the first rented run):**
+
+- WASM: `"method": "student"` (docs/WASM-API.md §3–§5): tricks 1–2 with all eight seats in play
+  valued by the student (`loadStudent`), everything else as before, byte for byte; new refusal
+  `no_student`. Tested natively (`crates/wasm/tests/api.rs`) and native against WebAssembly
+  (`tools/wasm_check.sh` with the real equity table and O_3: PASS, seven student requests with a
+  seeded random student among the 21, every split). Speed of the 512-256 student above, a whole
+  request (the view rebuilt from the app's JSON, the card tracker, the encoder, the network):
+  0.3–0.5 ms natively and 0.4–0.7 ms as WebAssembly under Node on this VM (the hybrid PIMC's
+  trick-2 request of 4 deals: 12.6 ms natively); its file is 7.3 MB and loads in 74 ms.
+- Runner: chunk kind `student_teacher` (`crates/runner/src/student.rs`): part `first_part + i` of a
+  generator stream on every thread, the shard uploaded to `inputs/sha256/<hex>` and listed in
+  `out/student/<name>.inputs.json`; a later run adds parts (`first_part`) or skips stored ones
+  (`skip_parts`).
+- Manifests (not launched): `docs/vast/student-t2-mech.manifest.json` (a few minutes) and
+  `docs/vast/student-t2-base.manifest.json`: the test set (2 × 2,048 decisions at 1,024 deals),
+  then 200,000 rules-bot and 50,000 mixed decisions at 320 deals: about 1.4 hours on a 245-thread
+  machine, about $1 at $0.72/h (more at the $1.70 cap's prices), about 9.5 GB of shards.
+
+## 12. Next
+
+1. Launch `student-t2-mech` (minutes), then `student-t2-base` (about 1.4 hours, about $1 on a
+   245-thread machine at $0.72/h): the main session reviews and launches.
+2. Train 256-128 and 512-256 students on 50k, 100k and 250k decisions (the learning curve) and
+   measure them on the test set with `search student-check --baseline rules`.
+3. A student bot for the arena (`search::bot`), so promotion is by SPRT in duplicate tournaments
+   (PLAN §9), and the DAgger source (`--source student`: positions from the student's own games).
+4. Trick 1 once O_2 exists: price it with the real O_2 first (§8: its width sets the cost).
