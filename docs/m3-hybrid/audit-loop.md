@@ -336,3 +336,44 @@ about 20 s a mini set, 400 a round would have spent most of the night measuring 
 relaunched with at most 60 new mini sets a round (the groups with the largest weight x SD^2 first; the rest wait and are
 reported as not yet measured), and with a patient price ladder after a relaunch climbed to $1.97/h in ten minutes
 (`m3-hybrid-t4-loop-3`: AMD EPYC 7B13, 122 threads, 504 GB, $0.73/h).
+
+### Overnight results, 2026-10-17 (both loops stopped on diminishing returns)
+
+Trick 4 (`m3-hybrid-t4-loop-3`; AMD EPYC 7B13, 122 threads, 504 GB, $0.73/h; 00:05-05:45 UTC). Golden set 4,000
+trick-3 decisions x 320 exact worlds; 95% upper bound of the decision loss (all / pos 1-2 / pos 3-4 / pos 5-8), largest
+|bias| on the all row; groups from 10M-row audit shards at gamma 0.0001:
+
+| round | shape | network | all | 1-2 | 3-4 | 5-8 | bias | found / confirmed | failing at decision level |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 1024-1024-512-128 | b28750e3d447 | **0.0016%** | 0.0026% | 0.0023% | 0.0012% | 0.0025% | 4,858 / 1,551 | 8 (44 unmeasurable, 1,473 not yet measured) |
+| 2 | 1024-1024-512-128 | ba808dcf05dd | 0.0021% | 0.0055% | 0.0026% | 0.0008% | 0.0030% | 8,375 / 3,787 | 14 |
+| 3 | 2048-2048-1024-256 | 6d72e18cfcf8 | **0.0016%** | 0.0040% | 0.0020% | 0.0009% | 0.0035% | 7,690 / 2,724 | 13 |
+| 4 | 4096-2048-1024-256 | (stopped in its mini sets) | 0.0024% | 0.0059% | 0.0023% | 0.0012% | 0.0045% | - / 3,026 | 13 |
+
+Trick 3 (`m3-hybrid-t3-loop-1`; AMD EPYC 7663, 224 threads, 2x A100 40GB, $1.60/h; 22:53-05:05 UTC). Golden set 2,000
+trick-2 decisions x 320 exact worlds (generated tonight, about 3 s an exact world, shared content-addressed); groups
+from 10M-row audit shards:
+
+| round | shape | network | all | 1-2 | 3-4 | 5-8 | own-team bias | found / confirmed | failing |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 2048-1024-256 | b34e12b51099 | 0.0088% | 0.0153% | 0.0071% | 0.0088% | -0.0125% (fails) | 802 / 628 | 56 |
+| 2 | 2048-1024-256 | f5766aa98a1d | **0.0068%** | 0.0122% | 0.0080% | 0.0052% | -0.0085% | 820 / 630 | 46 |
+| 3 | 2048-2048-1024-256 | a099061b6aed | 0.0074% | 0.0164% | 0.0057% | 0.0056% | -0.0096% | 812 / 629 | 47 |
+| 4 | 2048-2048-1024-256 | (stopped in its mini sets) | 0.0076% | 0.0153% | 0.0060% | 0.0061% | -0.0142% (fails) | - / 629 | 47 |
+
+Network keys: `inputs/sha256/<sha>` with b28750e3d447400523d2af9cbe85e4fbbb414200474560a7c1038b7adf0ce5a0 (trick 4,
+round 1), 6d72e18cfcf800be9071afacea8ece38b8fdacb2c07757839656a6ef8431f157 (trick 4, round 3),
+f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad (trick 3, round 2).
+
+What the night showed:
+- **Trick 4 passes at 0.0016%, every seat band below 0.006%, every bias below 0.005%,** on ten times the old golden
+  set. The old 400-decision set's failing seat bands (0.021% at seats 1-2) were small-sample tails, not the network.
+- **Trick 3's leader is the open problem:** seats 1-2 stay at 0.012-0.016% and the leader's own team is under-valued by
+  about 0.02-0.03% in that band (-0.0085% to -0.0142% overall), round after round, at both network sizes.
+- **"Flat" was out of reach by construction.** At 10M rows the auditor confirms thousands of groups at trick 4 (the
+  position-level SD threshold, 1%, is close to the network's overall SD, 0.8-1.0%), and flat needs every one measured at
+  the decision level; 60 mini sets a round measure a few percent of them. So the push to 0.005% / 0.0075% never
+  started.
+- **Retraining from scratch every round is noisy:** the golden bound moved 0.0016 -> 0.0021 -> 0.0016 -> 0.0024% at trick
+  4 while the data only grew, and the capacity rule stepped up almost every round (its "worst group" changes from round
+  to round). More width did not help either loop.
