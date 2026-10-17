@@ -189,3 +189,123 @@ caught, and then rules 39-41 (and 34) apply for the rest of the hand. Decision:
   the networks, which have never seen such a position. A separate network for turned hands, or a "turned" input added
   to a network with zero-initialised weights and trained additively, only if measurement shows search is not enough.
 - Until this is built and released, the app's own bot plays any hand after a turn.
+
+### 7.1 Built (branch `eng-turned`, 2026-10-17, with the owner's rulings of the same day)
+The engine now referees a hand exactly as the app's `src/engine/game.ts` does (`penalise`,
+`credit`, `catchHiddenAces`, `resolveTrick`, `advance`, `finishHand`, `afterTurn`), so an app game
+replays in the engine card for card. Our own players still never act illegally (H1): nothing below
+is among `legal_actions`, and the solver and search never cause it.
+
+**The app's three ways in** (`crates/engine/src/game/referee.rs`; each refused with a code and the
+match unchanged when it cannot happen; all recorded in `Match::extras()`, so a record is
+`actions()` + `extras()`, replayed by `Match::apply_record` / `Match::replay_record`):
+- `turn_team(team)`: a pair turned before the play the match awaits, or, for the pair whose rob is
+  due, instead of that rob. The engine's automatic take is undone, as it never happened at the
+  app's table: the robber not robbing (Guide, cause `no_rob`), the dealer refusing a turned ace
+  (`declineRob`, `declined_rob`: the ace stays on the pack, out of play), the dealer leaving a
+  turned Joker (`leaveJoker`, `left_joker`: the Joker stays face up on the deck and the next card
+  is turned; an ace turned next stays unrobbed, the app's `afterTurn`).
+- `play_then_turn(card, team)`, ruling (a) "play, then turn": the legal card is placed, the pair
+  turned, then the trick goes on or is won without the turned cards (cause `with_play`).
+- `let_through(lapse)`, for replaying app records only: an illegal card, a play without robbing, a
+  rob without the ace (it may burn any card it then holds but the ace of trumps, H3), a burned
+  ace. Each is kept as a hidden renege and the engine turns the pair exactly when the app does: a
+  later card of that seat proves it (rule 37, `proved`), the ace of trumps shows from another hand
+  (`ace_shown`), the pair would reach 41 (rule 38: the credit is not made and the pair is turned
+  instead, `claim`, at every credit: a trick, a passed trick, the bonus, the jink), or the hand
+  ends (`hand_end`).
+
+Events: `PairTurned { team, score, cause }`; `TrickPassed { trick, team, points }` (0 when the
+receiver is caught at the claim); `TrickWon` with 0 points when its winner is caught at the claim
+or only turned cards were in it; game-end reason `passed_trick`; `turned_teams` in the public state
+(left out of the JSON when nobody is turned). Hands where the app does nothing are unchanged: every
+test, the WASM hashes and the normal differential output are identical to the parent commit.
+
+**The rulings as built:**
+- **Q2, "first card played takes it"** (the app's `standingWinnerIndex`): a trick to pass goes to
+  the card of a pair still in play that beats the others against the card led; when none of their
+  cards is a trump or of the suit led, to the first of them played. A trick in which no pair still
+  in play played stays with nobody, for no points; when the last pairs are turned mid-trick, the
+  trick goes to its best card for no points (the app's `resolveTrick`) and the hand ends with
+  nobody scoring it. In the trick being played the case cannot arise (its leader is in play: Q1).
+- **Q3, "same as the app"**: passed tricks are credited one at a time in trick order, each checked
+  at the claim; the first pair to reach 41 wins the game (`passed_trick`) and later passes are not
+  credited.
+- **Rule 34 as the app plays it**: the last pair in play plays the hand out alone and wins with a
+  jink at the end of the hand (unless caught at the claim). A hand with a turn or a let-through
+  ends in the app's order: hidden false robs and burned aces caught, then the bonus (one caught at
+  the claim is lost with the pair, as in the app), then the jink (worth what the pair still needs,
+  at least 10). After a trick whose winner was turned, the next seat on its left still in play
+  leads (the app).
+
+**Still refused: Q1, "ask the pros first"** (`led_trick_in_progress`): a pair turned while the
+trick it led is being played, up to the moment that trick is won, whatever turns it (a turn, a
+play then a turn, a card that proves its own renege, the ace of trumps showing). The app keeps the
+turned card as the card led; the engine waits for the pub's ruling and refuses the step, the match
+unchanged; a legal card that would do it is refused by `apply` too, and the app's own bot plays on.
+It is not refused when every pair is then turned, or when a passed trick ends the game first. In
+the differential test's random referee play (far more reneges than any real table), a legal card is
+refused this way in about 8% of hands, and about 12% of matches reach a seat all of whose cards are
+refused (the run stops that match there).
+
+**Differences from the app that cannot change the money** (documented, not restructured):
+- In a hand where the app did nothing, the engine checks a jink before the end-of-hand bonus (the
+  app: bonus, then jink). The jinking pair holds the best trump's trick, so the same pair wins the
+  game; only the recorded reason (`jink` or `end_bonus`) can differ.
+- `GameWon.scores` never adds a jink's credit (the app's hand points do).
+- When a passed trick ends the game the engine stops there; the app's `penalise` still rewrites the
+  later tricks' winners and points, and may turn further pairs after the game is won.
+- `trick_winners` keeps who won each trick at the table; after passes the holders are in
+  `tricks_won` and the `TrickPassed` events (the app rewrites `trick.winner`).
+- H3: the engine lets a robber burn the card it has just taken; the app's rob burns from the hand
+  before the take. (A real difference in what can be recorded, not in the money of a recorded app
+  game: the app never sends such a burn.)
+- `ProvedNoAce` and `AceUndealt` are the table's inferences: after a play without robbing let
+  through, they can be false until the renege is caught, exactly as at a real table.
+
+**The app's rules text must follow its code (for the app session, not done here):** fivefingers
+`docs/rules.md` lines 113-115 say "a card of another suit never wins"; the owner's ruling and the
+app's own `standingWinnerIndex` give the trick to the first card played among the pairs still in
+play. That text must be corrected in the app repo (and `rulesText.ts`, which holds the same words).
+This branch does not edit /home/user/fivefingers.
+
+**Reference** (`crates/reference/src/game/referee.rs`): written separately after the app's code (a
+pairwise "beats" from the first standing card, the trick kept whole, its own renege kinds), with
+the same events, refusal codes and hidden reneges. **Differential test** (`difftest --turns N`):
+random referee steps (turns before a play, with a play and while a rob is due; all four lapses)
+before about one play in N and one rob in three, both implementations asked the same, every answer
+and the full snapshot (state, hidden reneges, every seat's events) compared after each, and every
+match replayed from its record. 20,000 matches (seed 1, `--turns 12`): 378,492 turns and 261,815
+lapses tried, 254,743 pairs turned (141,751 before a play, 64,511 with a play, 24,245 proved,
+2,126 by the ace shown, 1,127 at a claim, 7,828 at the hand end, 10,603 for not robbing, 2,043
+declined robs, 509 left Jokers), 98,298 tricks passed, 5,700 games won by passed tricks, 4,705
+hands with every pair turned: all agree, and every match replays from its record; 2,498 matches
+stopped at a seat all of whose cards the open question refuses. Without referee steps the run
+(20,000 matches) is byte for byte the parent commit's.
+
+**Belief and search.** The card tracker no longer trusts a turned seat's show-outs or "no ace"
+proofs (its face-down cards keep its hand size and may be of any suit), nor the robber facts for a
+turned robber or for one the cards seen show without the ace (its own plays, the ace seen
+elsewhere, the ace taken from the table at its turn, another seat turned for not robbing). It keeps
+what a turn itself makes public: the seat turned for not robbing holds the ace; a robber caught at
+the claim or the hand end does not; a seat asked to play in trick 1 when a pair was turned before or
+with its card lacks it (the engine robs by itself). When the facts still admit no placement (an
+uncaught renege the cards give away), every other seat is treated as possibly having broken the
+rules. `search::worlds::rebuild` replays a view step by step to match: each turn at its moment
+(`turn_team`, or `Match::observe_play` with the card it came with), a turned or untrusted seat's
+card as the table saw it (`observe_play`, also undoing a rob the world would make), a turned or
+provably false robber's rob as the lapse the world needs, and the engine catches the rest itself.
+Tests: every sampled world of 5,000 random referee matches rebuilds to the seat's exact view, the
+true deal is never excluded once every renege's pair is turned, turned seats get their face-down
+cards with no void constraints (`referee_views_rebuild_and_turned_seats_have_no_voids`,
+`a_turned_seats_show_out_proves_nothing`), the tracker's worlds equal the engine's on 25 small
+positions (2,500 in the long run) after the referee (`belief_equals_engine_oracle_after_the_referee`),
+and exact PIMC on referee views equals the mean of naive solves
+(`exact_pimc_on_referee_views_equals_mean_of_solves`).
+
+**Solver**: positions with turned pairs are searched exactly among the seats still in play (6, 4,
+or 2 when one pair plays the hand out) and never shown to a network (`FrontierCut::applies`
+refuses them, `canonical` panics on them). Exact solve cost on this VM (one thread, default
+switches): trick 2 mean 3.0 s with 8 seats, 68 ms with 6, 0.9 ms with 4; trick 3 6.7 / 0.5 /
+0.04 ms; trick 4 under 0.03 ms; trick 1 with 6 seats 17 s (max 42 s), with 4 seats 29 ms
+(`cargo run --release -p solver --example turned_cost`).

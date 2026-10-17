@@ -96,6 +96,26 @@ pub(crate) fn trick_winner8(trick: &[Card; SEATS], trump: Suit) -> usize {
     best
 }
 
+/// The index (in play order) of the card that wins a trick of any length (1..=8 cards; a
+/// trick of the seats still in play when partnerships are turned):
+/// `engine::rules::trick_winner(trick, trump)`, by the same strengths as [`trick_winner8`].
+#[inline]
+pub(crate) fn trick_winner_of(trick: &[Card], trump: Suit) -> usize {
+    let t = tables();
+    let ti = trump as usize;
+    let row = &t.strength[ti][usize::from(t.led[ti][usize::from(trick[0])])];
+    let mut best = 0;
+    let mut bs = row[usize::from(trick[0])];
+    for (i, &c) in trick.iter().enumerate().skip(1) {
+        let s = row[usize::from(c)];
+        if s > bs {
+            bs = s;
+            best = i;
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +168,17 @@ mod tests {
                     }
                 }
             }
+        }
+        let mut rng = Rng::new(43);
+        for _ in 0..50_000 {
+            let mut deck: [Card; engine::cards::DECK_SIZE] = core::array::from_fn(|c| c as Card);
+            rng.shuffle(&mut deck);
+            let trump = Suit::ALL[rng.bounded(4) as usize];
+            let n = 1 + rng.bounded(SEATS as u64) as usize;
+            assert_eq!(
+                trick_winner_of(&deck[..n], trump),
+                trick_winner(&deck[..n], trump)
+            );
         }
         let mut rng = Rng::new(41);
         for _ in 0..200_000 {

@@ -1059,3 +1059,351 @@ fn every_completed_hand_has_a_trump_played() {
         }
     }
 }
+
+// --------------------------------------------------------------------------
+// Turned partnerships (rules 34, 39, 40 and 41)
+// --------------------------------------------------------------------------
+
+/// Spades trumps, the ace of spades undealt, dealer 7 (seat 0 leads). Seat 0
+/// wins trick 1 with the king of clubs and trick 2 with the 5 of spades.
+fn turned_hand() -> Match {
+    let mut m = Match::new(7, Rules::default());
+    m.start_hand(&deck(
+        7,
+        [
+            "KC 5S AD 2D 3D",
+            "4C QC KH QH KD",
+            "2C JC JH 10H QD",
+            "5C 9S 9H 8H JD",
+            "3C AC 4D 5D 6D",
+            "6C 9C 7H 6H 10D",
+            "7C KS 5H 4H 9D",
+            "8C 10C 3H 2H 8D",
+        ],
+        "7S",
+        "AS",
+    ));
+    for n in "KC 4C 2C 5C 3C 6C 7C 8C 5S QC JC 9S AC 9C KS 10C".split_whitespace() {
+        m.apply(Action::Play(idx(n))).unwrap();
+    }
+    m
+}
+
+#[test]
+fn turned_pair_loses_its_points_and_its_tricks_pass() {
+    let mut m = turned_hand();
+    assert_eq!(m.scores(), [16, 0, 0, 0]);
+    m.turn_team(0).unwrap();
+    assert_in_order(
+        &public_events(&m),
+        &[
+            "PairTurned team=0 score=0",
+            "TrickPassed trick=1 team=2 points=5",
+            "TrickPassed trick=2 team=2 points=5",
+        ],
+    );
+    assert_eq!(m.scores(), [0, 0, 10, 0]);
+    assert_eq!(m.bonus_taken(), [false; 4]);
+    // Rule 40: seat 0 was to lead; seat 1 leads instead.
+    assert_eq!(m.phase(), Phase::AwaitPlay(1));
+    for n in "KH JH 9H 7H 5H 3H QH 10H 8H 6H 4H 2H KD QD JD 10D 9D 8D".split_whitespace() {
+        m.apply(Action::Play(idx(n))).unwrap();
+    }
+    // Rule 39: the end-of-hand bonus goes to the king of spades, the best
+    // trump still counting; rule 41: team 0 scores nothing.
+    assert_in_order(
+        &public_events(&m),
+        &["Bonus team=2 points=6 kind=end card=KS", "HandEnd hand=0"],
+    );
+    assert_eq!(m.scores(), [0, 15, 16, 0]);
+}
+
+/// Rule 34 as the app plays it: the last pair in play plays the hand out alone, takes every
+/// trick and the bonus, and wins the game with a jink at the end of the hand.
+#[test]
+fn last_pair_in_play_wins_with_a_jink() {
+    let mut m = turned_hand();
+    m.turn_team(0).unwrap();
+    m.turn_team(1).unwrap();
+    assert_eq!(m.phase(), Phase::AwaitPlay(2));
+    m.turn_team(3).unwrap();
+    assert_eq!(m.games_won(), [0; 4], "not yet: the hand is played out");
+    play_names(&mut m, "JH 5H 10H 4H QD 9D");
+    assert_in_order(
+        &public_events(&m),
+        &[
+            "TrickWon trick=5 seat=2 team=2 points=5",
+            "Bonus team=2 points=6 kind=end card=KS",
+            "GameWon team=2 reason=jink scores=0,0,31,0",
+        ],
+    );
+    assert_eq!(m.games_won(), [0, 0, 1, 0]);
+}
+
+#[test]
+fn refusals_change_nothing() {
+    let mut m = turned_hand();
+    m.apply(Action::Play(idx("KH"))).unwrap_err();
+    // Seat 0 leads trick 3, then its team is turned: refused.
+    m.apply(Action::Play(idx("AD"))).unwrap();
+    let before = public_events(&m);
+    let e = m.turn_team(0).unwrap_err();
+    assert!(e.starts_with("led_trick_in_progress"), "{e}");
+    assert_eq!(public_events(&m), before);
+    assert!(m.turn_team(9).unwrap_err().starts_with("no_such_team"));
+    m.turn_team(1).unwrap();
+    assert!(m.turn_team(1).unwrap_err().starts_with("already_turned"));
+}
+
+fn play_names(m: &mut Match, names: &str) {
+    for n in names.split_whitespace() {
+        m.apply(Action::Play(idx(n)))
+            .unwrap_or_else(|e| panic!("{n}: {e}"));
+    }
+}
+
+/// The turned hand's deal with a chosen turned card and pack, and seat 5 holding `seat5`.
+fn hand_with(turned: &str, pack: &str, seat5: &str, scores: [u8; 4]) -> Match {
+    let mut m = Match::new(7, Rules::default());
+    m.scores = scores;
+    m.bonus_taken = scores.map(|x| x % 5 == 1);
+    m.start_hand(&deck(
+        7,
+        [
+            "KC 5S AD 2D 3D",
+            "4C QC KH QH KD",
+            "2C JC JH 10H QD",
+            "5C 9S 9H 8H JD",
+            "3C AC 4D 5D 6D",
+            seat5,
+            "7C KS 5H 4H 9D",
+            "8C 10C 3H 2H 8D",
+        ],
+        turned,
+        pack,
+    ));
+    m
+}
+
+/// Q1 (owner 2026-10-17, "ask the pros first"): the pair that led the trick being played is
+/// turned, even by the trick's last card: refused, nothing changes.
+#[test]
+fn q1_a_turned_leader_mid_trick_is_refused() {
+    let mut m = turned_hand();
+    play_names(&mut m, "2D KD QD JD 4D 10D 9D");
+    let before = public_events(&m);
+    let e = m.play_then_turn(idx("8D"), 0).unwrap_err();
+    assert!(e.starts_with("led_trick_in_progress"), "{e}");
+    assert_eq!(public_events(&m), before);
+}
+
+/// Q2 (owner 2026-10-17, "first card played takes it"): no card of the pairs in play in the
+/// trick is a trump or of the suit led: the first of theirs takes it.
+#[test]
+fn q2_first_card_played_takes_a_trick_nobody_can_win() {
+    let mut m = Match::new(7, Rules::default());
+    m.start_hand(&deck(
+        7,
+        [
+            "KC QC JC AC 2C",
+            "2D 3D 4D 5D 2S",
+            "6D 7D 8D 9D 3S",
+            "10D JD QD KD 4S",
+            "3C 4C 5C 6C 7C",
+            "AD 2H 3H 4H 6S",
+            "5H 6H 7H 8H 8S",
+            "9H 10H JH QH KH",
+        ],
+        "7S",
+        "AS",
+    ));
+    play_names(&mut m, "KC 2D 6D 10D 3C AD 5H 9H");
+    m.turn_team(0).unwrap();
+    m.turn_team(1).unwrap();
+    assert_in_order(
+        &public_events(&m),
+        &[
+            "PairTurned team=0 score=0 cause=before_play",
+            "TrickPassed trick=1 team=1 points=5",
+            "PairTurned team=1 score=0 cause=before_play",
+            "TrickPassed trick=1 team=2 points=5",
+        ],
+    );
+}
+
+/// Q3 (owner 2026-10-17, "same as the app"): passed tricks are credited in trick order; the
+/// first team to 41 wins and later passes are not credited.
+#[test]
+fn q3_the_first_team_to_41_by_passed_tricks_wins() {
+    let mut m = turned_hand_from([10, 5, 36, 36]);
+    m.turn_team(0).unwrap();
+    assert_in_order(
+        &public_events(&m),
+        &[
+            "PairTurned team=0 score=10 cause=before_play",
+            "TrickPassed trick=1 team=2 points=5",
+            "GameWon team=2 reason=passed_trick scores=10,5,41,36",
+        ],
+    );
+    assert_eq!(count_events(&m, "TrickPassed trick=2"), 0);
+}
+
+fn turned_hand_from(scores: [u8; 4]) -> Match {
+    let mut m = hand_with("7S", "AS", "6C 9C 7H 6H 10D", scores);
+    play_names(&mut m, "KC 4C 2C 5C 3C 6C 7C 8C 5S QC JC 9S AC 9C KS 10C");
+    m
+}
+
+/// "Play, then turn": seat 7's 8♦ completes trick 3 and team 1 is turned with it; the trick is
+/// won without its cards.
+#[test]
+fn play_then_turn_resolves_the_trick_without_the_turned_cards() {
+    let mut m = turned_hand();
+    play_names(&mut m, "2D KD QD JD 4D 10D 9D");
+    assert!(
+        m.play_then_turn(idx("3H"), 1)
+            .unwrap_err()
+            .starts_with("illegal_card")
+    );
+    m.play_then_turn(idx("8D"), 1).unwrap();
+    assert_in_order(
+        &public_events(&m),
+        &[
+            "Played seat=7 card=8D",
+            "PairTurned team=1 score=0 cause=with_play",
+            "TrickWon trick=3 seat=2 team=2 points=5",
+        ],
+    );
+}
+
+/// A turn while a rob is due undoes the take: the robber's (no_rob), the dealer's turned ace
+/// (declined_rob) and the dealer's turned Joker (left_joker, the next card turned; an ace
+/// turned next stays on the pack).
+#[test]
+fn a_turn_while_a_rob_is_due_undoes_the_take() {
+    let mut m = hand_with("7S", "9C", "6C AS 7H 6H 10D", [0; 4]);
+    play_names(&mut m, "KC 4C 2C 5C 3C");
+    assert_eq!(m.phase(), Phase::AwaitBurn(5));
+    m.turn_team(1).unwrap();
+    assert_eq!(count_events(&m, "Took"), 0);
+    assert_eq!(m.public().table_card, Some(idx("7S")));
+    assert_eq!(m.phase(), Phase::AwaitPlay(6));
+    assert!(public_events(&m).last().unwrap().ends_with("cause=no_rob"));
+
+    let mut m = hand_with("AS", "7S", "6C 9C 7H 6H 10D", [0; 4]);
+    assert_eq!(m.phase(), Phase::AwaitBurn(7));
+    assert!(m.turn_team(0).unwrap_err().starts_with("not_before_a_play"));
+    m.turn_team(3).unwrap();
+    assert_eq!(m.public().table_card, Some(idx("AS")));
+    assert_eq!(m.phase(), Phase::AwaitPlay(0));
+    assert!(
+        public_events(&m)
+            .last()
+            .unwrap()
+            .ends_with("cause=declined_rob")
+    );
+
+    let mut m = hand_with("JK AS", "7S", "6C 9C 7H 6H 10D", [0; 4]);
+    m.turn_team(3).unwrap();
+    let l = public_events(&m);
+    assert_eq!(
+        l[l.len() - 3..],
+        [
+            "Turned card=JK",
+            "PairTurned team=3 score=0 cause=left_joker",
+            "Turned card=AS"
+        ]
+    );
+    assert_eq!(m.public().table_card, Some(idx("AS")));
+    assert_eq!(m.public().robber, None);
+    assert_eq!(m.phase(), Phase::AwaitPlay(0));
+}
+
+/// Reneges let through are caught when the app catches them: a card that proves it (rule 37),
+/// the ace of trumps from another hand, a claim of the game, the end of the hand (rule 38).
+#[test]
+fn reneges_let_through_are_caught_when_the_app_catches_them() {
+    // Proved: seat 1 plays the K♥ to a club lead holding clubs, then its Q♣.
+    let mut m = hand_with("7S", "AS", "6C 9C 7H 6H 10D", [0; 4]);
+    play_names(&mut m, "KC");
+    assert!(
+        m.let_through(Lapse::Play(idx("4C")))
+            .unwrap_err()
+            .starts_with("legal")
+    );
+    m.let_through(Lapse::Play(idx("KH"))).unwrap();
+    assert_eq!(m.reneges(), [(1, "follow:C".to_string(), false)]);
+    play_names(&mut m, "2C 5C 3C 6C 7C 8C 5S QC");
+    assert!(public_events(&m).last().unwrap().ends_with("cause=proved"));
+    assert_eq!(m.reneges(), [(1, "follow:C".to_string(), true)]);
+
+    // The ace shows: seat 2 robs without it, seat 5 plays the A♠.
+    m = hand_with("7S", "9C", "6C AS 7H 6H 10D", [0; 4]);
+    play_names(&mut m, "KC 4C");
+    m.let_through(Lapse::FalseRob(idx("JH"))).unwrap();
+    play_names(&mut m, "2C 5C 3C 6C 7C 8C 5S QC 7S 9S AC AS");
+    assert!(
+        public_events(&m)
+            .last()
+            .unwrap()
+            .ends_with("cause=ace_shown")
+    );
+    assert_eq!(m.phase(), Phase::AwaitPlay(7));
+
+    // A claim: team 2 on 36 robbed without the ace and wins trick 1 with the 7♠.
+    m = hand_with("7S", "AS", "6C 9C 7H 6H 10D", [0, 0, 36, 0]);
+    play_names(&mut m, "KC 4C");
+    m.let_through(Lapse::FalseRob(idx("JH"))).unwrap();
+    play_names(&mut m, "7S 5C 3C 6C 7C 8C");
+    assert_in_order(
+        &public_events(&m),
+        &[
+            "TrickWon trick=1 seat=2 team=2 points=0",
+            "PairTurned team=2 score=36 cause=claim",
+            "TrickPassed trick=1 team=0 points=5",
+        ],
+    );
+    assert_eq!(m.phase(), Phase::AwaitPlay(3));
+
+    // The end of the hand: seat 5 burned the A♠.
+    m = hand_with("7S", "9C", "6C AS 7H 6H 10D", [0; 4]);
+    play_names(&mut m, "KC 4C 2C 5C 3C");
+    m.let_through(Lapse::BurnAce).unwrap();
+    play_names(
+        &mut m,
+        "6C 7C 8C 5S QC JC 9S AC 7S KS 10C AD KD QD JD 4D 10D 9D 8D \
+         KH JH 9H 5D 7H 5H 3H 2D QH 10H 8H 6D 6H 4H 2H 3D",
+    );
+    assert_in_order(
+        &public_events(&m),
+        &[
+            "PairTurned team=1 score=0 cause=hand_end",
+            "TrickPassed trick=3 team=2 points=5",
+            "TrickPassed trick=4 team=2 points=5",
+            "TrickPassed trick=5 team=2 points=5",
+            "HandEnd hand=0 aborted=false",
+        ],
+    );
+    assert_eq!(m.scores(), [16, 0, 15, 0]);
+}
+
+/// Every partnership turned in the middle of a trick: the trick goes to its best card for
+/// nothing and the hand ends with nobody scoring it.
+#[test]
+fn everyone_turned_ends_the_hand() {
+    let mut m = hand_with("7S", "AS", "6C 9C 7H 6H 10D", [0; 4]);
+    play_names(&mut m, "KC 4C 2C 5C 3C 6C 7C 8C 5S QC");
+    for team in [2, 3, 1, 0] {
+        m.turn_team(team).unwrap();
+    }
+    assert_in_order(
+        &public_events(&m),
+        &[
+            "PairTurned team=0 score=0 cause=before_play",
+            "TrickWon trick=2 seat=0 team=0 points=0",
+            "HandEnd hand=0 aborted=true",
+        ],
+    );
+    assert_eq!(m.scores(), [0; 4]);
+    assert!(m.needs_deck());
+}

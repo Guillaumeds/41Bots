@@ -120,6 +120,9 @@ impl Checker {
 
     fn event(&mut self, e: &Event) {
         match *e {
+            Event::PairTurned { .. } | Event::TrickPassed { .. } => {
+                panic!("nobody is turned by legal play (H1): only the app turns a pair")
+            }
             Event::MatchStart { first_dealer } => {
                 assert!(self.prev.is_none());
                 assert!(first_dealer < 8);
@@ -349,6 +352,9 @@ impl Checker {
                     }
                 }
                 match reason {
+                    GameEndReason::FortyOneByPassedTrick => {
+                        panic!("no trick passes in legal play (H1)")
+                    }
                     GameEndReason::Jink => {
                         assert_eq!(self.tricks_by_team[t], 5);
                         assert!(scores[t] < 41);
@@ -774,6 +780,7 @@ fn rule_branches_are_reached() {
                     GameEndReason::FortyOneByImmediateBonus => by_immediate += 1,
                     GameEndReason::FortyOneByEndBonus => by_end += 1,
                     GameEndReason::FortyOneByTrick => {}
+                    GameEndReason::FortyOneByPassedTrick => panic!("no pass in legal play"),
                 },
                 Event::HandEnd { aborted: true, .. } => mid_hand += 1,
                 _ => {}

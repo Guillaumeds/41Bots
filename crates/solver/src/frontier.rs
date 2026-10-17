@@ -148,7 +148,17 @@ pub fn canonical_order(trump: Suit) -> &'static [(Card, u8); 53] {
 
 /// The canonical form of a position at a trick boundary (no card of the current trick played,
 /// no rob pending).
+///
+/// # Panics
+/// If a partnership is turned in `p` ([`Position::turned`]): the canonical form is what the
+/// oracle networks read, and they have never seen a hand with a turned partnership (owner,
+/// 2026-10-17, docs/APP-ENGINE-CONTRACT.md §7), so such a position must be searched exactly and
+/// never reach a network ([`FrontierCut::applies`] never cuts one).
 pub fn canonical(p: &Position) -> CanonPos {
+    assert_eq!(
+        p.turned, 0,
+        "a position with a turned partnership is never shown to a network: search it exactly"
+    );
     debug_assert_eq!(
         p.n_played, 0,
         "the canonical form is taken at a trick boundary"
@@ -291,9 +301,22 @@ impl<'a> FrontierCut<'a> {
         self.trick
     }
 
-    /// Is `p` on the frontier (the start of the frontier's trick)?
+    /// Is `p` on the frontier (the start of the frontier's trick)? Never when a partnership is
+    /// turned ([`Position::turned`]): the networks have never seen such a hand (owner,
+    /// 2026-10-17, docs/APP-ENGINE-CONTRACT.md §7), so every solve with a frontier searches a
+    /// turned position exactly to the end of the hand, and its value is the exact solve's. This
+    /// is the one gate through which every solver (naive, optimised, parallel) and the batch
+    /// prefetch reach the evaluator.
     #[inline]
     pub fn applies(&self, p: &Position) -> bool {
+        p.turned == 0 && self.at_boundary(p)
+    }
+
+    /// [`FrontierCut::applies`] without the turned test, for the optimised solvers: they drop the
+    /// frontier altogether for a solve with a turned partnership (the turned partnerships never
+    /// change during a solve), so every position they test is one where nobody is turned.
+    #[inline]
+    pub(crate) fn at_boundary(&self, p: &Position) -> bool {
         p.n_played == 0 && p.hand.tricks_done + 1 == self.trick && p.rob.is_none()
     }
 

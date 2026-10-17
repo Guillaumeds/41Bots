@@ -95,6 +95,8 @@ pub struct PublicSnap {
     pub robber: Option<u8>,
     pub proved_no_ace: [bool; 8],
     pub ace_undealt: bool,
+    /// Partnerships turned this hand (rules 39-41, 34).
+    pub turned_teams: [bool; 4],
 }
 
 /// Everything in a snapshot except the event lists.
@@ -128,6 +130,8 @@ pub struct State {
     pub burns: [Vec<u8>; SEATS],
     /// The undealt pack, sorted.
     pub undealt: Vec<u8>,
+    /// The reneges the app let through this hand (hidden): seat, kind word, caught.
+    pub reneges: Vec<(u8, String, bool)>,
 }
 
 /// A full snapshot: the state plus each seat's canonical event list.
@@ -207,6 +211,7 @@ impl PublicSnap {
             robber: p.robber,
             proved_no_ace: p.proved_no_ace,
             ace_undealt: p.ace_undealt,
+            turned_teams: p.turned_teams,
         }
     }
 
@@ -239,6 +244,7 @@ impl PublicSnap {
             robber: p.robber,
             proved_no_ace: p.proved_no_ace,
             ace_undealt: p.ace_undealt,
+            turned_teams: p.turned_teams,
         }
     }
 }
@@ -280,6 +286,11 @@ impl State {
             hands: core::array::from_fn(|s| bits_sorted(hands[s])),
             burns: core::array::from_fn(|s| bits_sorted(burns[s])),
             undealt: bits_sorted(m.truth().undealt),
+            reneges: m
+                .reneges()
+                .iter()
+                .map(|r| (r.seat, r.kind.canonical(), r.caught))
+                .collect(),
         }
     }
 
@@ -302,6 +313,7 @@ impl State {
             hands: core::array::from_fn(|s| sorted(r.hand(s as u8))),
             burns: core::array::from_fn(|s| sorted(r.burns(s as u8))),
             undealt: sorted(r.undealt()),
+            reneges: r.reneges(),
         }
     }
 
@@ -368,6 +380,7 @@ impl State {
             ),
             ("public.proved_no_ace".into(), seats_text(&p.proved_no_ace)),
             ("public.ace_undealt".into(), p.ace_undealt.to_string()),
+            ("public.turned_teams".into(), list_text(&p.turned_teams)),
         ];
         for (s, h) in self.hands.iter().enumerate() {
             f.push((format!("hand[{s}]"), cards_text(h)));
@@ -376,6 +389,12 @@ impl State {
             f.push((format!("burns[{s}]"), cards_text(b)));
         }
         f.push(("undealt".into(), cards_text(&self.undealt)));
+        let reneges: Vec<String> = self
+            .reneges
+            .iter()
+            .map(|(s, k, c)| format!("{s}:{k}:{}", if *c { "caught" } else { "hidden" }))
+            .collect();
+        f.push(("reneges".into(), reneges.join(",")));
         f
     }
 }

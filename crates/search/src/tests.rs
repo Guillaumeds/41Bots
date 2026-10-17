@@ -329,3 +329,169 @@ fn rollout_match_end_is_certain_for_the_two_game_team_at_any_stake() {
         }
     }
 }
+
+// ------------------------------------------------------------------------------------------
+// Turned partnerships (rules 34 and 39-41; docs/APP-ENGINE-CONTRACT.md §7)
+// ------------------------------------------------------------------------------------------
+
+/// Decisions at `trick` in hands where the app turned one or two partnerships earlier in the
+/// hand (rules-v1 plays every seat): (view, legal, the match).
+fn turned_decisions(trick: u8, want: usize, seed: u64) -> Vec<(SeatView, Vec<Action>, Match)> {
+    let mut out = Vec::new();
+    let mut k = 0;
+    while out.len() < want {
+        let mut rng = Rng::derive(seed, &[k, 7]);
+        let mut m = Match::new(Rng::derive(seed, &[k]).next_u64(), Rules::HOUSE);
+        k += 1;
+        let pairs = 1 + rng.bounded(2) as usize;
+        let mut turned = 0;
+        let mut hand = m.hand_index();
+        while m.phase() != Phase::MatchOver && m.hand_index() < 3 {
+            if m.hand_index() != hand {
+                hand = m.hand_index();
+                turned = 0;
+            }
+            let seat = m.to_act().expect("to act");
+            let p = m.public();
+            if matches!(m.phase(), Phase::AwaitPlay(_))
+                && turned < pairs
+                && p.trick_no >= 2
+                && p.trick_no < trick
+                && rng.bounded(6) == 0
+            {
+                if m.turn_team(rng.bounded(4) as u8).is_ok() {
+                    turned += 1;
+                }
+                continue;
+            }
+            let v = m.view(seat);
+            let legal = m.legal_actions();
+            if turned > 0
+                && v.public.trick_no == trick
+                && v.public.turned_teams.iter().any(|&t| t)
+                && candidates(&v, &legal).1.len() >= 2
+                && out.len() < want
+            {
+                out.push((v.clone(), legal.clone(), m.clone()));
+            }
+            let a = bots::decide(&v, &Rules::HOUSE, &legal).0;
+            m.apply(a).expect("legal");
+        }
+    }
+    out
+}
+
+/// Worlds rebuilt from a turned view replay the turns: the seat's view of the rebuilt match is
+/// its view, and exact PIMC equals the mean of naive solves of those worlds (rejection source,
+/// the test oracle, and the belief source, the default).
+#[test]
+fn exact_pimc_on_turned_views_equals_mean_of_solves() {
+    let l = leaf();
+    let rejection = RejectionSource::new();
+    let belief = crate::worlds::BeliefSource::new();
+    let sources: [&dyn WorldSource; 2] = [&rejection, &belief];
+    let c = cfg(1);
+    let mut checked = 0;
+    for src in sources {
+        let ctx = Ctx {
+            leaf: &*l,
+            source: src,
+            rules: Rules::HOUSE,
+        };
+        for trick in [3u8, 4] {
+            for (i, (v, legal, _)) in turned_decisions(trick, 4, 41 + u64::from(trick))
+                .iter()
+                .enumerate()
+            {
+                let d = evaluate(v, legal, i as u64, &ctx, &c);
+                assert_eq!(d.method, Method::ExactPimc);
+                let worlds = src.prepare(v, Rules::HOUSE);
+                let mut per: Vec<Vec<(u64, MoneyChance)>> = vec![Vec::new(); legal.len()];
+                for w in 0..u64::from(c.w34) {
+                    let world = worlds.sample(&mut world_rng(i as u64, w));
+                    let m = rebuild(v, &world, Rules::HOUSE, 0).expect("rebuild");
+                    assert_eq!(m.view(v.seat).public, v.public, "the rebuilt public state");
+                    assert_eq!(m.view(v.seat).hand, v.hand);
+                    let (pos, mctx, _) = solver::from_match(&m).expect("play");
+                    assert_ne!(pos.turned, 0);
+                    let sol = solver::solve(
+                        &pos,
+                        mctx,
+                        &FnLeaf(|s: &MatchState| l.value(s)),
+                        solver::Options::default(),
+                    );
+                    for (j, a) in legal.iter().enumerate() {
+                        let val = sol
+                            .children
+                            .iter()
+                            .find(|x| x.0 == a.card())
+                            .expect("valued")
+                            .1;
+                        per[j].push((1, val));
+                    }
+                }
+                for (j, terms) in per.iter().enumerate() {
+                    assert_eq!(d.candidates[j].2, MoneyChance::mix(terms));
+                }
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(checked, 16);
+}
+
+/// The hybrid never asks a network about a turned hand: `exact_world` with a frontier whose
+/// evaluator panics gives exactly the exact values at tricks 2 and 3 (the frontier at the start
+/// of trick 3, 4 or 5).
+#[test]
+fn hybrid_search_values_turned_worlds_exactly() {
+    use solver::{CanonPos, FnFrontier, FrontierCut, MatchCtx, SolveMem};
+    fn never(_: &CanonPos, _: &MatchCtx) -> MoneyChance {
+        panic!("a network was asked about a hand with a turned partnership")
+    }
+    let l = leaf();
+    let src = RejectionSource::new();
+    let ctx = Ctx {
+        leaf: &*l,
+        source: &src,
+        rules: Rules::HOUSE,
+    };
+    let c = cfg(1);
+    let f = FnFrontier(never);
+    let mut checked = 0;
+    for trick in [3u8, 4] {
+        for (_, legal, m) in turned_decisions(trick, 3, 90 + u64::from(trick)) {
+            let cands: Vec<_> = legal.iter().map(|&a| (a, None)).collect();
+            let mut run = crate::pimc::WorldSolve::default();
+            let exact = crate::pimc::exact_world(
+                &m,
+                &cands,
+                &ctx,
+                &c,
+                None,
+                &mut SolveMem::new(),
+                &mut run,
+                None,
+            )
+            .expect("solved");
+            for cut_at in (trick + 1)..=5 {
+                let mut run = crate::pimc::WorldSolve::default();
+                let hybrid = crate::pimc::exact_world(
+                    &m,
+                    &cands,
+                    &ctx,
+                    &c,
+                    None,
+                    &mut SolveMem::new(),
+                    &mut run,
+                    Some(FrontierCut::new(cut_at, &f)),
+                )
+                .expect("solved");
+                assert_eq!(hybrid, exact);
+                assert_eq!(run.stats.frontier, 0);
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked >= 6);
+}

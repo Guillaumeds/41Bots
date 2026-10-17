@@ -17,11 +17,14 @@
 //! however many worlds are drawn and whichever thread draws it.
 
 use engine::cards::{ALL_CARDS, Bits, Card, DECK_SIZE, JOKER, bit, cards, count, has};
-use engine::game::{Action, Event, Match, Phase, Rules, build_deck, current_hand_start_of};
+use engine::game::{
+    Action, Event, Lapse, Match, Phase, Rules, TurnCause, build_deck, current_hand_start_of,
+};
 use engine::rng::Rng;
 use engine::view::SeatView;
 
 use crate::labels;
+use belief::Tracker;
 
 /// One complete guess of the hidden cards, consistent with a seat's view.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -124,6 +127,15 @@ impl Hidden {
 /// Rebuild a world as a match (docs/M3-SPEC.md §5.1): build the hand's deck from the world, start
 /// the match at the hand's start state, and re-apply the hand's actions. The viewer's own actions
 /// come from its events; another seat's burn comes from the world.
+///
+/// A hand where the app turned a partnership (docs/APP-ENGINE-CONTRACT.md §7) is replayed as the
+/// table saw it: each turn at its moment (`Match::turn_team`, or with the card it came with:
+/// `Match::observe_play`); a turned seat's card the world makes illegal, or played without the rob
+/// the world would make, is placed as seen (`Match::observe_play`: its partnership is turned, so
+/// it may have reneged); a turned robber whose world lacks the ace of trumps took the turned card
+/// without it, and one whose world burn is the ace burned it (`Match::let_through`), so the engine
+/// catches them as it caught the real one (the ace shown, a claim). The world sampler only offers
+/// such worlds for seats whose partnership the view shows turned.
 pub fn rebuild(
     view: &SeatView,
     world: &World,
@@ -138,16 +150,14 @@ pub fn rebuild(
     let mut orig = world.hands;
     orig[usize::from(me)] = view.hand;
     let mut k = 0usize;
-    let mut actions = Vec::new();
+    // The hand's steps: plays and burns (a burn with the card the world gives it).
+    let mut burn_cards = Vec::new();
     for e in evs {
         match *e {
-            Event::Played { seat, card } => {
-                orig[usize::from(seat)] |= bit(card);
-                actions.push(Action::Play(card));
-            }
+            Event::Played { seat, card } => orig[usize::from(seat)] |= bit(card),
             Event::Burned { seat, card } if seat == me => {
                 orig[usize::from(seat)] |= bit(card);
-                actions.push(Action::Burn(card));
+                burn_cards.push(card);
             }
             Event::BurnDone { seat } if seat != me => {
                 let Some(&c) = world.burns.get(k) else {
@@ -155,7 +165,7 @@ pub fn rebuild(
                 };
                 k += 1;
                 orig[usize::from(seat)] |= bit(c);
-                actions.push(Action::Burn(c));
+                burn_cards.push(c);
             }
             _ => {}
         }
@@ -199,12 +209,100 @@ pub fn rebuild(
         Ok(m) => m,
         Err(e) => return err(e.0),
     };
-    for a in actions {
-        if m.apply(a).is_err() {
-            return err("a recorded action is illegal in this world");
+    let mut burns = burn_cards.into_iter();
+    // Who may have broken a rule unseen: the viewer itself (it knows what it did), a seat whose
+    // partnership the view shows turned, and any seat the card tracker does not trust (the cards
+    // seen give its lapse away); for the rob, a robber the card tracker finds may have taken the
+    // turned card without the ace of trumps or burned it. Every other seat is taken to have kept
+    // the rules until it is caught, as the card tracker takes it. (The tracker is built only when
+    // a world needs it: never for a world consistent with a view where nobody broke a rule.)
+    let tracker = std::cell::OnceCell::new();
+    let tracker = || tracker.get_or_init(|| Tracker::from_view(view));
+    let out = |seat: u8| {
+        seat == me
+            || view.public.turned_teams[usize::from(engine::team_of(seat))]
+            || tracker().lapsed[usize::from(seat)]
+    };
+    let robber_may_lapse = || tracker().robber_may_have_lapsed;
+    for (i, e) in evs.iter().enumerate() {
+        let ok = match *e {
+            Event::Played { seat, card } => {
+                // The turns made with this card (a renege it proved, the app's turn with it)
+                // follow it, among the passes and other catches it set off.
+                let with: Vec<(u8, TurnCause)> = evs[i + 1..]
+                    .iter()
+                    .take_while(|e| {
+                        matches!(e, Event::PairTurned { .. } | Event::TrickPassed { .. })
+                    })
+                    .filter_map(|e| match *e {
+                        Event::PairTurned { team, cause, .. }
+                            if matches!(cause, TurnCause::WithPlay | TurnCause::Proved) =>
+                        {
+                            Some((team, cause))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let awaited = m.phase() == Phase::AwaitPlay(seat);
+                let legal = awaited && has(m.legal_mask(), card);
+                // The app's turn with a card is made at the play the engine awaits (a seat with
+                // a rob due cannot have played it).
+                let app_turn = with.iter().any(|&(_, c)| c == TurnCause::WithPlay);
+                if with.is_empty() && legal {
+                    m.apply(Action::Play(card)).is_ok()
+                } else {
+                    (legal || out(seat))
+                        && (awaited || !app_turn)
+                        && m.observe_play(card, &with).is_ok()
+                }
+            }
+            Event::Burned { seat, .. } if seat == me => burns
+                .next()
+                .is_some_and(|c| burn_step(&mut m, seat, c, || true)),
+            Event::BurnDone { seat } if seat != me => burns
+                .next()
+                .is_some_and(|c| burn_step(&mut m, seat, c, || out(seat) || robber_may_lapse())),
+            // Turned by the app before a play, or while its rob was due. (Turned with a card:
+            // above; caught by the engine itself, the ace shown, a claim, the end of the hand:
+            // nothing to do.)
+            Event::PairTurned {
+                team,
+                cause:
+                    TurnCause::BeforePlay
+                    | TurnCause::NoRob
+                    | TurnCause::DeclinedRob
+                    | TurnCause::LeftJoker,
+                ..
+            } => m.turn_team(team).is_ok(),
+            _ => true,
+        };
+        if !ok {
+            return Err(RebuildError(format!(
+                "a recorded step is refused in this world: {} (phase {:?})",
+                e.canonical(),
+                m.phase()
+            )));
         }
     }
     Ok(m)
+}
+
+/// A burn of `card` by `seat` as the table saw it (a `BurnDone`): the robber's burn, or, for a
+/// robber that may have broken the rules unseen (`may_lapse`), its burn of the ace of trumps,
+/// or (when the world gives it no ace of trumps, so the engine did not take the turned card for
+/// it) a take without the ace and its burn.
+fn burn_step(m: &mut Match, seat: u8, card: Card, may_lapse: impl FnOnce() -> bool) -> bool {
+    let ace = m.public().trump.map(engine::rules::ace_of_trumps);
+    match m.phase() {
+        Phase::AwaitBurn(s) if s == seat && ace == Some(card) => {
+            may_lapse() && m.let_through(Lapse::BurnAce).is_ok()
+        }
+        Phase::AwaitBurn(s) if s == seat => m.apply(Action::Burn(card)).is_ok(),
+        Phase::AwaitPlay(s) if s == seat => {
+            may_lapse() && m.let_through(Lapse::FalseRob(card)).is_ok()
+        }
+        _ => false,
+    }
 }
 
 /// Does the rebuilt match show the viewer exactly the view it was built from (the strongest

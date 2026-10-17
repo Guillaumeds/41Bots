@@ -57,8 +57,8 @@ fn every_action_check_agrees_with_the_boundary_check() {
             check: Check::EveryAction,
             ..fast
         };
-        let a = attempt(&fast).unwrap_or_else(|d| panic!("{d}"));
-        let b = attempt(&every).unwrap_or_else(|d| panic!("{d}"));
+        let a = attempt(&fast).unwrap_or_else(|d| panic!("{d}")).0;
+        let b = attempt(&every).unwrap_or_else(|d| panic!("{d}")).0;
         assert_eq!(a, b);
     }
 }
@@ -72,7 +72,7 @@ fn tampered(edit: &dyn Fn(&mut State, Option<&mut Events>)) -> Disagreement {
         }
     };
     let mut report = Report::default();
-    let err = run_seeded(3, 0, HOUSE, Some(&hook), &mut report)
+    let err = run_seeded(3, 0, HOUSE, Some(&hook), None, &mut report)
         .expect_err("a corrupted snapshot must be reported");
     assert_eq!(report.matches, 0, "a failed match is not counted");
     assert_eq!((err.seed, err.match_index), (3, 0));
@@ -160,7 +160,7 @@ fn a_panic_becomes_a_located_disagreement() {
         assert!(applied != 30, "deliberate test panic");
     };
     let mut report = Report::default();
-    let d = run_seeded(4, 2, HOUSE, Some(&hook), &mut report).expect_err("must be reported");
+    let d = run_seeded(4, 2, HOUSE, Some(&hook), None, &mut report).expect_err("must be reported");
     assert_eq!((d.seed, d.match_index, d.action_index), (4, 2, 30));
     assert!(
         d.reason
@@ -185,7 +185,7 @@ fn print_sample_disagreement() {
         }
     };
     let mut report = Report::default();
-    let d = run_seeded(3, 0, HOUSE, Some(&hook), &mut report).expect_err("must be reported");
+    let d = run_seeded(3, 0, HOUSE, Some(&hook), None, &mut report).expect_err("must be reported");
     println!("{d}");
 }
 
@@ -249,4 +249,65 @@ fn coverage_minimums_are_enforced() {
         ..Report::default()
     };
     assert_eq!(impossible.coverage_problems(false).len(), 1);
+}
+
+// --------------------------------------------------------------------------------------------
+// Turned partnerships (docs/APP-ENGINE-CONTRACT.md §7)
+// --------------------------------------------------------------------------------------------
+
+/// Random hands with random steps of the app's referee (turns before a play, with a play and
+/// while a rob is due; illegal cards, plays without robbing, robs without the ace and burned
+/// aces let through and caught later), through both implementations: every step is accepted or
+/// refused alike, the full snapshot (state, hidden reneges and every seat's events) agrees after
+/// each, and every match replays from its record.
+#[test]
+fn turned_partnerships_agree_in_300_matches() {
+    let r = run_turns_threads(41, 300, HOUSE, TURN_EVERY, 4).unwrap_or_else(|d| panic!("{d}"));
+    assert_eq!(r.matches, 300);
+    assert_eq!(
+        r.won_by_trick
+            + r.won_by_immediate_bonus
+            + r.won_by_end_bonus
+            + r.jink
+            + r.won_by_passed_trick,
+        r.games,
+        "every game has exactly one end reason"
+    );
+    assert_eq!(r.money.iter().sum::<i64>(), 0);
+    assert!(r.pairs_turned > 1000, "{r:?}");
+    assert!(r.last_pair_left > 20 && r.all_pairs_turned > 5, "{r:?}");
+    assert!(r.tricks_passed > 200 && r.no_point_tricks > 5, "{r:?}");
+    assert!(r.won_by_passed_trick > 5, "{r:?}");
+    // Every cause of a turn, every lapse and every refusal the driver can meet happens
+    // (`no_such_team` is never asked, and `play_then_turn` is only asked with legal cards).
+    assert!(r.turn_causes.iter().all(|&n| n > 0), "{r:?}");
+    assert!(r.lapses.iter().all(|&n| n > 0), "{r:?}");
+    assert_eq!(r.turn_refusals[0] + r.turn_refusals[3], 0);
+    assert!([1, 2, 4].iter().all(|&i| r.turn_refusals[i] > 0), "{r:?}");
+    assert!(r.lapse_refusals.iter().all(|&n| n > 0), "{r:?}");
+    assert!(r.refused_plays > 0 && r.stuck_matches < 60, "{r:?}");
+    assert!(r.coverage_problems(false).is_empty());
+    // The same with one thread, and one match alone.
+    let one = run_turns(41, 24, HOUSE, TURN_EVERY).unwrap_or_else(|d| panic!("{d}"));
+    let four = run_turns_threads(41, 24, HOUSE, TURN_EVERY, 4).unwrap_or_else(|d| panic!("{d}"));
+    assert_eq!(one, four);
+    let alone = run_match_turns(41, 7, HOUSE, TURN_EVERY).unwrap_or_else(|d| panic!("{d}"));
+    assert_eq!(alone.matches, 1);
+}
+
+/// Frequent turns: many hands with two and three partnerships turned.
+#[test]
+fn frequent_turns_agree() {
+    let r = run_turns_threads(7, 120, HOUSE, 4, 4).unwrap_or_else(|d| panic!("{d}"));
+    assert!(r.last_pair_left > 50, "{r:?}");
+}
+
+/// A run without turns is exactly the run it always was (the turn generator is never drawn).
+#[test]
+fn runs_without_turns_are_unchanged() {
+    let r = run(7, 12, HOUSE).unwrap_or_else(|d| panic!("{d}"));
+    assert_eq!(
+        r.turn_attempts + r.lapse_attempts + r.pairs_turned + r.tricks_passed,
+        0
+    );
 }

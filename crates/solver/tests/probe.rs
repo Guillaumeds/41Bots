@@ -198,6 +198,7 @@ fn made(
         hand,
         best,
         rob: None,
+        turned: 0,
     }
 }
 

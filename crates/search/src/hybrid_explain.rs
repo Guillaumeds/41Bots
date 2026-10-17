@@ -1143,6 +1143,7 @@ mod tests {
                 1,
             )),
             rob: None,
+            turned: 0,
         };
         (
             pos,
