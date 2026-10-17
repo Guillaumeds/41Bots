@@ -974,11 +974,24 @@ fn world_prior(
         position,
         solves: solves_per_world(cands),
     };
+    let pos = usize::from(position.min(7));
     let s = match (method, cut) {
-        // A hybrid world: exact search over the tricks before the frontier only. Measured on
-        // the build VM (2026-10-17, docs/m3-hybrid/silver.md): H_3 from trick 1 about 3 s a
-        // world at the leader down to a tenth of that at the eighth seat; H_2, H_4 and later
-        // decisions far less. Rough until measured times replace it.
+        // A hybrid world: exact search over the tricks before the frontier only. Mean
+        // thread-seconds of a whole world (every candidate) by place in the trick, measured on
+        // the build VM on 2026-10-17 with 2048-1024-256 networks: H_3 from trick 1, the silver
+        // pilot (docs/m3-hybrid/silver.md §5; a rented thread is 2-2.7 times slower); H_2 from
+        // trick 1, the pilot's toy O_2 times 3 for a 2048-wide one; H_3 from trick 2, the WASM
+        // API's native table (docs/WASM-API.md). Rough until measured times replace it.
+        (Method::ExactPimc, Some(cut)) if trick == 1 && cut == 3 => {
+            [712.0, 330.0, 211.0, 30.0, 13.0, 1.1, 0.2, 1.8][pos]
+        }
+        (Method::ExactPimc, Some(cut)) if trick == 1 && cut == 2 => {
+            [5.7, 1.6, 0.33, 0.12, 0.06, 0.03, 0.03, 0.03][pos]
+        }
+        (Method::ExactPimc, Some(cut)) if trick == 2 && cut == 3 => [
+            0.073, 0.025, 0.0067, 0.005, 0.0031, 0.0012, 0.00075, 0.00038,
+        ][pos],
+        // Other cuts (later tricks, or H_4 from trick 2): far cheaper; a coarse guess.
         (Method::ExactPimc, Some(cut)) => {
             let tricks = i32::from(cut) - i32::from(trick);
             let seat = 1.0 - f64::from(position) / 9.0;
