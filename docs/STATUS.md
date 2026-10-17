@@ -344,3 +344,36 @@ loses under H_3's values, with the golden checks' statistics plus score and race
   rate on the real machine first.
 - **For the owner:** which size to run (or a smaller first stage), and whether to add the exact
   anchor that measures the silver's own error at trick 1.
+
+## 2026-10-17 (afternoon and evening, Irish time): the trick-2 run, the app's engine API, the student started
+
+**The trick-2 loop is running** (`m3-hybrid-t2-loop-1`, manifest `docs/vast/m3-hybrid-t2-loop.manifest.json`, binaries
+`ebc5d7a`, image `20261017-bc692e446939`, cap $35): AMD EPYC 7742 (245 usable threads, 251 GB, RTX 4060 Ti 16 GB,
+$0.72/h), labels from 19:06 Irish time at about 1,730 rows a minute with the CPU steady at 100% (1.2M random rows, then
+the rules and validation shards, training, the audit rounds). Expected about 35 hours and about $25. Round 1's network is
+the provisional O_2 (out of spec until the loop and the silver set say otherwise), about 15 hours in.
+- **Before it:** seven mechanism tests (about $4.6 in all). Fixes they forced: a shard upload that fails is retried, not
+  fatal; the pooled harvest schedule (`eebf917`); the plain labels' look-ahead as a 1 GiB byte budget (`ebc5d7a`: with
+  one-row chunks at trick 2 the old count window stalled every thread behind one slow row; run 6 swung between 3% and
+  96% CPU).
+- **Launcher guards added after bad rentals:** a machine whose container gets far fewer threads than listed is destroyed
+  at its first heartbeat, recorded and replaced (an AMD EPYC 9B45 gave 46 of 384 threads, twice); Xeon Phi chips are
+  never rented; an operator's stop is never followed by a replacement (`NO-REPLACE`); an upload-speed floor
+  (`min_inet_up`); Blackwell GPUs by opt-in with the CUDA 13 image (`cu130` group of PyTorch 2.14.1).
+- **Turned pairs** (rules 34, 37-41) are in the engine and the reference (branch `eng-turned`, merged; APP-ENGINE-CONTRACT
+  §7.1); the owner's ruling Q1 (a pair turned while its led trick is played) waits for the pros.
+
+**The app's engine API is built and merged** (`docs/WASM-API.md`; `crates/wasm/dist/engine.wasm` 834,515 bytes): the app
+sends its own `maskMatch` view; PIMC with H_3 at trick 2, exact from trick 3, trick 1 refused until an O_2 is loaded;
+the coach's fields with `lines: true`; byte-identical natively and in WASM and for any split across workers. In WASM on
+the build VM a trick-2 deal costs 368 ms when leading, 128 ms second, under 40 ms later; four workers fit about 25 deals
+at a trick-2 lead in 5 s. The owner sent the app session a prompt to wire it behind a switch and test it by duplicate
+tournament against today's Pro.
+
+**The student network build has started** (branch `eng-student`): a small network that values every legal card from the
+seat's view, trained on stored teacher records (each decision's raw position, every card's value in every deal, stamped
+with the teacher's network, the equity table and the rules), so later rounds only add data (DAgger, expert iteration).
+First data run (trick 2, 250k decisions at 320 deals) about $1-2 per 250k on the 245-thread machine, to be priced and
+approved when the pipeline is built.
+
+**Silver set merged** (`eng-silver`, with the per-seat time priors fixed); its size is still the owner's choice.
