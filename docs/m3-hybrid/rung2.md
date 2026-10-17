@@ -396,3 +396,11 @@ check will be cheap; the labels are the cost.
 $1.1/h if a rented thread is as fast as this VM's; a hyper-threaded thread on a fully loaded machine
 may be up to half again slower (about 8 hours, $9). Training on the GPU adds up to `max_minutes`
 (200). To be priced with the owner before running (spec §5).
+
+## Adopted O_3 (owner, 2026-10-17)
+The overnight trick-3 audit loop's round 2 is the current O_3: 2048-1024-256, outcome head,
+`inputs/sha256/f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad`, trained on 40M trick-3 labels
+(random 25.6M s321, rules 6.4M s322, harvest 8M s313) plus round 1's targeted shard. On 2,000 trick-2 golden decisions
+x 320 exact worlds (generated overnight, stored): 95% upper bound 0.0068% overall, seats 1-2 0.0122%, 3-4 0.0080%,
+5-8 0.0052%, own-team bias -0.0085% (the overall row passes; the leader's band does not). Later loops start from it
+(additive mode) and must beat it on the same golden set.

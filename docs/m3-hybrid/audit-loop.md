@@ -377,3 +377,19 @@ What the night showed:
 - **Retraining from scratch every round is noisy:** the golden bound moved 0.0016 -> 0.0021 -> 0.0016 -> 0.0024% at trick
   4 while the data only grew, and the capacity rule stepped up almost every round (its "worst group" changes from round
   to round). More width did not help either loop.
+
+## 9. Decisions of 2026-10-17 (owner, after the overnight loops)
+- **Two training modes, chosen per run:** `scratch` (the loop as it ran overnight: a fresh network each round, the
+  capacity ladder) gets a trick "pretty flat"; `additive` (start from a stored network, keep training it on old and new
+  data together, keep the result only if no worse on the golden set, harvest only the groups still out of spec) fills
+  the rest. The switch is decided together per trick; the rule of thumb is that the golden set passes overall and in
+  every band and the rounds' changes are within noise. Labels are never made twice: a run stores its shards and a later
+  run reuses them.
+- **Machines:** the focused, additive phase is CPU-bound (finding and proving rare groups), not GPU-bound; trick 3 and
+  trick 2 rent for CPU threads with any GPU; trick 4 in scratch mode is the one case that wants a fast GPU.
+- **Trick 2 runs the same design first** (scratch, exact labels, shards stored), and its data then feeds the additive
+  phase.
+- **Trick-2 labels from the trick-3 network** (bootstrapping, TreeStrap-style): allowed only through a gate (a trick-2
+  network trained on hybrid labels against one on exact labels, same money, same exact checks) and only once trick 3 is
+  near 0.005-0.0075%; the audit and every check stay exact. Errors carry forward and add along the chain, and with four
+  teams a flipped near-tie can move the other teams' values in a label by more.

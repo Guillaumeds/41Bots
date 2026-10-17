@@ -585,3 +585,11 @@ Choice (rule: class-4 SD, then the worst band bound, then validation loss; a tie
 **1024-1024-512-128**. Width alone does not lower the race-class error on this data (the float class-4 SD is 3.0% for
 all three), and the two wide networks early-stopped at epochs 9 and 11. The lever is the audit loop's targeted data;
 the ladder keeps the wider shapes for when the data has grown: `<widths>;2048,2048,1024,256;4096,2048,1024,256`.
+
+## Adopted O_4 (owner, 2026-10-17)
+The overnight trick-4 audit loop's round 1 is the current O_4: 1024-1024-512-128, outcome head,
+`inputs/sha256/b28750e3d447400523d2af9cbe85e4fbbb414200474560a7c1038b7adf0ce5a0`, trained on the lead-4 label mix
+(40M trick-4 labels). On 4,000 trick-3 golden decisions x 320 exact worlds: 95% upper bound 0.0016% overall, seats 1-2
+0.0026%, 3-4 0.0023%, 5-8 0.0012%, largest bias 0.0025%; 13 auditor groups still fail at the decision level, most of
+them race-for-the-money conditions (`audit-loop.md` §8). Later loops start from it (additive mode) and must beat it on
+the same golden set.
