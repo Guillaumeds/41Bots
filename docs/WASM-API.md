@@ -302,7 +302,7 @@ Deal *w* (0 ≤ *w* < N) is drawn from `seed` and *w* only, and every value is a
 
 | File | SHA-256 | Bytes | Note |
 |---|---|---|---|
-| `engine.wasm` | `7d928e322b31f5be57154d8843d6936e23f80bf6e20809b520e5dc66a5a0a290` (built from a708c7691e0d; the current one is in `crates/wasm/dist/SHA256SUMS`) | 754,647 | built by `tools/wasm_build.sh` from a committed tree; committed in `crates/wasm/dist/` |
+| `engine.wasm` | `b53e09fb515cd4cf465330bd9fbb1b3d1f0998442afb4afa3f70b185c375fbf7` (built from 490b45eed5e9, Stage B; the current one is always in `crates/wasm/dist/SHA256SUMS`) | 834,515 | built by `tools/wasm_build.sh` from a committed tree; committed in `crates/wasm/dist/` |
 | `engine.mjs` | `512882afaa788b08c0c067dbdaebb1f954cb4a2d5282cc8e61f3461cf007400e` | 4,691 | the loader (`crates/wasm/js/engine.mjs`) |
 | equity table `equity-v0.npy` | `64740dab7845f0502c93ce195d721e1ffb8aa6ab141739ef43f754690de16808` | 25,920,128 (24.7 MiB) | under Cloudflare's 25 MiB static-file limit; rebuilding it takes 25 s natively, so it is downloaded, not rebuilt |
 | O_3, the trick-3 network (2048-1024-256) | `f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad` | 16,936,384 | from R2 `inputs/sha256/<sha>`; serves trick-2 decisions |
