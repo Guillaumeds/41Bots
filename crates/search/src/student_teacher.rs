@@ -664,4 +664,115 @@ mod tests {
         assert!(check_job(&j, &h, true).is_err(), "cut 3 at trick 3");
         assert!(check_job(&j, &Teacher::Exact, true).is_ok());
     }
+
+    /// More deals added later merge exactly: shards of deals 0..2 and 2..5 of the same decisions
+    /// read as one decision each, with the values, means and feature rows of one shard of deals
+    /// 0..5; overlapping deals are refused; the check and the encoding run end to end on them.
+    #[test]
+    fn added_deals_merge_exactly_and_the_check_runs() {
+        use student::data::{Shards, Uniform, feature_row};
+        let starts = collect_starts(400, 8);
+        let l = leaf();
+        let source = BeliefSource::new();
+        let ctx = belief_ctx(&*l, &source);
+        let o = oracle(3);
+        let teacher = Teacher::Hybrid {
+            net: &o,
+            cut: 3,
+            sha256: &o.sha256,
+        };
+        let mut a = job(2, 6, 2, SOURCE_RULES, 2);
+        let mut b = a;
+        b.deal_from = 2;
+        b.deals = 3;
+        let mut all = a;
+        all.deals = 5;
+        let pa = tmp("m-a.npy");
+        let pb = tmp("m-b.npy");
+        let pall = tmp("m-all.npy");
+        for (j, p) in [(&a, &pa), (&b, &pb), (&all, &pall)] {
+            write_teacher_shard(j, &starts, &ctx, teacher, "eq", "bin", "train", p, None)
+                .expect("written");
+        }
+        let mut two = Shards::open(&[&pb, &pa], &[]).expect("opens");
+        let mut one = Shards::open(&[&pall], &[]).expect("opens");
+        assert_eq!((two.groups.len(), one.groups.len()), (6, 6));
+        for g in 0..6 {
+            let m2 = two.merged(g).expect("merged");
+            let m1 = one.merged(g).expect("merged");
+            assert_eq!(m2.deals, vec![0, 1, 2, 3, 4]);
+            assert_eq!(m2.values, m1.values);
+            assert_eq!(m2.means(), m1.means());
+            assert_eq!(
+                feature_row(&m2, &*l, &Uniform).expect("encodes"),
+                feature_row(&m1, &*l, &Uniform).expect("encodes")
+            );
+        }
+        // Deal weights (docs/STUDENT.md §3 item 2): weight 1 everywhere gives the plain means;
+        // weight 0 on deals 0..2 gives the means of deals 2..5 alone.
+        let wfile = |w: &dyn Fn(u32) -> u64| -> std::path::PathBuf {
+            let mut body = Vec::new();
+            let mut n = 0;
+            for g in 0..one.groups.len() {
+                let (sh, i) = one.groups[g][0];
+                let h = &one.readers[sh].records[i];
+                for d in h.deal_from..h.deal_from + h.n_deals {
+                    body.extend_from_slice(&h.pos_sha256);
+                    body.extend_from_slice(&h.dseed.to_le_bytes());
+                    body.extend_from_slice(&d.to_le_bytes());
+                    body.extend_from_slice(&w(d).to_le_bytes());
+                    n += 1;
+                }
+            }
+            let mut hd = format!(
+                "{{'descr': {}, 'fortran_order': False, 'shape': ({n},), }}",
+                student::data::WEIGHTS_DESCR
+            );
+            let pad = (64 - (11 + hd.len()) % 64) % 64;
+            hd.push_str(&" ".repeat(pad));
+            hd.push('\n');
+            let mut b = b"\x93NUMPY\x01\x00".to_vec();
+            b.extend_from_slice(&(hd.len() as u16).to_le_bytes());
+            b.extend_from_slice(hd.as_bytes());
+            b.extend_from_slice(&body);
+            let p = tmp(&format!("w-{}.npy", w(0)));
+            std::fs::write(&p, b).expect("written");
+            p
+        };
+        let ones = student::data::WeightsFile::read(&wfile(&|_| 1)).expect("reads");
+        let late = student::data::WeightsFile::read(&wfile(&|d| u64::from(d >= 2))).expect("reads");
+        for g in 0..6 {
+            let m = one.merged(g).expect("merged");
+            let plain = feature_row(&m, &*l, &Uniform).expect("encodes");
+            assert_eq!(feature_row(&m, &*l, &ones).expect("encodes"), plain);
+            let w = feature_row(&m, &*l, &late).expect("encodes");
+            let mb = two.merged(g).expect("merged");
+            let tail = student::record::means_of(&mb.values[2..], mb.head.cands.len());
+            let team = engine::team_of(m.head.pos.seat);
+            let rotated: Vec<_> = tail
+                .iter()
+                .map(|&x| student::encode::rotate(x, team))
+                .collect();
+            assert_eq!(w.targets, rotated);
+        }
+        // Overlapping deals are refused.
+        assert!(Shards::open(&[&pa, &pall], &[]).is_err());
+        // A test shard cannot be read with training shards.
+        a.seed = student::STUDENT_TEST_SEED;
+        let pt = tmp("m-t.npy");
+        write_teacher_shard(&a, &starts, &ctx, teacher, "eq", "bin", "test", &pt, None)
+            .expect("written");
+        assert!(Shards::open(&[&pa, &pt], &[]).is_err());
+        // The check: a random student against the teacher's values.
+        let net = student::net::random_net(4, &[16, 8], 12);
+        let judged = student::check::judge(&net, &mut one, &*l).expect("judged");
+        assert_eq!(judged.len(), 6);
+        for (g, d) in judged.iter().enumerate() {
+            let m = one.merged(g).expect("merged");
+            let means = m.means();
+            let t = engine::team_of(m.head.pos.seat);
+            let best = means.iter().map(|v| v.get(t)).max().expect("candidates");
+            assert_eq!(d.loss, best - means[usize::from(d.chosen)].get(t));
+        }
+    }
 }

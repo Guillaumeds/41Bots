@@ -6,10 +6,23 @@
 //!   to the seat's exact view; the candidates' codes.
 //! - [`record`]: the teacher's stored records (format `41bots-student-teacher-v1`): every
 //!   candidate's money chance in every deal, with the stamps; append-only, content-addressed.
+//! - [`encode`]: the encoder `student-v1` (the single source of truth): a seat's view and a
+//!   candidate as feature indices; its versioned hash.
+//! - [`features`]: feature shards (format `41bots-student-features-v1`), what Python trains on.
+//! - [`data`]: teacher shards read together: stamps checked, decisions merged by deal index,
+//!   encoded as feature rows; the deal re-weighting hook.
+//! - [`net`]: the integer student network (the oracle's integer scheme), one scorer for every
+//!   candidate, and the bot's choice.
+//! - [`check`]: the student against the teacher's stored values: decision loss and agreement.
 //!
 //! Everything that scores is fixed point ([`equity::MoneyChance`]); floats appear only inside
 //! training (Python).
 
+pub mod check;
+pub mod data;
+pub mod encode;
+pub mod features;
+pub mod net;
 pub mod position;
 pub mod record;
 

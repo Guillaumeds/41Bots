@@ -18,9 +18,10 @@ from .intnet import ACT_SHIFT, CLIP, FORMAT, LOGIT_SHIFT, SUM_BOUND, check_layer
 MAX_FRAC = 24
 
 
-def quantize(float_layers):
+def quantize(float_layers, n_features=N_FEATURES):
     """``float_layers``: [(w float [n_in, n_out] input-major, b float [n_out])]; returns
-    [(w int32, b int64, shift)]."""
+    [(w int32, b int64, shift)]. ``n_features``: the first layer's inputs (the oracle encoder's by
+    default; the student's when given: the same scheme, ``crates/student``)."""
     out = []
     last = len(float_layers) - 1
     for k, (w, b) in enumerate(float_layers):
@@ -41,7 +42,7 @@ def quantize(float_layers):
                 continue
             out.append((wi.astype(np.int32), bi.astype(np.int64), s + s_in - s_out))
             break
-    check_layers(out)
+    check_layers(out, n_features)
     return out
 
 

@@ -44,6 +44,9 @@
 //!                  [--harvest-keep PRED.json [--keep-cap 256]] [--max-decisions N]
 //!                  [--harvest-schedule pooled|decision]
 //!                  [--seat-weights 2,1,1]
+//! search student-check --net STUDENT.safetensors --teacher SHARD.npy [--teacher …] --equity TABLE
+//!                  [--allow-stamp KEY …] [--boot 1000] [--boot-seed 1] [--json OUT]
+//!                  [--baseline rules]
 //! search hybrid-check --trick T --cut K --net WEIGHTS --equity TABLE
 //!                  [--decisions FILE | --count N] [--seed 1] [--start-hands 20000]
 //!                  [--first I] [--last J] [--ids …] [--to 320] [--label 1]
@@ -68,6 +71,13 @@
 //! both files' SHA-256), written as `.part` files and renamed once whole. Byte-identical for any
 //! `--threads`. `--role test` (the fixed test set) needs `student::STUDENT_TEST_SEED`, which a
 //! training shard may not use; seed 1 is refused. `--progress FILE` is rewritten every 2 s.
+//! `student-check` measures a student network (`crates/student`, docs/STUDENT.md §7) against the
+//! teacher's stored values: the teacher shards (the fixed test set, or any) are merged by deal
+//! index as `student encode` merges them, each decision is encoded and valued by the integer
+//! student, and the report gives the decision loss (the teacher's best mean minus the mean of the
+//! student's choice, deciding pair, % of money chance) with a bootstrap 95% upper bound,
+//! agreement and the student's value error, overall, by trick, by place and by stratum;
+//! `--baseline rules` adds the same table for the rules bot (`rules-v1`) on the same decisions.
 //! `labels` writes training labels for the oracle network O_K (docs/M3-HYBRID-SPEC.md §5,
 //! `search::oracle_labels`): a label shard (`nn::shard`, `.npy` records: encoded features, the exact
 //! value as four u64, the source tag, the trick) and a JSON sidecar `FILE.npy.json` with the
@@ -296,8 +306,9 @@ fn main() -> ExitCode {
         Some("robber-burn") => robber_burn(&a),
         Some("labels") => labels_cmd(&a),
         Some("hybrid-check") => hybrid_check(&a),
+        Some("student-check") => student_check(&a),
         _ => Err(
-            "usage: search decisions|worlds|agree|curves|score|teacher|bench-t1|robber-burn|labels|hybrid-check … (see the source docs)"
+            "usage: search decisions|worlds|agree|curves|score|teacher|bench-t1|robber-burn|labels|hybrid-check|student-check … (see the source docs)"
                 .into(),
         ),
     };
@@ -1519,6 +1530,76 @@ fn student_teacher(a: &Args) -> Result<(), String> {
         secs,
         info.records as f64 * 3600.0 / secs.max(1e-9),
     );
+    Ok(())
+}
+
+/// `search student-check`: a student network against the teacher's stored values.
+fn student_check(a: &Args) -> Result<(), String> {
+    let net_path = a.req("--net")?;
+    let net = student::net::StudentNet::from_bytes(
+        &std::fs::read(net_path).map_err(|e| format!("{net_path}: {e}"))?,
+    )?;
+    let paths: Vec<PathBuf> = a.all("--teacher").into_iter().map(PathBuf::from).collect();
+    if paths.is_empty() {
+        return Err("give at least one --teacher shard".into());
+    }
+    let allow: Vec<String> = a
+        .all("--allow-stamp")
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+    let mut shards = student::data::Shards::open(&refs, &allow)?;
+    let (table, equity_sha) = load_equity_sha(a.req("--equity")?)?;
+    for r in &shards.readers {
+        if r.sidecar["equity_sha256"] != equity_sha.as_str() {
+            return Err(format!(
+                "{}: made with another equity table",
+                r.path.display()
+            ));
+        }
+    }
+    let t0 = Instant::now();
+    let judged = student::check::judge(&net, &mut shards, &table)?;
+    let rows = student::check::report(&judged, a.num("--boot", 1000)?, a.num("--boot-seed", 1)?);
+    print!("{}", student::check::print(&rows));
+    println!(
+        "{} decisions, student {} ({:?} hidden), {:.1} s",
+        judged.len(),
+        net.sha256,
+        net.hidden(),
+        t0.elapsed().as_secs_f64()
+    );
+    let baseline = match a.get("--baseline") {
+        None => None,
+        Some("rules") => {
+            let (b, missing) = student::check::judge_rules(&mut shards)?;
+            let brows =
+                student::check::report(&b, a.num("--boot", 1000)?, a.num("--boot-seed", 1)?);
+            println!("baseline rules-v1 (its choice not among the candidates: {missing}):");
+            print!("{}", student::check::print(&brows));
+            Some(serde_json::json!({ "bot": "rules-v1", "not_judged": missing, "rows": brows }))
+        }
+        Some(x) => return Err(format!("--baseline {x}: rules")),
+    };
+    if let Some(out) = a.get("--json") {
+        let v = serde_json::json!({
+            "baseline": baseline,
+            "net": net_path,
+            "net_sha256": net.sha256,
+            "hidden": net.hidden(),
+            "encoder_sha256": student::encode::encoder_sha256(),
+            "teacher_shards": shards.readers.iter().map(|r| r.key.clone()).collect::<Vec<_>>(),
+            "role": shards.role(),
+            "equity_sha256": equity_sha,
+            "rows": rows,
+            "decisions": judged
+                .iter()
+                .map(|d| serde_json::json!([d.trick, d.place, d.stratum, d.n_cands, d.best, d.chosen, d.loss]))
+                .collect::<Vec<_>>(),
+        });
+        write_json(out, &v)?;
+    }
     Ok(())
 }
 

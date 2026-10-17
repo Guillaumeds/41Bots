@@ -37,10 +37,11 @@ def round_shift(x, k):
     return (x + (1 << (k - 1))) >> k
 
 
-def check_layers(layers):
-    """The Rust checks: chained shapes, N_FEATURES inputs, 4 to 64 outputs, shifts < 63, and no
-    sum can leave +-2^62 for any input."""
-    if layers[0][0].shape[0] != N_FEATURES or not 4 <= layers[-1][0].shape[1] <= 64:
+def check_layers(layers, n_features=N_FEATURES):
+    """The Rust checks: chained shapes, ``n_features`` inputs (the oracle encoder's by default; the
+    student's, ``crates/student``, when given), 4 to 64 outputs, shifts < 63, and no sum can leave
+    +-2^62 for any input."""
+    if layers[0][0].shape[0] != n_features or not 4 <= layers[-1][0].shape[1] <= 64:
         raise ValueError("shapes")
     for k, (w, b, shift) in enumerate(layers):
         if k and w.shape[0] != layers[k - 1][0].shape[1]:
