@@ -129,6 +129,37 @@ impl Merged {
     pub fn means(&self) -> Vec<MoneyChance> {
         means_of(&self.values, self.head.cands.len())
     }
+
+    /// The decision cut to its first `n` deals (`student encode --max-deals`): exactly what a
+    /// teacher run with `--deals n` from the same first deal would have stored, since deal `w` of a
+    /// decision depends only on its view, seed and `w` (docs/STUDENT.md §3). Refused when the
+    /// decision holds fewer than `n` deals or its first `n` are not consecutive.
+    pub fn first_deals(&self, n: u32) -> Result<Merged, String> {
+        let k = n as usize;
+        if n == 0 {
+            return Err("--max-deals must be at least 1".into());
+        }
+        if k > self.deals.len() {
+            return Err(format!(
+                "--max-deals {n}: the decision holds only {} deals",
+                self.deals.len()
+            ));
+        }
+        if self.deals[..k]
+            .iter()
+            .enumerate()
+            .any(|(j, &d)| d != self.deals[0] + j as u32)
+        {
+            return Err(format!(
+                "--max-deals {n}: the decision's first {n} deals are not consecutive"
+            ));
+        }
+        Ok(Merged {
+            head: self.head.clone(),
+            deals: self.deals[..k].to_vec(),
+            values: self.values[..k].to_vec(),
+        })
+    }
 }
 
 /// Teacher shards opened together.
@@ -222,6 +253,29 @@ impl Shards {
             values,
         })
     }
+}
+
+/// Every decision of `shards` as a feature row, in decision order (`student encode`): with
+/// `max_deals`, each from its first that many deals only ([`Merged::first_deals`]). A test set
+/// is never cut (its fixed 1,024 deals are the measure's, docs/STUDENT.md §7).
+pub fn feature_rows(
+    shards: &mut Shards,
+    leaf: &dyn Leaf,
+    weights: &dyn DealWeights,
+    max_deals: Option<u32>,
+) -> Result<Vec<FeatureRow>, String> {
+    if max_deals.is_some() && shards.role() == "test" {
+        return Err("--max-deals is never applied to the test set".into());
+    }
+    let mut rows = Vec::with_capacity(shards.groups.len());
+    for g in 0..shards.groups.len() {
+        let mut m = shards.merged(g)?;
+        if let Some(n) = max_deals {
+            m = m.first_deals(n).map_err(|e| format!("decision {g}: {e}"))?;
+        }
+        rows.push(feature_row(&m, leaf, weights).map_err(|e| format!("decision {g}: {e}"))?);
+    }
+    Ok(rows)
 }
 
 /// Check that a record's candidates are legal in its position (they were stored by a generator;

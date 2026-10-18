@@ -32,8 +32,21 @@ fn shard_entry(records: &[u8], values: &[u8], n: u64, role: &str) -> Value {
 #[test]
 fn settings_are_checked() {
     let q = parse(&base()).expect("parses");
-    assert_eq!(q.sizes, vec![40, 100]);
-    assert_eq!(q.widths, vec!["16,8".to_string(), "8".to_string()]);
+    let pt = |size, widths: &str, deals| Point {
+        size,
+        widths: widths.into(),
+        deals,
+    };
+    assert_eq!(
+        q.points,
+        vec![
+            pt(40, "16,8", None),
+            pt(40, "8", None),
+            pt(100, "16,8", None),
+            pt(100, "8", None)
+        ]
+    );
+    assert_eq!(q.train_groups, vec![0, 0]);
     assert_eq!(
         (q.epochs, q.batch, q.patience, q.seed, q.val_permille),
         (40, 256, 4, 1, 50)
@@ -47,9 +60,84 @@ fn settings_are_checked() {
         Entry::Run {
             run: "teach-1".into(),
             stream: "rules".into(),
-            parts: Some(3)
+            parts: Some(3),
+            bundles: None
         }
     );
+    // Points with deals (instead of sizes x widths), in the order listed.
+    let mut p = base();
+    p.as_object_mut().expect("object").remove("sizes");
+    p.as_object_mut().expect("object").remove("widths");
+    p["points"] = json!([{ "size": 100, "widths": "16, 8", "deals": 32 },
+                         { "size": 40, "widths": "8" },
+                         { "size": 40, "widths": "8", "deals": 320 }]);
+    let q = parse(&p).expect("parses");
+    assert_eq!(
+        q.points,
+        vec![
+            pt(100, "16,8", Some(32)),
+            pt(40, "8", None),
+            pt(40, "8", Some(320))
+        ]
+    );
+    assert_eq!(
+        q.points.iter().map(Point::name).collect::<Vec<_>>(),
+        ["n100-w16x8-d32", "n40-w8", "n40-w8-d320"]
+    );
+    for v in [
+        json!([]),
+        json!([{ "size": 0, "widths": "8" }]),
+        json!([{ "size": 10 }]),
+        json!([{ "size": 10, "widths": "8,x" }]),
+        json!([{ "size": 10, "widths": "8", "deals": 0 }]),
+        json!([{ "size": 10, "widths": "8", "deals": "all" }]),
+        json!([{ "size": 10, "widths": "8", "rows": 3 }]),
+        json!([{ "size": 10, "widths": "8", "deals": 4 }, { "size": 10, "widths": "8", "deals": 4 }]),
+    ] {
+        let mut q = p.clone();
+        q["points"] = v.clone();
+        assert!(parse(&q).is_err(), "points = {v}");
+    }
+    let mut q = p.clone();
+    q["sizes"] = json!([40]);
+    assert!(parse(&q).is_err(), "points with sizes");
+    // A run entry listing its stored bundles (a run stopped before its merged report), groups.
+    let bundle = |i: u64| {
+        json!({ "path": format!("runs/teach-2/out/rules/{i:06}-abcd.tar.zst"),
+                "sha256": format!("{i:064x}"), "bytes": 10 + i })
+    };
+    let mut p = base();
+    p["train_inputs"] = json!([run_entry("rules", 3),
+        { "run": "teach-2", "stream": "rules", "bundles": [bundle(1), bundle(2)], "group": 1 }]);
+    let q = parse(&p).expect("parses");
+    assert_eq!(q.train_groups, vec![0, 1]);
+    let Entry::Run {
+        bundles: Some(b), ..
+    } = &q.train[1]
+    else {
+        panic!("bundles")
+    };
+    assert_eq!((b.len(), b[1].bytes), (2, 12));
+    for e in [
+        json!({ "run": "teach-2", "stream": "rules", "bundles": [] }),
+        json!({ "run": "teach-2", "stream": "rules", "bundles": [bundle(1), bundle(1)] }),
+        json!({ "run": "teach-2", "stream": "rules", "bundles": [bundle(1)], "parts": 2 }),
+        json!({ "run": "teach-2", "stream": "mixed", "bundles": [bundle(1)] }),
+        json!({ "run": "teach-2", "stream": "rules", "group": -1 }),
+        json!({ "run": "teach-2", "stream": "rules",
+                "bundles": [{ "path": "runs/teach-2/out/rules/a.tar.zst", "sha256": "00",
+                              "bytes": 1 }] }),
+        json!({ "run": "teach-2", "stream": "rules",
+                "bundles": [{ "path": "runs/teach-2/out/rules/../x.tar.zst",
+                              "sha256": format!("{:064x}", 1), "bytes": 1 }] }),
+    ] {
+        let mut q = base();
+        q["train_inputs"] = json!([e.clone()]);
+        assert!(parse(&q).is_err(), "{e}");
+    }
+    let mut q = base();
+    q["test_inputs"] = json!([{ "run": "teach-1", "stream": "test", "group": 1 }]);
+    assert!(parse(&q).is_err(), "a test group");
     for (k, v) in [
         ("sizes", json!([100, 40])),
         ("sizes", json!([40, 40])),
@@ -145,7 +233,29 @@ fn the_spread_order_interleaves_in_proportion_and_sizes_are_prefixes() {
     assert_eq!(parts_for(&[30, 30, 30], 31), Some(2));
     assert_eq!(parts_for(&[30, 30, 30], 90), Some(3));
     assert_eq!(parts_for(&[30, 30, 30], 91), None);
-    assert_eq!(pair_name(50000, "512,256"), "n50000-w512x256");
+    assert_eq!(pair_name(50000, "512,256", None), "n50000-w512x256");
+    assert_eq!(pair_name(50000, "512,256", Some(32)), "n50000-w512x256-d32");
+    // Groups: ascending, the order within each; a later group never changes an earlier prefix.
+    let late: Vec<Shard> = (0..3).map(|i| s(&format!("l{i}"))).collect();
+    assert_eq!(
+        labels(ordered_groups(
+            vec![late.clone(), rules[..3].to_vec(), mixed[..1].to_vec()],
+            &[1, 0, 0],
+            Order::Spread
+        )),
+        ["r0", "r1", "m0", "r2", "l0", "l1", "l2"]
+    );
+    assert_eq!(
+        labels(ordered_groups(
+            vec![rules[..3].to_vec(), mixed[..1].to_vec()],
+            &[0, 0],
+            Order::Spread
+        )),
+        labels(ordered(
+            vec![rules[..3].to_vec(), mixed[..1].to_vec()],
+            Order::Spread
+        ))
+    );
 }
 
 /// The manifests in docs/vast parse, and a student_train stream is one chunk.
@@ -155,6 +265,8 @@ fn the_manifests_parse() {
     for name in [
         "student-t2-curve.manifest.json",
         "student-t2-curve-mech.manifest.json",
+        "student-t2-dealtest.manifest.json",
+        "student-t2-dealtest-mech.manifest.json",
     ] {
         let text = fs::read_to_string(root.join(name)).expect(name);
         let v: Value = serde_json::from_str(&text).expect(name);
@@ -168,9 +280,44 @@ fn the_manifests_parse() {
     )
     .expect("JSON");
     let q = parse(&v["streams"][0]["params"]).expect("parses");
-    assert_eq!(q.sizes, vec![50_000, 100_000, 250_000]);
-    assert_eq!(q.widths, vec!["256,128".to_string(), "512,256".to_string()]);
+    assert_eq!(q.points.len(), 6);
+    assert_eq!(
+        (
+            q.points[0].size,
+            q.points[0].widths.as_str(),
+            q.points[0].deals
+        ),
+        (50_000, "256,128", None)
+    );
     assert_eq!(q.device, Device::Cuda);
+    // The deal test: 125 parts of 5,000 (the base run's 50 spread, then the more run's 75 stored
+    // bundles), every point within them, the 250,000 anchor on exactly the base run's parts.
+    let d: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("student-t2-dealtest.manifest.json")).expect("read"),
+    )
+    .expect("JSON");
+    let q = parse(&d["streams"][0]["params"]).expect("parses");
+    assert_eq!(q.train_groups, vec![0, 0, 1]);
+    let Entry::Run {
+        bundles: Some(b), ..
+    } = &q.train[2]
+    else {
+        panic!("bundles")
+    };
+    assert_eq!(b.len(), 75);
+    let names: Vec<String> = q.points.iter().map(Point::name).collect();
+    assert_eq!(
+        names,
+        [
+            "n250000-w512x256-d320",
+            "n126000-w512x256-d320",
+            "n315000-w512x256-d128",
+            "n625000-w512x256-d64",
+            "n625000-w512x256-d32",
+            "n126000-w512x256-d64"
+        ]
+    );
+    assert!(q.points.iter().all(|p| p.size <= 625_000));
     v["streams"][0]["chunks"] = json!(2);
     assert!(crate::sched::parse_v2(&v).is_err());
 }
@@ -199,8 +346,8 @@ fn stored_run(store: &Path, run: &str, streams: &[(&str, &str, &[u64])]) {
     for (stream, role, parts) in streams {
         let mut chunks = Vec::new();
         for (i, &n) in parts.iter().enumerate() {
-            let records = format!("records {stream} {i}").into_bytes();
-            let values = format!("values of {stream} part {i}").into_bytes();
+            let records = format!("records {run} {stream} {i}").into_bytes();
+            let values = format!("values of {run} {stream} part {i}").into_bytes();
             for b in [&records, &values] {
                 let d = store.join("inputs/sha256");
                 fs::create_dir_all(&d).expect("mkdir");
@@ -300,10 +447,11 @@ cp '{py}' "$UV_PROJECT_ENVIRONMENT/bin/python"
         "student",
         &format!(
             r#"echo "student $*" >> '{c}'
-out=""; n=0; role=""
+out=""; n=0; role=""; md=null
 while [ $# -gt 0 ]; do
   case "$1" in
   --out) out=$2; shift ;;
+  --max-deals) md=$2; shift ;;
   --teacher) side="$2.json"
      k=$(grep -o '"records": *[0-9]*' "$side" | head -1 | cut -d: -f2); n=$((n + k))
      role=$(grep -o '"role": *"[a-z]*"' "$side" | head -1 | cut -d'"' -f4); shift ;;
@@ -311,7 +459,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 printf features > "$out"
-echo "{{\"records\": $n, \"role\": \"$role\", \"encoder\": \"student-v1\", \"encoder_sha256\": \"e\"}}" > "$out.json"
+echo "{{\"records\": $n, \"role\": \"$role\", \"encoder\": \"student-v1\", \"encoder_sha256\": \"e\", \"max_deals\": $md}}" > "$out.json"
 "#
         ),
     );
@@ -473,5 +621,110 @@ echo "group n loss"
     let mut q = p.clone();
     q["test_inputs"] = json!([{ "run": "teach-2", "stream": "test" }]);
     fails(q, "not found");
+
+    // The deal test: points with deals, a run read from its listed bundles (its merged report
+    // gone) in a later group. Each deal count is encoded once over the parts its largest size
+    // needs (--max-deals for a cut), each point trains on its own set, the curve says the deals,
+    // and a second call trains nothing.
+    stored_run(&store, "teach-3", &[("rules", "train", &[30, 30])]);
+    let merged = {
+        let l = store.join("teach-3-merged.json");
+        assert!(remote.get("runs/teach-3/merged.json", &l).expect("get"));
+        read_json(&l).expect("merged")
+    };
+    fs::remove_file(store.join("runs/teach-3/merged.json")).expect("rm");
+    let bundles: Vec<Value> = merged["streams"][0]["chunks"]
+        .as_array()
+        .expect("chunks")
+        .iter()
+        .map(|c| c["outputs"][0].clone())
+        .collect();
+    fs::write(&calls, "").expect("clear");
+    let mut d = p.clone();
+    d["train_inputs"] = json!([run_entry("rules", 3), run_entry("mixed", 1),
+        { "run": "teach-3", "stream": "rules", "bundles": bundles, "group": 1 }]);
+    let o = d.as_object_mut().expect("object");
+    o.remove("sizes");
+    o.remove("widths");
+    d["points"] = json!([{ "size": 150, "widths": "8", "deals": 2 },
+                         { "size": 40, "widths": "8" },
+                         { "size": 60, "widths": "8", "deals": 2 }]);
+    let root4 = tmp.join("c4");
+    let mut ctx4 = Ctx::local("student-train-test", &root4, 4);
+    let r = chunk_with(&mut ctx4, &d, &progs, &table, json!({})).expect("runs");
+    assert_eq!(r["pairs"], 3, "{r}");
+    let log = fs::read_to_string(&calls).expect("calls");
+    assert_eq!(log.matches("student encode").count(), 1 + 5 + 2, "{log}");
+    assert_eq!(log.matches("--max-deals 2 ").count(), 5, "{log}");
+    let trainings: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains("fortyone_nn.student"))
+        .collect();
+    assert_eq!(trainings.len(), 3, "{log}");
+    assert!(trainings[0].contains("--limit 150 ") && trainings[0].contains("/features/d2/"));
+    assert_eq!(
+        trainings[0].matches("/features/d2/").count(),
+        5,
+        "{}",
+        trainings[0]
+    );
+    assert!(trainings[1].contains("--limit 40 ") && !trainings[1].contains("/d2/"));
+    // Two training parts and the test set.
+    assert_eq!(
+        trainings[1].matches("/features/").count(),
+        3,
+        "{}",
+        trainings[1]
+    );
+    let check = log
+        .lines()
+        .find(|l| l.contains("search student-check"))
+        .expect("a check");
+    assert!(!check.contains("max-deals"), "{check}");
+    let out4 = root4.join("out/student");
+    let curve = read_json(&out4.join("curve.json")).expect("curve");
+    let rows: Vec<(u64, Value)> = curve["rows"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .map(|r| (r["size"].as_u64().expect("size"), r["deals"].clone()))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![(40, Value::Null), (60, json!(2)), (150, json!(2))]
+    );
+    let done = read_json(&out4.join("n150-w8-d2/done.json")).expect("done");
+    assert_eq!(
+        (done["deals"].clone(), done["parts"].clone()),
+        (json!(2), json!(5))
+    );
+    let text = fs::read_to_string(out4.join("curve.txt")).expect("text");
+    assert!(text.contains(" deals ") && text.contains(" all "), "{text}");
+    let inputs = read_json(&out4.join("inputs.json")).expect("inputs");
+    let labels: Vec<&str> = inputs["train"]
+        .as_array()
+        .expect("train")
+        .iter()
+        .map(|s| s["label"].as_str().expect("label"))
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            "teach-1/rules/part 0",
+            "teach-1/rules/part 1",
+            "teach-1/mixed/part 0",
+            "teach-1/rules/part 2",
+            "teach-3/rules/part 0",
+            "teach-3/rules/part 1"
+        ]
+    );
+    fs::write(&calls, "").expect("clear");
+    chunk_with(&mut ctx4, &d, &progs, &table, json!({})).expect("runs");
+    let log = fs::read_to_string(&calls).expect("calls");
+    assert!(!log.contains("fortyone_nn.student"), "{log}");
+    // A listed bundle that is not the stored one stops the chunk.
+    let mut bad = d.clone();
+    bad["train_inputs"][2]["bundles"][1]["bytes"] = json!(1);
+    fails(bad, "its listing says");
     let _ = fs::remove_dir_all(&tmp);
 }

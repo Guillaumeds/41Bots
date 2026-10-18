@@ -797,4 +797,72 @@ mod tests {
         }
         assert!((expected - want / r.len() as f64).abs() < 1e-12);
     }
+    /// `student encode --max-deals N` (docs/STUDENT.md §5): a record of 5 deals cut to its first
+    /// 2 gives exactly the merged values, means and feature rows of a record generated with
+    /// `--deals 2` for the same seed; cut to all its deals it gives byte-identical feature rows;
+    /// more deals than stored, and any cut of a test set, are refused.
+    #[test]
+    fn records_cut_to_their_first_deals_are_the_smaller_teacher_runs() {
+        use student::data::{Shards, Uniform, feature_rows};
+        let starts = collect_starts(400, 8);
+        let l = leaf();
+        let source = BeliefSource::new();
+        let ctx = belief_ctx(&*l, &source);
+        let o = oracle(3);
+        let teacher = Teacher::Hybrid {
+            net: &o,
+            cut: 3,
+            sha256: &o.sha256,
+        };
+        let wide = job(2, 6, 5, SOURCE_MIXED, 2);
+        let mut narrow = wide;
+        narrow.deals = 2;
+        let pw = tmp("cut-wide.npy");
+        let pn = tmp("cut-narrow.npy");
+        for (j, p) in [(&wide, &pw), (&narrow, &pn)] {
+            write_teacher_shard(j, &starts, &ctx, teacher, "eq", "bin", "train", p, None)
+                .expect("written");
+        }
+        let mut w = Shards::open(&[&pw], &[]).expect("opens");
+        let mut n = Shards::open(&[&pn], &[]).expect("opens");
+        for g in 0..6 {
+            let cut = w.merged(g).expect("merged").first_deals(2).expect("cut");
+            let small = n.merged(g).expect("merged");
+            assert_eq!((&cut.deals, &cut.values), (&small.deals, &small.values));
+            assert_eq!(cut.means(), small.means());
+            assert!(w.merged(g).expect("merged").first_deals(6).is_err());
+            assert!(w.merged(g).expect("merged").first_deals(0).is_err());
+        }
+        let bytes = |rows: &[student::features::FeatureRow]| {
+            let mut b = student::features::header(rows.len() as u64);
+            for r in rows {
+                student::features::row_bytes(r, &mut b);
+            }
+            b
+        };
+        let cut = feature_rows(&mut w, &*l, &Uniform, Some(2)).expect("encodes");
+        let small = feature_rows(&mut n, &*l, &Uniform, None).expect("encodes");
+        assert_eq!(cut, small);
+        assert_eq!(bytes(&cut), bytes(&small));
+        let all = feature_rows(&mut w, &*l, &Uniform, None).expect("encodes");
+        let full = feature_rows(&mut w, &*l, &Uniform, Some(5)).expect("encodes");
+        assert_eq!(bytes(&all), bytes(&full));
+        assert_ne!(bytes(&all), bytes(&cut));
+        assert!(feature_rows(&mut w, &*l, &Uniform, Some(6)).is_err());
+        // A test set is never cut.
+        let mut t = wide;
+        t.seed = student::STUDENT_TEST_SEED;
+        let pt = tmp("cut-test.npy");
+        write_teacher_shard(&t, &starts, &ctx, teacher, "eq", "bin", "test", &pt, None)
+            .expect("written");
+        let mut ts = Shards::open(&[&pt], &[]).expect("opens");
+        assert!(feature_rows(&mut ts, &*l, &Uniform, Some(2)).is_err());
+        assert!(feature_rows(&mut ts, &*l, &Uniform, Some(5)).is_err());
+        assert_eq!(
+            feature_rows(&mut ts, &*l, &Uniform, None)
+                .expect("encodes")
+                .len(),
+            6
+        );
+    }
 }

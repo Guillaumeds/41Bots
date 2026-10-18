@@ -18,7 +18,10 @@
 //!   wholly done, and hold `parts` chunks when given), fetches each chunk's bundle listed there
 //!   (SHA-256 and size checked) and takes from it the part's `student/<file>.inputs.json`: the
 //!   records' and values' keys and sizes and the teacher's sidecar. A part whose shard was not
-//!   shared (its upload failed, so its values are only in its bundle) stops the chunk.
+//!   shared (its upload failed, so its values are only in its bundle) stops the chunk. With
+//!   `"bundles": [ { "path", "sha256", "bytes" }, … ]` the parts are those bundles, in the order
+//!   listed, and `merged.json` is not read: a run stopped before its merged report (the stored
+//!   bundles under `runs/R/out/S/`, each checked by SHA-256 and size as from a merged report).
 //! - a stored shard named directly, as a part's `.inputs.json` gives it:
 //!   `{ "records": "sha256:<hex>", "records_bytes": B, "values": "sha256:<hex>",
 //!   "values_bytes": B, "sidecar": { … } }` (`part` and `file` may stay; nothing else).
@@ -26,10 +29,21 @@
 //! **Order and sizes.** The training parts are put in one order: `order` `"spread"` (the
 //! default) interleaves the entries in proportion (part `i` of an entry of `n` parts at
 //! `(i + ½) / n`, ties to the earlier entry: with 40 rules parts and 10 mixed, every five parts hold
-//! four rules ones and one mixed one), `"given"` keeps them entry by entry. Each size of `sizes`
-//! (decisions, ascending, distinct) trains on the first that many decisions in that order (the
-//! fewest parts that hold them, and the trainer's `--limit`): a deterministic prefix, so the
-//! learning curve's data only grows. Only the parts the largest size needs are fetched.
+//! four rules ones and one mixed one), `"given"` keeps them entry by entry. An entry may carry
+//! `"group": k` (default 0): the groups come in ascending order, the order applied within each, so
+//! a later run's parts can follow an earlier run's without changing the earlier prefix. Each size
+//! trains on the first that many decisions in that order (the fewest parts that hold them, and the
+//! trainer's `--limit`): a deterministic prefix, so the learning curve's data only grows. Only the
+//! parts the largest size needs are fetched.
+//!
+//! **Points.** Either `sizes` (decisions, ascending, distinct) × `widths`, every target from all
+//! the stored deals, or `points`: `[ { "size": N, "widths": "512,256", "deals": D }, … ]`, trained
+//! in the order listed, `deals` optional. A point with `deals` trains on targets built from each
+//! decision's first D deals only (`student encode --max-deals D`: exactly what a teacher run with
+//! D deals would have stored), so the number of teacher deals a student needs is measured on data
+//! already paid for; the test set always uses all its deals. Each deal count is encoded once into
+//! its own feature shard set (`features/d<D>/`), over the parts its largest size needs; a point's
+//! directory and resume key gain `-d<D>`.
 //!
 //! **Steps** (the heartbeat names each; `partial_cpu_ok`, as `hybrid_rung`: the GPU steps leave the
 //! CPU idle by design):
@@ -38,31 +52,34 @@
 //!    against the first (`student::record::STAMPS`, but `allow_stamps`), no shard twice; written
 //!    to `out/student/inputs.json`.
 //! 3. Fetch and encode: each needed shard's two files fetched (`fetch_jobs` at a time; SHA-256 and
-//!    size checked) and encoded once (`student encode`, encoder `student-v1`) into a feature shard
-//!    of its own; the test parts into one test feature shard. A training part's raw files are
+//!    size checked) and encoded once per deal count that needs it (`student encode`, encoder
+//!    `student-v1`, `--max-deals` for a cut) into a feature shard of its own; the test parts into
+//!    one test feature shard, never cut. A training part's raw files are
 //!    deleted once encoded unless `keep_raw` (the test set's stay: `search student-check` reads
 //!    them).
 //! 4. The Python environment and the GPU check (`hybrid_rung`'s steps 2 and 3, the same groups,
 //!    limits and records): `out/student/device.json`.
-//! 5. For each size (outer) and width (inner): `python -m fortyone_nn.student` (the settings
+//! 5. For each point (sizes × widths: size outer, width inner): `python -m fortyone_nn.student` (the settings
 //!    below, `--limit` the size, `--test` the test feature shard), then `search student-check` of
 //!    the integer network on the test set with `--baseline` each of `baselines`, then the
 //!    networks shared content-addressed (`upload`; a failure is a warning). Into
-//!    `out/student/n<size>-w<w1>x<w2>/`: `float.safetensors`, `int.safetensors`, `report.json`
+//!    `out/student/n<size>-w<w1>x<w2>[-d<deals>]/`: `float.safetensors`, `int.safetensors`, `report.json`
 //!    (the trainer's), `check.json` and `check.txt` (the measure), and `done.json` last (the
-//!    files' SHA-256, the keys, the parts used).
-//! 6. `out/student/curve.json` and `curve.txt` (rewritten after every pair): per (size, width) the
-//!    test set's decision loss, its bootstrap 95% upper bound and the agreement, overall, by place
-//!    in the trick and by score class (stratum S1–S4), beside the baselines.
+//!    files' SHA-256, the keys, the parts used, the deals).
+//! 6. `out/student/curve.json` and `curve.txt` (rewritten after every pair): per (size, width,
+//!    deals; `null` / "all" for every deal) the test set's decision loss, its bootstrap 95% upper
+//!    bound and the agreement, overall, by place in the trick and by score class (stratum S1–S4),
+//!    beside the baselines.
 //!
-//! **Resume** at the (size, width) level: the runner restores a `student_train` chunk's live files
-//! (`runs/<run>/partial/<stream>/<index>/out/`, uploaded every `upload_every_s`) on the machine
-//! that continues it, and a pair whose `done.json` is there with every file it lists (by SHA-256)
-//! is not trained again; the data are fetched and encoded again (minutes). Float training on a GPU
+//! **Resume** at the point level (size, widths, deals): the runner restores a `student_train`
+//! chunk's live files (`runs/<run>/partial/<stream>/<index>/out/`, uploaded every
+//! `upload_every_s`) on the machine that continues it, and a point whose `done.json` is there
+//! with every file it lists (by SHA-256) is not trained again; the data are fetched and encoded again (minutes). Float training on a GPU
 //! is not bit-reproducible, so a pair redone gives another network; its integer file's SHA-256 is
 //! what is recorded.
 //!
-//! Settings: `train_inputs`, `test_inputs`, `sizes`, `widths` (required); `order` (`spread`);
+//! Settings: `train_inputs`, `test_inputs`, and `sizes` with `widths` or `points` (required);
+//! `order` (`spread`);
 //! the trainer's `epochs` (40), `batch` (256), `lr` (0.001), `patience` (4), `seed` (1),
 //! `val_permille` (50), `max_minutes` (0: none) as `fortyone_nn.student`'s defaults; `device`
 //! (`auto`, `cuda` or `cpu`; default `auto`), `train_threads` (8 beside a GPU, else all);
@@ -71,6 +88,7 @@
 //! `keep_raw` (false), `fetch_jobs` (4), `upload` (true), `allow_stamps` ([]); `table` and
 //! `equity_input` as other kinds; any other key is refused ([`KEYS`]). One chunk a stream.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -86,12 +104,13 @@ use crate::spike::build_table_from;
 use crate::{Ctx, sibling};
 
 /// The settings a `student_train` chunk takes; any other key is refused.
-pub(crate) const KEYS: [&str; 26] = [
+pub(crate) const KEYS: [&str; 27] = [
     "train_inputs",
     "test_inputs",
     "order",
     "sizes",
     "widths",
+    "points",
     "epochs",
     "batch",
     "lr",
@@ -116,8 +135,8 @@ pub(crate) const KEYS: [&str; 26] = [
 ];
 
 /// The keys of a run entry and of a stored shard's entry.
-const RUN_KEYS: [&str; 3] = ["run", "stream", "parts"];
-const SHARD_KEYS: [&str; 7] = [
+const RUN_KEYS: [&str; 5] = ["run", "stream", "parts", "bundles", "group"];
+const SHARD_KEYS: [&str; 8] = [
     "records",
     "records_bytes",
     "values",
@@ -125,7 +144,12 @@ const SHARD_KEYS: [&str; 7] = [
     "sidecar",
     "part",
     "file",
+    "group",
 ];
+
+/// The keys of a curve point and of a listed bundle.
+const POINT_KEYS: [&str; 3] = ["size", "widths", "deals"];
+const BUNDLE_KEYS: [&str; 3] = ["path", "sha256", "bytes"];
 
 /// The baselines `search student-check` knows.
 const BASELINES: [&str; 2] = ["rules", "random"];
@@ -133,14 +157,40 @@ const BASELINES: [&str; 2] = ["rules", "random"];
 /// One entry of `train_inputs` / `test_inputs`.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Entry {
-    /// Every part of a finished `student_teacher` stream.
+    /// Every part of a finished `student_teacher` stream (from its `merged.json`), or the parts
+    /// whose bundles are listed (`bundles`: a run stopped before its merged report).
     Run {
         run: String,
         stream: String,
         parts: Option<u64>,
+        bundles: Option<Vec<Bundle>>,
     },
     /// One stored shard.
     Shard(Shard),
+}
+
+/// A stored part bundle of a `student_teacher` stream, as a merged report lists it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Bundle {
+    pub path: String,
+    pub sha256: String,
+    pub bytes: u64,
+}
+
+/// One point of the curve: a training size, the hidden widths and the teacher deals per
+/// decision its targets are built from (`None`: every stored deal).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Point {
+    pub size: u64,
+    pub widths: String,
+    pub deals: Option<u32>,
+}
+
+impl Point {
+    /// Its directory name, the resume key: `n<size>-w<w1>x<w2>…`, then `-d<deals>` when cut.
+    pub fn name(&self) -> String {
+        pair_name(self.size, &self.widths, self.deals)
+    }
 }
 
 /// A stored teacher shard: its two files by SHA-256 and size, and its sidecar.
@@ -182,10 +232,13 @@ pub(crate) enum Order {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Params {
     pub train: Vec<Entry>,
+    /// The group of each training entry (0 unless given): groups in ascending order, the order
+    /// applied within each.
+    pub train_groups: Vec<u64>,
     pub test: Vec<Entry>,
     pub order: Order,
-    pub sizes: Vec<u64>,
-    pub widths: Vec<String>,
+    /// The curve's points, in training order.
+    pub points: Vec<Point>,
     pub epochs: u64,
     pub batch: u64,
     pub lr: f64,
@@ -208,7 +261,7 @@ fn err(e: impl std::fmt::Display) -> String {
     format!("student_train: {e}")
 }
 
-fn parse_entries(p: &Value, key: &str) -> Result<Vec<Entry>, String> {
+fn parse_entries(p: &Value, key: &str) -> Result<(Vec<Entry>, Vec<u64>), String> {
     let list = match p.get(key) {
         Some(Value::Array(a)) if !a.is_empty() => a,
         _ => {
@@ -220,11 +273,18 @@ fn parse_entries(p: &Value, key: &str) -> Result<Vec<Entry>, String> {
         }
     };
     let mut out = Vec::new();
+    let mut groups = Vec::new();
     for (i, e) in list.iter().enumerate() {
         let n = i + 1;
         let o = e
             .as_object()
             .ok_or_else(|| err(format!("{key} entry {n} is not an object")))?;
+        groups.push(match o.get("group") {
+            None | Some(Value::Null) => 0,
+            Some(v) => v
+                .as_u64()
+                .ok_or_else(|| err(format!("{key} entry {n}: group must be a whole number")))?,
+        });
         if o.contains_key("run") {
             if let Some(k) = o.keys().find(|k| !RUN_KEYS.contains(&k.as_str())) {
                 return Err(err(format!(
@@ -255,10 +315,29 @@ fn parse_entries(p: &Value, key: &str) -> Result<Vec<Entry>, String> {
                     ))
                 })?),
             };
+            let (run, stream) = (text("run")?, text("stream")?);
+            let bundles = match o.get("bundles") {
+                None | Some(Value::Null) => None,
+                Some(v) => Some(parse_bundles(
+                    v,
+                    &run,
+                    &stream,
+                    &format!("{key} entry {n}"),
+                )?),
+            };
+            if let (Some(b), Some(np)) = (&bundles, parts)
+                && b.len() as u64 != np
+            {
+                return Err(err(format!(
+                    "{key} entry {n}: {} bundles listed, parts says {np}",
+                    b.len()
+                )));
+            }
             out.push(Entry::Run {
-                run: text("run")?,
-                stream: text("stream")?,
+                run,
+                stream,
                 parts,
+                bundles,
             });
         } else {
             if let Some(k) = o.keys().find(|k| !SHARD_KEYS.contains(&k.as_str())) {
@@ -267,8 +346,125 @@ fn parse_entries(p: &Value, key: &str) -> Result<Vec<Entry>, String> {
                     SHARD_KEYS.join(", ")
                 )));
             }
-            out.push(Entry::Shard(shard_of(o, &format!("{key} entry {n}"))?));
+            let mut o = o.clone();
+            o.remove("group");
+            out.push(Entry::Shard(shard_of(&o, &format!("{key} entry {n}"))?));
         }
+    }
+    Ok((out, groups))
+}
+
+/// A run entry's `bundles`: a non-empty list of `{ "path", "sha256", "bytes" }`, each path one
+/// of the run's stream's part bundles (`runs/<run>/out/<stream>/…`), no bundle twice.
+fn parse_bundles(v: &Value, run: &str, stream: &str, label: &str) -> Result<Vec<Bundle>, String> {
+    let list = v.as_array().filter(|a| !a.is_empty()).ok_or_else(|| {
+        err(format!(
+            "{label}: bundles must be a list of {{ \"path\", \"sha256\", \"bytes\" }}"
+        ))
+    })?;
+    let prefix = format!("runs/{run}/out/{stream}/");
+    let mut out: Vec<Bundle> = Vec::new();
+    for (i, b) in list.iter().enumerate() {
+        let what = format!("{label}: bundle {}", i + 1);
+        let o = b
+            .as_object()
+            .ok_or_else(|| err(format!("{what} is not an object")))?;
+        if let Some(k) = o.keys().find(|k| !BUNDLE_KEYS.contains(&k.as_str())) {
+            return Err(err(format!(
+                "{what}: unknown key {k:?} (a bundle takes {})",
+                BUNDLE_KEYS.join(", ")
+            )));
+        }
+        let path = o
+            .get("path")
+            .and_then(Value::as_str)
+            .filter(|p| {
+                p.strip_prefix(&prefix).is_some_and(|f| {
+                    f.ends_with(".tar.zst")
+                        && f.bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+                })
+            })
+            .ok_or_else(|| err(format!("{what}: path must be {prefix}<file>.tar.zst")))?;
+        let sha256 = o
+            .get("sha256")
+            .and_then(Value::as_str)
+            .filter(|h| h.len() == 64 && h.bytes().all(|c| c.is_ascii_hexdigit()))
+            .ok_or_else(|| err(format!("{what}: sha256 must be 64 hex digits")))?;
+        let bytes = o
+            .get("bytes")
+            .and_then(Value::as_u64)
+            .filter(|x| *x > 0)
+            .ok_or_else(|| err(format!("{what}: bytes must be a whole number above 0")))?;
+        if out.iter().any(|x| x.path == path || x.sha256 == sha256) {
+            return Err(err(format!("{what}: the same bundle twice")));
+        }
+        out.push(Bundle {
+            path: path.to_string(),
+            sha256: sha256.to_ascii_lowercase(),
+            bytes,
+        });
+    }
+    Ok(out)
+}
+
+/// Checks one widths string ("512,256"); returns it without spaces.
+fn check_widths(w: &str) -> Result<String, String> {
+    let hidden: Vec<usize> = w
+        .split(',')
+        .map(|x| x.trim().parse::<usize>().ok().filter(|n| *n > 0))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| err(format!("widths {w:?}: hidden-layer sizes like \"256,128\"")))?;
+    nn::mlp::check_hidden_widths(&hidden).map_err(|e| err(format!("widths {w:?}: {e}")))?;
+    Ok(w.replace(' ', ""))
+}
+
+/// `points`: a non-empty list of `{ "size", "widths", "deals" }` (`deals` optional: every stored
+/// deal), no point twice.
+fn parse_points(v: &Value) -> Result<Vec<Point>, String> {
+    let list = v.as_array().filter(|a| !a.is_empty()).ok_or_else(|| {
+        err("points must be a list of { \"size\", \"widths\", \"deals\" (optional) }")
+    })?;
+    let mut out: Vec<Point> = Vec::new();
+    for (i, x) in list.iter().enumerate() {
+        let what = format!("points entry {}", i + 1);
+        let o = x
+            .as_object()
+            .ok_or_else(|| err(format!("{what} is not an object")))?;
+        if let Some(k) = o.keys().find(|k| !POINT_KEYS.contains(&k.as_str())) {
+            return Err(err(format!(
+                "{what}: unknown key {k:?} (a point takes {})",
+                POINT_KEYS.join(", ")
+            )));
+        }
+        let size = o
+            .get("size")
+            .and_then(Value::as_u64)
+            .filter(|n| *n > 0)
+            .ok_or_else(|| err(format!("{what}: size must be a whole number above 0")))?;
+        let widths = check_widths(
+            o.get("widths")
+                .and_then(Value::as_str)
+                .ok_or_else(|| err(format!("{what}: widths such as \"512,256\"")))?,
+        )?;
+        let deals = match o.get("deals") {
+            None | Some(Value::Null) => None,
+            Some(d) => Some(
+                d.as_u64()
+                    .filter(|n| (1..=u64::from(u32::MAX)).contains(n))
+                    .ok_or_else(|| err(format!("{what}: deals must be a whole number above 0")))?
+                    as u32,
+            ),
+        };
+        let p = Point {
+            size,
+            widths,
+            deals,
+        };
+        if out.contains(&p) {
+            return Err(err(format!("{what}: the same point twice")));
+        }
+        out.push(p);
     }
     Ok(out)
 }
@@ -374,42 +570,66 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
             Some(_) => Err(err(format!("{k} must be a list of strings"))),
         }
     };
-    let train = parse_entries(p, "train_inputs")?;
-    let test = parse_entries(p, "test_inputs")?;
+    let (train, train_groups) = parse_entries(p, "train_inputs")?;
+    let (test, test_groups) = parse_entries(p, "test_inputs")?;
+    if test_groups.iter().any(|g| *g != 0) {
+        return Err(err("test_inputs take no group"));
+    }
     let order = match p.get("order").and_then(Value::as_str).unwrap_or("spread") {
         "spread" => Order::Spread,
         "given" => Order::Given,
         x => return Err(err(format!("order {x:?}: spread or given"))),
     };
-    let sizes: Vec<u64> = match p.get("sizes") {
-        Some(Value::Array(a)) if !a.is_empty() => a
-            .iter()
-            .map(|x| x.as_u64().filter(|n| *n > 0))
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| err("sizes must be whole numbers above 0"))?,
-        _ => return Err(err("sizes must be a list of decision counts")),
+    let points = match p.get("points") {
+        Some(v) => {
+            if p.get("sizes").is_some() || p.get("widths").is_some() {
+                return Err(err(
+                    "points or sizes and widths: the points list every (size, widths, deals)",
+                ));
+            }
+            parse_points(v)?
+        }
+        None => {
+            let sizes: Vec<u64> = match p.get("sizes") {
+                Some(Value::Array(a)) if !a.is_empty() => a
+                    .iter()
+                    .map(|x| x.as_u64().filter(|n| *n > 0))
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| err("sizes must be whole numbers above 0"))?,
+                _ => {
+                    return Err(err(
+                        "sizes must be a list of decision counts (or give points)",
+                    ));
+                }
+            };
+            if sizes.windows(2).any(|w| w[0] >= w[1]) {
+                return Err(err("sizes must be ascending and distinct"));
+            }
+            let widths = strings("widths", &[])?;
+            if widths.is_empty() {
+                return Err(err(
+                    "widths must be a list such as [\"256,128\", \"512,256\"]",
+                ));
+            }
+            let normal = widths
+                .iter()
+                .map(|w| check_widths(w))
+                .collect::<Result<Vec<_>, _>>()?;
+            if (1..normal.len()).any(|i| normal[..i].contains(&normal[i])) {
+                return Err(err("widths: the same widths twice"));
+            }
+            sizes
+                .iter()
+                .flat_map(|&size| {
+                    normal.iter().map(move |w| Point {
+                        size,
+                        widths: w.clone(),
+                        deals: None,
+                    })
+                })
+                .collect()
+        }
     };
-    if sizes.windows(2).any(|w| w[0] >= w[1]) {
-        return Err(err("sizes must be ascending and distinct"));
-    }
-    let widths = strings("widths", &[])?;
-    if widths.is_empty() {
-        return Err(err(
-            "widths must be a list such as [\"256,128\", \"512,256\"]",
-        ));
-    }
-    for w in &widths {
-        let hidden: Vec<usize> = w
-            .split(',')
-            .map(|x| x.trim().parse::<usize>().ok().filter(|n| *n > 0))
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| err(format!("widths {w:?}: hidden-layer sizes like \"256,128\"")))?;
-        nn::mlp::check_hidden_widths(&hidden).map_err(|e| err(format!("widths {w:?}: {e}")))?;
-    }
-    let normal: Vec<String> = widths.iter().map(|w| w.replace(' ', "")).collect();
-    if (1..normal.len()).any(|i| normal[..i].contains(&normal[i])) {
-        return Err(err("widths: the same widths twice"));
-    }
     let device = match p.get("device").and_then(Value::as_str).unwrap_or("auto") {
         "auto" => Device::Auto,
         "cuda" => Device::Cuda,
@@ -443,10 +663,10 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
     };
     Ok(Params {
         train,
+        train_groups,
         test,
         order,
-        sizes,
-        widths: normal,
+        points,
         epochs,
         batch,
         lr,
@@ -466,9 +686,11 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
     })
 }
 
-/// A pair's directory name: `n<size>-w<w1>x<w2>…`.
-pub(crate) fn pair_name(size: u64, widths: &str) -> String {
-    format!("n{size}-w{}", widths.replace(',', "x"))
+/// A point's directory name: `n<size>-w<w1>x<w2>…`, then `-d<deals>` when its targets come from
+/// the first `deals` deals only (a run without `deals` keeps its old names).
+pub(crate) fn pair_name(size: u64, widths: &str, deals: Option<u32>) -> String {
+    let d = deals.map_or(String::new(), |d| format!("-d{d}"));
+    format!("n{size}-w{}{d}", widths.replace(',', "x"))
 }
 
 /// The training parts in one order (`entries[k]`: the parts of entry `k`, in their order).
@@ -495,6 +717,25 @@ pub(crate) fn ordered(entries: Vec<Vec<Shard>>, order: Order) -> Vec<Shard> {
     }
 }
 
+/// The training parts in one order by group: groups ascending (`groups[k]` is entry `k`'s), the
+/// order within each group ([`ordered`]).
+pub(crate) fn ordered_groups(entries: Vec<Vec<Shard>>, groups: &[u64], order: Order) -> Vec<Shard> {
+    let group = |k: usize| groups.get(k).copied().unwrap_or(0);
+    let mut keys: Vec<u64> = (0..entries.len()).map(group).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let mut slots: Vec<Option<Vec<Shard>>> = entries.into_iter().map(Some).collect();
+    let mut out = Vec::new();
+    for g in keys {
+        let members: Vec<Vec<Shard>> = (0..slots.len())
+            .filter(|&k| group(k) == g)
+            .filter_map(|k| slots[k].take())
+            .collect();
+        out.extend(ordered(members, order));
+    }
+    out
+}
+
 /// How many of the parts (in order, `decisions` each) the first `size` decisions need.
 pub(crate) fn parts_for(decisions: &[u64], size: u64) -> Option<usize> {
     let mut total = 0;
@@ -505,6 +746,16 @@ pub(crate) fn parts_for(decisions: &[u64], size: u64) -> Option<usize> {
         }
     }
     None
+}
+
+/// Per deal count of the points (`None`: every deal), the encoded training parts (feature shard,
+/// decisions), in training order.
+type DealSets = BTreeMap<Option<u32>, Vec<(PathBuf, u64)>>;
+
+/// Where the feature shards of one deal count go: `features/` for every deal (the old layout),
+/// `features/d<N>/` for the first N.
+fn deal_dir(feat: &Path, deals: Option<u32>) -> PathBuf {
+    deals.map_or(feat.to_path_buf(), |d| feat.join(format!("d{d}")))
 }
 
 /// The programs a chunk runs (the release bundle's; fakes in the tests).
@@ -632,6 +883,7 @@ fn encode(
     table: &Path,
     out: &Path,
     allow: &[String],
+    max_deals: Option<u32>,
     log: &Path,
 ) -> Result<(), String> {
     let mut c = Command::new(student);
@@ -641,6 +893,9 @@ fn encode(
     }
     for a in allow {
         c.args(["--allow-stamp", a]);
+    }
+    if let Some(n) = max_deals {
+        c.args(["--max-deals", &n.to_string()]);
     }
     c.arg("--equity").arg(table).arg("--out").arg(out);
     let o = c
@@ -706,12 +961,29 @@ impl Train<'_> {
         for (k, e) in entries.iter().enumerate() {
             match e {
                 Entry::Shard(s) => out.push(vec![s.clone()]),
-                Entry::Run { run, stream, parts } => {
+                Entry::Run {
+                    run,
+                    stream,
+                    parts,
+                    bundles,
+                } => {
                     self.phase(
                         "inputs",
                         json!({ "set": what, "entry": k + 1, "run": run, "stream": stream }),
                     );
-                    out.push(self.resolve_run(run, stream, *parts)?);
+                    out.push(match bundles {
+                        None => self.resolve_run(run, stream, *parts)?,
+                        Some(b) => {
+                            let dir = self.work.join("runs").join(run);
+                            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                            let list = b
+                                .iter()
+                                .enumerate()
+                                .map(|(i, x)| (i as u64, x.clone()))
+                                .collect::<Vec<_>>();
+                            self.parts_of(run, stream, &dir, &list)?
+                        }
+                    });
                 }
             }
         }
@@ -764,18 +1036,37 @@ impl Train<'_> {
                 chunks.len()
             )));
         }
-        let mut out = Vec::new();
+        let mut list = Vec::new();
         for c in &chunks {
             let index = c["index"].as_u64().unwrap_or(0);
             let o = c["outputs"]
                 .as_array()
                 .and_then(|o| o.first())
                 .ok_or_else(|| err(format!("{run}/{stream}/{index}: no bundle listed")))?;
-            let (path, sha, bytes) = (
-                o["path"].as_str().unwrap_or_default().to_string(),
-                o["sha256"].as_str().unwrap_or_default().to_string(),
-                o["bytes"].as_u64().unwrap_or(0),
-            );
+            list.push((
+                index,
+                Bundle {
+                    path: o["path"].as_str().unwrap_or_default().to_string(),
+                    sha256: o["sha256"].as_str().unwrap_or_default().to_string(),
+                    bytes: o["bytes"].as_u64().unwrap_or(0),
+                },
+            ));
+        }
+        self.parts_of(run, stream, &dir, &list)
+    }
+
+    /// The stored shards of a stream's part bundles (`(chunk index, bundle)`, in order): each
+    /// bundle fetched and checked (SHA-256 and size), its part's `.inputs.json` read.
+    fn parts_of(
+        &mut self,
+        run: &str,
+        stream: &str,
+        dir: &Path,
+        list: &[(u64, Bundle)],
+    ) -> Result<Vec<Shard>, String> {
+        let mut out = Vec::new();
+        for (index, b) in list {
+            let (index, path, sha, bytes) = (*index, b.path.clone(), b.sha256.clone(), b.bytes);
             let local = dir.join(format!("{stream}-{index:06}.tar.zst"));
             let (p2, l2) = (path.clone(), local.clone());
             if !self.remote_call(move |r| retry(3, || r.get(&p2, &l2)))? {
@@ -784,7 +1075,7 @@ impl Train<'_> {
             let (h, n) = sha256_file(&local)?;
             if h != sha || n != bytes {
                 return Err(err(format!(
-                    "{path}: SHA-256 {h} and {n} bytes, merged.json says {sha} and {bytes}"
+                    "{path}: SHA-256 {h} and {n} bytes, its listing says {sha} and {bytes}"
                 )));
             }
             let data = fs::read(&local).map_err(|e| e.to_string())?;
@@ -817,7 +1108,12 @@ impl Train<'_> {
         let t = Instant::now();
         let train_entries = self.q.train.clone();
         let test_entries = self.q.test.clone();
-        let train = ordered(self.resolve(&train_entries, "train")?, self.q.order);
+        let groups = self.q.train_groups.clone();
+        let train = ordered_groups(
+            self.resolve(&train_entries, "train")?,
+            &groups,
+            self.q.order,
+        );
         let test: Vec<Shard> = self
             .resolve(&test_entries, "test")?
             .into_iter()
@@ -859,7 +1155,7 @@ impl Train<'_> {
             }
         }
         let total: u64 = train.iter().map(Shard::decisions).sum();
-        let largest = *self.q.sizes.last().expect("sizes");
+        let largest = self.q.points.iter().map(|p| p.size).max().expect("points");
         if largest > total {
             return Err(err(format!(
                 "size {largest}: the training inputs hold {total} decisions"
@@ -883,14 +1179,16 @@ impl Train<'_> {
         Ok((train, test))
     }
 
-    /// Step 3: fetch and encode; returns (feature shards of the needed training parts with their
-    /// decisions, the test feature shard, the test set's raw records files).
+    /// Step 3: fetch and encode; returns (per deal count of the points, the feature shards of the
+    /// training parts its largest size needs, with their decisions; the test feature shard; the
+    /// test set's raw records files). A part is fetched once and encoded once per deal count that
+    /// needs it (`student encode --max-deals`, `None`: every deal), then its raw files deleted.
     #[allow(clippy::type_complexity)]
     fn fetch_encode(
         &mut self,
         train: &[Shard],
         test: &[Shard],
-    ) -> Result<(Vec<(PathBuf, u64)>, PathBuf, Vec<PathBuf>), String> {
+    ) -> Result<(DealSets, PathBuf, Vec<PathBuf>), String> {
         let t = Instant::now();
         let raw = self.work.join("raw");
         let feat = self.work.join("features");
@@ -898,10 +1196,20 @@ impl Train<'_> {
         fs::create_dir_all(&raw).map_err(|e| e.to_string())?;
         fs::create_dir_all(&feat).map_err(|e| e.to_string())?;
         let decisions: Vec<u64> = train.iter().map(Shard::decisions).collect();
-        let largest = *self.q.sizes.last().expect("sizes");
-        let need = parts_for(&decisions, largest).expect("checked in inputs");
-        // The test set first (it stays raw for the check), then the training parts in batches
-        // of `fetch_jobs`, each part fetched and encoded on its own thread.
+        // Per deal count, the parts its largest size needs.
+        let mut needs: BTreeMap<Option<u32>, usize> = BTreeMap::new();
+        for p in &self.q.points {
+            let n = parts_for(&decisions, p.size).expect("checked in inputs");
+            let e = needs.entry(p.deals).or_insert(0);
+            *e = (*e).max(n);
+        }
+        let need = needs.values().copied().max().expect("points");
+        let largest = self.q.points.iter().map(|p| p.size).max().expect("points");
+        for d in needs.keys() {
+            fs::create_dir_all(deal_dir(&feat, *d)).map_err(|e| e.to_string())?;
+        }
+        // The test set first (it stays raw for the check, and is never cut), then the training
+        // parts in batches of `fetch_jobs`, each part fetched and encoded on its own thread.
         let mut test_raw = Vec::new();
         for (i, s) in test.iter().enumerate() {
             self.phase(
@@ -924,17 +1232,18 @@ impl Train<'_> {
                 logs.join("encode-test.log"),
             );
             self.ctx
-                .blocking(move || encode(&st, &tr, &tb, &tf, &al, &lg))
+                .blocking(move || encode(&st, &tr, &tb, &tf, &al, None, &lg))
                 .map_err(err)?;
         }
-        let mut feats: Vec<(PathBuf, u64)> = Vec::new();
+        let mut sets: DealSets = needs.keys().map(|d| (*d, Vec::new())).collect();
         let jobs = self.q.fetch_jobs as usize;
         let mut downloaded = 0u64;
-        for batch in train[..need].chunks(jobs) {
+        let mut fetched = 0usize;
+        for (b, batch) in train[..need].chunks(jobs).enumerate() {
             self.phase(
                 "fetch and encode",
-                json!({ "parts_done": feats.len(), "parts": need,
-                        "decisions_needed": largest }),
+                json!({ "parts_done": fetched, "parts": need,
+                        "decisions_needed": largest, "deal_sets": needs.len() }),
             );
             let r = Arc::clone(&self.remote);
             let (st, tb, al, keep) = (
@@ -944,26 +1253,44 @@ impl Train<'_> {
                 self.q.keep_raw,
             );
             let (raw2, feat2, logs2) = (raw.clone(), feat.clone(), logs.clone());
-            let batch: Vec<Shard> = batch.to_vec();
-            let bytes: u64 = batch.iter().map(|s| s.records_bytes + s.values_bytes).sum();
-            let done: Vec<Result<PathBuf, String>> = self.ctx.blocking(move || {
+            let batch: Vec<(usize, Shard)> = batch
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (b * jobs + i, s.clone()))
+                .collect();
+            let needs2 = needs.clone();
+            let bytes: u64 = batch
+                .iter()
+                .map(|(_, s)| s.records_bytes + s.values_bytes)
+                .sum();
+            type Encoded = Vec<(Option<u32>, PathBuf)>;
+            let done: Vec<Result<Encoded, String>> = self.ctx.blocking(move || {
                 std::thread::scope(|sc| {
                     let hs: Vec<_> = batch
                         .iter()
-                        .map(|s| {
+                        .map(|(k, s)| {
                             let (r, st, tb, al) = (Arc::clone(&r), &st, &tb, &al);
-                            let (raw2, feat2, logs2) = (&raw2, &feat2, &logs2);
-                            sc.spawn(move || -> Result<PathBuf, String> {
-                                let f = feat2.join(format!("{}.npy", s.records));
+                            let (raw2, feat2, logs2, needs2) = (&raw2, &feat2, &logs2, &needs2);
+                            sc.spawn(move || -> Result<Encoded, String> {
                                 let rp = fetch_shard(&*r, s, raw2)?;
-                                let log = logs2.join(format!("encode-{}.log", &s.records[..16]));
-                                encode(st, std::slice::from_ref(&rp), tb, &f, al, &log)?;
+                                let mut out = Vec::new();
+                                for (&d, &n) in needs2 {
+                                    if *k >= n {
+                                        continue;
+                                    }
+                                    let f = deal_dir(feat2, d).join(format!("{}.npy", s.records));
+                                    let tag = d.map_or(String::new(), |d| format!("-d{d}"));
+                                    let log =
+                                        logs2.join(format!("encode-{}{tag}.log", &s.records[..16]));
+                                    encode(st, std::slice::from_ref(&rp), tb, &f, al, d, &log)?;
+                                    out.push((d, f));
+                                }
                                 if !keep {
                                     let _ = fs::remove_file(&rp);
                                     let _ = fs::remove_file(student::record::values_path(&rp));
                                     let _ = fs::remove_file(student::record::sidecar_path(&rp));
                                 }
-                                Ok(f)
+                                Ok(out)
                             })
                         })
                         .collect();
@@ -976,17 +1303,26 @@ impl Train<'_> {
                 })
             });
             for d in done {
-                let f = d.map_err(err)?;
-                let side = read_json(&PathBuf::from(format!("{}.json", f.display())))?;
-                if side["role"] != "train" {
-                    return Err(err(format!(
-                        "{}: a training part encoded with role {}",
-                        f.display(),
-                        side["role"]
-                    )));
+                for (deals, f) in d.map_err(err)? {
+                    let side = read_json(&PathBuf::from(format!("{}.json", f.display())))?;
+                    if side["role"] != "train" {
+                        return Err(err(format!(
+                            "{}: a training part encoded with role {}",
+                            f.display(),
+                            side["role"]
+                        )));
+                    }
+                    if side["max_deals"] != json!(deals) {
+                        return Err(err(format!(
+                            "{}: encoded with max_deals {}, the point asks {deals:?}",
+                            f.display(),
+                            side["max_deals"]
+                        )));
+                    }
+                    let n = side["records"].as_u64().unwrap_or(0);
+                    sets.get_mut(&deals).expect("a deal set").push((f, n));
                 }
-                let n = side["records"].as_u64().unwrap_or(0);
-                feats.push((f, n));
+                fetched += 1;
             }
             downloaded += bytes;
         }
@@ -999,11 +1335,14 @@ impl Train<'_> {
             json!({ "parts_used": need, "training_bytes_fetched": downloaded,
                     "test_decisions": tside["records"], "encoder": tside["encoder"],
                     "encoder_sha256": tside["encoder_sha256"],
-                    "train_feature_decisions": feats.iter().map(|f| f.1).sum::<u64>(),
+                    "deal_sets": sets.iter().map(|(d, f)| json!({
+                        "deals": d, "parts": f.len(),
+                        "train_feature_decisions": f.iter().map(|x| x.1).sum::<u64>() }))
+                        .collect::<Vec<_>>(),
                     "keep_raw": self.q.keep_raw, "seconds": secs(t) }),
         );
         self.save()?;
-        Ok((feats, test_feat, test_raw))
+        Ok((sets, test_feat, test_raw))
     }
 
     /// Step 4: the Python environment and the GPU check; returns (Python, device).
@@ -1105,12 +1444,11 @@ impl Train<'_> {
         }
     }
 
-    /// Step 5 for one pair: train, export, check, share; returns its `done.json`.
+    /// Step 5 for one point: train, export, check, share; returns its `done.json`.
     #[allow(clippy::too_many_arguments)]
     fn pair(
         &mut self,
-        size: u64,
-        widths: &str,
+        point: &Point,
         feats: &[(PathBuf, u64)],
         test_feat: &Path,
         test_raw: &[PathBuf],
@@ -1118,7 +1456,8 @@ impl Train<'_> {
         device: &str,
     ) -> Result<Value, String> {
         let t = Instant::now();
-        let name = pair_name(size, widths);
+        let (size, widths, deals) = (point.size, point.widths.as_str(), point.deals);
+        let name = point.name();
         let dest = self.out.join(&name);
         let decisions: Vec<u64> = feats.iter().map(|f| f.1).collect();
         let n = parts_for(&decisions, size).ok_or_else(|| {
@@ -1156,8 +1495,8 @@ impl Train<'_> {
             .arg(&prog);
         let base = self.progress(
             "train",
-            json!({ "size": size, "widths": widths, "parts": n, "device": device,
-                    "train_threads": threads }),
+            json!({ "size": size, "widths": widths, "deals": deals, "parts": n,
+                    "device": device, "train_threads": threads }),
         );
         self.ctx.set_phase("chunk", base.clone());
         let stall = crate::Stall::new(
@@ -1181,7 +1520,10 @@ impl Train<'_> {
         )?;
         let train_secs = secs(t);
         // The measure: `search student-check` of the integer network on the test set.
-        self.phase("check", json!({ "size": size, "widths": widths }));
+        self.phase(
+            "check",
+            json!({ "size": size, "widths": widths, "deals": deals }),
+        );
         let int = dir.join("int.safetensors");
         let mut c = Command::new(&self.progs.tools.search);
         c.arg("student-check").arg("--net").arg(&int);
@@ -1238,7 +1580,7 @@ impl Train<'_> {
             files.insert(f.into(), json!(sha256_file(&dest.join(f))?.0));
         }
         let done = json!({
-            "size": size, "widths": widths, "parts": n,
+            "size": size, "widths": widths, "deals": deals, "parts": n,
             "part_files": feats[..n].iter().map(|(f, d)| json!({
                 "features": f.file_name().map(|x| x.to_string_lossy().into_owned()),
                 "decisions": d })).collect::<Vec<_>>(),
@@ -1254,28 +1596,28 @@ impl Train<'_> {
 
     fn run(&mut self) -> Result<Value, String> {
         let (train, test) = self.inputs()?;
-        let (feats, test_feat, test_raw) = self.fetch_encode(&train, &test)?;
+        let (sets, test_feat, test_raw) = self.fetch_encode(&train, &test)?;
         let (python, device) = self.python()?;
         let mut pairs = Vec::new();
-        let (sizes, widths) = (self.q.sizes.clone(), self.q.widths.clone());
-        for &size in &sizes {
-            for w in &widths {
-                let dir = self.out.join(pair_name(size, w));
-                let done = match Self::finished(&dir) {
-                    Some(d) => {
-                        println!(
-                            "runner: student_train: {} was finished before (resumed): not trained again",
-                            pair_name(size, w)
-                        );
-                        d
-                    }
-                    None => self.pair(size, w, &feats, &test_feat, &test_raw, &python, &device)?,
-                };
-                pairs.push(done);
-                self.rec.insert("pairs".into(), json!(pairs));
-                self.save()?;
-                write_curve(&self.out)?;
-            }
+        for point in self.q.points.clone() {
+            let dir = self.out.join(point.name());
+            let done = match Self::finished(&dir) {
+                Some(d) => {
+                    println!(
+                        "runner: student_train: {} was finished before (resumed): not trained again",
+                        point.name()
+                    );
+                    d
+                }
+                None => {
+                    let feats = &sets[&point.deals];
+                    self.pair(&point, feats, &test_feat, &test_raw, &python, &device)?
+                }
+            };
+            pairs.push(done);
+            self.rec.insert("pairs".into(), json!(pairs));
+            self.save()?;
+            write_curve(&self.out)?;
         }
         let curve = write_curve(&self.out)?;
         self.save()?;
@@ -1309,21 +1651,22 @@ fn groups() -> Vec<String> {
 /// Writes `curve.json` and `curve.txt` from the finished pairs under `out` (every
 /// `n<size>-w<…>/done.json` with its `check.json` and `report.json`), in size then width order.
 pub(crate) fn write_curve(out: &Path) -> Result<Value, String> {
-    let mut found: Vec<(u64, String, PathBuf)> = Vec::new();
+    let mut found: Vec<(u64, String, u64, PathBuf)> = Vec::new();
     for e in fs::read_dir(out).map_err(|e| e.to_string())? {
         let p = e.map_err(|e| e.to_string())?.path();
         if let Some(d) = Train::finished(&p) {
             found.push((
                 d["size"].as_u64().unwrap_or(0),
                 d["widths"].as_str().unwrap_or_default().to_string(),
+                d["deals"].as_u64().unwrap_or(u64::MAX),
                 p,
             ));
         }
     }
-    found.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    found.sort_by(|a, b| (a.0, &a.1, a.2).cmp(&(b.0, &b.1, b.2)));
     let mut rows = Vec::new();
     let mut baselines = Value::Null;
-    for (size, widths, dir) in &found {
+    for (size, widths, deals, dir) in &found {
         let check = read_json(&dir.join("check.json"))?;
         let report = read_json(&dir.join("report.json"))?;
         let done = read_json(&dir.join("done.json"))?;
@@ -1350,6 +1693,7 @@ pub(crate) fn write_curve(out: &Path) -> Result<Value, String> {
         }
         rows.push(json!({
             "size": size, "widths": widths,
+            "deals": if *deals == u64::MAX { Value::Null } else { json!(deals) },
             "train_decisions": report["data"]["train_rows"], "val_decisions": report["data"]["val_rows"],
             "epochs_run": report["history"].as_array().map_or(0, Vec::len),
             "best_epoch": report["best_epoch"],
@@ -1386,16 +1730,22 @@ pub(crate) fn curve_text(curve: &Value) -> String {
          the mean of the player's choice, % of the deciding pair's money chance; upper: bootstrap \
          95% bound; agree: % of decisions on the teacher's best)\n\n",
     );
+    let deals = |r: &Value| {
+        r["deals"]
+            .as_u64()
+            .map_or("all".to_string(), |d| d.to_string())
+    };
     s.push_str(&format!(
-        "{:<22} {:>9} {:>9} {:>9} {:>7} {:>7} {:>8}\n",
-        "player", "train", "loss %", "upper %", "agree", "epochs", "minutes"
+        "{:<22} {:>9} {:>6} {:>9} {:>9} {:>7} {:>7} {:>8}\n",
+        "player", "train", "deals", "loss %", "upper %", "agree", "epochs", "minutes"
     ));
     let rows = curve["rows"].as_array().cloned().unwrap_or_default();
     let bases = curve["baselines"].as_array().cloned().unwrap_or_default();
     for b in &bases {
         s.push_str(&format!(
-            "{:<22} {:>9} {:>9} {:>9} {:>7} {:>7} {:>8}\n",
+            "{:<22} {:>9} {:>6} {:>9} {:>9} {:>7} {:>7} {:>8}\n",
             format!("baseline {}", b["bot"].as_str().unwrap_or("?")),
+            "-",
             "-",
             num(&b["all"]["loss_pct"]),
             num(&b["all"]["upper95_pct"]),
@@ -1406,9 +1756,10 @@ pub(crate) fn curve_text(curve: &Value) -> String {
     }
     for r in &rows {
         s.push_str(&format!(
-            "{:<22} {:>9} {:>9} {:>9} {:>7} {:>7} {:>8}\n",
+            "{:<22} {:>9} {:>6} {:>9} {:>9} {:>7} {:>7} {:>8}\n",
             format!("student {}", r["widths"].as_str().unwrap_or("?")),
             r["size"].to_string(),
+            deals(r),
             num(&r["test"]["loss_pct"]),
             num(&r["test"]["upper95_pct"]),
             pct(&r["test"]["agreement"]),
@@ -1426,13 +1777,13 @@ pub(crate) fn curve_text(curve: &Value) -> String {
         .iter()
         .map(|g| g.replace("place ", "P").replace("stratum ", ""))
         .collect();
-    s.push_str(&format!("{:<22} {:>9}", "player", "train"));
+    s.push_str(&format!("{:<22} {:>9} {:>6}", "player", "train", "deals"));
     for g in &short {
         s.push_str(&format!(" {g:>7}"));
     }
     s.push('\n');
-    let line = |label: String, size: String, by: &Value| {
-        let mut l = format!("{label:<22} {size:>9}");
+    let line = |label: String, size: String, d: String, by: &Value| {
+        let mut l = format!("{label:<22} {size:>9} {d:>6}");
         for g in &gs {
             let v = &by[g.as_str()]["loss_pct"];
             l.push_str(&format!(
@@ -1447,6 +1798,7 @@ pub(crate) fn curve_text(curve: &Value) -> String {
         s.push_str(&line(
             format!("baseline {}", b["bot"].as_str().unwrap_or("?")),
             "-".into(),
+            "-".into(),
             &b["by_group"],
         ));
     }
@@ -1454,6 +1806,7 @@ pub(crate) fn curve_text(curve: &Value) -> String {
         s.push_str(&line(
             format!("student {}", r["widths"].as_str().unwrap_or("?")),
             r["size"].to_string(),
+            deals(r),
             &r["by_group"],
         ));
     }

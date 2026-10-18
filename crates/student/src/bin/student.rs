@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! student encode  --teacher A.npy [--teacher B.npy …] --equity TABLE --out F.npy
-//!                 [--allow-stamp KEY …] [--deal-weights W.npy]
+//!                 [--allow-stamp KEY …] [--deal-weights W.npy] [--max-deals N]
 //! student eval    --net INT.safetensors --features F.npy --out LOGITS.npy
 //! student fixture --count N --seed S --out F.npy [--role fixture|test]
 //! student hash
@@ -14,7 +14,11 @@
 //!   pair order. The shards' stamps must agree (`--allow-stamp KEY` lets one differ); the equity
 //!   table must be the one the teacher used (`equity_sha256`). A test-set shard gives a test-set
 //!   feature shard (`role: "test"`), which the trainer never trains on. Byte-identical for the same
-//!   shards in the same order.
+//!   shards in the same order. `--max-deals N` builds every target from the decision's first N
+//!   deals only: exactly the shard a teacher run with `--deals N` (same seeds) would give, so the
+//!   number of deals a student needs is measured on data already stored; refused when a decision
+//!   holds fewer than N deals, and on a test set (the measure always uses all its deals). The
+//!   sidecar then records `max_deals`.
 //! - `eval`: the integer network's logits (`<i8`, `[N, 32, 4]`, rotated pair order, 0 past a
 //!   decision's candidates) for every record of a feature shard: the Python trainer's integer
 //!   forward pass is checked against it bit for bit (`python/nn/tests/test_student.py`).
@@ -28,7 +32,7 @@ use std::process::ExitCode;
 
 use equity::{EquityTable, MoneyChance};
 use serde_json::{Value, json};
-use student::data::{DealWeights, Shards, Uniform, WeightsFile, feature_row};
+use student::data::{DealWeights, Shards, Uniform, WeightsFile, feature_rows};
 use student::encode::{
     ENCODER, K_MAX, N_BINARY, N_VIEW, V_MAX, encode_cand, encode_view, encoder_sha256,
 };
@@ -167,11 +171,16 @@ fn encode(a: &Args) -> Result<(), String> {
         .map(|p| std::fs::read(p).map(|b| sha256_hex(&b)))
         .transpose()
         .map_err(|e| e.to_string())?;
-    let mut rows = Vec::with_capacity(shards.groups.len());
-    for g in 0..shards.groups.len() {
-        let m = shards.merged(g)?;
-        rows.push(feature_row(&m, &table, &*weights).map_err(|e| format!("decision {g}: {e}"))?);
-    }
+    let max_deals = a
+        .get("--max-deals")
+        .map(|v| {
+            v.parse::<u32>()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or_else(|| format!("--max-deals: not a whole number above 0: {v}"))
+        })
+        .transpose()?;
+    let rows = feature_rows(&mut shards, &table, &*weights, max_deals)?;
     let out = PathBuf::from(a.req("--out")?);
     let teacher: Vec<Value> = shards
         .readers
@@ -188,10 +197,7 @@ fn encode(a: &Args) -> Result<(), String> {
         .map(|&k| (k.to_string(), s0[k].clone()))
         .collect::<serde_json::Map<_, _>>()
         .into();
-    let sha = write_shard(
-        &out,
-        &rows,
-        json!({
+    let mut extra = json!({
             "role": shards.role(),
             "teacher_shards": teacher,
             "teacher_stamps": stamps,
@@ -199,8 +205,11 @@ fn encode(a: &Args) -> Result<(), String> {
             "equity_sha256": eq_sha,
             "deal_weights_sha256": weights_sha,
             "decisions_merged": shards.groups.iter().filter(|g| g.len() > 1).count(),
-        }),
-    )?;
+    });
+    if let Some(n) = max_deals {
+        extra["max_deals"] = json!(n);
+    }
+    let sha = write_shard(&out, &rows, extra)?;
     println!(
         "{} decisions from {} shards ({}) -> {} ({sha})",
         rows.len(),

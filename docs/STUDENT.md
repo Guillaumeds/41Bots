@@ -183,7 +183,11 @@ search teacher --trick 1|2 --count N --deals D --seed S --net WEIGHTS|exact --eq
   candidate's target four-vector in the rotated pair order, the teacher's own-pair SD per
   candidate, trick, place, stratum, source, the position key) and a sidecar (encoder name and
   hash, the teacher shards' keys and stamps). Deal re-weighting hook: `--deal-weights FILE`
-  (one weight per stored deal) gives weighted means instead of plain ones.
+  (one weight per stored deal) gives weighted means instead of plain ones. `--max-deals N`
+  builds every target from the decision's first N deals only: exactly the feature shard a
+  teacher run with `--deals N` and the same seeds would give (tested byte for byte), so how many
+  deals a student needs is measured on stored data; refused when a decision holds fewer than N
+  deals, and never applied to the test set (the measure always uses all its deals).
 - **Loss:** per candidate, the cross-entropy of the four-way softmax against the teacher's mean
   four-vector (the oracle head's loss, PLAN §6.5); the mean over a decision's candidates, then over
   decisions (a robber's 25 joint candidates do not outweigh a 3-card decision). This is
@@ -373,6 +377,18 @@ for the money (stratum S4) are where both the rules bot and the student lose mos
   a teacher run with a random O_3, then the curve on CPU, then a resume that skips a finished
   pair); and the mechanism manifest itself on CPU against a local copy of `student-t2-mech-1`'s
   bundles and shards (3 MB).
+
+**The deal test (2026-10-18, not launched):** `student_train` takes `points` (each a size,
+widths and `deals`: the targets from the first `deals` deals, encoded once per deal count with
+`--max-deals` into its own feature set; the point's directory and resume key gain `-d<deals>`,
+`curve.txt` a deals column), entries in ordered `group`s (a later run's parts follow an earlier
+run's without changing its prefix) and a run's stored part bundles listed directly (`bundles`, for
+a run stopped before its merged report). `docs/vast/student-t2-dealtest.manifest.json`: the base
+run's 250,000 decisions then the 75 rules parts `student-t2-more-1` stored before it stopped
+(625,000 in all; it made no mixed parts), 512-256 students at 250,000 × 320 deals (the anchor:
+the earlier curve point's exact data and settings), 126,000 × 320, 315,000 × 128, 625,000 × 64,
+625,000 × 32 and 126,000 × 64; `student-t2-dealtest-mech.manifest.json` the same mechanism on
+`student-t2-mech-1`'s shards.
 
 ## 12. Next
 
