@@ -401,3 +401,21 @@ the earlier curve point's exact data and settings), 126,000 × 320, 315,000 × 1
 3. A student bot for the arena (`search::bot`), so promotion is by SPRT in duplicate tournaments
    (PLAN §9), and the DAgger source (`--source student`: positions from the student's own games).
 4. Trick 1 once O_2 exists: price it with the real O_2 first (§8: its width sets the cost).
+
+## 13. How many deals per decision (measured 2026-10-18, run `student-t2-dealtest-1`, $0.67)
+
+Trick-2 student 512-256 on the stored records (base + `student-t2-more-1`), each target cut to the first N
+deals (`student encode --max-deals`, exact subsets), scored on the fixed 4,096-decision test set at 1,024 deals:
+
+| positions | deals | teacher cost | loss % (95% upper) | agree |
+|---|---|---|---|---|
+| 126,000 | 320 | 1x | 0.1140 (0.1317) | 63.7% |
+| 315,000 | 128 | 1x | **0.0695** (0.0771) | 64.2% |
+| 625,000 | 64 | 1x | 0.0760 (0.0875) | 63.8% |
+| 625,000 | 32 | 0.5x | 0.0776 (0.0862) | 63.3% |
+| 126,000 | 64 | 0.2x | 0.1463 (0.1670) | 60.0% |
+| 250,000 | 320 | 2x | 0.0784 (0.0912) | 64.4% (identical to the curve run: the check) |
+
+At equal teacher cost, more positions at 64-128 deals beat 320 deals clearly; at equal positions more deals
+still help. Decision (2026-10-18): new student data at **64 deals** (extend close calls later by deal index);
+trick-1 data likewise at 64-128, confirmed on a first trick-1 batch the same way.
