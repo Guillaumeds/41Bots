@@ -25,6 +25,8 @@
 //!   candidate, the network's error there and its outcome probabilities.
 //! - [`oracle_labels`]: training labels for the oracle networks of the hybrid yardstick
 //!   (docs/M3-HYBRID-SPEC.md §5): positions at the start of a trick, encoded, valued exactly.
+//! - [`student_teacher`]: the student's teacher records (docs/STUDENT.md §3–§4): decisions at
+//!   trick 1 or 2 valued by PIMC over many deals with the hybrid, every candidate in every deal.
 //! - [`audit`]: the search side of the audit loop (docs/m3-hybrid/audit-loop.md): the frontier
 //!   positions a decision's search reaches inside a predicate file's groups, the golden slices
 //!   and the mini golden sets drawn by rejection.
@@ -44,6 +46,7 @@ pub mod ordered;
 pub mod pimc;
 pub mod plan;
 pub mod saved;
+pub mod student_teacher;
 pub mod t1bench;
 pub mod teacher;
 pub mod worlds;

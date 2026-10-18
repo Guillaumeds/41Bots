@@ -61,6 +61,7 @@ mod remote;
 mod sched;
 mod spike;
 mod stop;
+mod student;
 mod t1bench;
 mod t1check;
 mod v2;

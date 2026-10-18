@@ -63,13 +63,14 @@ jobs:
       - name: Install uv (Python 3.14 for python/nn)
         if: runner.os == 'Linux'
         uses: astral-sh/setup-uv@v6
-      - name: Oracle network tests (Python integer forward pass vs Rust nn-tool, bit for bit; numpy only)
+      - name: Oracle and student network tests (Python integer forward passes vs Rust nn-tool and student, bit for bit; numpy only)
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          cargo build --release -p nn
+          cargo build --release -p nn -p student
           cd python/nn
-          NN_TOOL=../../target/release/nn-tool uv run --no-project --python 3.14 --with numpy==2.5.4 \
+          NN_TOOL=../../target/release/nn-tool STUDENT_TOOL=../../target/release/student \
+            uv run --no-project --python 3.14 --with numpy==2.5.4 \
             python -m unittest discover -s tests -v
       - name: Build engine with serde
         run: cargo build -p engine --features serde

@@ -191,6 +191,21 @@ pub extern "C" fn load_net(len: u32) -> u32 {
     status(r)
 }
 
+/// Load the student network from the input buffer: 0 (the output holds `{"sha256":…,"bytes":…}`)
+/// or 1 (the output holds a refusal).
+#[allow(unsafe_code)] // An export needs the `no_mangle` attribute; nothing else here is unsafe.
+#[unsafe(no_mangle)]
+pub extern "C" fn load_student(len: u32) -> u32 {
+    let r = take_file(len).and_then(|bytes| {
+        engine_mut()
+            .as_mut()
+            .expect("made above")
+            .load_student(&bytes)
+            .map(|sha| format!("{{\"sha256\":\"{sha}\",\"bytes\":{}}}", bytes.len()))
+    });
+    status(r)
+}
+
 /// Value the request in the input buffer; the result (or refusal) JSON goes to the output.
 /// Returns its length.
 #[allow(unsafe_code)] // An export needs the `no_mangle` attribute; nothing else here is unsafe.

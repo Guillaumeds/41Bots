@@ -525,6 +525,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "solver",
+ "student",
 ]
 
 [[package]]
@@ -613,6 +614,20 @@ version = "0.1.0"
 dependencies = [
  "engine",
  "equity",
+]
+
+[[package]]
+name = "student"
+version = "0.1.0"
+dependencies = [
+ "belief",
+ "bots",
+ "engine",
+ "equity",
+ "nn",
+ "serde_json",
+ "sha2",
+ "solver",
 ]
 
 [[package]]
@@ -717,6 +732,7 @@ dependencies = [
  "search",
  "serde_json",
  "solver",
+ "student",
 ]
 
 [[package]]

@@ -5,7 +5,10 @@
 //! rebuilt by `search::pimc::world_match` (the belief source, deal `w` from
 //! `Rng::derive(seed, [WORLD, w])`) and valued by `search::pimc::exact_world` (exact, or the
 //! hybrid H_k with the oracle network as its frontier). Nothing here computes a value of its own:
-//! it adds the deals' fixed-point values exactly and writes them out.
+//! it adds the deals' fixed-point values exactly and writes them out. With `"method": "student"`
+//! a decision at trick 1 or 2 with all eight seats in play is valued instead by the student
+//! network (`crates/student`, docs/STUDENT.md: the bots' fast player), every other decision as
+//! before.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -23,6 +26,8 @@ use search::pimc::{
 use search::worlds::{BeliefSource, WorldSource};
 use serde_json::Value;
 use solver::{FrontierCut, Leaf, SolveMem};
+use student::encode::{encode_cand, encode_view};
+use student::net::StudentNet;
 
 use crate::appview::{AppPhase, AppTable, Refusal, field, int, rebuild};
 use crate::cards::{app_card, engine_card};
@@ -63,6 +68,8 @@ pub struct Engine {
     leaf: Option<(Arc<dyn Leaf + Send + Sync>, String)>,
     /// Oracle networks by the trick at whose start they take over.
     nets: BTreeMap<u8, Oracle>,
+    /// The student network (`"method": "student"`).
+    student: Option<StudentNet>,
 }
 
 impl Default for Engine {
@@ -80,6 +87,8 @@ pub enum Method {
     Exact,
     /// One legal action: nothing searched.
     Forced,
+    /// The student network (tricks 1–2, all eight seats in play, `"method": "student"`).
+    Student,
 }
 
 impl Method {
@@ -88,6 +97,7 @@ impl Method {
             Method::Hybrid(_) => "hybrid",
             Method::Exact => "exact",
             Method::Forced => "forced",
+            Method::Student => "student",
         }
     }
 }
@@ -145,6 +155,8 @@ struct Request {
     shards: u32,
     tt_mb: usize,
     lines: bool,
+    /// `"method": "student"`.
+    student: bool,
     table: AppTable,
 }
 
@@ -212,6 +224,22 @@ fn read_request(text: &str) -> Result<Request, Refusal> {
         Some(Value::Bool(b)) => *b,
         Some(_) => return Err(bad("lines must be true or false")),
     };
+    let student = match v.get("method") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(m)) if m == "search" => false,
+        Some(Value::String(m)) if m == "student" => true,
+        Some(_) => return Err(bad("method must be \"search\" or \"student\"")),
+    };
+    if student && shards != 1 {
+        return Err(bad(
+            "a student request is one call: shards must be 1 (nothing to split)",
+        ));
+    }
+    if student && lines {
+        return Err(bad(
+            "lines come from a search's deals: not with method student",
+        ));
+    }
     let table = AppTable::read(field(&v, "match", "request")?, seat, own_burns)?;
     Ok(Request {
         seat,
@@ -221,6 +249,7 @@ fn read_request(text: &str) -> Result<Request, Refusal> {
         shards,
         tt_mb,
         lines,
+        student,
         table,
     })
 }
@@ -237,6 +266,7 @@ impl Engine {
         Engine {
             leaf: None,
             nets: BTreeMap::new(),
+            student: None,
         }
     }
 
@@ -246,6 +276,7 @@ impl Engine {
         Engine {
             leaf: Some((leaf, name.to_string())),
             nets: BTreeMap::new(),
+            student: None,
         }
     }
 
@@ -291,6 +322,17 @@ impl Engine {
         Ok(out)
     }
 
+    /// Load the student network (its safetensors bytes); returns its SHA-256. Refused unless it
+    /// was made for this build's encoder (`student-v1` and its hash). A second one replaces the
+    /// first.
+    pub fn load_student(&mut self, bytes: &[u8]) -> Result<String, Refusal> {
+        let n = StudentNet::from_bytes(bytes)
+            .map_err(|e| Refusal::new("bad_file", format!("student network: {e}")))?;
+        let sha = n.sha256.clone();
+        self.student = Some(n);
+        Ok(sha)
+    }
+
     /// The loaded files and the engine's version, as JSON.
     pub fn info(&self, memory_bytes: Option<u64>) -> String {
         let mut s = format!(
@@ -310,6 +352,9 @@ impl Engine {
             s.push_str(&format!("\"{t}\":{}", json_str(&o.sha256)));
         }
         s.push('}');
+        if let Some(st) = &self.student {
+            s.push_str(&format!(",\"student\":{}", json_str(&st.sha256)));
+        }
         if let Some(m) = memory_bytes {
             s.push_str(&format!(",\"memoryBytes\":{m}"));
         }
@@ -356,6 +401,14 @@ impl Engine {
         let turned = p.turned_teams.iter().filter(|&&x| x).count();
         let method = if cands.len() <= 1 {
             Method::Forced
+        } else if req.student && (1..=2).contains(&p.trick_no) && turned == 0 {
+            if self.student.is_none() {
+                return Err(Refusal::new(
+                    "no_student",
+                    "method student needs the student network, not loaded",
+                ));
+            }
+            Method::Student
         } else if p.trick_no == 0 {
             return Err(Refusal::new(
                 "not_built",
@@ -384,8 +437,13 @@ impl Engine {
             }
             Method::Hybrid(cut)
         };
+        let student_sha = self
+            .student
+            .as_ref()
+            .map(|n| format!("student:{}", n.sha256));
         let net_sha = match method {
             Method::Hybrid(cut) => Some(self.nets[&cut].sha256.as_str()),
+            Method::Student => student_sha.as_deref(),
             _ => None,
         };
         let engine = engine_version(net_sha);
@@ -426,6 +484,17 @@ impl Engine {
                 "load the equity table before evaluating",
             ));
         };
+        if method == Method::Student {
+            // The student values every candidate from the seat's view: no deal is drawn.
+            let net = self.student.as_ref().expect("checked above");
+            let f =
+                encode_view(&view, &**leaf).map_err(|e| Refusal::new("inconsistent_view", e))?;
+            let cf: Vec<Vec<u16>> = cands.iter().map(|&c| encode_cand(&view, c)).collect();
+            for (c, v) in t.cands.iter_mut().zip(net.evaluate(&f, &cf)) {
+                c.sums = v.0;
+            }
+            return Ok(t);
+        }
         let source = BeliefSource::new();
         let ctx = Ctx {
             leaf: &**leaf,
@@ -554,6 +623,7 @@ fn write(t: &Totals) -> String {
     let team = usize::from(team_of(t.seat));
     let n = u64::from(t.to - t.from);
     let forced = t.method == Method::Forced;
+    let student = t.method == Method::Student;
     // Groups: candidates equal in every deal, each led by its first member (engine order).
     let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
     for j in 0..t.cands.len() {
@@ -576,7 +646,13 @@ fn write(t: &Totals) -> String {
     let means: Vec<Option<MoneyChance>> = t
         .cands
         .iter()
-        .map(|c| (!forced && n > 0).then(|| MoneyChance::mean_of_totals(c.sums, n)))
+        .map(|c| {
+            if student {
+                Some(MoneyChance(c.sums))
+            } else {
+                (!forced && n > 0).then(|| MoneyChance::mean_of_totals(c.sums, n))
+            }
+        })
         .collect();
     // Best first: the acting pair's value, high first; ties to the engine's first candidate.
     let value = |j: usize| means[j].map_or(0, |m| m.0[team]);
@@ -603,7 +679,7 @@ fn write(t: &Totals) -> String {
         t.shards,
         t.from,
         t.to,
-        if forced { 0 } else { n },
+        if forced || student { 0 } else { n },
         match t.world_count {
             Some(c) => json_str(&c.to_string()),
             None => "null".to_string(),
@@ -630,6 +706,16 @@ fn write(t: &Totals) -> String {
             None => s.push_str(
                 ",\"mean\":null,\"mean_fp\":null,\"value\":null,\"se\":null,\"n\":0,\"ess\":0,\"sum_fp\":null,\"sumsq_fp\":null",
             ),
+            Some(m) if student => {
+                // The student's own value: no deals, so no standard error; `sum_fp` carries the
+                // value for `merge` (a student result is one call).
+                let mean = m.0.map(fp_number).join(",");
+                let mean_fp = m.0.map(|x| json_str(&x.to_string())).join(",");
+                s.push_str(&format!(
+                    ",\"mean\":[{mean}],\"mean_fp\":[{mean_fp}],\"value\":{},\"se\":null,\"n\":0,\"ess\":0,\"sum_fp\":[{mean_fp}],\"sumsq_fp\":null",
+                    fp_number(m.0[team]),
+                ));
+            }
             Some(m) => {
                 let mean = m.0.map(fp_number).join(",");
                 let mean_fp = m.0.map(|x| json_str(&x.to_string())).join(",");
@@ -722,7 +808,7 @@ pub fn merge(results: &str) -> String {
 }
 
 /// Every refusal code (docs/WASM-API.md §5).
-pub const REFUSAL_CODES: [&str; 17] = [
+pub const REFUSAL_CODES: [&str; 18] = [
     "bad_request",
     "bad_file",
     "sha256_mismatch",
@@ -733,6 +819,7 @@ pub const REFUSAL_CODES: [&str; 17] = [
     "not_to_act",
     "no_equity",
     "no_network_for_trick",
+    "no_student",
     "not_built",
     "too_slow",
     "led_trick_in_progress",
@@ -890,6 +977,7 @@ fn read_totals(r: &Value) -> Result<Totals, Refusal> {
     let method = match field(r, "method", "result")?.as_str() {
         Some("forced") => Method::Forced,
         Some("exact") => Method::Exact,
+        Some("student") => Method::Student,
         Some("hybrid") => {
             let h = int(r, "meanHorizon", "result", 1, 4)? as u8;
             Method::Hybrid(trick + h)
@@ -909,6 +997,7 @@ fn read_totals(r: &Value) -> Result<Totals, Refusal> {
         x => Some(u_str::<u128>(x, "result.worldCount")?),
     };
     let forced = method == Method::Forced;
+    let student = method == Method::Student;
     let mut verb = BurnVerb::Rob;
     let mut lines = false;
     let mut hand: Vec<Card> = Vec::new();
@@ -946,10 +1035,12 @@ fn read_totals(r: &Value) -> Result<Totals, Refusal> {
             for (k, x) in a.iter().enumerate() {
                 sums[k] = u_str(x, &format!("{at}.sum_fp[{k}]"))?;
             }
-            (
-                sums,
-                u_str(field(c, "sumsq_fp", &at)?, &format!("{at}.sumsq_fp"))?,
-            )
+            let sumsq = if student {
+                0
+            } else {
+                u_str(field(c, "sumsq_fp", &at)?, &format!("{at}.sumsq_fp"))?
+            };
+            (sums, sumsq)
         };
         let own_lines = match c.get("lines_fp") {
             None => None,

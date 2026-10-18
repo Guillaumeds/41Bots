@@ -8,7 +8,8 @@ license.workspace = true
 publish.workspace = true
 
 # docs/M3-SPEC.md §1: engine, bot, bots, equity, solver, belief, serde, serde_json; nn for the
-# hybrid yardstick (docs/M3-HYBRID-SPEC.md); sha2 (already the runner's, so in the lockfile) for
+# hybrid yardstick (docs/M3-HYBRID-SPEC.md); student for the student's teacher records and the
+# student check (docs/STUDENT.md); sha2 (already the runner's, so in the lockfile) for
 # the label shards' SHA-256, hashed as the shard is written: it uses the CPU's SHA instructions
 # when there are any (detected at run time), several times faster than `equity::sha256` on the
 # gigabytes of a shard.
@@ -20,6 +21,7 @@ bots = { path = "../bots" }
 equity = { path = "../equity" }
 solver = { path = "../solver" }
 nn = { path = "../nn" }
+student = { path = "../student" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"

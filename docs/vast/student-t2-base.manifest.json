@@ -1,0 +1,72 @@
+{
+  "format": 2,
+  "run_id": "student-t2-base-1",
+  "run_seed": 1,
+  "threads": null,
+  "benchmark_seconds": 0,
+  "upload_every_s": 300,
+  "heartbeat_every_s": 30,
+  "note": "The student's first teacher data (docs/STUDENT.md §4, §6, §8): trick-2 decisions valued by PIMC over 320 deals each with H_3 (O_3 round 2), every candidate in every deal stored, the base of the learning curve: 200,000 rules-bot positions and 50,000 mixed (a random action one time in four), in parts of 5,000 shared content-addressed; first the fixed test set, 4,096 decisions at 1,024 deals (never trained on). Measured on the build VM: 4.7 s of a thread a decision at 320 deals, so about 1.3 hours on 245 threads plus the test set's 4 minutes. Nothing here trains: training runs on the stored shards afterwards.",
+  "machine": {
+    "min_cores": 190,
+    "min_ram_gb": 96,
+    "disk_gb": 60
+  },
+  "inputs": {
+    "o3": "sha256:f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad"
+  },
+  "streams": [
+    {
+      "name": "test",
+      "priority": 1,
+      "kind": "student_teacher",
+      "chunks": 2,
+      "params": {
+        "threads": "all",
+        "trick": 2,
+        "count": 2048,
+        "deals": 1024,
+        "seed": 32343,
+        "role": "test",
+        "source": "rules",
+        "net_input": "o3",
+        "tt_mb": 64,
+        "table": { "hands": 1000000, "seed": 1 }
+      }
+    },
+    {
+      "name": "rules",
+      "priority": 2,
+      "kind": "student_teacher",
+      "chunks": 40,
+      "params": {
+        "threads": "all",
+        "trick": 2,
+        "count": 5000,
+        "deals": 320,
+        "seed": 401,
+        "source": "rules",
+        "net_input": "o3",
+        "tt_mb": 64,
+        "table": { "hands": 1000000, "seed": 1 }
+      }
+    },
+    {
+      "name": "mixed",
+      "priority": 3,
+      "kind": "student_teacher",
+      "chunks": 10,
+      "params": {
+        "threads": "all",
+        "trick": 2,
+        "count": 5000,
+        "deals": 320,
+        "seed": 402,
+        "source": "mixed",
+        "net_input": "o3",
+        "tt_mb": 64,
+        "table": { "hands": 1000000, "seed": 1 }
+      }
+    }
+  ]
+}
