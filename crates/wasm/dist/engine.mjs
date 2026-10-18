@@ -5,6 +5,7 @@
 //   const engine = await load(wasmBytesOrModule);
 //   engine.loadEquity(equityBytes, "64740dab…");   // the SHA-256 is checked when given
 //   engine.loadNet(o3Bytes, "f5766aa9…");          // -> { sha256, trick, bytes }
+//   engine.loadStudent(studentBytes);               // -> { sha256, bytes } (requests with method "student")
 //   const result = engine.evaluate(request);       // request: object or JSON text -> JSON text
 //   const merged = engine.merge([r0, r1]);         // results: objects or JSON texts -> JSON text
 //   engine.info();                                 // -> { engine, api, valuesVersion, equity, nets, memoryBytes }
@@ -87,6 +88,11 @@ export class Engine {
   /** Load an oracle network (.safetensors bytes); its trick comes from the file. -> { sha256, trick, bytes } */
   loadNet(bytes, sha256) {
     return this.#load("load_net", bytes, sha256);
+  }
+
+  /** Load the student network (.safetensors bytes): requests with `method: "student"` at tricks 1-2. -> { sha256, bytes } */
+  loadStudent(bytes, sha256) {
+    return this.#load("load_student", bytes, sha256);
   }
 
   /** Value a decision: the request (object or JSON text) -> the result or refusal (JSON text). */
