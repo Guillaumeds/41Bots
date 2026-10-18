@@ -235,6 +235,22 @@ situations are below the resolution of any check this size and are reported as s
 weakness that is not a function of the position and context at all, which cannot exist for a
 deterministic exact value.
 
+### 5.1 The search depth is a setting, not a derived number (owner question, 2026-10-18)
+
+The method is from the research above (multiaccuracy; SliceFinder; DivExplorer; cross-fitting with
+Benjamini–Hochberg). The two limits are our choices: the exhaustive search takes conjunctions of up to
+**3** binary features (the papers' usual 2–3, for tractability: the candidates grow as features^k and
+every candidate costs confirmation power), and the regression tree goes to depth **6** (a common
+default; it can state 6 conditions but chooses them greedily). Neither is derived from our data. What
+any finite-data auditor can certify depends on the complexity of the group family against the data
+(uniform convergence, Vapnik–Chervonenkis): richer families need more rows to confirm a group, and the
+family of all subsets certifies nothing.
+
+**Planned check (owner: for future improvements, to document):** rerun the auditor on the stored audit
+shards of the trick-3 and trick-2 loops with conjunctions of 4 and trees of depth 8 and 10, and count the
+weak groups newly *confirmed on the held-out half*. None new: 3/6 are shown sufficient at this data size.
+Some new: raise the settings for later loops. CPU only, about $1–3.
+
 ## 6. Builds (Opus; Fable reviews)
 
 The predicate format, shared by every piece: a JSON list of groups, each
