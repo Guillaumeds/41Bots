@@ -118,6 +118,43 @@ pub fn judge_rules(shards: &mut Shards) -> Result<(Vec<Judged>, u64), String> {
     Ok((out, missing))
 }
 
+/// The seed tag of [`judge_random`]'s picks.
+const RANDOM_TAG: u64 = 0x7A4D;
+
+/// Judge a player that picks a candidate uniformly at random (a floor for every other number):
+/// decision `g`'s pick is `Rng::derive(seed, [RANDOM_TAG, g]).bounded(candidates)`, so the
+/// baseline is the same on every machine. The second number is the exact expected loss of a
+/// random pick over all decisions (the mean over each decision's candidates of the best less that
+/// candidate, then over decisions), in money chance (a fraction): the seeded picks' mean estimates
+/// it.
+pub fn judge_random(shards: &mut Shards, seed: u64) -> Result<(Vec<Judged>, f64), String> {
+    let mut out = Vec::with_capacity(shards.groups.len());
+    let mut expected = 0.0f64;
+    for g in 0..shards.groups.len() {
+        let m = shards.merged(g)?;
+        let team = engine::team_of(m.head.pos.seat);
+        let teacher = m.means();
+        let best = choose(&teacher, team);
+        let n = teacher.len() as u64;
+        let chosen = Rng::derive(seed, &[RANDOM_TAG, g as u64]).bounded(n) as usize;
+        let top = teacher[best].get(team);
+        let sum: u128 = teacher.iter().map(|t| u128::from(top - t.get(team))).sum();
+        expected += sum as f64 / n as f64 / ONE as f64;
+        out.push(Judged {
+            trick: m.head.trick,
+            place: m.head.place,
+            stratum: m.head.stratum,
+            n_cands: m.head.cands.len() as u8,
+            best: best as u8,
+            chosen: chosen as u8,
+            loss: top - teacher[chosen].get(team),
+            abs_err: 0,
+        });
+    }
+    let n = out.len().max(1) as f64;
+    Ok((out, expected / n))
+}
+
 /// A group's summary.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Summary {

@@ -125,8 +125,8 @@ pub fn bundle_dir(dir: &Path, dest: &Path) -> Result<(String, u64), String> {
     Ok((sha256_hex(&z), z.len() as u64))
 }
 
-/// Reads one file back out of a bundle (tests).
-#[cfg(test)]
+/// Reads one file back out of a bundle (`None`: no such member): the tests, and a
+/// `student_train` chunk reading a `student_teacher` part's `.inputs.json`.
 pub fn read_member(bundle: &[u8], name: &str) -> Result<Option<Vec<u8>>, String> {
     let tar = zstd::stream::decode_all(bundle).map_err(|e| format!("zstd: {e}"))?;
     let mut at = 0usize;

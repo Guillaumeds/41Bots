@@ -11,7 +11,8 @@ publish.workspace = true
 # `engine` (chunk seeds by `Rng::derive`), `arena` (the sequential-test decision over the finished
 # prefix, and the `arena_blocks` worker), `search` (its bot registry, so `pimc-*` bots play in
 # `arena_blocks`) and `solver` (its transposition tables' memory model, to size them), so each of
-# those stays one implementation.
+# those stays one implementation; `student` for the teacher records' paths and stamps
+# (`student_train`).
 [dependencies]
 serde_json = "1"
 engine = { path = "../engine" }
@@ -19,6 +20,7 @@ arena = { path = "../arena" }
 search = { path = "../search" }
 nn = { path = "../nn" }
 solver = { path = "../solver" }
+student = { path = "../student" }
 sha2 = "0.11.1"
 zstd = { version = "0.14.2", default-features = false }
 

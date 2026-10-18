@@ -25,7 +25,7 @@ use engine::rng::Rng;
 use serde_json::{Value, json};
 
 /// Kinds a format-2 stream may run.
-pub const KINDS: [&str; 14] = [
+pub const KINDS: [&str; 15] = [
     "difftest",
     "equity_sweep",
     "benchmark",
@@ -40,6 +40,7 @@ pub const KINDS: [&str; 14] = [
     "hybrid_rung",
     "hybrid_t1check",
     "student_teacher",
+    "student_train",
 ];
 
 /// The keys of a stream object; everything else goes in `params`.
@@ -364,6 +365,17 @@ pub fn parse_v2(v: &Value) -> Result<Manifest2, String> {
             return Err(format!(
                 "stream `{name}`: until_decided needs kind arena_blocks with sprt params"
             ));
+        }
+        // The student's training: its settings checked here; one chunk (it resumes inside, by
+        // (size, width), from its live files).
+        if kind == "student_train" {
+            crate::student_train::parse(&params).map_err(|e| format!("stream `{name}`: {e}"))?;
+            if chunks != Chunks::Fixed(1) {
+                return Err(format!(
+                    "stream `{name}`: student_train is one chunk (\"chunks\": 1): it trains every \
+                     size and width in turn and resumes by pair"
+                ));
+            }
         }
         // A hybrid rung's settings are checked here, so a typo stops the run before it starts.
         if kind == "hybrid_rung" {

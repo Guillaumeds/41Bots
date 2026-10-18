@@ -774,5 +774,27 @@ mod tests {
             let best = means.iter().map(|v| v.get(t)).max().expect("candidates");
             assert_eq!(d.loss, best - means[usize::from(d.chosen)].get(t));
         }
+        // The random-card baseline: seeded picks among the candidates (the same twice), each
+        // judged against the means; the expected loss is the mean over candidates and decisions.
+        let (r, expected) = student::check::judge_random(&mut one, 1).expect("judged");
+        assert_eq!(
+            student::check::judge_random(&mut one, 1).expect("judged").0,
+            r
+        );
+        let mut want = 0.0;
+        for (g, d) in r.iter().enumerate() {
+            let m = one.merged(g).expect("merged");
+            let means = m.means();
+            let t = engine::team_of(m.head.pos.seat);
+            let best = means.iter().map(|v| v.get(t)).max().expect("candidates");
+            assert!(usize::from(d.chosen) < means.len());
+            assert_eq!(d.loss, best - means[usize::from(d.chosen)].get(t));
+            want += means
+                .iter()
+                .map(|v| (best - v.get(t)) as f64 / equity::ONE as f64)
+                .sum::<f64>()
+                / means.len() as f64;
+        }
+        assert!((expected - want / r.len() as f64).abs() < 1e-12);
     }
 }

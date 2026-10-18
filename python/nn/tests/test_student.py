@@ -153,6 +153,31 @@ class Training(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 student.main(["--train", te, "--out", os.path.join(d, "s3"), "--epochs", "1"])
 
+    def test_limit_takes_a_prefix_and_progress_is_written(self):
+        from fortyone_nn import student
+
+        with tempfile.TemporaryDirectory() as d:
+            a = fixture(d, "a.npy", 40, 11)
+            b = fixture(d, "b.npy", 40, 12)
+            prog = os.path.join(d, "p.json")
+            rep = student.main(["--train", a, b, "--limit", "50", "--out", os.path.join(d, "l1"), "--widths", "8",
+                                "--epochs", "2", "--batch", "8", "--val-permille", "200", "--threads", "1",
+                                "--progress", prog])
+            self.assertEqual(rep["data"]["decisions"], 50)
+            self.assertEqual(rep["data"]["train_rows"] + rep["data"]["val_rows"], 50)
+            with open(prog) as f:
+                p = json.load(f)
+            self.assertEqual(p["step"], "done")
+            self.assertEqual(p["int_sha256"], rep["int_sha256"])
+            # The whole of the first shard as a limit is the first shard alone.
+            r1 = student.main(["--train", a, b, "--limit", "40", "--out", os.path.join(d, "l2"), "--widths", "8",
+                               "--epochs", "1", "--batch", "8", "--val-permille", "200", "--threads", "1"])
+            r2 = student.main(["--train", a, "--out", os.path.join(d, "l3"), "--widths", "8", "--epochs", "1",
+                               "--batch", "8", "--val-permille", "200", "--threads", "1"])
+            self.assertEqual(r1["history"][0]["train_loss"], r2["history"][0]["train_loss"])
+            with self.assertRaises(SystemExit):
+                student.main(["--train", a, "--limit", "41", "--out", os.path.join(d, "l4"), "--epochs", "1"])
+
     def test_training_is_repeatable(self):
         from fortyone_nn import student
         from fortyone_nn.formats import sha256_file

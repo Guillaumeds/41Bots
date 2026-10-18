@@ -47,7 +47,7 @@
 //!                  [--seat-weights 2,1,1]
 //! search student-check --net STUDENT.safetensors --teacher SHARD.npy [--teacher …] --equity TABLE
 //!                  [--allow-stamp KEY …] [--boot 1000] [--boot-seed 1] [--json OUT]
-//!                  [--baseline rules]
+//!                  [--baseline rules] [--baseline random]
 //! search hybrid-check --trick T --cut K --net WEIGHTS --equity TABLE
 //!                  [--decisions FILE | --count N] [--seed 1] [--start-hands 20000]
 //!                  [--first I] [--last J] [--ids …] [--to 320] [--label 1]
@@ -81,7 +81,10 @@
 //! student, and the report gives the decision loss (the teacher's best mean minus the mean of the
 //! student's choice, deciding pair, % of money chance) with a bootstrap 95% upper bound,
 //! agreement and the student's value error, overall, by trick, by place and by stratum;
-//! `--baseline rules` adds the same table for the rules bot (`rules-v1`) on the same decisions.
+//! `--baseline rules` adds the same table for the rules bot (`rules-v1`) on the same decisions,
+//! `--baseline random` for a random legal card (`student::check::judge_random`: a seeded pick per
+//! decision, `--boot-seed`, with the exact expected loss of a random pick printed beside it); the
+//! JSON's `baselines` lists each one asked for (`baseline` stays the rules bot's).
 //! `labels` writes training labels for the oracle network O_K (docs/M3-HYBRID-SPEC.md §5,
 //! `search::oracle_labels`): a label shard (`nn::shard`, `.npy` records: encoded features, the exact
 //! value as four u64, the source tag, the trick) and a JSON sidecar `FILE.npy.json` with the
@@ -1709,21 +1712,42 @@ fn student_check(a: &Args) -> Result<(), String> {
         net.hidden(),
         t0.elapsed().as_secs_f64()
     );
-    let baseline = match a.get("--baseline") {
-        None => None,
-        Some("rules") => {
-            let (b, missing) = student::check::judge_rules(&mut shards)?;
-            let brows =
-                student::check::report(&b, a.num("--boot", 1000)?, a.num("--boot-seed", 1)?);
-            println!("baseline rules-v1 (its choice not among the candidates: {missing}):");
-            print!("{}", student::check::print(&brows));
-            Some(serde_json::json!({ "bot": "rules-v1", "not_judged": missing, "rows": brows }))
+    // Baselines on the same decisions: the rules bot, and a random legal card (seeded picks,
+    // `--boot-seed`; with the exact expected loss of a random pick beside them).
+    let mut baselines = Vec::new();
+    for b in a.all("--baseline") {
+        let boots = a.num("--boot", 1000)?;
+        let boot_seed = a.num("--boot-seed", 1)?;
+        match b {
+            "rules" => {
+                let (j, missing) = student::check::judge_rules(&mut shards)?;
+                let brows = student::check::report(&j, boots, boot_seed);
+                println!("baseline rules-v1 (its choice not among the candidates: {missing}):");
+                print!("{}", student::check::print(&brows));
+                baselines.push(
+                    serde_json::json!({ "bot": "rules-v1", "not_judged": missing, "rows": brows }),
+                );
+            }
+            "random" => {
+                let (j, expected) = student::check::judge_random(&mut shards, boot_seed)?;
+                let brows = student::check::report(&j, boots, boot_seed);
+                println!(
+                    "baseline random (a seeded random legal card; expected loss {:.5} %):",
+                    100.0 * expected
+                );
+                print!("{}", student::check::print(&brows));
+                baselines.push(serde_json::json!({ "bot": "random", "pick_seed": boot_seed,
+                    "expected_loss_pct": 100.0 * expected, "rows": brows }));
+            }
+            x => return Err(format!("--baseline {x}: rules or random")),
         }
-        Some(x) => return Err(format!("--baseline {x}: rules")),
-    };
+    }
+    // `baseline`: the rules bot's (as before); `baselines`: every one asked for, in order.
+    let baseline = baselines.iter().find(|b| b["bot"] == "rules-v1").cloned();
     if let Some(out) = a.get("--json") {
         let v = serde_json::json!({
             "baseline": baseline,
+            "baselines": baselines,
             "net": net_path,
             "net_sha256": net.sha256,
             "hidden": net.hidden(),

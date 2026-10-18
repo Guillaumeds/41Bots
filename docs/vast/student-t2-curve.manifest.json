@@ -1,0 +1,50 @@
+{
+  "format": 2,
+  "run_id": "student-t2-curve-1",
+  "run_seed": 1,
+  "threads": null,
+  "benchmark_seconds": 0,
+  "upload_every_s": 300,
+  "heartbeat_every_s": 30,
+  "note": "The student's first learning curve (docs/STUDENT.md §5, §7, §12 item 2): from the base run's stored trick-2 teacher shards (student-t2-base-1: 40 rules and 10 mixed parts of 5,000 decisions at 320 deals, the fixed test set of 2 x 2,048 decisions at 1,024 deals), students of 256-128 and 512-256 hidden units trained on the first 50,000, 100,000 and 250,000 decisions (the parts spread four rules to one mixed), each measured on the test set with search student-check beside the rules bot and a random card. Fetches about 9.3 GB of shards (a few minutes at 1 Gbps, about 13 at 100 Mbps), encodes them once, then trains six networks on the GPU; each finished (size, width) pair survives a lost machine. Outputs: out/student/curve.txt and curve.json, and per pair the float and integer networks (the integer ones also in inputs/sha256).",
+  "machine": {
+    "gpus": 1,
+    "blackwell": true,
+    "min_gpu_ram_gb": 8,
+    "min_compute_cap": 600,
+    "min_cores": 32,
+    "min_ram_gb": 64,
+    "disk_gb": 40,
+    "min_inet_down": 100
+  },
+  "streams": [
+    {
+      "name": "curve",
+      "priority": 1,
+      "kind": "student_train",
+      "chunks": 1,
+      "params": {
+        "threads": "all",
+        "train_inputs": [
+          { "run": "student-t2-base-1", "stream": "rules", "parts": 40 },
+          { "run": "student-t2-base-1", "stream": "mixed", "parts": 10 }
+        ],
+        "test_inputs": [
+          { "run": "student-t2-base-1", "stream": "test", "parts": 2 }
+        ],
+        "order": "spread",
+        "sizes": [50000, 100000, 250000],
+        "widths": ["256,128", "512,256"],
+        "epochs": 40,
+        "batch": 256,
+        "lr": 0.001,
+        "patience": 4,
+        "seed": 1,
+        "val_permille": 50,
+        "device": "cuda",
+        "baselines": ["rules", "random"],
+        "table": { "hands": 1000000, "seed": 1 }
+      }
+    }
+  ]
+}

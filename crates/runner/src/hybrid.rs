@@ -267,7 +267,7 @@ pub(crate) const TRAIN_ONLY: &str = "not checked (train only)";
 const GOLDEN_SEED: u64 = 1;
 
 /// CPU threads of the trainer beside a GPU (it only gathers batches and launches GPU work).
-const GPU_TRAIN_THREADS: u64 = 8;
+pub(crate) const GPU_TRAIN_THREADS: u64 = 8;
 
 /// Attempts at `uv sync` (it downloads about 3.7 GB for the GPU build), and each one's limit.
 const SYNC_ATTEMPTS: u32 = 3;
@@ -295,7 +295,7 @@ pub(crate) enum Device {
 }
 
 impl Device {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Device::Auto => "auto",
             Device::Cuda => "cuda",
@@ -1101,7 +1101,7 @@ fn python_dir() -> Result<PathBuf, String> {
 
 /// The GPUs `nvidia-smi` lists (one line each), or `None` when it is missing, fails or lists
 /// none.
-fn gpus_listed(nvidia_smi: &Path) -> Option<Vec<String>> {
+pub(crate) fn gpus_listed(nvidia_smi: &Path) -> Option<Vec<String>> {
     let o = Command::new(nvidia_smi)
         .args([
             "--query-gpu=name,memory.total,driver_version,compute_cap",
@@ -1133,19 +1133,22 @@ fn compute_cap_of(line: &str) -> Option<(u32, u32)> {
 
 /// The dependency group of `python/nn`'s lock for a chunk, and what to record and warn about.
 #[derive(Debug, PartialEq)]
-struct EnvChoice {
-    group: &'static str,
+pub(crate) struct EnvChoice {
+    pub group: &'static str,
     /// The first GPU's compute capability as `major.minor` (`None`: no GPU used, or it could not
     /// be read).
-    compute_cap: Option<String>,
-    warnings: Vec<String>,
+    pub compute_cap: Option<String>,
+    pub warnings: Vec<String>,
 }
 
 /// The group for `device` and the GPUs `nvidia-smi` listed: `cpu` for the CPU (or without a GPU
 /// on `auto`); with a GPU `cu130` when the first one (the trainer uses it) has compute
 /// capability 10.0 or above, else `cu126`, which is also the choice, with a warning, when that
 /// capability cannot be read (today's behaviour).
-fn choose_group(device: Device, gpus: &Option<Vec<String>>) -> Result<EnvChoice, String> {
+pub(crate) fn choose_group(
+    device: Device,
+    gpus: &Option<Vec<String>>,
+) -> Result<EnvChoice, String> {
     let gpu_lines = match (device, gpus.as_deref()) {
         (Device::Cpu, _) | (Device::Auto, None | Some([])) => {
             return Ok(EnvChoice {
@@ -1201,6 +1204,87 @@ fn choose_group(device: Device, gpus: &Option<Vec<String>>) -> Result<EnvChoice,
         compute_cap,
         warnings,
     })
+}
+
+/// A Python command in the environment `python`, run from `python_dir` (`python/nn`, so
+/// `-m fortyone_nn.…` finds the package).
+pub(crate) fn python_command(python: &Path, python_dir: &Path, module: &str) -> Command {
+    let mut c = Command::new(python);
+    c.current_dir(python_dir)
+        .env("PYTHONUNBUFFERED", "1")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .args(["-m", module]);
+    c
+}
+
+/// `uv sync --locked` of `python/nn` with dependency group `group` into `env_dir` (up to
+/// [`SYNC_ATTEMPTS`] attempts of at most [`SYNC_LIMIT`] each, its output in `log`): the
+/// environment's Python, uv's version and the attempts made. Shared by `hybrid_rung` (step 2) and
+/// `student_train`.
+pub(crate) fn uv_sync(
+    ctx: &mut Ctx,
+    tools: &Tools,
+    group: &str,
+    env_dir: &Path,
+    log: &str,
+) -> Result<(PathBuf, String, u32), String> {
+    let version = Command::new(&tools.uv)
+        .arg("--version")
+        .output()
+        .map_err(|e| format!("cannot run uv ({}): {e}", tools.uv.display()))?;
+    let uv_version = String::from_utf8_lossy(&version.stdout).trim().to_string();
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let mut c = Command::new(&tools.uv);
+        c.args(["sync", "--locked", "--no-default-groups", "--group", group])
+            .args(["--python", "3.14", "--no-progress", "--project"])
+            .arg(&tools.python_dir)
+            .env("UV_PROJECT_ENVIRONMENT", env_dir);
+        match ctx.run_child_io(c, log, None, Some(SYNC_LIMIT), &mut |_| {}) {
+            Ok(()) => break,
+            Err(e) if attempts < SYNC_ATTEMPTS && crate::stop::requested().is_none() => {
+                eprintln!("runner: uv sync attempt {attempts} failed ({e}); trying again in 15 s");
+                ctx.blocking(|| std::thread::sleep(Duration::from_secs(15)));
+            }
+            Err(e) => return Err(format!("uv sync ({group}): {e}")),
+        }
+    }
+    let python = if cfg!(windows) {
+        env_dir.join("Scripts").join("python.exe")
+    } else {
+        env_dir.join("bin").join("python")
+    };
+    Ok((python, uv_version, attempts))
+}
+
+/// The GPU check (`python -m fortyone_nn.device`, the command `c`; at most [`CHECK_LIMIT`]): its
+/// facts (`device.json` at `path`: `device`, `reason`, the GPU and versions). With `device`
+/// `cuda` a failed check is an error; with `auto` the facts say `cpu` and why.
+pub(crate) fn gpu_check(
+    ctx: &mut Ctx,
+    mut c: Command,
+    device: Device,
+    path: &Path,
+    log: &str,
+) -> Result<Value, String> {
+    c.args(["--want", device.name(), "--json"]).arg(path);
+    let res = ctx.run_child_io(c, log, None, Some(CHECK_LIMIT), &mut |_| {});
+    let facts = read_json(path);
+    let reason = facts
+        .as_ref()
+        .and_then(|f| f["reason"].as_str())
+        .unwrap_or("no reason recorded")
+        .to_string();
+    if let Err(e) = res {
+        return Err(match device {
+            Device::Cuda => {
+                format!("device \"cuda\" was asked for, but there is no usable GPU: {reason}")
+            }
+            _ => format!("GPU check: {e}"),
+        });
+    }
+    facts.ok_or_else(|| "the GPU check wrote no device.json".to_string())
 }
 
 /// The decisions at trick `trick` in a decisions file (`search decisions`' JSON lines).
@@ -1645,12 +1729,7 @@ impl Rung<'_> {
     /// A Python command in the environment, run from `python/nn` (so `-m fortyone_nn.…` finds the
     /// package).
     fn python_cmd(&self, module: &str) -> Command {
-        let mut c = Command::new(&self.python);
-        c.current_dir(&self.tools.python_dir)
-            .env("PYTHONUNBUFFERED", "1")
-            .env("PYTHONDONTWRITEBYTECODE", "1")
-            .args(["-m", module]);
-        c
+        python_command(&self.python, &self.tools.python_dir, module)
     }
 
     /// Step 0 (only when the settings name stored inputs): the harvest's network and a stored
@@ -1800,47 +1879,10 @@ impl Rung<'_> {
             json!({ "group": group, "compute_cap": compute_cap, "gpus": gpus }),
         );
         self.ctx.set_phase("chunk", progress);
-        let version = Command::new(&self.tools.uv)
-            .arg("--version")
-            .output()
-            .map_err(|e| {
-                format!(
-                    "hybrid_rung: cannot run uv ({}): {e}",
-                    self.tools.uv.display()
-                )
-            })?;
-        let uv_version = String::from_utf8_lossy(&version.stdout).trim().to_string();
-        let mut attempts = 0;
-        loop {
-            attempts += 1;
-            let mut c = Command::new(&self.tools.uv);
-            c.args(["sync", "--locked", "--no-default-groups", "--group", group])
-                .args(["--python", "3.14", "--no-progress", "--project"])
-                .arg(&self.tools.python_dir)
-                .env("UV_PROJECT_ENVIRONMENT", &env_dir);
-            match self.ctx.run_child_io(
-                c,
-                "hybrid/uv-sync.log",
-                None,
-                Some(SYNC_LIMIT),
-                &mut |_| {},
-            ) {
-                Ok(()) => break,
-                Err(e) if attempts < SYNC_ATTEMPTS && crate::stop::requested().is_none() => {
-                    eprintln!(
-                        "runner: hybrid_rung: uv sync attempt {attempts} failed ({e}); trying again in 15 s"
-                    );
-                    self.ctx
-                        .blocking(|| std::thread::sleep(Duration::from_secs(15)));
-                }
-                Err(e) => return Err(format!("hybrid_rung: uv sync ({group}): {e}")),
-            }
-        }
-        self.python = if cfg!(windows) {
-            env_dir.join("Scripts").join("python.exe")
-        } else {
-            env_dir.join("bin").join("python")
-        };
+        let (python, uv_version, attempts) =
+            uv_sync(self.ctx, self.tools, group, &env_dir, "hybrid/uv-sync.log")
+                .map_err(|e| format!("hybrid_rung: {e}"))?;
+        self.python = python;
         let lock = sha256_file(&self.tools.python_dir.join("uv.lock"))?.0;
         self.rec.insert(
             "python_env".into(),
@@ -1857,32 +1899,16 @@ impl Rung<'_> {
         let progress = self.progress("GPU check", json!({}));
         self.ctx.set_phase("chunk", progress);
         let path = self.out.join("device.json");
-        let mut c = self.python_cmd("fortyone_nn.device");
-        c.args(["--want", self.p.device.name(), "--json"])
-            .arg(&path);
-        let res =
-            self.ctx
-                .run_child_io(c, "hybrid/device.log", None, Some(CHECK_LIMIT), &mut |_| {});
-        let facts = read_json(&path);
-        let reason = facts
-            .as_ref()
-            .and_then(|f| f["reason"].as_str())
-            .unwrap_or("no reason recorded")
-            .to_string();
-        if let Err(e) = res {
-            return Err(match self.p.device {
-                Device::Cuda => {
-                    format!(
-                        "hybrid_rung: device \"cuda\" was asked for, but there is no usable GPU: {reason}"
-                    )
-                }
-                _ => format!("hybrid_rung: GPU check: {e}"),
-            });
-        }
-        let facts = facts.ok_or("hybrid_rung: the GPU check wrote no device.json")?;
+        let c = self.python_cmd("fortyone_nn.device");
+        let facts = gpu_check(self.ctx, c, self.p.device, &path, "hybrid/device.log")
+            .map_err(|e| format!("hybrid_rung: {e}"))?;
         self.device = facts["device"].as_str().unwrap_or("cpu").to_string();
         if self.device != "cuda" && self.p.device == Device::Auto {
             let threads = self.train_threads();
+            let reason = facts["reason"]
+                .as_str()
+                .unwrap_or("no reason recorded")
+                .to_string();
             self.warn(format!(
                 "no usable GPU ({reason}): training on the CPU with {threads} threads"
             ));

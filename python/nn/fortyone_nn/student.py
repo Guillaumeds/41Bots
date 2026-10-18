@@ -3,7 +3,7 @@
     uv run python -m fortyone_nn.student --train F1.npy [F2.npy ...] --out DIR
         [--test T.npy] [--widths 256,128] [--epochs 40] [--batch 256] [--lr 1e-3] [--patience 4]
         [--seed 1] [--val-permille 50] [--threads 4] [--device cpu|cuda|auto] [--max-minutes M]
-        [--init FLOAT [--shrink-perturb L] [--perturb-seed S]]
+        [--init FLOAT [--shrink-perturb L] [--perturb-seed S]] [--limit N] [--progress FILE]
 
 The data are feature shards written by ``student encode`` (Rust, the only encoder; format
 ``41bots-student-features-v1``): one record per decision with the view's active features, the
@@ -25,6 +25,12 @@ Early stopping on the validation loss (``--patience`` epochs), the best epoch ke
 Warm start (``--init`` a previous student's ``float.safetensors``; ``--shrink-perturb L``: Ash &
 Adams 2020, ``fortyone_nn.train.SIGMA_RULE``): the run continues that network; train on all the data
 selected so far, never on the new data alone (docs/STUDENT.md section 6).
+
+``--limit N`` trains on the first N decisions of the training shards, in the order given (a
+deterministic prefix: the runner's learning curve, ``student_train``), before the validation split;
+more than the shards hold is refused. ``--progress FILE`` is rewritten (atomically) at each step and
+about every 20 s within an epoch: ``step`` (load, train, quantise, measure, done), ``epoch``,
+``epochs``, ``batches_done``, ``batches`` and ``minutes``.
 
 Writes to DIR: ``float.safetensors`` (float32 layers in the integer layout), ``int.safetensors``
 (the quantised network ``crates/student`` loads: format ``41bots-int-mlp-v1``, encoder ``student-v1``
@@ -62,6 +68,23 @@ from .studentint import (
     load_features,
     write_student_int,
 )
+
+class Progress:
+    """The ``--progress`` file: rewritten atomically (a temporary file, then a rename)."""
+
+    def __init__(self, path, t0):
+        self.path, self.t0, self.state = path, t0, {}
+
+    def __call__(self, **kv):
+        self.state.update(kv)
+        self.state["minutes"] = round((time.time() - self.t0) / 60, 3)
+        if not self.path:
+            return
+        tmp = self.path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(self.state, f)
+        os.replace(tmp, self.path)
+
 
 class StudentNet(nn.Module):
     def __init__(self, n_binary, n_dense, widths):
@@ -203,8 +226,12 @@ def main(argv=None):
     ap.add_argument("--init")
     ap.add_argument("--shrink-perturb", type=float)
     ap.add_argument("--perturb-seed", type=int)
+    ap.add_argument("--limit", type=int)
+    ap.add_argument("--progress")
     args = ap.parse_args(argv)
     t0 = time.time()
+    progress = Progress(args.progress, t0)
+    progress(step="load")
     try:
         widths = parse_widths(args.widths)
     except ValueError as e:
@@ -224,6 +251,10 @@ def main(argv=None):
     n_binary, n_dense = side["n_binary"], side["n_dense"]
     n_features = n_binary + n_dense
     cols = concat([Columns(a, n_binary) for a, _ in loaded])
+    if args.limit is not None:
+        if args.limit < 1 or args.limit > len(cols):
+            raise SystemExit(f"--limit {args.limit}: the training shards hold {len(cols)} decisions")
+        cols = cols.take(np.arange(args.limit))
     val_sel = (cols.pos_key % np.uint64(1000)) < np.uint64(args.val_permille)
     train_c, val_c = cols.take(~val_sel), cols.take(val_sel)
     test_c = None
@@ -254,7 +285,13 @@ def main(argv=None):
         model.train()
         perm = rng.permutation(len(train_c))
         total, n = 0.0, 0
-        for i in range(0, len(perm), args.batch):
+        batches = (len(perm) + args.batch - 1) // args.batch
+        progress(step="train", epoch=epoch, epochs=args.epochs, batches_done=0, batches=batches)
+        last = time.time()
+        for k, i in enumerate(range(0, len(perm), args.batch)):
+            if time.time() - last > 20:
+                progress(batches_done=k)
+                last = time.time()
             b = train_c.take(perm[i : i + args.batch])
             view, dense, cand, dec, tgt, nc = batch_tensors(b, device)
             loss = loss_of(model(view, dense, cand, dec), tgt, dec, nc)
@@ -281,9 +318,11 @@ def main(argv=None):
             break
     if best[1] is not None:
         model.load_state_dict(best[1])
+    progress(step="quantise", best_epoch=best[2])
     os.makedirs(args.out, exist_ok=True)
     data_meta = {
         "train_shards": json.dumps([os.path.basename(p) for p in args.train]),
+        "train_decisions": str(len(cols)),
         "train_sha256": json.dumps([sha256_file(p) for p in args.train]),
         "widths": args.widths,
         "seed": str(args.seed),
@@ -300,9 +339,11 @@ def main(argv=None):
         own_i = int_scores(int_layers, c, n_binary, n_features)
         return {"set": name, "loss": l, "float": by_groups(own_f, c), "int": by_groups(own_i, c)}
 
+    progress(step="measure")
     report = {
         "settings": vars(args),
-        "data": {"train_rows": len(train_c), "val_rows": len(val_c), "encoder_sha256": side["encoder_sha256"],
+        "data": {"decisions": len(cols), "limit": args.limit, "train_rows": len(train_c), "val_rows": len(val_c),
+                 "encoder_sha256": side["encoder_sha256"],
                  "teacher": side.get("teacher_stamps")},
         "history": history,
         "best_epoch": best[2],
@@ -323,6 +364,7 @@ def main(argv=None):
                               "keep": bool(new_loss <= old_loss)}
     with open(os.path.join(args.out, "report.json"), "w") as f:
         json.dump(report, f, indent=1, default=str)
+    progress(step="done", int_sha256=report["int_sha256"])
     v = report["val"]["int"]["all"]
     print(f"int network {report['int_sha256'][:16]}: val decision loss {v['decision_loss_pct']:.4f}% "
           f"agreement {v['agreement']:.3f} ({v['decisions']} decisions)")

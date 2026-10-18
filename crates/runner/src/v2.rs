@@ -60,7 +60,10 @@
 //!   `check.net_input` and `worlds_input` name inputs whose paths are added to its params
 //!   (`reference.net`, `check.net`, `worlds`);
 //! - `student_teacher` (`student.rs`, format 2 only): part `first_part + index` of a stream of
-//!   the student's teacher records; its `net_input` names an input whose path is added (`net`).
+//!   the student's teacher records; its `net_input` names an input whose path is added (`net`);
+//! - `student_train` (`student_train.rs`, format 2 only, one chunk): the student's learning curve
+//!   from stored teacher shards; like `search_measure` its live files are restored on the machine
+//!   that continues it, so its finished (size, width) pairs are not trained again.
 //!
 //! The equity input is `inputs.equity` (or the input named by `params.equity_input`).
 //!
@@ -209,6 +212,19 @@ fn worker_inner(spec_path: &Path) -> Result<(), String> {
                 }
             }
             crate::student::chunk(&mut ctx, &p, index)?
+        }
+        "student_train" => {
+            // A prebuilt equity table among the inputs replaces building it (hash-checked).
+            let mut p = params.clone();
+            if let Ok(path) = equity()
+                && let Some(o) = p.as_object_mut()
+            {
+                let t = o.entry("table").or_insert_with(|| json!({}));
+                if let Some(t) = t.as_object_mut() {
+                    t.entry("path").or_insert(json!(path));
+                }
+            }
+            crate::student_train::chunk(&mut ctx, &p)?
         }
         "suitability" | "agree" | "belief_bench" => {
             // The `search` subcommand of the same name (`belief_bench` → `belief-bench`), with
@@ -770,8 +786,9 @@ impl Run {
         let _ = fs::remove_dir_all(&dir);
         let logs = dir.join("logs");
         fs::create_dir_all(&logs).map_err(|e| e.to_string())?;
-        if s.kind == "search_measure" {
-            // Continue where an earlier machine stopped: its files as last uploaded, with the
+        if s.kind == "search_measure" || s.kind == "student_train" {
+            // Continue where an earlier machine stopped (a `student_train` chunk: its finished
+            // (size, width) pairs, which it then does not train again): its files as last uploaded, with the
             // checkpoint of the worlds finished since its last complete decision. A store that
             // cannot be read is retried three times; if it still fails, the chunk starts from
             // scratch (the same bytes, the saved worlds valued again) and the log says so loudly.

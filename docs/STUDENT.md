@@ -348,12 +348,40 @@ for the money (stratum S4) are where both the rules bot and the student lose mos
   then 200,000 rules-bot and 50,000 mixed decisions at 320 deals: about 1.4 hours on a 245-thread
   machine, about $1 at $0.72/h (more at the $1.70 cap's prices), about 9.5 GB of shards.
 
+**Stage 4 (training on a rented machine, not launched):**
+
+- Runner chunk kind `student_train` (`crates/runner/src/student_train.rs`, one chunk a stream):
+  the learning curve from stored teacher shards. Inputs are named by run and stream
+  (`{ "run": "student-t2-base-1", "stream": "rules", "parts": 40 }`: the run's `merged.json`
+  lists each part's bundle, whose `student/<file>.inputs.json` gives the shard's keys), or a
+  stored shard directly in its `.inputs.json` form. The training parts are spread in proportion
+  (four rules parts to one mixed one for the base run), each size is the first that many decisions
+  in that order (the trainer's new `--limit`), and only the parts the largest size needs are
+  fetched (SHA-256 and size checked) and encoded, each once. For each (size, width): the trainer on
+  the GPU (the hybrid rung's Python environment and GPU check), `search student-check` on the test
+  set with the rules bot and a random card as baselines (`--baseline random`: a seeded random
+  legal card per decision, with the exact expected loss of a random pick printed beside it), the
+  networks shared to `inputs/sha256/`; `out/student/curve.txt` and `curve.json` give the loss,
+  its upper bound and the agreement overall, by place and by score class. A lost machine's
+  finished pairs are restored from the chunk's live files and not trained again.
+- Manifests (not launched): `docs/vast/student-t2-curve-mech.manifest.json` (the mechanism run's
+  shards, minutes) and `docs/vast/student-t2-curve.manifest.json` (the base run's 250,000
+  decisions; sizes 50,000, 100,000 and 250,000; widths 256-128 and 512-256; one GPU of 8 GB or
+  more, 32 threads, 64 GB of RAM, 40 GB of disk).
+- Tested on this VM: the chunk with fake programs (`cargo test -p runner student_train`); end to
+  end with real programs on a local store (`crates/runner/tests/student_train.rs`, `--ignored`:
+  a teacher run with a random O_3, then the curve on CPU, then a resume that skips a finished
+  pair); and the mechanism manifest itself on CPU against a local copy of `student-t2-mech-1`'s
+  bundles and shards (3 MB).
+
 ## 12. Next
 
 1. Launch `student-t2-mech` (minutes), then `student-t2-base` (about 1.4 hours, about $1 on a
    245-thread machine at $0.72/h): the main session reviews and launches.
 2. Train 256-128 and 512-256 students on 50k, 100k and 250k decisions (the learning curve) and
-   measure them on the test set with `search student-check --baseline rules`.
+   measure them on the test set with `search student-check --baseline rules --baseline random`:
+   launch `student-t2-curve-mech`, then `student-t2-curve` (the runner's `student_train`, §11
+   Stage 4).
 3. A student bot for the arena (`search::bot`), so promotion is by SPRT in duplicate tournaments
    (PLAN §9), and the DAgger source (`--source student`: positions from the student's own games).
 4. Trick 1 once O_2 exists: price it with the real O_2 first (§8: its width sets the cost).

@@ -62,6 +62,7 @@ mod sched;
 mod spike;
 mod stop;
 mod student;
+mod student_train;
 mod t1bench;
 mod t1check;
 mod v2;
