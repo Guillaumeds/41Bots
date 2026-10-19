@@ -143,6 +143,10 @@ pub struct CheckJob {
     /// The optimizer's-curse test's noise at every leaf of the hybrid's search (`crate::curse`;
     /// `None`: none, the ordinary check). The noise never touches the reference's values.
     pub noise: Option<crate::curse::NoiseSpec>,
+    /// Exact leaves (`crate::exact_leaves`): the hybrid's frontier positions this policy picks
+    /// are solved exactly instead of being valued by the network (`None`: none, the hybrid as
+    /// before, byte for byte). The reference's values are never touched.
+    pub exact_leaves: Option<crate::exact_leaves::LeafPolicy>,
 }
 
 impl CheckJob {
@@ -334,6 +338,9 @@ pub struct WorldCheck {
     /// With race groups: the distinct frontier positions the hybrid's search reached, by race
     /// class ([`RaceRecorder`]).
     pub race: Option<Reach>,
+    /// With exact leaves: the search's distinct leaves by race class, those solved exactly, and
+    /// the leaf solves' nodes and time.
+    pub leaves: Option<crate::exact_leaves::LeafStats>,
 }
 
 /// The check of one decision.
@@ -388,6 +395,10 @@ pub struct DecisionCheck {
     /// world, summed), by race class ([`RaceRecorder`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub race: Option<Reach>,
+    /// With exact leaves: its worlds' leaves by race class, those solved exactly, the leaf
+    /// solves' nodes and time (summed over worlds).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exact_leaves: Option<crate::exact_leaves::LeafStats>,
     /// The reference values (the `exact_*` fields) are a silver reference's ([`Reference`]),
     /// not exact.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -411,6 +422,9 @@ pub struct CheckRun {
     pub mismatched: Vec<(u64, u64)>,
     /// With [`CheckJob::noise`]: the realised noise (`crate::curse::NoiseStats`).
     pub noise: Option<crate::curse::NoiseStats>,
+    /// With [`CheckJob::exact_leaves`]: the exact leaves over every world
+    /// (`crate::exact_leaves::LeafStats`).
+    pub exact_leaves: Option<crate::exact_leaves::LeafStats>,
 }
 
 /// Live counters of a running check, for progress reports (they never change a value).
@@ -886,6 +900,7 @@ pub fn check_worlds_ref(
             net: (0, 0),
             mismatched,
             noise: None,
+            exact_leaves: None,
         });
     }
     // The hybrid's solves.
@@ -896,6 +911,7 @@ pub fn check_worlds_ref(
         WorldSolve,
         Option<Reach>,
         Option<Reach>,
+        Option<crate::exact_leaves::LeafStats>,
     );
     let noise_total: Mutex<crate::curse::NoiseStats> = Mutex::default();
     let solve_hybrid = |i: usize, mem: &mut SolveMem| -> HybridOut {
@@ -907,9 +923,25 @@ pub fn check_worlds_ref(
             let (k, j) = tasks[i];
             crate::curse::NoisyLeaf::new(&timed, ctx.leaf, spec, plan[k].d.id, plan[k].worlds[j].w)
         });
-        let base: &dyn Frontier = match &noisy {
+        let noised: &dyn Frontier = match &noisy {
             Some(n) => n,
             None => &timed,
+        };
+        // Exact leaves replace the network's value where the policy says, under every recorder
+        // (which see the values the search uses).
+        let exacts = job.exact_leaves.as_ref().map(|policy| {
+            let k = tasks[i].0;
+            crate::exact_leaves::ExactLeaves::new(
+                noised,
+                ctx.leaf,
+                policy,
+                engine::team_of(plan[k].d.seat),
+                solver::SolveFamily::of_match(&m),
+            )
+        });
+        let base: &dyn Frontier = match &exacts {
+            Some(x) => x,
+            None => noised,
         };
         let rec = slices.map(|p| GroupRecorder::new(base, p, ctx.leaf));
         let inner: &dyn Frontier = match &rec {
@@ -927,13 +959,17 @@ pub fn check_worlds_ref(
             &mut run,
             Some(match &races {
                 Some(r) => FrontierCut::new(job.cut, r),
-                None if rec.is_some() || noisy.is_some() => FrontierCut::new(job.cut, inner),
+                None if rec.is_some() || noisy.is_some() || exacts.is_some() => {
+                    FrontierCut::new(job.cut, inner)
+                }
                 None => cut,
             }),
         )
         .expect("nothing stops a solve here");
         let race_reach = races.map(RaceRecorder::into_reach);
         let reach = rec.map(GroupRecorder::into_reach);
+        let leaves = exacts.as_ref().map(crate::exact_leaves::ExactLeaves::stats);
+        drop(exacts);
         if let Some(n) = noisy {
             noise_total
                 .lock()
@@ -952,12 +988,13 @@ pub fn check_worlds_ref(
             ]);
             p.hybrid_done.fetch_add(1, Ordering::Relaxed);
         }
-        (h, us, run, reach, race_reach)
+        (h, us, run, reach, race_reach, leaves)
     };
     let hybrid = pool(job.threads, &order, &solve_hybrid, tasks.len());
     let mut outs: Vec<WorldCheck> = Vec::with_capacity(tasks.len());
     for (i, (hy, ex)) in hybrid.into_iter().zip(exact).enumerate() {
-        let (h, hus, run, reach, race_reach) = hy.expect("every world valued by the hybrid");
+        let (h, hus, run, reach, race_reach, leaves) =
+            hy.expect("every world valued by the hybrid");
         let (k, j) = tasks[i];
         let t = &plan[k].worlds[j];
         let (exact, exact_us, exact_nodes, verified) = match (ex, &t.stored) {
@@ -984,6 +1021,7 @@ pub fn check_worlds_ref(
             robber: run.robber,
             reach,
             race: race_reach,
+            leaves,
         });
     }
     let mut decisions = Vec::new();
@@ -1043,10 +1081,24 @@ pub fn check_worlds_ref(
                 }
                 r
             }),
+            exact_leaves: job.exact_leaves.as_ref().map(|_| {
+                let mut st = crate::exact_leaves::LeafStats::default();
+                for o in ws {
+                    st.add(o.leaves.as_ref().expect("every world counted"));
+                }
+                st
+            }),
             silver: p.silver && reference.is_some(),
             world_checks: ws.to_vec(),
         });
     }
+    let exact_leaves = job.exact_leaves.as_ref().map(|_| {
+        let mut st = crate::exact_leaves::LeafStats::default();
+        for d in &decisions {
+            st.add(d.exact_leaves.as_ref().expect("every decision counted"));
+        }
+        st
+    });
     Ok(CheckRun {
         decisions,
         verified,
@@ -1059,6 +1111,7 @@ pub fn check_worlds_ref(
             .noise
             .as_ref()
             .map(|_| noise_total.into_inner().unwrap_or_else(|e| e.into_inner())),
+        exact_leaves,
     })
 }
 
@@ -1522,6 +1575,7 @@ mod tests {
             frontier: 0,
             reach: None,
             race: None,
+            exact_leaves: None,
             silver: false,
             world_checks: Vec::new(),
         };
@@ -1587,6 +1641,7 @@ mod tests {
             exact_solve_threads: 1,
             exact_tt_mb: 4,
             noise: None,
+            exact_leaves: None,
         };
         let a = run_check(&ds, &BTreeMap::new(), &job(1), &ctx, &f).expect("runs");
         let b = run_check(&ds, &BTreeMap::new(), &job(3), &ctx, &f).expect("runs");
@@ -1664,6 +1719,7 @@ mod tests {
             exact_solve_threads: 1,
             exact_tt_mb: 4,
             noise: None,
+            exact_leaves: None,
         };
         let text = format!(
             r#"[{{"name": "next team no trick", "conditions": [{{"feature": {}, "op": "==", "value": 1}}]}},
@@ -1780,6 +1836,7 @@ mod tests {
             exact_solve_threads: 1,
             exact_tt_mb: 4,
             noise: None,
+            exact_leaves: None,
         }
     }
 
@@ -2346,5 +2403,187 @@ mod tests {
         d[3].id = 99;
         assert!(paired(&a, &d, 10, 1).is_err());
         assert!(paired(&a, &a[..10], 10, 1).is_err());
+    }
+
+    // ------------------------------------------------------------ exact leaves
+
+    use crate::exact_leaves::{ExactLeaves, LeafPolicy, LeafStats};
+    use crate::worlds::WorldSource;
+
+    fn leaf_job(threads: usize, policy: Option<LeafPolicy>) -> CheckJob {
+        CheckJob {
+            verify_pct: 0.0,
+            exact_leaves: policy,
+            ..check_job(4, threads, 3)
+        }
+    }
+
+    fn world_values(r: &CheckRun) -> Vec<Vec<MoneyChance>> {
+        r.decisions
+            .iter()
+            .flat_map(|d| d.world_checks.iter().map(|w| w.hybrid.clone()))
+            .collect()
+    }
+
+    /// No policy is the check as before, and a policy that picks no leaf changes no value, choice
+    /// or error either, byte for byte (it only counts the leaves); with every leaf exact, H_k is
+    /// exact search: its values are the exact values in every world (no loss, no error); and the
+    /// leaves of chosen race classes are solved, the others not, the same on 1 and 3 threads.
+    #[test]
+    fn exact_leaves_none_all_and_race_classes() {
+        let ds = curse_setup();
+        let l = syn_leaf();
+        let src = BeliefSource::new();
+        let ctx = Ctx {
+            leaf: &*l,
+            source: &src,
+            rules: engine::game::Rules::HOUSE,
+        };
+        let none = BTreeMap::new();
+        let net = oracle(4, 61);
+        let run = |job: &CheckJob| run_check(&ds, &none, job, &ctx, &net).expect("runs");
+        let base = run(&leaf_job(2, None));
+        assert!(base.exact_leaves.is_none());
+        assert!(base.decisions.iter().all(|d| d.exact_leaves.is_none()));
+        assert!(
+            base.decisions
+                .iter()
+                .any(|d| d.loss > 0 || d.errors.iter().any(|&e| e != 0))
+        );
+        // Nothing picked: the same, byte for byte.
+        let nothing = run(&leaf_job(3, Some(LeafPolicy::race(0, 4))));
+        assert_eq!(key(&base), key(&nothing));
+        assert_eq!(world_values(&base), world_values(&nothing));
+        let st0 = nothing.exact_leaves.clone().expect("counted");
+        assert_eq!(st0.exact, [0; 5]);
+        assert_eq!(st0.nodes, 0);
+        assert!(st0.distinct.iter().sum::<u64>() > 0);
+        // Every leaf exact: exact search.
+        let all = run(&leaf_job(2, Some(LeafPolicy::all(4))));
+        for d in &all.decisions {
+            assert_eq!(d.loss, 0, "decision {}", d.id);
+            assert!(d.errors.iter().all(|&e| e == 0) && d.own_error_sum == 0);
+            for w in &d.world_checks {
+                assert_eq!(w.hybrid, w.exact, "decision {} world {}", d.id, w.w);
+            }
+        }
+        let sa = all.exact_leaves.clone().expect("counted");
+        assert_eq!(sa.exact, sa.distinct);
+        assert!(sa.nodes > 0);
+        // One race class: the most common (not every leaf), exact there only; thread-independent.
+        let c = (0..5)
+            .max_by_key(|&k| (st0.distinct[k], std::cmp::Reverse(k)))
+            .expect("a class");
+        assert!(
+            st0.distinct[c] < st0.distinct.iter().sum::<u64>(),
+            "{st0:?}"
+        );
+        let p = LeafPolicy::race(1 << c, 4);
+        let r1 = run(&leaf_job(1, Some(p.clone())));
+        let r3 = run(&leaf_job(3, Some(p)));
+        assert_eq!(key(&r1), key(&r3));
+        assert_eq!(world_values(&r1), world_values(&r3));
+        let counts = |r: &CheckRun| -> Vec<_> {
+            r.decisions
+                .iter()
+                .map(|d| d.exact_leaves.as_ref().expect("counted").counts())
+                .collect()
+        };
+        assert_eq!(counts(&r1), counts(&r3));
+        let s1: LeafStats = r1.exact_leaves.clone().expect("counted");
+        for k in 0..5 {
+            assert_eq!(s1.exact[k], if k == c { s1.distinct[k] } else { 0 });
+        }
+        assert!(s1.exact[c] > 0);
+        assert_ne!(
+            world_values(&r1),
+            world_values(&base),
+            "the exact leaves change values"
+        );
+    }
+
+    /// In one world's search, each leaf the policy picks holds exactly the exact solver's value
+    /// of its position (the value its label would carry: `oracle_labels::exact_value`, from
+    /// empty tables), and every other leaf the network's; a band picks the leaves whose network
+    /// value for the decider's team is inside it, and a band of 0-100% picks every leaf.
+    #[test]
+    fn an_exact_leaf_is_the_exact_solvers_value() {
+        let ds = curse_setup();
+        let l = syn_leaf();
+        let src = BeliefSource::new();
+        let ctx = Ctx {
+            leaf: &*l,
+            source: &src,
+            rules: engine::game::Rules::HOUSE,
+        };
+        let net = oracle(4, 62);
+        let cfg = SearchConfig {
+            tt_mb: 4,
+            ..SearchConfig::default()
+        };
+        let mut checked = (0, 0, 0);
+        for d in ds.iter().take(4) {
+            let (_, view, legal) = d.replay();
+            let (_, cands) = candidates(&view, &legal);
+            let worlds = src.prepare(&view, ctx.rules);
+            let team = engine::team_of(d.seat);
+            for w in 0..2 {
+                let m = world_match(&view, &*worlds, w, measure_seed(7, 1, d.id), ctx.rules);
+                for text in ["race:0,2,4", "race:1+band:30-70", "band:0-100"] {
+                    let policy = LeafPolicy::parse(text, 4).expect("valid").expect("some");
+                    let x = ExactLeaves::new(
+                        &net,
+                        &*l,
+                        &policy,
+                        team,
+                        solver::SolveFamily::of_match(&m),
+                    );
+                    let mut run = WorldSolve::default();
+                    exact_world(
+                        &m,
+                        &cands,
+                        &ctx,
+                        &cfg,
+                        None,
+                        &mut SolveMem::new(),
+                        &mut run,
+                        Some(FrontierCut::new(4, &x)),
+                    )
+                    .expect("solves");
+                    let leaves = x.leaves();
+                    assert!(!leaves.is_empty());
+                    for (pos, mctx, canon, v, exact) in leaves {
+                        let class = nn::outcome::race_class_of(&canon, &mctx, &*l);
+                        let nv = net.value(&canon, &mctx);
+                        let in_band = policy
+                            .band
+                            .is_some_and(|(lo, hi)| (lo..=hi).contains(&nv.get(team)));
+                        assert_eq!(exact, policy.has_class(class) || in_band, "{text}");
+                        if exact {
+                            let (e, _) = crate::oracle_labels::exact_value(
+                                &pos,
+                                mctx,
+                                &*l,
+                                solver::FastOptions::default(),
+                                &mut SolveMem::new(),
+                            );
+                            assert_eq!(v, e, "{text}: an exact leaf is its exact value");
+                            checked.0 += 1;
+                        } else {
+                            assert_eq!(v, nv, "{text}: the network's value");
+                            checked.1 += 1;
+                        }
+                        if text.starts_with("band:0-100") {
+                            assert!(exact);
+                            checked.2 += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            checked.0 > 0 && checked.1 > 0 && checked.2 > 0,
+            "{checked:?}"
+        );
     }
 }

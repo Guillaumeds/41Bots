@@ -34,7 +34,13 @@
 //!   (five percentages, race classes 0-4; required) and seed `noise_seed` (1) at each leaf;
 //!   `noise_calibrate` (0: none) above 0 first rescales the SDs on a sample of that many
 //!   decisions and their first `noise_calibrate_worlds` (8) worlds until the realised SD per
-//!   race class matches the given ones (`search hybrid-check --noise-calibrate`).
+//!   race class matches the given ones (`search hybrid-check --noise-calibrate`);
+//! - `exact_leaves` (optional; not with `truth` `"net"`): the hybrid's frontier positions this
+//!   policy picks are solved exactly instead of being valued by the network (`search hybrid-check
+//!   --exact-leaves`, `search::exact_leaves`: `race:4`, `race:2,4`, `race:1-4`, `+band:LO-HI`,
+//!   `all`; `none` or absent: none), each leaf solve with a table of `tt_mb` (a second table per
+//!   thread in the memory plan) (fix G, docs/m3-hybrid/rung2.md "Exact leaves (G)"; manifest
+//!   docs/vast/o3-exactleaf.manifest.json).
 //!
 //! with `--race-groups` when `race_groups` (true), into `out/hybrid/checks/<name>.json` and the
 //! printed tables in `<name>.txt`. Then each `paired` entry is `search hybrid-paired --a
@@ -86,7 +92,7 @@ pub(crate) const KEYS: [&str; 19] = [
 const RESOLVED: [&str; 3] = ["decisions", "worlds_path", "net_paths"];
 
 /// Keys of a check.
-const CHECK_KEYS: [&str; 7] = [
+const CHECK_KEYS: [&str; 8] = [
     "name",
     "nets",
     "truth",
@@ -94,6 +100,7 @@ const CHECK_KEYS: [&str; 7] = [
     "noise_seed",
     "noise_calibrate",
     "noise_calibrate_worlds",
+    "exact_leaves",
 ];
 
 /// One check.
@@ -109,6 +116,9 @@ pub(crate) struct Check {
     /// Decisions of the noise's calibration sample (0: none) and their worlds.
     pub noise_calibrate: u64,
     pub noise_calibrate_worlds: u64,
+    /// The exact leaves' policy (`search hybrid-check --exact-leaves`, `search::exact_leaves`),
+    /// in its normal form; `None`: none (the hybrid as before).
+    pub exact_leaves: Option<String>,
 }
 
 /// The checked settings.
@@ -266,6 +276,20 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
                 ));
             }
         }
+        let exact_leaves = match s(c, "exact_leaves")? {
+            None => None,
+            Some(text) => {
+                let p = search::exact_leaves::LeafPolicy::parse(&text, 1)
+                    .map_err(|e| format!("hybrid_checks: check `{name}`: {e}"))?;
+                if p.is_some() && truth_net {
+                    return Err(format!(
+                        "hybrid_checks: check `{name}`: exact_leaves is for checks against \
+                         exact values, not truth net"
+                    ));
+                }
+                p.map(|p| p.describe())
+            }
+        };
         checks.push(Check {
             name,
             nets,
@@ -274,6 +298,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
             noise_seed: n(c, "noise_seed", 1)?,
             noise_calibrate: n(c, "noise_calibrate", 0)?,
             noise_calibrate_worlds: n(c, "noise_calibrate_worlds", 8)?.max(1),
+            exact_leaves,
         });
     }
     let mut paired = Vec::new();
@@ -461,6 +486,10 @@ pub(crate) fn check_command(
     if q.race_groups {
         cmd.arg("--race-groups");
     }
+    if let Some(p) = &c.exact_leaves {
+        cmd.args(["--exact-leaves", p])
+            .args(["--exact-leaf-tt-mb", &r.tt_mb.to_string()]);
+    }
     cmd.arg("--json")
         .arg(r.out.join(format!("{}.json", c.name)))
         .arg("--progress")
@@ -509,6 +538,7 @@ fn summary(hc: &Value) -> Value {
         "net_sha256": hc["net"]["sha256"], "ensemble": hc["ensemble"]["id"],
         "verified_worlds": hc["verified_worlds"],
         "rows": rows, "noise": hc["noise"], "time": hc["time"],
+        "exact_leaves": hc["exact_leaves"],
     })
 }
 
@@ -533,10 +563,16 @@ pub(crate) fn chunk_with(
     let q = parse(p)?;
     let t0 = Instant::now();
     let threads = ctx.threads.max(1);
+    // A check with exact leaves holds a second table per thread, for the leaf solves.
+    let per_thread = if q.checks.iter().any(|c| c.exact_leaves.is_some()) {
+        2
+    } else {
+        1
+    };
     let plan = mem::plan_here(
         Requested::Mb(q.tt_mb),
         Tables::Own {
-            count: threads as u64,
+            count: per_thread * threads as u64,
         },
         table,
         "hybrid_checks (hybrid and reference tables)",
@@ -695,6 +731,18 @@ mod tests {
         assert!(bad(&|p| {
             p.as_object_mut().expect("object").remove("worlds_input");
         }));
+        // Exact leaves: a policy in its normal form; none is no policy; refused with truth net
+        // and when it does not parse.
+        let mut p = manifest_params();
+        p["checks"][1]["exact_leaves"] = json!("race:4,2");
+        p["checks"][2]["exact_leaves"] = json!("none");
+        let q = parse(&p).expect("valid");
+        assert_eq!(q.checks[1].exact_leaves.as_deref(), Some("race:2,4"));
+        assert_eq!(q.checks[2].exact_leaves, None);
+        assert_eq!(q.checks[0].exact_leaves, None);
+        assert!(bad(&|p| p["checks"][0]["exact_leaves"] = json!("race:4")));
+        assert!(bad(&|p| p["checks"][1]["exact_leaves"] = json!("race:9")));
+        assert!(bad(&|p| p["checks"][1]["exact_leaves"] = json!(4)));
         // Only the curse test: no exact worlds needed.
         let mut p = manifest_params();
         p.as_object_mut().expect("object").remove("worlds_input");
@@ -759,6 +807,19 @@ mod tests {
             args(paired_command(Path::new("search"), &q, 0, Path::new("/o"))),
             "hybrid-paired --a /o/single.json --b /o/ens.json --a-name single --b-name ens \
              --boot 1000 --boot-seed 1 --json /o/paired-single-vs-ens.json"
+        );
+        // A check with exact leaves passes its policy and the leaf solves' table.
+        let mut px = p.clone();
+        px["checks"][1]["exact_leaves"] = json!("race:1-4");
+        let rx = resolve(&px, &inputs).expect("resolves");
+        let qx = parse(&rx).expect("valid");
+        let x = args(check_command(Path::new("search"), &rx, &qx, 1, false, &run).expect("cmd"));
+        assert!(
+            x.ends_with(
+                "--race-groups --exact-leaves race:1,2,3,4 --exact-leaf-tt-mb 64 --json \
+                 /o/single.json --progress /p.json"
+            ),
+            "{x}"
         );
         // Unresolved settings cannot make a command.
         assert!(check_command(Path::new("search"), &p, &q, 0, false, &run).is_err());
@@ -871,6 +932,72 @@ esac
         assert!(q.checks[0].truth_net && q.checks[2].nets.len() == 4);
         assert_eq!(q.checks[0].nets, q.checks[1].nets);
         assert_eq!(q.paired.len(), 1);
+        assert!(v.get("bin_sha").is_none(), "the launcher sets bin_sha");
+    }
+
+    /// The committed exact-leaves manifest (docs/vast/o3-exactleaf.manifest.json, fix G) is one
+    /// the runner accepts: a CPU machine, one `hybrid_checks` chunk on the stored trick-2 golden
+    /// set (2,000 decisions x 320 worlds) with the adopted O_3, the baseline without exact leaves
+    /// (verifying the stored worlds first), race class 4, classes 2 and 4, classes 1-4, and each
+    /// against the baseline by the paired comparison.
+    #[test]
+    fn committed_exactleaf_manifest_parses() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let text =
+            fs::read_to_string(root.join("docs/vast/o3-exactleaf.manifest.json")).expect("read");
+        let v: Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(v["run_id"], "o3-exactleaf-1");
+        assert!(v["machine"].get("gpus").is_none(), "CPU only");
+        assert_eq!(
+            (&v["machine"]["min_cores"], &v["machine"]["min_ram_gb"]),
+            (&json!(128), &json!(60))
+        );
+        assert_eq!(
+            v["inputs"]["golden-t2-decisions"],
+            "sha256:635e9aef196c816380f3f15c05ede90b38b875fa4817061a57e6d39550065ab0"
+        );
+        assert_eq!(
+            v["inputs"]["golden-t2-worlds"],
+            "sha256:6ddc59b191e1fd534f260f9dfe103f742d6026768ca74acdbbb4fd430eb8265e"
+        );
+        assert_eq!(
+            v["inputs"]["o3-f5766a"],
+            "sha256:f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad"
+        );
+        let m = crate::sched::parse_v2(&v).expect("runnable");
+        assert_eq!(m.streams.len(), 1);
+        let s = &m.streams[0];
+        assert_eq!((s.kind.as_str(), s.threads_all), ("hybrid_checks", true));
+        let q = parse(&s.params).expect("settings");
+        assert_eq!((q.trick, q.cut, q.worlds, q.verify_pct), (2, 3, 320, 1.0));
+        let checks: Vec<(&str, Option<&str>)> = q
+            .checks
+            .iter()
+            .map(|c| (c.name.as_str(), c.exact_leaves.as_deref()))
+            .collect();
+        assert_eq!(
+            checks,
+            [
+                ("none", None),
+                ("race4", Some("race:4")),
+                ("race24", Some("race:2,4")),
+                ("race1to4", Some("race:1,2,3,4")),
+            ]
+        );
+        assert!(
+            q.checks
+                .iter()
+                .all(|c| !c.truth_net && c.nets == ["o3-f5766a"])
+        );
+        let paired: Vec<(&str, &str)> = q
+            .paired
+            .iter()
+            .map(|(_, a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        assert_eq!(
+            paired,
+            [("none", "race4"), ("none", "race24"), ("none", "race1to4")]
+        );
         assert!(v.get("bin_sha").is_none(), "the launcher sets bin_sha");
     }
 }
