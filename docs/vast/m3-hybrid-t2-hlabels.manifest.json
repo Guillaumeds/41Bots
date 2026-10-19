@@ -107,7 +107,7 @@
         "label_source": "hybrid",
         "label_net": "inputs/sha256/f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
         "hybrid_exact_share": 0.1,
-        "label_exact_leaves": "race:1-4"
+        "label_exact_leaves": "learned:inputs/sha256/20c41678c64681855003e5b8660e0a2e1fb9e8d552f7d898dd956055c767a9d5:t=277338260"
       }
     }
   ]

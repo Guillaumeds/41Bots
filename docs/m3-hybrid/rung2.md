@@ -489,3 +489,25 @@ squared error against race:1-4's 9.6%; in the hybrid on 32 golden decisions, at 
 time it solves 35% of the leaves and takes the value SD from 0.61% to 0.27%. Design, research,
 numbers and the manifest (`docs/vast/o3-learnedleaf.manifest.json`, not launched):
 `docs/m3-hybrid/learned-leaves.md`.
+
+### Result on the golden set (run `o3-learnedleaf-2`, 2026-10-19; adopted)
+
+The adopted O_3 (f5766a) on the stored 2,000 trick-2 decisions x 320 worlds, one machine (AMD EPYC 7B12,
+245 threads, $0.30/h; the run cost about $0.65). Run 1 (`o3-learnedleaf-1`) was stopped at its second check
+for speed; its baseline reproduced `o3-exactleaf-1`'s byte for byte, so race:1-4 was not re-run and is read
+from `o3-exactleaf-1`. Decision loss, mean / 95% upper bound:
+
+| exact leaves | thread-ms a world | leaves solved | all | pos 1-2 | pos 1 | largest \|bias\| | verdict |
+|---|---|---|---|---|---|---|---|
+| none | 252 | 0% | 0.0056% / 0.0068% | | 0.0154% / 0.0201% | 0.0239% | FAIL |
+| race:1-4 (G v1) | 1,692 | 56.8% | 0.0014% / 0.0018% | 0.0032% (upper) | 0.0040% / 0.0058% | 0.0041% | PASS |
+| **learned, t=277338260** | **1,550** | **40.2%** | **0.0005% / 0.0008%** | **0.0009% / 0.0013%** | **0.0015% / 0.0022%** | **0.0019%** | **PASS** |
+| learned, t=1057825477 | 1,083 | 20.0% | 0.0023% / 0.0030% | 0.0041% / 0.0057% | 0.0071% / 0.0101% | 0.0082% | FAIL (pos 1) |
+
+- At slightly less thread time than race:1-4, the learned rule loses about a third as much money overall and at
+  the leader, and every seat (largest upper bound 0.0031%, pos 5), score group and race group passes.
+- The half-cost threshold saves only 30% of the time (leaf solves on the golden set cost more each than on the
+  build VM's sample) and fails at pos 1.
+- **Adopted:** `learned:<leafrisk-o3-v1>:t=277338260` is H_3's exact-leaf rule for trick-2 decisions and for
+  hybrid trick-2 labels (`docs/vast/m3-hybrid-t2-hlabels.manifest.json`). Files: R2
+  `runs/o3-learnedleaf-2/out/checks/`.
