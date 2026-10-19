@@ -83,7 +83,12 @@
 //! `hybrid-work/train-rows/`, always its `--rows-dir`, never in `out/`) when they do not fit in
 //! memory beside that and its own reserve, and trains the same network, byte for byte; on a
 //! machine with enough memory nothing changes (docs/m3-hybrid/vast.md, the trainer's rows and
-//! RAM). `compare_cpu` (false; after a GPU training, train once more on the CPU with the same
+//! RAM). `train_fraction` (1; above 0, at most 1; not with the audit loop): each training shard
+//! gives only its first ceil(fraction × rows) rows, the same prefix every time (the trainer's
+//! `--train-fraction`, passed only below 1, in every feed; the row weights cut to match; never
+//! the validation shard, the golden set or the check), for the learning-curve test of whether
+//! more base rows help (owner, 2026-10-19; docs/vast/o3-basecurve-*.manifest.json); `rung.json` records it
+//! and the rows used (`net.train_fraction`, `net.train_rows_used`). `compare_cpu` (false; after a GPU training, train once more on the CPU with the same
 //! settings and record both, for small checks), `upload_shards` (false; see step 4), `table`
 //! (the equity table, as `search_measure`'s), and the scheduler's `threads`, `est_seconds`,
 //! `equity_input`.
@@ -197,7 +202,7 @@ mod reuse;
 use audit::additive;
 
 /// The settings a `hybrid_rung` chunk takes; any other key is refused.
-pub(crate) const KEYS: [&str; 74] = [
+pub(crate) const KEYS: [&str; 75] = [
     "cut",
     "check",
     "audit_rounds",
@@ -266,6 +271,7 @@ pub(crate) const KEYS: [&str; 74] = [
     "train_threads",
     "train_feed",
     "train_beside_gb",
+    "train_fraction",
     "compare_cpu",
     "upload_shards",
     "table",
@@ -393,6 +399,11 @@ pub(crate) struct Params {
     /// beside the CPU steps (in the background) passes [`LABEL_GB_PER_THREAD`] times the usable
     /// threads, one alone nothing. A number: passed to every training.
     pub train_beside_gb: Option<f64>,
+    /// `train_fraction` (1: every row, the trainer's command as before): each training shard
+    /// gives only its first ceil(fraction × rows) rows, the trainer's `--train-fraction` (the
+    /// learning-curve test; owner, 2026-10-19). Never the validation shard, the golden set or a
+    /// check's data.
+    pub train_fraction: f64,
     pub compare_cpu: bool,
     pub upload_shards: bool,
     /// `harvest_net`: the SHA-256 of the integer network (`int.safetensors` of an earlier run,
@@ -496,6 +507,7 @@ impl Params {
             "device": self.device.name(), "train_threads": self.train_threads,
             "train_feed": self.train_feed,
             "train_beside_gb": self.train_beside_gb.map_or(json!("auto"), |g| json!(g)),
+            "train_fraction": self.train_fraction,
             "compare_cpu": self.compare_cpu, "upload_shards": self.upload_shards,
             "label_parts": self.label_parts, "overlap": self.overlap,
             "partial_epochs": self.partial_epochs,
@@ -1011,6 +1023,24 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
             "hybrid_rung: train_beside_gb must be \"auto\" or a number of GiB, 0 or more",
         )?),
     };
+    let train_fraction = match o.get("train_fraction") {
+        None | Some(Value::Null) => 1.0,
+        Some(v) => v
+            .as_f64()
+            .filter(|x| x.is_finite() && *x > 0.0 && *x <= 1.0)
+            .ok_or(
+                "hybrid_rung: train_fraction must be a number above 0 and at most 1 (the share \
+                    of each training shard's rows trained on, its first rows; 1: every row)",
+            )?,
+    };
+    // One training only: the audit loop's rounds would cut their targeted shards too.
+    if train_fraction < 1.0 && audit_rounds > 0 {
+        return Err(
+            "hybrid_rung: train_fraction below 1 is for one training (the learning-curve test): \
+             not with audit_rounds"
+                .into(),
+        );
+    }
     let verify_pct = f("verify_pct", 1.0)?;
     if verify_pct > 100.0 {
         return Err("hybrid_rung: verify_pct is a percentage (0 to 100)".into());
@@ -1069,6 +1099,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         train_threads,
         train_feed,
         train_beside_gb,
+        train_fraction,
         compare_cpu: b("compare_cpu")?,
         upload_shards: b("upload_shards")?,
         harvest_net,
@@ -2696,6 +2727,10 @@ impl Rung<'_> {
         if let Some(g) = self.p.train_beside_gb {
             c.args(["--host-others-gb", &g.to_string()]);
         }
+        // Only below 1, so that every other command is the former one.
+        if self.p.train_fraction < 1.0 {
+            c.args(["--train-fraction", &self.p.train_fraction.to_string()]);
+        }
         c
     }
 
@@ -2870,6 +2905,15 @@ impl Rung<'_> {
         if !report["stream"].is_null() {
             rec["stream"] = report["stream"].clone();
         }
+        // The share of the training rows used (`train_fraction`) and the rows actually trained
+        // on, from the trainer's report (each training shard's rows in its file and used).
+        let used = &report["data"]["train_rows_used"];
+        rec["train_fraction"] = json!(self.p.train_fraction);
+        rec["train_rows_used"] = used.as_array().map_or(Value::Null, |a| {
+            json!(a.iter().filter_map(Value::as_u64).sum::<u64>())
+        });
+        rec["train_rows_used_by_shard"] = used.clone();
+        rec["train_rows_in_files_by_shard"] = report["data"]["train_rows_in_files"].clone();
         self.rec.insert(key.into(), rec);
         self.done(step, t)
     }
@@ -3075,6 +3119,90 @@ mod tests {
         ] {
             assert!(parse(&bad).is_err(), "{bad}");
         }
+    }
+
+    /// `train_fraction`: 1 by default; above 0 and at most 1, else refused; not with the audit
+    /// loop (its rounds would cut their targeted shards too).
+    #[test]
+    fn train_fraction_settings() {
+        let p = parse(&json!({})).expect("defaults");
+        assert_eq!(p.train_fraction, 1.0);
+        assert_eq!(p.to_json()["train_fraction"], json!(1.0));
+        for (v, want) in [(json!(0.5), 0.5), (json!(1), 1.0), (json!(1e-3), 1e-3)] {
+            let p = parse(&json!({ "train_fraction": v })).expect("in range");
+            assert_eq!(p.train_fraction, want);
+        }
+        for bad in [
+            json!(0),
+            json!(-0.5),
+            json!(1.01),
+            json!(2),
+            json!("half"),
+            json!(true),
+        ] {
+            let e = parse(&json!({ "train_fraction": bad })).expect_err("refused");
+            assert!(
+                e.contains("train_fraction must be a number above 0 and at most 1"),
+                "{e}"
+            );
+        }
+        let e = parse(&json!({ "train_fraction": 0.5, "cut": 4, "audit_rounds": 2 }))
+            .expect_err("not with the audit loop");
+        assert!(e.contains("not with audit_rounds"), "{e}");
+    }
+
+    /// The trainer's command carries `--train-fraction` only below 1 (1: the command exactly as
+    /// before), and a training's record gives the fraction and the rows used from its report.
+    #[cfg(unix)]
+    #[test]
+    fn the_trainer_gets_the_fraction_and_the_rows_are_recorded() {
+        let root = std::env::temp_dir().join(format!("hybrid-fraction-cmd-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let tools = Tools {
+            search: root.join("search"),
+            uv: root.join("uv"),
+            python_dir: root.join("py"),
+            nvidia_smi: root.join("nvidia-smi"),
+            remote: None,
+        };
+        let args = |p: &Params| -> Vec<String> {
+            let mut ctx = Ctx::local("hybrid-test", &root, 4);
+            let r = test_rung(&mut ctx, p, &tools, &root);
+            let files = Feed::Files(vec![root.join("a.npy"), root.join("v.npy")]);
+            let c = r.train_cmd(&files, &root.join("net"), "cpu", 4, &root.join("prog"));
+            c.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let whole = args(&parse(&json!({})).expect("defaults"));
+        assert!(!whole.iter().any(|a| a == "--train-fraction"), "{whole:?}");
+        let half = args(&parse(&json!({ "train_fraction": 0.5 })).expect("half"));
+        assert_eq!(&half[half.len() - 2..], ["--train-fraction", "0.5"]);
+        assert_eq!(
+            &half[..half.len() - 2],
+            &whole[..],
+            "the flag is the only difference"
+        );
+
+        let p = parse(&json!({ "train_fraction": 0.5 })).expect("half");
+        let mut ctx = Ctx::local("hybrid-test", &root, 4);
+        let mut r = test_rung(&mut ctx, &p, &tools, &root);
+        let dir = r.out.join("net");
+        fs::create_dir_all(&dir).expect("mkdir");
+        fs::write(dir.join("int.safetensors"), "int").expect("write");
+        fs::write(dir.join("float.safetensors"), "float").expect("write");
+        let report = json!({ "history": [{ "val_loss": 1.5 }], "best_epoch": 0,
+                             "data": { "train_fraction": 0.5, "train_rows_in_files": [7, 5],
+                                       "train_rows_used": [4, 3] } });
+        fs::write(dir.join("report.json"), report.to_string()).expect("write");
+        r.train_record(&dir, "cpu", 4, "net_cpu", "train", Instant::now())
+            .expect("recorded");
+        let rec = &r.rec["net_cpu"];
+        assert_eq!(rec["train_fraction"], json!(0.5));
+        assert_eq!(rec["train_rows_used"], json!(7));
+        assert_eq!(rec["train_rows_used_by_shard"], json!([4, 3]));
+        assert_eq!(rec["train_rows_in_files_by_shard"], json!([7, 5]));
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -3967,6 +4095,86 @@ mod tests {
                 .is_some_and(|n| !n.contains("PLACEHOLDER") && n.contains("--max-dollars 35"))
         );
         assert!(v.get("bin_sha").is_none());
+
+        // The learning-curve pair (owner, 2026-10-19): the same scratch training on the stored
+        // trick-3 base shards, 50% and 100% of each, then the stored trick-2 golden set's check;
+        // identical but for the run id and the fraction.
+        let read = |n: &str| -> Value {
+            let path = dir.join(format!("{n}.manifest.json"));
+            serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("json")
+        };
+        let (v50, v100) = (read("o3-basecurve-50"), read("o3-basecurve-100"));
+        let mut same = v50.clone();
+        same["run_id"] = v100["run_id"].clone();
+        same["streams"][0]["params"]["train_fraction"] = json!(1);
+        assert_eq!(same, v100, "only the run id and the fraction differ");
+        for (v, run, fraction) in [
+            (&v50, "o3-basecurve-50-1", 0.5),
+            (&v100, "o3-basecurve-100-1", 1.0),
+        ] {
+            assert_eq!(v["run_id"], run);
+            let m = crate::sched::parse_v2(v).unwrap_or_else(|e| panic!("{run}: {e}"));
+            assert_eq!(m.streams.len(), 1);
+            let s = &m.streams[0];
+            assert_eq!((s.kind.as_str(), s.threads_all), ("hybrid_rung", true));
+            let p = parse(&s.params).expect("settings");
+            assert_eq!(p.train_fraction, fraction);
+            assert_eq!((p.cut, p.check), (3, true));
+            assert!(p.audit.is_none() && p.additive.is_none() && !p.upload_shards);
+            assert!(
+                p.train.is_empty() && p.shards().is_empty(),
+                "{run}: nothing to label"
+            );
+            assert!(p.harvest_net.is_none());
+            assert_eq!(
+                p.label_inputs
+                    .iter()
+                    .map(|x| (x.set, x.seed, x.rows, x.rowweights.is_some()))
+                    .collect::<Vec<_>>(),
+                [
+                    ("random", 321, Some(25_600_000), false),
+                    ("rules", 322, Some(6_400_000), false),
+                    ("harvest", 313, Some(8_000_000), true),
+                    ("val", 401, Some(100_000), false)
+                ]
+            );
+            assert_eq!(
+                (
+                    p.golden_trick,
+                    p.golden_count,
+                    p.golden_worlds,
+                    p.golden_seed
+                ),
+                (2, 2000, 320, 1)
+            );
+            assert_eq!(
+                p.golden_inputs,
+                Some((
+                    "635e9aef196c816380f3f15c05ede90b38b875fa4817061a57e6d39550065ab0".into(),
+                    "6ddc59b191e1fd534f260f9dfe103f742d6026768ca74acdbbb4fd430eb8265e".into()
+                ))
+            );
+            assert_eq!(p.verify_pct, 1.0);
+            assert_eq!(
+                (p.widths_arg().as_str(), p.head.as_str()),
+                ("2048,1024,256", "outcome")
+            );
+            assert_eq!(
+                (p.epochs, p.batch, p.patience, p.train_seed),
+                (40, 1024, 4, 1)
+            );
+            assert_eq!(p.device, Device::Cuda);
+            let mach = &v["machine"];
+            assert_eq!(
+                (
+                    &mach["min_ram_gb"],
+                    &mach["min_gpu_ram_gb"],
+                    &mach["blackwell"]
+                ),
+                (&json!(60), &json!(16), &json!(true))
+            );
+            assert!(v.get("bin_sha").is_none());
+        }
 
         // A typo in a hybrid stream stops the manifest at once.
         let bad = json!({ "format": 2, "run_id": "x", "run_seed": 1, "streams": [

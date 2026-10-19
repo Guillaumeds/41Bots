@@ -6,7 +6,7 @@
         [--device cpu|cuda|auto] [--feed auto|resident|staged|disk] [--host-reserve-gb G]
         [--host-others-gb G] [--rows-dir DIR] [--prefetch-threads T] [--prefetch-depth K] [--cuda-graph auto|off]
         [--profile-batches N] [--progress FILE]
-        [--watch-dir DIR --expect N [--partial-epochs K]]
+        [--watch-dir DIR --expect N [--partial-epochs K]] [--train-fraction F]
 
 A plain MLP: the binary features through an embedding-bag sum (exactly a linear layer on the
 one-hot inputs), plus the dense features through a linear layer, ReLU clipped at 64 (as the
@@ -143,6 +143,16 @@ generalising worse than one trained on all of it from the start (Ash & Adams, "O
 neural network training", 2020; measured in docs/m3-hybrid/overlap.md); the validation loss of
 the best (full-data) epoch is what tells.
 
+A fraction of the training rows (``--train-fraction F``, 0 < F <= 1, default 1; owner, 2026-10-19:
+the learning-curve test of whether more base rows help): each training shard gives only its first
+``prefix_rows(F, rows)`` = ceil(F x rows) rows (exact arithmetic on F as written),
+the same prefix every time and on any number of threads, and its row weights are cut to the same
+prefix. It applies to every training shard, given (``--train``) or streamed, in every feed
+(resident, staged, disk: only the prefix rows are written), never to the validation shard. 1 reads
+every row exactly as before (the same network, byte for byte). The report gives the fraction and
+each shard's rows in its file and used (``data.train_fraction``, ``data.train_rows_in_files``,
+``data.train_rows_used``), and the network's metadata ``train_fraction`` when it is below 1.
+
 Streamed shards (``--watch-dir``) join between epochs in place (class ``Columns``): host memory
 holds the rows in, plus the joining shard's load buffer while it joins (847 bytes a row at
 trick 4), whatever the number of joins.
@@ -173,6 +183,7 @@ import argparse
 import collections
 import contextlib
 import copy
+import fractions
 import gc
 import json
 import math
@@ -1231,14 +1242,41 @@ def shard_weight(path):
     return w
 
 
-def data_weights(path, rows):
+def prefix_rows(fraction, rows):
+    """The rows a training shard of ``rows`` rows gives under ``--train-fraction fraction``:
+    ceil(fraction x rows) in exact arithmetic on the number as written (its shortest decimal form,
+    ``repr``: 0.1 of 10 is 1, not 2 from the binary float a little above 0.1; 0.5 of 7 is 4), at
+    least 1 for a shard with rows; every row at 1."""
+    if fraction >= 1:
+        return rows
+    return min(rows, math.ceil(fractions.Fraction(repr(fraction)) * rows))
+
+
+def check_fraction(fraction):
+    """``--train-fraction``'s range, (0, 1]: the reason it is refused, or None."""
+    if not (math.isfinite(fraction) and 0 < fraction <= 1):
+        return f"--train-fraction {fraction} must be above 0 and at most 1"
+    return None
+
+
+def prefix_shard(sh, fraction):
+    """The shard ``sh`` (a memory map) cut to its first ``prefix_rows`` rows (a view: nothing
+    read); the shard itself at 1."""
+    k = prefix_rows(fraction, len(sh))
+    return sh if k == len(sh) else sh[:k]
+
+
+def data_weights(path, rows, keep=None):
     """A training shard's loss weights: (its shard weight, its row weights as uint16 in units of
     1/256 or None, the row weights' SHA-256 or None). See ``shard_weight`` and
-    ``formats.load_row_weights``."""
+    ``formats.load_row_weights``. ``rows``: the rows in the shard's file (the sidecar holds one a
+    row); ``keep``: the rows used (``--train-fraction``), the row weights cut to that prefix."""
     try:
         rw = load_row_weights(path, rows)
     except ValueError as e:
         raise SystemExit(str(e)) from None
+    if rw is not None and keep is not None and keep < rows:
+        rw = rw[:keep]
     sha = sha256_file(path + ROW_WEIGHTS_SUFFIX) if rw is not None else None
     return shard_weight(path), rw, sha
 
@@ -1273,15 +1311,17 @@ def weights_record(names, sizes, shas):
     return rec
 
 
-def load_part(path, threads, store_for=None):
+def load_part(path, threads, store_for=None, fraction=1.0):
     """One training shard for the streamed data: checked (``check_shards``), converted and hashed,
     on ``threads`` threads. Converted into memory (``load_compact``: ``part["comp"]``), or, when
     ``store_for(shard)`` gives a ``DiskRows``, into a new file of it (``part["segment"]``; the rows
-    never all in memory)."""
-    sh = load_shard(path)
+    never all in memory). ``fraction``: ``--train-fraction`` (its first rows only)."""
+    full = load_shard(path)
+    sh = prefix_shard(full, fraction)
     tricks = check_shards([sh], threads=threads)
-    w, rw, rsha = data_weights(path, len(sh))
-    part = {"path": path, "name": os.path.basename(path), "rows": int(len(sh)), "tricks": tricks,
+    w, rw, rsha = data_weights(path, len(full), len(sh))
+    part = {"path": path, "name": os.path.basename(path), "rows": int(len(sh)), "rows_in_file": int(len(full)),
+            "tricks": tricks,
             "sha256": sha256_file(path), "weight": w, "row_weights": rw, "row_weights_sha256": rsha}
     disk = store_for(sh) if store_for is not None else None
     if disk is None:
@@ -1298,10 +1338,12 @@ class Watcher:
     are loaded. ``take()`` hands over the loaded shards not yet taken (raising the loading's error,
     if any); ``all_in()``: every expected shard taken."""
 
-    def __init__(self, directory, expect, given=(), threads=1, poll=1.0, store_for=None):
+    def __init__(self, directory, expect, given=(), threads=1, poll=1.0, store_for=None, fraction=1.0):
         if expect < 1:
             raise ValueError("--expect must be at least 1")
         self.dir, self.expect, self.threads, self.poll = directory, expect, threads, poll
+        # ``--train-fraction``: each shard's first rows only (``load_part``).
+        self.fraction = fraction
         # Where each shard's rows go (``load_part``): memory, or the training's rows on disk.
         self.store_for = store_for
         self.given = list(given)
@@ -1330,7 +1372,7 @@ class Watcher:
                     with self.cond:
                         if self.loaded >= self.expect:
                             raise ValueError(f"more training shards than --expect {self.expect}: {p}")
-                    part = load_part(p, self.threads, self.store_for)
+                    part = load_part(p, self.threads, self.store_for, self.fraction)
                     part["ready_s"] = round(time.time() - self.t0, 3)
                     with self.cond:
                         self.ready.append(part)
@@ -1756,6 +1798,9 @@ def _main(argv, stack):
     ap.add_argument("--partial-epochs", type=int, default=0,
                     help="with --watch-dir: at most this many epochs on each partial set of shards, then wait (0: no limit)")
     ap.add_argument("--watch-poll", type=float, default=1.0, help=argparse.SUPPRESS)
+    ap.add_argument("--train-fraction", type=float, default=1.0,
+                    help="train on the first ceil(F x rows) rows of each training shard, 0 < F <= 1 (default 1: "
+                         "every row); never the validation shard")
     ap.add_argument("--init", help="additive training: start from this float network (a float.safetensors) instead of "
                                    "a fresh initialisation; its widths and head must be --widths and --head")
     ap.add_argument("--init-int", help="with --init: the integer network it must quantise to, byte for byte (proves the "
@@ -1785,6 +1830,8 @@ def _main(argv, stack):
         ap.error("--host-reserve-gb and --host-others-gb must be 0 or more")
     if args.prefetch_threads < 1 or args.prefetch_depth < 1:
         ap.error("--prefetch-threads and --prefetch-depth must be at least 1")
+    if check_fraction(args.train_fraction):
+        ap.error(check_fraction(args.train_fraction))
     # Before anything else (no data loaded, no GPU probed, no output made): a layer wider than the
     # integer inference allows (formats.MAX_WIDTH, Rust's nn::MAX_WIDTH) would train for nothing.
     try:
@@ -1875,7 +1922,13 @@ def _main(argv, stack):
                     disk["store"] = DiskRows(rows_dir, specs)
             return disk["store"]
     if args.watch_dir is None:
-        shards = [load_shard(p) for p in args.train]
+        # ``--train-fraction``: each shard's first rows (a view of its memory map; 1: the shard).
+        full_rows = []
+        shards = []
+        for p in args.train:
+            sh = load_shard(p)
+            full_rows.append(int(len(sh)))
+            shards.append(prefix_shard(sh, args.train_fraction))
         val = np.asarray(load_shard(args.val))
         # The files' SHA-256 (for the report and the network's metadata), each on a thread of its own
         # while the rows are checked and converted (hashlib lets other threads run as it hashes).
@@ -1889,7 +1942,8 @@ def _main(argv, stack):
         v = shards[0].dtype["outcomes"].shape[0]
     else:
         # Streamed shards: wait for the validation shard and a first training shard.
-        watcher = Watcher(args.watch_dir, args.expect, args.train, load_threads, args.watch_poll, store_for)
+        watcher = Watcher(args.watch_dir, args.expect, args.train, load_threads, args.watch_poll, store_for,
+                          args.train_fraction)
         progress(step="wait", shards_in=0, shards=args.expect)
         while not os.path.exists(args.val):
             time.sleep(args.watch_poll)
@@ -1925,10 +1979,12 @@ def _main(argv, stack):
         for p in new:
             if p["tricks"] != {trick}:
                 raise SystemExit(f"{p['path']} holds tricks {sorted(p['tricks'])}, the validation shard {trick}")
-            stream["parts"].append({"name": p["name"], "rows": p["rows"], "sha256": p["sha256"],
+            stream["parts"].append({"name": p["name"], "rows": p["rows"], "rows_in_file": p["rows_in_file"],
+                                    "sha256": p["sha256"],
                                     "weight": p["weight"], "row_weights_sha256": p["row_weights_sha256"],
                                     "ready_s": p["ready_s"], "first_epoch": epoch})
             hashes["train"].append(p["sha256"])
+            rows_in_files.append(p["rows_in_file"])
             sizes.append((p["rows"], p["weight"], p["row_weights"]))
             names.append(p["name"])
             rw_shas.append(p["row_weights_sha256"])
@@ -1937,12 +1993,13 @@ def _main(argv, stack):
     store = None
     if watcher is None:
         n = sum(len(sh) for sh in shards)
-        dw = [data_weights(p, len(sh)) for sh, p in zip(shards, args.train)]
+        dw = [data_weights(p, r, len(sh)) for sh, p, r in zip(shards, args.train, full_rows)]
+        rows_in_files = full_rows
         sizes = [(len(sh), w, rw) for sh, (w, rw, _) in zip(shards, dw)]
         names = [os.path.basename(p) for p in args.train]
         rw_shas = [sha for _, _, sha in dw]
     else:
-        sizes, names, rw_shas = [], [], []
+        sizes, names, rw_shas, rows_in_files = [], [], [], []
         hashes = {"train": [], "val": sha256_file(args.val)}
         store = Columns()
         add_parts(parts, 0)
@@ -2174,6 +2231,9 @@ def _main(argv, stack):
     }
     if "train_weights" in weighting:
         meta["train_weights"] = json.dumps(weighting["train_weights"])
+    # Only below 1: every row trains the same network, which then stays the same file.
+    if args.train_fraction < 1:
+        meta["train_fraction"] = repr(args.train_fraction)
     # The network it continued (additive training): part of its identity.
     if init is not None:
         meta["init_float_sha256"] = init["record"]["float_sha256"]
@@ -2210,7 +2270,8 @@ def _main(argv, stack):
         "trick": trick,
         "head": head_name,
         "outcomes": v,
-        "data": dict(hashes, **weighting),
+        "data": dict(hashes, **weighting, train_fraction=args.train_fraction, train_rows_in_files=rows_in_files,
+                     train_rows_used=[r for r, _, _ in sizes]),
         "history": history,
         "best_epoch": best[2],
         "float": {"val_loss": vloss, "outcome_accuracy": acc, "error": error_stats(pf, val["value"]),

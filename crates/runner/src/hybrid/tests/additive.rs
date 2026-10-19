@@ -995,3 +995,132 @@ fn label_inputs_name_only_stored_shards() {
     }
     let _ = fs::remove_dir_all(&f.base);
 }
+
+/// The learning-curve rung (owner, 2026-10-19; docs/vast/o3-basecurve-*.manifest.json): stored
+/// base shards reused (one with row weights), the validation shard reused, a scratch training,
+/// and the golden check on a stored golden set: nothing labelled, nothing of the golden set made,
+/// no audit loop. `train_fraction` 0.5 reaches the trainer as `--train-fraction 0.5` (the
+/// validation shard whole, the check unchanged) and `rung.json` records it; 1 passes nothing, the
+/// trainer's command exactly as before.
+#[cfg(unix)]
+#[test]
+fn a_fraction_of_stored_shards_trains_and_is_checked() {
+    let f = fakes("fraction");
+    let (rs, rside) = stored_shard(&f, "r.npy", 7, 321, "random");
+    let (ls, lside) = stored_shard(&f, "l.npy", 4, 322, "rules");
+    let (hs, hside) = stored_shard(&f, "h.npy", 5, 313, "harvest");
+    let rw = nn::rowweights::write(&f.base.join("h.npy"), &[256, 512, 256, 384, 256]).expect("rw");
+    let hrw = store(&f, &rw);
+    let (vs, vside) = stored_shard(&f, "v.npy", 3, 401, "random");
+    let dec = f.base.join("decisions-t3.jsonl");
+    fs::write(&dec, b"{\"id\":0,\"trick\":3}\n{\"id\":1,\"trick\":3}\n").expect("write");
+    let wor = f.base.join("exact-t3-n4.jsonl");
+    fs::write(
+        &wor,
+        b"{\"id\":0,\"method\":\"exact\"}\n{\"id\":1,\"method\":\"exact\"}\n",
+    )
+    .expect("write");
+    let (dec, wor) = (store(&f, &dec), store(&f, &wor));
+    let k = |h: &str| format!("inputs/sha256/{h}");
+    let settings = |fraction: Value| {
+        json!({
+            "cut": 4, "train_fraction": fraction,
+            "label_inputs": [
+                { "set": "random", "seed": 321, "rows": 7, "shard": k(&rs), "sidecar": k(&rside) },
+                { "set": "rules", "seed": 322, "rows": 4, "shard": k(&ls), "sidecar": k(&lside) },
+                { "set": "harvest", "seed": 313, "rows": 5, "shard": k(&hs), "sidecar": k(&hside),
+                  "rowweights": k(&hrw) },
+                { "set": "val", "seed": 401, "rows": 3, "shard": k(&vs), "sidecar": k(&vside) }],
+            "golden_trick": 3, "golden_count": 2, "golden_worlds": 4,
+            "golden_decisions_input": k(&dec), "golden_worlds_input": k(&wor), "verify_pct": 1,
+            "widths": "16,8", "epochs": 2, "upload_shards": false,
+        })
+    };
+    let remote: Arc<dyn Remote> = Arc::new(DirRemote {
+        root: f.base.join("remote"),
+    });
+    let tools = Tools {
+        search: f.search.clone(),
+        uv: f.uv.clone(),
+        python_dir: f.py.clone(),
+        nvidia_smi: f.base.join("no-such-nvidia-smi"),
+        remote: Some(Arc::clone(&remote)),
+    };
+    let mut trains = Vec::new();
+    for (name, fraction) in [("half", json!(0.5)), ("whole", json!(1))] {
+        let params = parse(&settings(fraction.clone())).expect("params");
+        assert!(
+            params.train.is_empty() && params.shards().is_empty(),
+            "nothing to label"
+        );
+        assert!(params.check && params.audit.is_none() && params.additive.is_none());
+        fs::write(&f.calls, "").expect("truncate");
+        let root = f.base.join(name);
+        let mut ctx = Ctx::local("hybrid-test", &root, 4);
+        let r = chunk_with(&mut ctx, &params, &tools, &f.table, json!({})).expect("the chunk runs");
+        assert_eq!(r["verdict"], "FAIL", "the fake check's verdict");
+        let log = fs::read_to_string(&f.calls).expect("calls");
+        for none in ["search labels", "search decisions", "search worlds"] {
+            assert!(!log.contains(none), "{none} in\n{log}");
+        }
+        let work = std::path::absolute(root.join("hybrid-work/labels")).expect("abs");
+        let train = log
+            .lines()
+            .find(|l| l.starts_with("python -m fortyone_nn.train"))
+            .expect("trained")
+            .to_string();
+        assert!(
+            train.contains(&format!(
+                "--train {} {} {} --val {} --out",
+                work.join("t4-random-s321.npy").display(),
+                work.join("t4-rules-s322.npy").display(),
+                work.join("t4-harvest-s313.npy").display(),
+                work.join("t4-val-s401.npy").display()
+            )),
+            "{train}"
+        );
+        assert!(
+            work.join("t4-harvest-s313.npy.rowweights").is_file(),
+            "the row weights beside their shard, for the trainer to cut"
+        );
+        let check = log
+            .lines()
+            .find(|l| l.starts_with("search hybrid-check --trick 3 --cut 4"))
+            .expect("checked");
+        assert!(!check.contains("--train-fraction"), "{check}");
+        let rung = read_json(&root.join("out/hybrid/rung.json")).expect("rung.json");
+        assert_eq!(
+            steps_of(&rung),
+            [
+                "inputs",
+                "python environment",
+                "GPU check",
+                "label inputs",
+                "golden set (stored)",
+                "train",
+                "hybrid check"
+            ]
+        );
+        assert_eq!(rung["params"]["train_fraction"].as_f64(), fraction.as_f64());
+        assert_eq!(rung["net"]["train_fraction"].as_f64(), fraction.as_f64());
+        assert_eq!(
+            rung["label_inputs"]["train_rows"], 16,
+            "the shards' whole rows"
+        );
+        trains.push(train);
+    }
+    assert!(
+        trains[0].ends_with(" --train-fraction 0.5"),
+        "{}",
+        trains[0]
+    );
+    assert!(!trains[1].contains("--train-fraction"), "{}", trains[1]);
+    assert_eq!(
+        trains[0]
+            .replace(" --train-fraction 0.5", "")
+            .replace("/half/", "/whole/"),
+        trains[1],
+        "the flag is the only difference"
+    );
+    let _ = fs::remove_dir_all(&f.base);
+}
