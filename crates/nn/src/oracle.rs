@@ -570,44 +570,59 @@ impl EvalState {
         v
     }
 
-    /// [`EvalState::eval`] of each position, the network's passes for the positions the memo
-    /// does not hold made as batches of up to [`MAX_BATCH`].
+    /// [`EvalState::eval`] of each position: the positions the memo does not hold (each distinct
+    /// one once) go through the network as batches of up to [`MAX_BATCH`], filled from the whole
+    /// list, so a large batch makes as few passes over the weights as it can.
     fn eval_batch(&mut self, o: &Oracle, cs: &[CanonPos], ctx: &MatchCtx, out: &mut [MoneyChance]) {
-        for (cs, out) in cs.chunks(MAX_BATCH).zip(out.chunks_mut(MAX_BATCH)) {
-            self.eval_chunk(o, cs, ctx, out);
-        }
-    }
-
-    fn eval_chunk(&mut self, o: &Oracle, cs: &[CanonPos], ctx: &MatchCtx, out: &mut [MoneyChance]) {
         // Which positions need the network: not in the memo, and not equal to one earlier in
-        // the chunk (its value is copied from that one's afterwards).
-        let mut todo: [usize; MAX_BATCH] = [0; MAX_BATCH];
-        let mut same: [usize; MAX_BATCH] = [usize::MAX; MAX_BATCH];
-        let mut slots: [Option<usize>; MAX_BATCH] = [None; MAX_BATCH];
-        let mut n = 0;
+        // the list (its value is copied from that one's afterwards).
+        let mut todo: Vec<usize> = Vec::new();
+        let mut same: Vec<usize> = vec![usize::MAX; cs.len()];
+        let mut slots: Vec<Option<usize>> = Vec::with_capacity(cs.len());
+        let mut first: HashMap<CanonPos, usize, Fx> = HashMap::default();
         self.stats.batched += cs.len() as u64;
         for (i, c) in cs.iter().enumerate() {
-            slots[i] = self.slot(o, c, ctx);
-            if let Some(v) = self.recall(slots[i], c, ctx) {
+            let slot = self.slot(o, c, ctx);
+            slots.push(slot);
+            if let Some(v) = self.recall(slot, c, ctx) {
                 self.stats.batch_hits += 1;
                 out[i] = v;
-            } else if let Some(&j) = todo[..n].iter().find(|&&j| cs[j] == *c) {
+            } else if let Some(&j) = first.get(c) {
                 self.stats.batch_hits += 1;
                 same[i] = j;
             } else {
-                todo[n] = i;
-                n += 1;
+                first.insert(*c, i);
+                todo.push(i);
             }
         }
+        for chunk in todo.chunks(MAX_BATCH) {
+            self.eval_chunk(o, cs, chunk, &slots, ctx, out);
+        }
+        for i in 0..cs.len() {
+            if same[i] != usize::MAX {
+                out[i] = out[same[i]];
+            }
+        }
+    }
+
+    /// The network's values of the positions `cs[i]` for `i` in `todo` (at most [`MAX_BATCH`],
+    /// distinct, none in the memo) as one batch, into `out[i]` and the memo.
+    fn eval_chunk(
+        &mut self,
+        o: &Oracle,
+        cs: &[CanonPos],
+        todo: &[usize],
+        slots: &[Option<usize>],
+        ctx: &MatchCtx,
+        out: &mut [MoneyChance],
+    ) {
+        let n = todo.len();
         if n == 0 {
             return;
         }
         self.stats.batches += 1;
         self.stats.forwards += n as u64;
-        let keys: Vec<DenseKey> = todo[..n]
-            .iter()
-            .map(|&i| DenseKey::of(&cs[i], ctx))
-            .collect();
+        let keys: Vec<DenseKey> = todo.iter().map(|&i| DenseKey::of(&cs[i], ctx)).collect();
         // Room for every key of the chunk at once (so none is dropped while the others go in).
         let missing = keys.iter().filter(|k| !self.dense.contains_key(k)).count();
         if missing > 0 && self.dense.len() + missing > DENSE_CAP {
@@ -616,10 +631,7 @@ impl EvalState {
         for k in &keys {
             self.ensure_dense(o, k);
         }
-        let feats: Vec<Features> = todo[..n]
-            .iter()
-            .map(|&i| binary_features(&cs[i], ctx))
-            .collect();
+        let feats: Vec<Features> = todo.iter().map(|&i| binary_features(&cs[i], ctx)).collect();
         let mut z = vec![[0i64; MAX_OUT]; n];
         {
             let items: Vec<(&[u16], &[i64])> = feats
@@ -629,15 +641,10 @@ impl EvalState {
                 .collect();
             o.fast.forward_batch(&items, &mut self.scratch, &mut z);
         }
-        for (t, &i) in todo[..n].iter().enumerate() {
+        for (t, &i) in todo.iter().enumerate() {
             let v = self.money(o, &cs[i], &keys[t], &z[t]);
             self.remember(slots[i], &cs[i], ctx, v);
             out[i] = v;
-        }
-        for i in 0..cs.len() {
-            if same[i] != usize::MAX {
-                out[i] = out[same[i]];
-            }
         }
     }
 }
