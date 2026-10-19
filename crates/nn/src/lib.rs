@@ -20,6 +20,8 @@
 //! - [`ensemble`]: several networks as one evaluator, the integer mean of their money chances.
 //! - [`predicate`]: the audit loop's groups of positions, as conditions on the encoder's
 //!   features (docs/m3-hybrid/audit-loop.md §6), shared with the Python auditor.
+//! - [`groups`]: the sibling groups of a label shard (`NAME.npy.groups`), for the trainer's
+//!   pairwise ranking loss.
 //! - [`synthetic`]: a synthetic leaf, network and features for tests and fixtures.
 //!
 //! Everything here is integer arithmetic, so a network's money chances are byte-identical on
@@ -28,6 +30,7 @@
 pub mod encode;
 pub mod ensemble;
 pub mod fast;
+pub mod groups;
 pub mod kernel;
 pub mod mlp;
 pub mod money;

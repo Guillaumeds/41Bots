@@ -134,6 +134,69 @@ def load_row_weights(shard_path, rows):
     return a
 
 
+# Sibling groups (crates/nn/src/groups.rs; ``search labels --source siblings``): the sidecar
+# ``NAME.npy.groups`` of a shard ``NAME.npy`` is a ``.npy`` file of one packed record per row, in row
+# order: ``group`` (<u4), the row's group, numbered 0, 1, 2, ... in row order (a group's rows are
+# consecutive), and ``mover`` (u1), the team that chose at the group's choice point as an index
+# into that row's own (rotated) value order. Old shards have none; their rows are ordinary rows.
+GROUPS_SUFFIX = ".groups"
+GROUPS_DTYPE = np.dtype([("group", "<u4"), ("mover", "u1")])
+
+# The label shards' source tags (crates/nn/src/shard.rs).
+SOURCE_RANDOM, SOURCE_RULES, SOURCE_HARVEST, SOURCE_SIBLINGS = 1, 2, 3, 4
+
+
+def check_groups(g):
+    """The reason the group records ``g`` (``GROUPS_DTYPE``) break the format, or None: groups
+    numbered from 0 in row order (each row's group the row before's or one more), movers 0-3."""
+    grp = np.asarray(g["group"]).astype(np.int64)
+    if len(grp) == 0:
+        return None
+    if grp[0] != 0:
+        return f"the first row's group is {int(grp[0])}, not 0"
+    step = np.diff(grp)
+    if np.any((step != 0) & (step != 1)):
+        i = int(np.argmax((step != 0) & (step != 1))) + 1
+        return f"row {i}: group {int(grp[i])} after {int(grp[i - 1])} (groups are numbered 0, 1, 2, ... in row order)"
+    if np.any(np.asarray(g["mover"]) > 3):
+        return f"row {int(np.argmax(np.asarray(g['mover']) > 3))}: a mover above 3"
+    return None
+
+
+def load_groups(shard_path, rows):
+    """The sibling groups of the shard at ``shard_path`` (records ``GROUPS_DTYPE``), or None
+    without a sidecar. Refused: another type or shape, another length than ``rows``, broken
+    numbering (``check_groups``)."""
+    p = shard_path + GROUPS_SUFFIX
+    try:
+        a = np.load(p, allow_pickle=False)
+    except FileNotFoundError:
+        return None
+    if a.dtype != GROUPS_DTYPE or a.ndim != 1:
+        raise ValueError(f"{p}: groups must be a 1-D {GROUPS_DTYPE} array, not {a.dtype} {a.shape}")
+    if len(a) != rows:
+        raise ValueError(f"{p}: {len(a)} group rows for {rows} rows")
+    why = check_groups(a)
+    if why:
+        raise ValueError(f"{p}: {why}")
+    return a
+
+
+def tie_bits(a):
+    """Every row's tied outcomes as an int64 bitmask (bit ``o`` for outcome ``o``): the possible
+    outcomes whose exact money vector (u64 for every team) equals the label's, the label
+    included. Several outcomes tie when they end in the same money for every team; the label is
+    the first of them in the vocabulary's fixed order (spec 6a)."""
+    v = a.dtype["outcomes"].shape[0]
+    if v > 62:
+        raise ValueError(f"{v} outcomes do not fit an int64 bitmask")
+    o = np.asarray(a["outcomes"])
+    lab = np.asarray(a["label"]).astype(np.int64)
+    want = o[np.arange(len(o)), lab]
+    eq = (o == want[:, None, :]).all(axis=2) & mask_bits(a["mask"], v)
+    return (eq.astype(np.int64) << np.arange(v, dtype=np.int64)[None, :]).sum(axis=1)
+
+
 def mask_bits(mask, v):
     """The possible-outcome bits as a boolean array [n, v]."""
     m = np.asarray(mask).astype(np.uint64)

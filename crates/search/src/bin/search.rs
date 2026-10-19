@@ -2116,7 +2116,24 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         Some(w) if job.source == Source::Harvest => Some((w.to_string(), parse_seat_weights(w)?)),
         _ => None,
     };
-    let harvest = if job.source == Source::Harvest {
+    let siblings = job.source == Source::Siblings;
+    if siblings {
+        // A sibling run keeps its groups: the other harvests' selections do not apply.
+        for f in [
+            "--harvest-keep",
+            "--keep-cap",
+            "--harvest-race-classes",
+            "--harvest-race-cap",
+            "--seat-weights",
+        ] {
+            if a.has(f) {
+                return Err(format!(
+                    "{f} is not for --source siblings (its rows are whole groups)"
+                ));
+            }
+        }
+    }
+    let harvest = if matches!(job.source, Source::Harvest | Source::Siblings) {
         let keep = match a.get("--harvest-keep") {
             None => {
                 if a.has("--keep-cap") {
@@ -2242,6 +2259,7 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
                 strata,
                 race,
                 keep: keep.as_ref().map(|(k, _)| k.clone()),
+                siblings,
             },
             shares.to_string(),
             weights,
@@ -2250,7 +2268,7 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         ))
     } else {
         if let Some(f) = harvest_flags.iter().find(|f| a.has(f)) {
-            return Err(format!("{f} is for --source harvest only"));
+            return Err(format!("{f} is for --source harvest (or siblings) only"));
         }
         None
     };
@@ -2379,6 +2397,13 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
             }
             nn::rowweights::write(&out, &weights)?;
         }
+        // A sibling run's groups (`NAME.npy.groups`), in place before the shard is renamed.
+        if let Some(g) = &summary.siblings {
+            if g.len() as u64 != summary.rows {
+                return Err(format!("{} group rows for {} rows", g.len(), summary.rows));
+            }
+            nn::groups::write(&out, g)?;
+        }
         std::fs::rename(&part, &out).map_err(|e| format!("{}: {e}", out.display()))?;
         Ok::<_, String>(summary)
     })?;
@@ -2396,6 +2421,7 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         shard.label_time.as_secs_f64(),
     );
     let decisions = shard.decisions;
+    let sibling_groups = shard.siblings;
     let secs = t0.elapsed().as_secs_f64();
     let mut side = serde_json::json!({
         "format": "41bots-label-shard-v1",
@@ -2441,6 +2467,30 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
             "rowweights_sha256": equity::sha256::sha256_hex(&bytes),
             "rows_by_position": &by_position[1..] });
     }
+    if let Some(g) = &sibling_groups {
+        let path = nn::groups::path_for(&out);
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let sm = nn::groups::summary(g);
+        side["siblings"] = serde_json::json!({
+            "groups": sm.groups,
+            "groups_file": path.file_name().map(|n| n.to_string_lossy().into_owned()),
+            "groups_sha256": equity::sha256::sha256_hex(&bytes),
+            "groups_by_size": sm.by_size,
+            "sizes": format!("index = rows in the group (the last entry counts {} or more)",
+                             nn::groups::SIZES),
+            "max_groups_per_decision": harvest.as_ref().map(|(h, ..)| h.cap),
+            "what": "groups of frontier positions that one choice point separates                      (search::oracle_labels::sibling_plan): from each decision, every seat still                      to play in the trick is a choice point along the line the search expects;                      each legal card of that seat is followed to the start of the frontier trick                      along its principal line (every later card the best for its seat's team by                      the search's values: the network's at the frontier, or exact ones; the                      solver's tie rule), the distinct positions reached (canonical form) are the                      group, the seat's team the mover; groups of fewer than two positions are                      dropped; every position is labelled exactly",
+            "mover": "an index into each row's own (rotated) value order",
+            "last_group_cut": "the shard ends at the row count, so its last group may be cut",
+        });
+        eprintln!(
+            "labels: siblings: {} groups in {} rows (groups by size 0-{}+: {:?})",
+            sm.groups,
+            sm.rows,
+            nn::groups::SIZES,
+            sm.by_size
+        );
+    }
     if let Some((h, shares, weights, keep_file, max)) = &harvest {
         // Rows written and decisions played: fewer rows than `count` only when the bound on
         // decisions stopped the harvest ("bounded").
@@ -2464,6 +2514,12 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
             HARVEST_TT_MB,
             net.as_ref().map(|(o, p)| (o, p.as_str())),
         );
+        if h.siblings {
+            side["harvest"]["what"] = serde_json::json!(
+                "sibling groups from training decisions (see siblings): not a sample of the \
+                 reached positions; cap_per_decision is the most groups a decision gives"
+            );
+        }
         // The label solves (the search's own table is `search` above).
         side["harvest"]["label_solves"] = serde_json::json!({
             "table_mb": exec.tt_mb,
@@ -2514,6 +2570,11 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
                         .iter()
                         .filter(|d| h.keep.as_ref().is_some_and(|k| d.keep_distinct > k.cap))
                         .count()
+                ),
+                None if h.siblings => format!(
+                    "{} sibling rows a decision (at most {} groups a decision)",
+                    format_args!("{:.1}", n_rows as f64 / n),
+                    h.cap
                 ),
                 None => format!(
                     "{} decisions capped at {}",
@@ -4631,6 +4692,7 @@ mod tests {
             strata: vec![1, 2, 3, 4],
             race: None,
             keep: None,
+            siblings: false,
         };
         let ds = [
             decision(1, 2000, 2500, 16),
