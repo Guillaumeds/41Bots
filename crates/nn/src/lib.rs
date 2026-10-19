@@ -17,16 +17,24 @@
 //! - [`outcome`]: the outcome head (spec §6a): how the hand can end from a position, the exact
 //!   money vector of each ending, and the value of a distribution over them.
 //! - [`oracle`]: a loaded network as a solver frontier evaluator ([`solver::Frontier`]).
+//! - [`ensemble`]: several networks as one evaluator, the integer mean of their money chances.
 //! - [`predicate`]: the audit loop's groups of positions, as conditions on the encoder's
 //!   features (docs/m3-hybrid/audit-loop.md §6), shared with the Python auditor.
+//! - [`groups`]: the sibling groups of a label shard (`NAME.npy.groups`), for the trainer's
+//!   pairwise ranking loss.
+//! - [`leafrisk`]: the leaf-risk predictor, integer regression trees that predict the oracle
+//!   network's squared error at a frontier position (which leaves the hybrid solves exactly).
 //! - [`synthetic`]: a synthetic leaf, network and features for tests and fixtures.
 //!
 //! Everything here is integer arithmetic, so a network's money chances are byte-identical on
 //! every machine, thread count and WASM; floats exist only in training (Python).
 
 pub mod encode;
+pub mod ensemble;
 pub mod fast;
+pub mod groups;
 pub mod kernel;
+pub mod leafrisk;
 pub mod mlp;
 pub mod money;
 pub mod oracle;
@@ -38,6 +46,7 @@ pub mod shard;
 pub mod synthetic;
 
 pub use encode::{Features, encode};
+pub use ensemble::Ensemble;
 pub use mlp::{IntMlp, MAX_WIDTH};
 pub use money::money_from_logits;
 pub use oracle::Oracle;

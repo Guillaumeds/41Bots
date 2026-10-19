@@ -52,6 +52,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 
 mod bundle;
+mod checks;
 mod hybrid;
 mod machine;
 mod measure;
@@ -1747,6 +1748,7 @@ fn run_kind(ctx: &mut Ctx, kind: &str, params: &Value) -> Result<Value, String> 
         "t1bench" => t1bench::chunk(ctx, params)?,
         "hybrid_rung" => hybrid::chunk(ctx, params)?,
         "hybrid_t1check" => t1check::chunk(ctx, params)?,
+        "hybrid_checks" => checks::chunk(ctx, params)?,
         "arena_block" => {
             return Err("arena_block chunks need the arena binary (not built yet)".into());
         }

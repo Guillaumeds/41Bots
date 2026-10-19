@@ -8,7 +8,8 @@
 //! ```json
 //! "label_source": "hybrid",
 //! "label_net": "inputs/sha256/<hex of the integer O_{cut+1}>",
-//! "hybrid_exact_share": 0.1
+//! "hybrid_exact_share": 0.1,
+//! "label_exact_leaves": "race:1-4"
 //! ```
 //! - `label_source` (`"exact"`, the default: every label exact, the chunk exactly as before; or
 //!   `"hybrid"`);
@@ -18,6 +19,13 @@
 //! - `hybrid_exact_share` (0; refused without `"hybrid"`): the exact anchor, a share (0 to 1, six
 //!   decimals at most) of each hybrid shard's rows labelled exactly all the same, drawn by each
 //!   row's key (`search::oracle_labels::anchored`: deterministic, the same for any thread count).
+//! - `label_exact_leaves` (`"none"`, the default; refused without `"hybrid"`): exact leaves, the
+//!   syntax of `search hybrid-check --exact-leaves` (`search::exact_leaves`): the hybrid's
+//!   trick-`cut + 1` frontier positions the policy picks are solved exactly, the network values
+//!   the others (`search labels --exact-leaves`). A learned term names its leaf-risk model by its
+//!   stored input's key (`learned:inputs/sha256/<hex>:t=T` or `:budget=S`), fetched at step 0
+//!   with `label_net` and checked to be a model of trick-`cut + 1` leaves of that very network.
+//!   `none` gives exactly the hybrid labels without it; `all` gives exact values.
 //!
 //! **Only training shards.** Hybrid labels go to the generated training shards (`random`,
 //! `rules`, `harvest`, `race`) and the audit loop's targeted harvests. The validation shard, the
@@ -34,11 +42,18 @@
 
 use serde_json::{Map, Value, json};
 
+use std::path::PathBuf;
+
 use super::Rung;
 use crate::remote::{input_hex, input_key};
 
 /// The settings of this module.
-pub(crate) const KEYS: [&str; 3] = ["label_source", "label_net", "hybrid_exact_share"];
+pub(crate) const KEYS: [&str; 4] = [
+    "label_source",
+    "label_net",
+    "hybrid_exact_share",
+    "label_exact_leaves",
+];
 
 /// `label_source` `"hybrid"`'s settings.
 #[derive(Clone, Debug, PartialEq)]
@@ -47,18 +62,63 @@ pub(crate) struct HybridLabels {
     pub net: String,
     /// `hybrid_exact_share` in parts per million.
     pub exact_ppm: u32,
+    /// `label_exact_leaves` in its normal form (`None`: `"none"`); a learned term names its
+    /// model by its stored input's key (`learned:inputs/sha256/<hex>:…`).
+    pub exact_leaves: Option<String>,
+    /// SHA-256 of a learned term's leaf-risk model (a stored input, fetched as
+    /// `label_leafrisk`).
+    pub leafrisk: Option<String>,
 }
 
 impl HybridLabels {
-    /// The arguments `search labels` takes for a training shard.
-    pub fn args(&self, net_path: &std::path::Path) -> Vec<String> {
+    /// The arguments `search labels` takes for a training shard (`leafrisk_path`: the fetched
+    /// leaf-risk model of a learned term).
+    pub fn args(
+        &self,
+        net_path: &std::path::Path,
+        leafrisk_path: Option<&std::path::Path>,
+    ) -> Vec<String> {
         let mut v = vec!["--label-net".to_string(), net_path.display().to_string()];
         if self.exact_ppm > 0 {
             v.push("--exact-share".into());
             v.push(share_text(self.exact_ppm));
         }
+        if let Some(text) = &self.exact_leaves {
+            let mut t = text.clone();
+            if let (Some(h), Some(p)) = (&self.leafrisk, leafrisk_path) {
+                t = t.replace(
+                    &format!("learned:{}:", input_key(h)),
+                    &format!("learned:{}:", p.display()),
+                );
+            }
+            v.push("--exact-leaves".into());
+            v.push(t);
+        }
         v
     }
+}
+
+/// `label_exact_leaves` checked and in its normal form (`None`: none), and a learned term's
+/// model (the SHA-256 of its stored input).
+fn parse_exact_leaves(text: &str) -> Result<(Option<String>, Option<String>), String> {
+    let err = |e: String| format!("hybrid_rung: label_exact_leaves: {e}");
+    if text.contains("learned:") {
+        let models = search::exact_leaves::check_spec(text).map_err(err)?;
+        let m = models.first().ok_or_else(|| err("no model".into()))?;
+        let hex = input_hex(m).ok_or_else(|| {
+            err(format!(
+                "the learned term's model {m:?} must be a stored input's key, \
+                 \"inputs/sha256/<64 hex digits>\" (the leaf-risk model)"
+            ))
+        })?;
+        let t = text.trim().replace(
+            &format!("learned:{m}:"),
+            &format!("learned:{}:", input_key(&hex)),
+        );
+        return Ok((Some(t), Some(hex)));
+    }
+    let p = search::exact_leaves::LeafPolicy::parse(text, 1).map_err(err)?;
+    Ok((p.map(|p| p.describe()), None))
 }
 
 /// A share in parts per million as `search labels --exact-share` reads it ("0.100000").
@@ -72,6 +132,7 @@ pub(crate) fn to_json(h: Option<&HybridLabels>) -> Value {
         None => json!({ "label_source": "exact" }),
         Some(h) => json!({ "label_source": "hybrid", "label_net": input_key(&h.net),
                            "hybrid_exact_share": share_text(h.exact_ppm),
+                           "label_exact_leaves": h.exact_leaves.as_deref().unwrap_or("none"),
                            "applies_to": "the training shards (random, rules, harvest, race) and \
                                           the audit loop's targeted harvests; validation, audit \
                                           and golden sets stay exact" }),
@@ -90,7 +151,7 @@ pub(crate) fn parse(o: &Map<String, Value>, cut: u64) -> Result<Option<HybridLab
         }
     };
     if source == "exact" {
-        if let Some(k) = ["label_net", "hybrid_exact_share"]
+        if let Some(k) = ["label_net", "hybrid_exact_share", "label_exact_leaves"]
             .iter()
             .find(|k| o.get(**k).is_some_and(|v| !v.is_null()))
         {
@@ -140,7 +201,22 @@ pub(crate) fn parse(o: &Map<String, Value>, cut: u64) -> Result<Option<HybridLab
             }
         }
     };
-    Ok(Some(HybridLabels { net, exact_ppm }))
+    let (exact_leaves, leafrisk) = match o.get("label_exact_leaves") {
+        None | Some(Value::Null) => (None, None),
+        Some(Value::String(t)) => parse_exact_leaves(t)?,
+        Some(v) => {
+            return Err(format!(
+                "hybrid_rung: label_exact_leaves {v}: a policy as `search hybrid-check \
+                 --exact-leaves` reads it, e.g. \"race:1-4\" or \"none\""
+            ));
+        }
+    };
+    Ok(Some(HybridLabels {
+        net,
+        exact_ppm,
+        exact_leaves,
+        leafrisk,
+    }))
 }
 
 /// A shard's label source as its sidecar records it (`"exact"` for sidecars written before
@@ -151,7 +227,9 @@ pub(crate) fn sidecar_source(side: &Value) -> &str {
 
 /// The values version a sidecar of label source `source` must record at cut `cut`: the exact
 /// solver's (a number), or for hybrid labels `"<exact>+O<cut+1>:<label_net_sha256>"` (the
-/// sidecar's own network, which must be a SHA-256).
+/// sidecar's own network, which must be a SHA-256), with the sidecar's exact leaves after it
+/// when it has them (`+exact:<label_exact_leaves>`, and `+leafrisk:<label_leafrisk_sha256>` for a
+/// learned term: `search::oracle_labels::hybrid_values_version`).
 pub(crate) fn want_values_version(side: &Value, source: &str, cut: u64) -> Result<Value, String> {
     let v = search::measure::VALUES_VERSION;
     if source == "exact" {
@@ -161,7 +239,18 @@ pub(crate) fn want_values_version(side: &Value, source: &str, cut: u64) -> Resul
         .as_str()
         .filter(|s| input_hex(&format!("sha256:{s}")).is_some())
         .ok_or("its sidecar says hybrid labels but names no label_net_sha256")?;
-    Ok(json!(format!("{v}+O{}:{sha}", cut + 1)))
+    let mut want = format!("{v}+O{}:{sha}", cut + 1);
+    if let Some(p) = side["label_exact_leaves"].as_str() {
+        want.push_str(&format!("+exact:{p}"));
+        if p.contains("learned:") {
+            let m = side["label_leafrisk_sha256"]
+                .as_str()
+                .filter(|s| input_hex(&format!("sha256:{s}")).is_some())
+                .ok_or("its sidecar's exact leaves have a learned term but name no model")?;
+            want.push_str(&format!("+leafrisk:{m}"));
+        }
+    }
+    Ok(json!(want))
 }
 
 /// What `rung.json` records of a shard's labels (`label_source`, and the hybrid facts).
@@ -177,6 +266,17 @@ pub(crate) fn record(side: &Value) -> Value {
         ] {
             v[k] = side[k].clone();
         }
+        if side.get("label_exact_leaves").is_some() {
+            for k in [
+                "label_exact_leaves",
+                "label_leafrisk_sha256",
+                "exact_leaves",
+            ] {
+                if let Some(x) = side.get(k) {
+                    v[k] = x.clone();
+                }
+            }
+        }
     }
     v
 }
@@ -187,7 +287,9 @@ impl Rung<'_> {
     /// and audit shards are always exact).
     pub(super) fn label_args(&self, set: &str) -> Vec<String> {
         match (&self.p.hybrid_labels, self.inputs.get("label_net")) {
-            (Some(h), Some(net)) if !matches!(set, "val" | "audit") => h.args(net),
+            (Some(h), Some(net)) if !matches!(set, "val" | "audit") => {
+                h.args(net, self.inputs.get("label_leafrisk").map(PathBuf::as_path))
+            }
             _ => Vec::new(),
         }
     }
@@ -217,11 +319,12 @@ impl Rung<'_> {
         Ok(rec)
     }
 
-    /// The summary's line on the labels: the run's label source, and with hybrid labels the
-    /// network and which shards have them.
+    /// The audit summary's last line with hybrid labels: the network, the exact share and
+    /// leaves, and which shards have hybrid labels (nothing with exact labels: the summary is as
+    /// before).
     pub(super) fn label_line(&self) -> String {
         match &self.p.hybrid_labels {
-            None => "labels: exact (every shard)\n".to_string(),
+            None => String::new(),
             Some(h) => {
                 let (mut hy, mut ex) = (Vec::new(), Vec::new());
                 for e in &self.label_kinds {
@@ -234,10 +337,11 @@ impl Rung<'_> {
                 }
                 format!(
                     "labels: hybrid training labels (H_{} with the network {}, exact share \
-                     {}): hybrid {}; exact {}\n",
+                     {}, exact leaves {}): hybrid {}; exact {}\n",
                     self.p.cut + 1,
                     input_key(&h.net),
                     share_text(h.exact_ppm),
+                    h.exact_leaves.as_deref().unwrap_or("none"),
                     if hy.is_empty() {
                         "none".into()
                     } else {
@@ -295,7 +399,7 @@ mod tests {
         assert_eq!(h.net, "a".repeat(64));
         assert_eq!(h.exact_ppm, 100_000);
         assert_eq!(
-            h.args(std::path::Path::new("/n")),
+            h.args(std::path::Path::new("/n"), None),
             ["--label-net", "/n", "--exact-share", "0.100000"]
         );
         let plain = parse(
@@ -306,7 +410,7 @@ mod tests {
         .expect("some");
         assert_eq!(plain.exact_ppm, 0);
         assert_eq!(
-            plain.args(std::path::Path::new("/n")),
+            plain.args(std::path::Path::new("/n"), None),
             ["--label-net", "/n"]
         );
         assert_eq!(to_json(None)["label_source"], "exact");
@@ -359,6 +463,75 @@ mod tests {
         }
     }
 
+    /// `label_exact_leaves`: in its normal form, passed to `search labels --exact-leaves` with a
+    /// learned model's stored key turned into its local path; `none` is no setting at all;
+    /// refused without hybrid labels, malformed, or with a model that is no stored input.
+    #[test]
+    fn exact_leaves_settings() {
+        let with = |x: Value| {
+            let mut v = json!({ "label_source": "hybrid", "label_net": key('a') });
+            v["label_exact_leaves"] = x;
+            parse(&o(v), 2)
+        };
+        let h = with(json!("race:4,2")).expect("ok").expect("some");
+        assert_eq!(h.exact_leaves.as_deref(), Some("race:2,4"));
+        assert_eq!(h.leafrisk, None);
+        assert_eq!(
+            h.args(std::path::Path::new("/n"), None),
+            ["--label-net", "/n", "--exact-leaves", "race:2,4"]
+        );
+        assert_eq!(to_json(Some(&h))["label_exact_leaves"], "race:2,4");
+        let none = with(json!("none")).expect("ok").expect("some");
+        assert_eq!((none.exact_leaves, none.leafrisk), (None, None));
+        let plain = parse(
+            &o(json!({ "label_source": "hybrid", "label_net": key('a') })),
+            2,
+        )
+        .expect("ok")
+        .expect("some");
+        assert_eq!(to_json(Some(&plain))["label_exact_leaves"], "none");
+        assert_eq!(with(json!("none")), Ok(Some(plain)));
+        // A learned term: the model by its stored key (either form), normalised.
+        let m = "d".repeat(64);
+        for form in [format!("inputs/sha256/{m}"), format!("sha256:{m}")] {
+            let l = with(json!(format!("race:1-4+learned:{form}:t=277338260")))
+                .expect("ok")
+                .expect("some");
+            assert_eq!(l.leafrisk.as_deref(), Some(m.as_str()));
+            assert_eq!(
+                l.exact_leaves.as_deref(),
+                Some(format!("race:1-4+learned:inputs/sha256/{m}:t=277338260").as_str())
+            );
+            assert_eq!(
+                l.args(
+                    std::path::Path::new("/n"),
+                    Some(std::path::Path::new("/in/risk.json"))
+                ),
+                [
+                    "--label-net",
+                    "/n",
+                    "--exact-leaves",
+                    "race:1-4+learned:/in/risk.json:t=277338260"
+                ]
+            );
+        }
+        for (v, want) in [
+            (json!("race:9"), "race class"),
+            (json!("ties"), "term"),
+            (json!(4), "a policy"),
+            (json!("learned:risk.json:t=5"), "stored input's key"),
+            (
+                json!(format!("learned:inputs/sha256/{m}:t=-1")),
+                "whole number",
+            ),
+        ] {
+            let e = with(v.clone()).expect_err("refused");
+            assert!(e.contains(want), "{v}: {e}");
+        }
+        let e = parse(&o(json!({ "label_exact_leaves": "race:4" })), 2).expect_err("exact");
+        assert!(e.contains("label_source \"hybrid\""), "{e}");
+    }
+
     #[test]
     fn sidecars_say_their_source() {
         let exact = json!({ "values_version": 2 });
@@ -379,6 +552,30 @@ mod tests {
             )))
         );
         assert!(want_values_version(&json!({ "label_source": "hybrid" }), "hybrid", 2).is_err());
+        // Exact leaves: the policy and a learned term's model are in the values version.
+        let v = search::measure::VALUES_VERSION;
+        let mut el = hybrid.clone();
+        el["label_exact_leaves"] = json!("race:1,2,3,4");
+        assert_eq!(
+            want_values_version(&el, "hybrid", 2),
+            Ok(json!(format!("{v}+O3:{sha}+exact:race:1,2,3,4")))
+        );
+        let m = "e".repeat(64);
+        el["label_exact_leaves"] = json!("race:4+learned:abcdefabcdef:t=7");
+        assert!(want_values_version(&el, "hybrid", 2).is_err(), "no model");
+        el["label_leafrisk_sha256"] = json!(m);
+        assert_eq!(
+            want_values_version(&el, "hybrid", 2),
+            Ok(json!(format!(
+                "{v}+O3:{sha}+exact:race:4+learned:abcdefabcdef:t=7+leafrisk:{m}"
+            )))
+        );
+        el["exact_leaves"] = json!({ "leaves": 10, "leaves_exact": 4 });
+        let r = record(&el);
+        assert_eq!(r["label_exact_leaves"], "race:4+learned:abcdefabcdef:t=7");
+        assert_eq!(r["label_leafrisk_sha256"], json!(m));
+        assert_eq!(r["exact_leaves"]["leaves_exact"], 4);
+        assert!(record(&hybrid).get("label_exact_leaves").is_none());
         let r = record(&hybrid);
         assert_eq!(r["label_source"], "hybrid");
         assert_eq!(r["rows_hybrid"], 9);

@@ -25,7 +25,7 @@ use engine::rng::Rng;
 use serde_json::{Value, json};
 
 /// Kinds a format-2 stream may run.
-pub const KINDS: [&str; 15] = [
+pub const KINDS: [&str; 16] = [
     "difftest",
     "equity_sweep",
     "benchmark",
@@ -39,6 +39,7 @@ pub const KINDS: [&str; 15] = [
     "belief_bench",
     "hybrid_rung",
     "hybrid_t1check",
+    "hybrid_checks",
     "student_teacher",
     "student_train",
 ];
@@ -389,6 +390,19 @@ pub fn parse_v2(v: &Value) -> Result<Manifest2, String> {
                 if !inputs.iter().any(|(i, _)| *i == n) {
                     return Err(format!(
                         "stream `{name}`: hybrid_t1check names input `{n}`, which the manifest's \
+                         inputs do not list"
+                    ));
+                }
+            }
+        }
+        // Stored-network checks name their files among the manifest's inputs.
+        if kind == "hybrid_checks" {
+            for n in
+                crate::checks::input_names(&params).map_err(|e| format!("stream `{name}`: {e}"))?
+            {
+                if !inputs.iter().any(|(i, _)| *i == n) {
+                    return Err(format!(
+                        "stream `{name}`: hybrid_checks names input `{n}`, which the manifest's \
                          inputs do not list"
                     ));
                 }

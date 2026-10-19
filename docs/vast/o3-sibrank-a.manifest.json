@@ -1,0 +1,93 @@
+{
+  "format": 2,
+  "run_id": "o3-sibrank-a-1",
+  "run_seed": 1,
+  "threads": null,
+  "benchmark_seconds": 0,
+  "upload_every_s": 300,
+  "heartbeat_every_s": 30,
+  "note": "Owner 2026-10-19, fix E (decision-focused training): O_3 at 80M rows lowered its value error but not its golden decision loss, because decisions turn on the ORDER of the trick-3 positions one choice separates. A/B on the stored 40M trick-3 base (random s321, rules s322, harvest s313 with its row weights, val s401; all reused as stored) plus 6M new sibling-group rows (search labels --source siblings, seed 351: from each trick-2 decision every seat still to play is a choice point along the search's own line, driven by the stored O_3 harvest_net; each card's trick-3 frontier position, labelled exactly; about 3 rows a group, 2M groups; decisions half from positions 1-2 so the leader's choice points are not under-sampled), O_3's shape 2048-1024-256 from scratch, same seed and epoch rule, then the stored 2,000-decision trick-2 golden check. Run A and B side by side; both make the same sibling shard (byte-identical, a pure function of the seed and the network) and store it (upload_shards), so a later run can reuse it through label_inputs (set siblings, with its groups key from out/hybrid/shards.json). This is A: cross-entropy only (today's training on the same data and compute).",
+  "machine": {
+    "gpus": 1,
+    "min_gpu_ram_gb": 16,
+    "min_compute_cap": 600,
+    "min_cores": 190,
+    "min_ram_gb": 60,
+    "disk_gb": 250,
+    "min_inet_down": 100,
+    "max_dph": 1.7,
+    "blackwell": true
+  },
+  "streams": [
+    {
+      "name": "rung",
+      "priority": 1,
+      "kind": "hybrid_rung",
+      "chunks": 1,
+      "params": {
+        "threads": "all",
+        "cut": 3,
+        "label_inputs": [
+          {
+            "set": "extra",
+            "seed": 321,
+            "rows": 25600000,
+            "shard": "inputs/sha256/fd846dadc7996734120b758ee2f3bbeeb0ef159ad27014ce1ee7f796fe52a220",
+            "sidecar": "inputs/sha256/da58c2dbc4f44aa735a3acf4dba5ee4c585ca116ab22ce233f114680301b5468",
+            "weight": 1
+          },
+          {
+            "set": "extra",
+            "seed": 322,
+            "rows": 6400000,
+            "shard": "inputs/sha256/91c6e0014b76e0764f451aea7a093a7b79cfe9ac8a69f706cbe127cab109f086",
+            "sidecar": "inputs/sha256/401d9ed95d1291fdd7a9bdff7a5c98ee4c4d15d4c3997f9cf3107d3650afb82f",
+            "weight": 1
+          },
+          {
+            "set": "extra",
+            "seed": 313,
+            "rows": 8000000,
+            "shard": "inputs/sha256/a80cc28708543687cf743a69cff080be92ff0d25ee5021af740db5d12989b508",
+            "sidecar": "inputs/sha256/1522915f70385f02679026b3504cf11d506b7245d8cd2db6a9c994ed795c389e",
+            "rowweights": "inputs/sha256/d999c353e62bfa937abd544ad5ad68ce099af3bfc2e0f371c6bcdeeafecc4211",
+            "weight": 1
+          },
+          {
+            "set": "val",
+            "seed": 401,
+            "rows": 100000,
+            "shard": "inputs/sha256/d51e22abd0aad9a699b28da82725bb163249148092fc1daca739a62e9a71c9e0",
+            "sidecar": "inputs/sha256/99c298a224010d8067f1e1bea7277ab54da8d6fb665df66dd899fbf5637a4c66"
+          }
+        ],
+        "labels_random": 0,
+        "labels_rules": 0,
+        "labels_siblings": 6000000,
+        "labels_siblings_seed": 351,
+        "siblings_positions": "0.5,0.25,0.25",
+        "golden_trick": 2,
+        "golden_count": 2000,
+        "golden_seed": 1,
+        "golden_worlds": 320,
+        "golden_decisions_input": "inputs/sha256/635e9aef196c816380f3f15c05ede90b38b875fa4817061a57e6d39550065ab0",
+        "golden_worlds_input": "inputs/sha256/6ddc59b191e1fd534f260f9dfe103f742d6026768ca74acdbbb4fd430eb8265e",
+        "verify_pct": 1,
+        "widths": "2048,1024,256",
+        "head": "outcome",
+        "epochs": 40,
+        "batch": 1024,
+        "patience": 4,
+        "train_seed": 1,
+        "max_minutes": 0,
+        "device": "cuda",
+        "upload_shards": true,
+        "table": {
+          "hands": 1000000,
+          "seed": 1
+        },
+        "harvest_net": "inputs/sha256/b89b26d6e2f0bd25dac7f57411a35e2531abd087e964d6bd4df54621319efcc5"
+      }
+    }
+  ]
+}

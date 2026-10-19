@@ -177,6 +177,7 @@ fn main() -> Result<(), String> {
                     cap: 256,
                 }),
                 keep: None,
+                siblings: false,
             };
             let mut search_mem = SolveMem::new();
             let mut shared = Tot::default();

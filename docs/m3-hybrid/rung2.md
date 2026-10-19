@@ -410,3 +410,82 @@ The overnight trick-3 audit loop's round 2 is the current O_3: 2048-1024-256, ou
 x 320 exact worlds (generated overnight, stored): 95% upper bound 0.0068% overall, seats 1-2 0.0122%, 3-4 0.0080%,
 5-8 0.0052%, own-team bias -0.0085% (the overall row passes; the leader's band does not). Later loops start from it
 (additive mode) and must beat it on the same golden set.
+
+## Exact leaves (G) (build of 2026-10-19)
+
+**Why.** Fix "G" of the 2026-10-19 diagnosis (owner approved): O_3 is least reliable in the race
+classes (`nn::outcome::race_class`: 2, several teams can win the game; 4, a team can win the match and
+another the game; auditor SD 2.0% and 4.0% against about 0.95% in classes 0-1), and at trick 4 exact
+values at the race-class frontier took H_4's bound from 0.0057% to 0.0016% (rung1.md §6). An exact solve
+from the start of trick 3 costs milliseconds, so H_3 (trick-2 decisions: the trick-2 teacher, O_2's cheap
+labels and later the app's trick-2 search) can afford one at the leaves where O_3 is weakest. This spends
+compute for quality; no standard is lowered.
+
+**Design** (`crates/search/src/exact_leaves.rs`; `search hybrid-check --exact-leaves SPEC
+[--exact-leaf-tt-mb M]`):
+- **The policy** is a union of terms joined by `+`: `race:LIST` (every leaf of those race classes;
+  `race:4`, `race:2,4`, `race:1-4`), `band:LO-HI` (every leaf where O_3 gives the decider's team LO% to
+  HI%, the bounds turned into units of 2^-32 once and compared as whole numbers), `all` (every leaf: H_3
+  becomes exact search, for tests and ceilings), `none` (the default). Only whole numbers decide: the race
+  class comes from the outcome mask and the games won, the band from the network's integer money chance.
+  Tie-decided leaves are not a term: telling them apart needs two exact solves of every leaf (the cost of
+  `all`); the race classes hold almost all of them (rung1.md §5).
+- **An exact leaf's value** is `oracle_labels::exact_value` of the position as the search first reached
+  it: the labels' exact solver, tie rule and fixed-point money chance, so an exact leaf equals its label
+  exactly (tested against a solve from empty tables). Each world's search has its own `ExactLeaves`
+  evaluator that decides once per distinct canonical form and memoises the value (as the network's values
+  are), so a value depends only on the canonical form and the match, as the solvers require.
+- **Speed without changing a value:** the leaf solves of one world share one table
+  (`solver::SolveFamily::of_match` of the world: the values of solves from empty tables, fewer nodes), on
+  a second per-thread solver memory kept from world to world (`--exact-leaf-tt-mb`, default 64 MB at cut 3;
+  the runner counts a second table per thread in its memory plan). Every value is byte-identical for any
+  thread count and machine; the leaf solves' times are reports only.
+- **`none` is today's check byte for byte:** without a policy the network is not wrapped at all, and a
+  policy that picks no leaf gives the same values, choices and errors (tested).
+- **Report** (text and JSON `exact_leaves`): per race class the distinct leaves a world and the share
+  solved exactly; the leaf solves' nodes and thread time a world; the hybrid's thread time a world with
+  them and without them. `values.hybrid` ends `+exact:<policy>`. `hybrid-paired` also prints both checks'
+  thread time a world. The runner's `hybrid_checks` takes `exact_leaves` per check (not with `truth`
+  `"net"`).
+
+**Measured on this VM** (4 threads, the stored trick-2 golden set, decisions 0-31, one per seat and
+stratum, x 32 worlds, the adopted O_3 f5766a; distinct leaves per world's search: 355, of which class 0
+159, class 1 117, class 2 64, class 3 0.3, class 4 14.7):
+
+| policy | leaves exact | leaf solves a world | ms a solve | thread-ms a world | x none | bound all | own bias all | own bias seats 1-2 |
+|---|---|---|---|---|---|---|---|---|
+| none | 0% | 0 | - | 21.4 | 1.0 | 0.0241% | -0.127% | -0.160% |
+| race:4 | 4.1% | 14.7 | 3.4 | 73.3 | 3.4 | 0.0241% | -0.053% | -0.155% |
+| race:2,4 | 22.1% | 78.3 | 1.9 | 169.3 | 7.9 | 0.0241% | -0.058% | -0.124% |
+| race:1-4 | 55.2% | 195.8 | 2.5 | 513.3 | 24.0 | 0.0132% | -0.028% | -0.021% |
+
+Thirty-two decisions cannot judge the standard (the bounds above are for the sample only; one decision,
+seat 3, keeps its loss under every policy). The paired comparison of race:1-4 against none on them: loss
+-0.0057% (interval -0.0148% .. 0), own-team bias +0.099% (seats 1-2 +0.139%, interval +0.032% ..
++0.271%): the exact leaves remove most of the own-team undervaluation in this sample. With `--exact-leaves
+all` on six golden decisions x 4 worlds, H_3's values equal the stored exact worlds in every world (loss 0,
+every error 0): 1.18 s a world, 3.7 ms a leaf solve.
+
+**Price of the rented run** (`docs/vast/o3-exactleaf.manifest.json`, run `o3-exactleaf-1`, not launched):
+2,000 decisions x 320 worlds per check, (a) none, (b) race:4, (c) race:2,4, (d) race:1-4, and (b)-(d)
+paired against (a). On this VM the four checks cost 0.78 thread-seconds per world-set together, 0.50 M
+thread-seconds; a rented hyper-threaded thread ran the baseline 2.4 times slower (51 against 21 ms a
+world, o3-curse-ensemble-1), so about 1.2 M thread-seconds: about 1.4 hours on 245 threads, 2.6 hours on
+128 (est_seconds 9,000).
+
+**For the app** (trick-2 search, PIMC over many deals with H_3): race:4 multiplies H_3's time a world by
+about 3.4, race:2,4 by about 8 and race:1-4 by about 24 on this VM. Which policy is worth it is for the
+rented run's paired comparisons to show.
+
+## Learned exact leaves (build of 2026-10-19)
+
+The owner asked for G's choice of leaves to be found in the data rather than set by hand. A learned
+leaf-risk model (`nn::leafrisk`: gradient-boosted integer trees over O_3's own inputs and cheap
+extras of its answer, trained on fresh network-driven trick-3 harvest rows with O_3's errors)
+predicts O_3's squared error at each frontier position; `--exact-leaves learned:MODEL:t=T` solves
+the leaves scored at or above `T`, a threshold chosen by Learn then Test on a separate calibration
+split. On the held-out test split, at race:1-4's share of positions solved it leaves 1.0% of O_3's
+squared error against race:1-4's 9.6%; in the hybrid on 32 golden decisions, at race:1-4's thread
+time it solves 35% of the leaves and takes the value SD from 0.61% to 0.27%. Design, research,
+numbers and the manifest (`docs/vast/o3-learnedleaf.manifest.json`, not launched):
+`docs/m3-hybrid/learned-leaves.md`.

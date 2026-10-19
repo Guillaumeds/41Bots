@@ -9,7 +9,7 @@
   "note": "Trick-3 audit loop, overnight 2026-10-16/17 (owner): groups down to 0.01% of positions, standard 0.01% then push 0.0075%; data of trick-3 round 3 (40M), start shape 2048-1024-256 (round 3's validation loss 1.448 against round 2's 1.497); stored trick-2 golden set. Golden set generated at 2,000 trick-2 decisions x 320 exact worlds (5x the stored 400; about 75 minutes of the CPU beside round 1's training). Any GPU model (no gpu_names): trick 3 is mostly CPU work (labels, harvests, mini golden sets), and 190-thread machines with the fastest GPUs are rare. Audit shards of 10M positions (groups of 0.01% hold 1,000 of them): the second mechanism test measured the auditor at 2.2 minutes for 4M rows on 122 threads.",
   "machine": {
     "gpus": 1,
-    "min_gpu_ram_gb": 20,
+    "min_gpu_ram_gb": 16,
     "min_compute_cap": 600,
     "min_cores": 190,
     "min_ram_gb": 192,

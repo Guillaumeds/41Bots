@@ -71,13 +71,17 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
-use engine::game::{HandStartState, Match, Phase, Rules};
+use engine::game::{Action, HandStartState, Match, Phase, Rules};
 use engine::rng::Rng;
+use engine::team_of;
 use equity::MoneyChance;
 use nn::encode::encode;
+use nn::groups::GroupRow;
 use nn::outcome::{N_RACE_CLASSES, outcomes};
 use nn::predicate::{Evaluator, Predicates};
-use nn::shard::{Row, SOURCE_HARVEST, SOURCE_RANDOM, SOURCE_RULES, row_bytes, row_bytes_for};
+use nn::shard::{
+    Row, SOURCE_HARVEST, SOURCE_RANDOM, SOURCE_RULES, SOURCE_SIBLINGS, row_bytes, row_bytes_for,
+};
 use serde::Serialize;
 use solver::frontier::{CanonPos, Frontier};
 use solver::{
@@ -85,6 +89,7 @@ use solver::{
     solve_fast_cut, solve_fast_with,
 };
 
+use crate::exact_leaves::{ExactLeaves, LeafPolicy};
 use crate::measure::{DecisionSpec, build_decision};
 use crate::ordered::{ordered, window_for};
 use crate::pimc::{
@@ -107,6 +112,9 @@ pub enum Source {
     Rules,
     /// Frontier positions the hybrid's search reaches from training decisions ([`harvest_rows`]).
     Harvest,
+    /// Sibling groups ([`sibling_plan`]): the frontier positions that one choice point's cards
+    /// lead to, each played on by the hybrid's own search to the frontier.
+    Siblings,
 }
 
 impl Source {
@@ -116,6 +124,7 @@ impl Source {
             Source::Random => SOURCE_RANDOM,
             Source::Rules => SOURCE_RULES,
             Source::Harvest => SOURCE_HARVEST,
+            Source::Siblings => SOURCE_SIBLINGS,
         }
     }
 
@@ -125,6 +134,7 @@ impl Source {
             Source::Random => "random",
             Source::Rules => "rules",
             Source::Harvest => "harvest",
+            Source::Siblings => "siblings",
         }
     }
 
@@ -134,7 +144,10 @@ impl Source {
             "random" => Ok(Source::Random),
             "rules" => Ok(Source::Rules),
             "harvest" => Ok(Source::Harvest),
-            _ => Err(format!("unknown --source {s} (random, rules or harvest)")),
+            "siblings" => Ok(Source::Siblings),
+            _ => Err(format!(
+                "unknown --source {s} (random, rules, harvest or siblings)"
+            )),
         }
     }
 }
@@ -177,6 +190,56 @@ pub struct RowInfo {
     pub hybrid: bool,
     /// Frontier (network) evaluations of a hybrid label's search (0 for an exact label).
     pub evals: u64,
+    /// With exact leaves ([`HybridLabels::exact_leaves`]): the hybrid search's distinct frontier
+    /// positions, those of them solved exactly, and the leaf solves' nodes (0 otherwise).
+    pub leaves: LeafCounts,
+    /// A sibling row's group ([`Source::Siblings`]; `None` for other sources): its decision, its
+    /// group within the decision and the mover as an index into the row's rotated value order.
+    pub sib: Option<SibTag>,
+}
+
+/// A sibling row's group ([`sibling_plan`]): the decision `j` it came from, its group within the
+/// decision (0, 1, … in the order the walk meets the choice points) and the mover's team: the
+/// absolute team (`engine::team_of` of the seat that chose) in a [`Sampled`] position, an index
+/// into the row's rotated value order once labelled ([`RowInfo::sib`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SibTag {
+    /// The decision.
+    pub decision: u64,
+    /// The group within the decision.
+    pub group: u32,
+    /// The mover's team.
+    pub mover: u8,
+}
+
+/// The sidecar `NAME.npy.groups` of sibling rows (`nn::groups`) from their facts in row order:
+/// a new group number whenever a row's (decision, group) differs from the row before's, each
+/// row's mover as its own rotated index. Rows without a group ([`RowInfo::sib`] `None`) are
+/// refused.
+///
+/// # Errors
+/// If a row has no group, or a group number would overflow.
+pub fn sibling_group_rows<'a>(
+    infos: impl IntoIterator<Item = &'a RowInfo>,
+) -> Result<Vec<GroupRow>, String> {
+    let mut out = Vec::new();
+    let mut last: Option<(u64, u32)> = None;
+    let mut g: u32 = 0;
+    for (i, info) in infos.into_iter().enumerate() {
+        let s = info
+            .sib
+            .ok_or_else(|| format!("row {i} has no sibling group"))?;
+        let key = (s.decision, s.group);
+        if last.is_some_and(|l| l != key) {
+            g = g.checked_add(1).ok_or("more than 2^32 groups")?;
+        }
+        last = Some(key);
+        out.push(GroupRow {
+            group: g,
+            mover: s.mover,
+        });
+    }
+    Ok(out)
 }
 
 /// Rows' facts totalled (the sidecar's counts); the totals do not depend on the order rows are
@@ -201,6 +264,29 @@ pub struct RowCounts {
     pub hybrid: u64,
     /// Frontier (network) evaluations of the hybrid labels' searches.
     pub evals: u64,
+    /// The hybrid labels' exact leaves ([`HybridLabels::exact_leaves`]; 0 without).
+    pub leaves: LeafCounts,
+}
+
+/// The exact leaves of hybrid label searches ([`HybridLabels::exact_leaves`]), summed: distinct
+/// frontier positions per search, those solved exactly, and the leaf solves' nodes. Whole
+/// numbers that depend only on the rows (each search's leaves are its own), never on threads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LeafCounts {
+    /// Distinct frontier positions (per search, summed).
+    pub distinct: u64,
+    /// Of those, solved exactly.
+    pub exact: u64,
+    /// Solver nodes of the leaf solves.
+    pub nodes: u64,
+}
+
+impl LeafCounts {
+    fn add(&mut self, o: &LeafCounts) {
+        self.distinct += o.distinct;
+        self.exact += o.exact;
+        self.nodes += o.nodes;
+    }
 }
 
 impl RowCounts {
@@ -215,6 +301,7 @@ impl RowCounts {
         self.by_class[usize::from(i.class)] += 1;
         self.hybrid += u64::from(i.hybrid);
         self.evals += i.evals;
+        self.leaves.add(&i.leaves);
     }
 
     /// Add another total.
@@ -236,6 +323,7 @@ impl RowCounts {
         }
         self.hybrid += o.hybrid;
         self.evals += o.evals;
+        self.leaves.add(&o.leaves);
     }
 }
 
@@ -317,7 +405,9 @@ pub fn row_position(
                 let m = Match::from_hand_start(start, deck, 0, Rules::HOUSE).expect("valid");
                 rules_to(&m, k)
             }
-            Source::Harvest => panic!("harvested rows come by decision: harvest_rows"),
+            Source::Harvest | Source::Siblings => {
+                panic!("harvested rows come by decision: harvest_rows")
+            }
         };
         match m {
             Some(m) => {
@@ -382,6 +472,12 @@ pub struct HybridLabels<'a> {
     /// the decisions before). A pure function of the row's key, for any thread count and
     /// schedule.
     pub exact_ppm: u32,
+    /// Exact leaves (`crate::exact_leaves`, as `search hybrid-check --exact-leaves`): the
+    /// frontier positions at the start of the next trick this policy picks are solved exactly
+    /// instead of being valued by `net` (`None`: every frontier position by the network, the
+    /// hybrid labels as before). A band term reads the money chance of the team to lead the
+    /// labelled position (its decider).
+    pub exact_leaves: Option<&'a LeafPolicy>,
 }
 
 impl Labeller<'_> {
@@ -441,6 +537,30 @@ pub fn parse_exact_share(s: &str) -> Result<u32, String> {
     Ok(ppm as u32)
 }
 
+/// The values version a hybrid shard's sidecar records (`values_version`): the exact solver's,
+/// the network of the trick after `trick` by its SHA-256, and with exact leaves the policy's
+/// normal form (`LeafPolicy::describe`) and a learned term's full model SHA-256, so labels made
+/// with another network, policy or model never pass for these:
+/// `"<exact>+O<trick+1>:<net>"`, `…+exact:<policy>`, `…+exact:<policy>+leafrisk:<model>`.
+pub fn hybrid_values_version(
+    trick: u8,
+    net_sha256: &str,
+    exact_leaves: Option<&LeafPolicy>,
+) -> String {
+    let mut v = format!(
+        "{}+O{}:{net_sha256}",
+        crate::measure::VALUES_VERSION,
+        trick + 1
+    );
+    if let Some(p) = exact_leaves {
+        v.push_str(&format!("+exact:{}", p.describe()));
+        if let Some(l) = &p.learned {
+            v.push_str(&format!("+leafrisk:{}", l.model.sha256));
+        }
+    }
+    v
+}
+
 /// The solver table (megabytes) of a hybrid label's search (one trick to the frontier: small,
 /// and it never changes a value).
 pub const HYBRID_TT_MB: usize = 8;
@@ -450,15 +570,32 @@ pub const HYBRID_TT_MB: usize = 8;
 /// the game) through trick `k`, `net`'s value of every position reached at the start of trick
 /// `k + 1` (its canonical form, as everywhere the hybrid runs: `search hybrid-check`, `search
 /// worlds --method hybrid`, the student's teacher), and the solver nodes and frontier
-/// evaluations it took.
+/// evaluations it took. With `exact_leaves`, the frontier positions the policy picks are solved
+/// exactly instead (`crate::exact_leaves::ExactLeaves`, the very wrapper `hybrid-check` uses:
+/// the labels' exact solver and tie rule, one memo per search, the leaf solves sharing one table
+/// in the family of `pos`), and their counts are returned too.
 pub fn hybrid_value(
     pos: &Position,
     ctx: MatchCtx,
     leaf: &SharedLeaf,
     net: &dyn Frontier,
+    exact_leaves: Option<&LeafPolicy>,
     mem: &mut SolveMem,
-) -> (MoneyChance, u64, u64) {
-    let cut = FrontierCut::new(pos.hand.tricks_done + 2, net);
+) -> (MoneyChance, u64, u64, LeafCounts) {
+    let exacts = exact_leaves.map(|policy| {
+        ExactLeaves::new(
+            net,
+            leaf,
+            policy,
+            team_of(pos.leader),
+            SolveFamily::of_position(pos, ctx),
+        )
+    });
+    let front: &dyn Frontier = match &exacts {
+        Some(x) => x,
+        None => net,
+    };
+    let cut = FrontierCut::new(pos.hand.tricks_done + 2, front);
     let sol = solve_fast_cut(
         pos,
         ctx,
@@ -468,10 +605,19 @@ pub fn hybrid_value(
         mem,
         None,
     );
+    let counts = exacts.as_ref().map_or(LeafCounts::default(), |x| {
+        let st = x.stats();
+        LeafCounts {
+            distinct: st.distinct.iter().sum(),
+            exact: st.exact.iter().sum(),
+            nodes: st.nodes,
+        }
+    });
     (
         sol.value.expect("no time cap"),
         sol.stats.nodes,
         sol.stats.frontier,
+        counts,
     )
 }
 
@@ -494,11 +640,13 @@ fn label_value(
     let trick = pos.hand.tricks_done + 1;
     match labeller {
         Labeller::Hybrid(h) if !labeller.exact_row(seed, source, trick, a, b) => {
-            let (v, nodes, evals) = hybrid_value(pos, ctx, leaf, h.net, mem);
+            let (v, nodes, evals, leaves) =
+                hybrid_value(pos, ctx, leaf, h.net, h.exact_leaves, mem);
             let info = RowInfo {
                 nodes,
                 hybrid: true,
                 evals,
+                leaves,
                 ..RowInfo::default()
             };
             (v, info)
@@ -536,6 +684,19 @@ fn labelled_row_by(
     leaf: &SharedLeaf,
     hybrid: bool,
 ) -> Row {
+    labelled_row_rot(pos, ctx, v, source, leaf, hybrid).0
+}
+
+/// [`labelled_row_by`] and the encoder's rotation `r` (mod 4) of the team order: absolute team
+/// `t` is index `(t + r) mod 4` of the row's value (`MoneyChance::rotate`).
+fn labelled_row_rot(
+    pos: &Position,
+    ctx: &MatchCtx,
+    v: MoneyChance,
+    source: u8,
+    leaf: &SharedLeaf,
+    hybrid: bool,
+) -> (Row, u8) {
     let c = canonical(pos);
     let (features, r) = encode(&c, ctx, leaf);
     let value = v.rotate(r % 4);
@@ -551,15 +712,18 @@ fn labelled_row_by(
              {pos:?}"
         )
     });
-    Row {
-        features,
-        value,
-        source,
-        trick: pos.hand.tricks_done + 1,
-        label,
-        mask: o.mask,
-        outcomes: o.vecs,
-    }
+    (
+        Row {
+            features,
+            value,
+            source,
+            trick: pos.hand.tricks_done + 1,
+            label,
+            mask: o.mask,
+            outcomes: o.vecs,
+        },
+        r % 4,
+    )
 }
 
 /// Row `i` of a job, labelled as `labeller` says (an exact solve with a table of `tt_mb`
@@ -579,7 +743,7 @@ fn make_row(
     let (pos, ctx, mut info) = row_position(job, i, starts, source);
     let key = (job.seed, job.source.tag(), i, 0);
     let (v, l) = label_value(labeller, key, &pos, ctx, None, leaf, opts, mem);
-    (info.nodes, info.hybrid, info.evals) = (l.nodes, l.hybrid, l.evals);
+    (info.nodes, info.hybrid, info.evals, info.leaves) = (l.nodes, l.hybrid, l.evals, l.leaves);
     let row = labelled_row_by(&pos, &ctx, v, job.source.tag(), leaf, l.hybrid);
     info.class = row.race_class();
     (row, info)
@@ -591,9 +755,8 @@ fn check_label_job(job: &LabelJob) {
         "seed 1 is the golden sets' seed: labels must use another"
     );
     assert!((2..=5).contains(&job.trick), "frontier tricks are 2..=5");
-    assert_ne!(
-        job.source,
-        Source::Harvest,
+    assert!(
+        !matches!(job.source, Source::Harvest | Source::Siblings),
         "harvested rows come by decision: harvest_rows"
     );
 }
@@ -714,6 +877,9 @@ pub struct ShardSummary {
     pub label_time: Duration,
     /// A targeted harvest's rows and reached positions per group (`None` for other runs).
     pub groups: Option<GroupTally>,
+    /// A sibling run's groups, one per row in row order (the sidecar `NAME.npy.groups`,
+    /// [`sibling_group_rows`]; `None` for other runs).
+    pub siblings: Option<Vec<GroupRow>>,
 }
 
 /// A targeted harvest's counts per group of its predicate file ([`PredKeep`]); a position in
@@ -986,6 +1152,7 @@ fn stream_label_rows<W: Write + Send>(
         search_time: Duration::ZERO,
         label_time: Duration::ZERO,
         groups: None,
+        siblings: None,
     })
 }
 
@@ -1086,6 +1253,10 @@ pub struct HarvestJob {
     /// The targeted harvest (`--harvest-keep`): positions in any group of a predicate file are
     /// kept up to their own cap, the others up to `cap` (which may then be 0). Not with `race`.
     pub keep: Option<PredKeep>,
+    /// Sibling groups instead of the reached positions ([`sibling_plan`], `search labels
+    /// --source siblings`): `cap` is then the most groups a decision gives. Not with `race` or
+    /// `keep`.
+    pub siblings: bool,
 }
 
 /// The default cap of a targeted harvest's in-group positions per decision.
@@ -1572,6 +1743,9 @@ pub struct Sampled {
     /// Its exact value and the nodes of its solve when the search already solved it
     /// ([`Driver::Exact`]); `None` with a network driver (solved for the label).
     pub exact: Option<(MoneyChance, u64)>,
+    /// A sibling position's group, the mover as an absolute team ([`sibling_plan`]); `None`
+    /// for other harvests.
+    pub sib: Option<SibTag>,
 }
 
 /// A harvest decision searched and sampled ([`harvest_plan`]), its labels still to make.
@@ -1640,6 +1814,19 @@ pub fn harvest_plan(
     search_mem: &mut SolveMem,
     label_mem: &mut SolveMem,
 ) -> (DecisionPlan, Vec<Reached>) {
+    if job.siblings {
+        return sibling_plan(
+            job,
+            j,
+            starts,
+            leaf,
+            source,
+            driver,
+            label_tt_mb,
+            search_mem,
+            label_mem,
+        );
+    }
     let k = job.trick;
     let t0 = Instant::now();
     let (d, cands, m, mut rng) = harvest_root(job, j, starts, source);
@@ -1756,6 +1943,7 @@ pub fn harvest_plan(
                     Driver::Exact => Some((r.value, r.nodes)),
                     Driver::Net(_) => None,
                 },
+                sib: None,
             }
         })
         .collect();
@@ -1781,6 +1969,206 @@ pub fn harvest_plan(
         sample: samples,
         row_groups,
         reached_groups,
+        family,
+        search_time: t0.elapsed(),
+    };
+    (plan, list)
+}
+
+/// A choice point's mover team, legal actions and the index of the search's best.
+type Choice = (u8, Vec<Action>, usize);
+
+/// Sibling decision `j` ([`Source::Siblings`]; owner, 2026-10-19, "fix E": train on what a
+/// decision needs, decision-focused learning, Elmachtoub & Grigas's "Smart Predict-then-Optimize",
+/// with a pairwise ranking loss, RankNet, Burges et al. 2005): the frontier positions that one
+/// choice point's cards lead to, grouped, every one labelled exactly.
+///
+/// **The walk.** The decision is a harvest decision ([`harvest_root`]: the yardstick's generator
+/// at a trick of `job.tricks`, the decider's position by `job.schedule`, a world drawn from the
+/// decider's belief), searched in that world as the hybrid H_k searches it: the solver's max^n with
+/// the frontier at the start of trick `k` valued as `driver` says (the run's network, or exact
+/// values). From the decision, every seat still to play in the trick is a choice point in turn,
+/// along the line the search itself expects (each seat's card the best for its own team by those
+/// values, the solver's tie rule: the first strictly best card in increasing card index). At
+/// each choice point, every legal card of the seat to play is followed to the frontier by the same
+/// rule ("its principal line": every later card the best for its seat's team): the card's
+/// frontier position. A choice point gives a **group**: its cards' frontier positions, distinct by
+/// canonical form, with the seat's team as the **mover**; a group of fewer than two positions (one
+/// card, or every card leading to one position, or lines on which the game ends before the
+/// frontier) gives none. At most `job.cap` groups a decision, in walk order.
+///
+/// **Why this rule.** When the hybrid decides, it compares its cards by the value at the end of
+/// each card's principal line, the network's value of that frontier position (max^n backs a
+/// leaf's vector up unchanged); every later seat in the trick decides the same way, for its own
+/// team. A decision goes wrong when the network ranks those positions differently from their exact
+/// values, even when each value is close. So the groups are exactly the positions the search
+/// compares, and the pairwise loss teaches the network their order for the team that chooses.
+/// With the network as driver the lines are the ones H_k really plays (the label is still exact);
+/// with exact values (`Driver::Exact`) they are exact best responses.
+///
+/// A pure function of (seed, trick, `j`), the job's settings and the driver, as [`harvest_plan`].
+#[allow(clippy::too_many_arguments)]
+pub fn sibling_plan(
+    job: &HarvestJob,
+    j: u64,
+    starts: &[Vec<HandStartState>; 4],
+    leaf: &SharedLeaf,
+    source: &dyn WorldSource,
+    driver: Driver<'_>,
+    label_tt_mb: usize,
+    search_mem: &mut SolveMem,
+    label_mem: &mut SolveMem,
+) -> (DecisionPlan, Vec<Reached>) {
+    let k = job.trick;
+    let t0 = Instant::now();
+    let (d, cands, m, _rng) = harvest_root(job, j, starts, source);
+    let (t, st, pos) = (d.trick, usize::from(d.stratum - 1), usize::from(d.position));
+    let family = SolveFamily::of_match(&m);
+    let mut lm = std::mem::take(label_mem);
+    match family {
+        Some(f) => lm.share(f),
+        None => lm.unshare(),
+    }
+    let rec = Recorder {
+        leaf,
+        opts: label_opts(label_tt_mb),
+        driver,
+        state: Mutex::new(RecState {
+            mem: lm,
+            seen: BTreeMap::new(),
+            list: Vec::new(),
+            evals: 0,
+        }),
+    };
+    let ctx = Ctx {
+        leaf,
+        source,
+        rules: Rules::HOUSE,
+    };
+    let cfg = SearchConfig {
+        tt_mb: HARVEST_TT_MB,
+        ..SearchConfig::default()
+    };
+    let mut run = WorldSolve::default();
+    let h = m.hand_index();
+    let over = |x: &Match| x.phase() == Phase::MatchOver || x.hand_index() != h;
+    let at_frontier = |x: &Match| {
+        let p = x.public();
+        p.trick_no == k && p.trick_cards.is_empty() && matches!(x.phase(), Phase::AwaitPlay(_))
+    };
+    // The search's value of every legal card of the seat to play at `x` (absolute team order),
+    // and the index of the best for its team (the first strictly best, in the order of
+    // `legal_actions`: increasing card index).
+    let mut choose = |x: &Match| -> Choice {
+        let seat = x.to_act().expect("someone acts before the frontier");
+        let legal = x.legal_actions();
+        let cs: Vec<Candidate> = legal.iter().map(|&a| (a, None)).collect();
+        let vals = exact_world(
+            x,
+            &cs,
+            &ctx,
+            &cfg,
+            None,
+            search_mem,
+            &mut run,
+            Some(FrontierCut::new(k, &rec)),
+        )
+        .expect("nothing stops a sibling search");
+        let team = usize::from(team_of(seat));
+        let mut best = 0;
+        for (i, v) in vals.iter().enumerate() {
+            if v.0[team] > vals[best].0[team] {
+                best = i;
+            }
+        }
+        (team_of(seat), legal, best)
+    };
+    // The frontier position at the end of `x`'s principal line, `None` when the hand (or the
+    // game) ends first.
+    let line_end = |mut x: Match, choose: &mut dyn FnMut(&Match) -> Choice| {
+        loop {
+            if over(&x) {
+                return None;
+            }
+            if at_frontier(&x) {
+                return Some(x);
+            }
+            let (_, legal, best) = choose(&x);
+            x.apply(legal[best]).expect("legal");
+        }
+    };
+    let mut groups: Vec<Vec<(Position, MatchCtx, CanonPos)>> = Vec::new();
+    let mut movers: Vec<u8> = Vec::new();
+    let mut cur = m.clone();
+    while !over(&cur) && !at_frontier(&cur) && groups.len() < job.cap as usize {
+        let (team, legal, best) = choose(&cur);
+        let mut members: Vec<(Position, MatchCtx, CanonPos)> = Vec::new();
+        for &a in &legal {
+            let mut child = cur.clone();
+            child.apply(a).expect("legal");
+            let Some(f) = line_end(child, &mut choose) else {
+                continue;
+            };
+            let (p, c, pending) = from_match(&f).expect("a play is awaited at the frontier");
+            debug_assert!(pending.is_none(), "no rob after trick 1");
+            if p.turned != 0 {
+                continue; // never shown to a network (searched exactly by the hybrid)
+            }
+            let canon = canonical(&p);
+            if !members.iter().any(|(_, _, x)| *x == canon) {
+                members.push((p, c, canon));
+            }
+        }
+        if members.len() >= 2 {
+            groups.push(members);
+            movers.push(team);
+        }
+        cur.apply(legal[best]).expect("legal");
+    }
+    let RecState {
+        mem: lm,
+        seen,
+        list,
+        evals,
+    } = rec.state.into_inner().unwrap_or_else(|e| e.into_inner());
+    *label_mem = lm;
+    let mut sample = Vec::new();
+    for (g, (members, &mover)) in groups.iter().zip(&movers).enumerate() {
+        for (p, c, canon) in members {
+            // With exact values at the frontier the search already solved it.
+            let exact = match driver {
+                Driver::Exact => seen.get(canon).map(|&i| (list[i].value, list[i].nodes)),
+                Driver::Net(_) => None,
+            };
+            sample.push(Sampled {
+                pos: *p,
+                ctx: *c,
+                exact,
+                sib: Some(SibTag {
+                    decision: j,
+                    group: g as u32,
+                    mover,
+                }),
+            });
+        }
+    }
+    let plan = DecisionPlan {
+        info: HarvestDecision {
+            id: j,
+            trick: t,
+            position: pos as u8 + 1,
+            stratum: st as u8 + 1,
+            cands: cands.len(),
+            evals,
+            distinct: list.len() as u32,
+            rows: sample.len() as u32,
+            search_nodes: run.stats.nodes,
+            race_distinct: 0,
+            keep_distinct: 0,
+        },
+        sample,
+        row_groups: Vec::new(),
+        reached_groups: Vec::new(),
         family,
         search_time: t0.elapsed(),
     };
@@ -1819,10 +2207,20 @@ pub fn label_item_by(
         .iter()
         .enumerate()
         .map(|(p, s)| {
-            let key = (item.seed, SOURCE_HARVEST, j, first + p as u64);
+            let source = if s.sib.is_some() {
+                SOURCE_SIBLINGS
+            } else {
+                SOURCE_HARVEST
+            };
+            let key = (item.seed, source, j, first + p as u64);
             let (value, l) = label_value(labeller, key, &s.pos, s.ctx, s.exact, leaf, opts, mem);
-            let row = labelled_row_by(&s.pos, &s.ctx, value, SOURCE_HARVEST, leaf, l.hybrid);
+            let (row, r) = labelled_row_rot(&s.pos, &s.ctx, value, source, leaf, l.hybrid);
             let class = row.race_class();
+            // The mover as an index into the row's own (rotated) value order.
+            let sib = s.sib.map(|t| SibTag {
+                mover: (t.mover + r) % 4,
+                ..t
+            });
             (
                 row,
                 RowInfo {
@@ -1830,6 +2228,8 @@ pub fn label_item_by(
                     class,
                     hybrid: l.hybrid,
                     evals: l.evals,
+                    leaves: l.leaves,
+                    sib,
                     ..item.base
                 },
             )
@@ -1951,6 +2351,11 @@ fn check_harvest_job(job: &HarvestJob) {
     assert!(
         job.race.is_none() || job.keep.is_none(),
         "a harvest keeps race classes or a predicate file's groups, not both"
+    );
+    assert!(
+        !job.siblings || (job.race.is_none() && job.keep.is_none() && job.cap >= 1),
+        "a sibling run keeps its groups (at least 1 a decision), not race classes or a \
+         predicate file's groups"
     );
     if let Some(k) = &job.keep {
         assert!(
@@ -2281,6 +2686,8 @@ pub fn write_harvest_shard_by<W: Write + Send>(
     let mut counts = RowCounts::default();
     let mut decisions = Vec::new();
     let mut groups = job.keep.as_ref().map(|k| GroupTally::new(k.preds.len()));
+    // A sibling run's row facts in row order, for its groups sidecar.
+    let mut sib_infos: Vec<RowInfo> = Vec::new();
     let mut times = (Duration::ZERO, Duration::ZERO);
     let fill = |sink: &mut ShardSink| {
         times = run_harvest(
@@ -2312,6 +2719,9 @@ pub fn write_harvest_shard_by<W: Write + Send>(
                 for i in &infos {
                     counts.add(i);
                 }
+                if job.siblings {
+                    sib_infos.extend_from_slice(&infos);
+                }
                 sink.put(bytes)
             },
         )?;
@@ -2328,6 +2738,11 @@ pub fn write_harvest_shard_by<W: Write + Send>(
         ));
     }
     let (search_time, label_time) = times;
+    let siblings = if job.siblings {
+        Some(sibling_group_rows(&sib_infos)?)
+    } else {
+        None
+    };
     Ok(ShardSummary {
         rows,
         sha256,
@@ -2338,6 +2753,7 @@ pub fn write_harvest_shard_by<W: Write + Send>(
         search_time,
         label_time,
         groups,
+        siblings,
     })
 }
 
@@ -2484,6 +2900,7 @@ mod tests {
             strata: HARVEST_STRATA.to_vec(),
             race: None,
             keep: None,
+            siblings: false,
         }
     }
 
@@ -2736,6 +3153,137 @@ mod tests {
                 .0
                 .is_empty()
         );
+    }
+
+    /// Sibling rows ([`sibling_plan`]): whole groups of at least two distinct positions (the
+    /// last may be cut by the row count), consecutive, tagged `SOURCE_SIBLINGS`; the same bytes
+    /// and groups for any thread count, through the streamed writer too; a pure function of
+    /// (seed, row index): a shorter run is a prefix of a longer one; and with exact values at the
+    /// frontier each group is the choice point's cards valued exactly: the mover's best card's
+    /// position is the one its principal line ends in.
+    #[test]
+    fn sibling_rows_are_whole_groups_and_deterministic() {
+        let starts = collect_starts(400, 9);
+        let l = leaf();
+        let job = |threads, count| HarvestJob {
+            count,
+            threads,
+            siblings: true,
+            ..harvest_job(4, vec![3], [1; 8], 16)
+        };
+        let (a, da) = harvest_rows(&job(1, 90), &starts, &*l, Driver::Exact, None);
+        let (b, db) = harvest_rows(&job(3, 90), &starts, &*l, Driver::Exact, None);
+        let (short, _) = harvest_rows(&job(2, 41), &starts, &*l, Driver::Exact, None);
+        assert_eq!(a.len(), 90);
+        let ra: Vec<Row> = a.iter().map(|x| x.0.clone()).collect();
+        let rb: Vec<Row> = b.iter().map(|x| x.0.clone()).collect();
+        assert_eq!(ra, rb);
+        let facts = |d: &[HarvestDecision]| serde_json::to_string(d).expect("json");
+        assert_eq!(facts(&da), facts(&db));
+        let ga = sibling_group_rows(a.iter().map(|x| &x.1)).expect("groups");
+        let gb = sibling_group_rows(b.iter().map(|x| &x.1)).expect("groups");
+        assert_eq!(ga, gb);
+        nn::groups::check(&ga).expect("valid groups");
+        // Pure in (seed, index): the first 41 rows and their groups are the same.
+        let rs: Vec<Row> = short.iter().map(|x| x.0.clone()).collect();
+        assert_eq!(rs[..], ra[..41]);
+        let gs = sibling_group_rows(short.iter().map(|x| &x.1)).expect("groups");
+        assert_eq!(gs[..], ga[..41]);
+        assert!(
+            ra.iter()
+                .all(|r| r.source == SOURCE_SIBLINGS && r.trick == 4)
+        );
+        // Whole groups of two or more (the last may be cut), each one decision's.
+        let sm = nn::groups::summary(&ga);
+        assert!(sm.groups >= 10, "{sm:?}");
+        let last = ga.last().expect("rows").group;
+        for g in 0..last {
+            let n = ga.iter().filter(|r| r.group == g).count();
+            assert!(n >= 2, "group {g} has {n} rows");
+        }
+        for w in a.windows(2) {
+            let (x, y) = (w[0].1.sib.expect("tag"), w[1].1.sib.expect("tag"));
+            assert!((x.decision, x.group) <= (y.decision, y.group));
+        }
+        // The mover's index names the same team in every row of a group: its money chance by the
+        // row's own value, the exact value of the position (labels are exact).
+        assert!(ga.iter().all(|r| r.mover < 4));
+        // The streamed writer gives the same bytes and groups.
+        let mut out = Vec::new();
+        let sum = write_harvest_shard(&job(2, 90), &starts, &*l, Driver::Exact, None, &mut out)
+            .expect("written");
+        assert_eq!(out, nn::shard::to_npy(&ra, nn::outcome::vocab(4)));
+        assert_eq!(sum.siblings, Some(ga.clone()));
+        // The decisions again by hand: a decision whose cards all lead to distinct frontier
+        // positions has them as its first group (its decider's choice point); with exact values
+        // the mover's best among them is the decision's exact best, the top of its group.
+        let src = BeliefSource::new();
+        let mut checked = 0;
+        for d in &da {
+            let (_, cands, m, _) = harvest_root(&job(1, 90), d.id, &starts, &src);
+            let first: Vec<&(Row, RowInfo)> = a
+                .iter()
+                .filter(|x| x.1.sib.is_some_and(|t| t.decision == d.id && t.group == 0))
+                .collect();
+            if cands.len() < 2 || first.len() != cands.len() {
+                continue;
+            }
+            let ctx = Ctx {
+                leaf: &*l,
+                source: &src,
+                rules: Rules::HOUSE,
+            };
+            let vals = exact_world(
+                &m,
+                &cands,
+                &ctx,
+                &SearchConfig::default(),
+                None,
+                &mut SolveMem::new(),
+                &mut WorldSolve::default(),
+                None,
+            )
+            .expect("solved");
+            let team = usize::from(team_of(m.to_act().expect("acts")));
+            let mut want: Vec<u64> = vals.iter().map(|v| v.0[team]).collect();
+            let mut got: Vec<u64> = first
+                .iter()
+                .map(|x| x.0.value.0[usize::from(x.1.sib.expect("tag").mover)])
+                .collect();
+            want.sort_unstable();
+            got.sort_unstable();
+            assert_eq!(
+                got, want,
+                "decision {}: the group is the cards' exact values",
+                d.id
+            );
+            checked += 1;
+        }
+        assert!(checked >= 2, "only {checked} decisions checked");
+    }
+
+    #[test]
+    fn sibling_group_rows_number_groups_in_row_order() {
+        let info = |decision, group, mover| RowInfo {
+            stratum: 1,
+            sib: Some(SibTag {
+                decision,
+                group,
+                mover,
+            }),
+            ..RowInfo::default()
+        };
+        let rows = [
+            info(0, 0, 1),
+            info(0, 0, 3),
+            info(0, 1, 2),
+            info(2, 0, 0),
+            info(2, 0, 0),
+        ];
+        let g = sibling_group_rows(&rows).expect("groups");
+        let got: Vec<(u32, u8)> = g.iter().map(|r| (r.group, r.mover)).collect();
+        assert_eq!(got, [(0, 1), (0, 3), (1, 2), (2, 0), (2, 0)]);
+        assert!(sibling_group_rows(&[RowInfo::default()]).is_err());
     }
 
     fn counts_of(rows: &[(Row, RowInfo)]) -> RowCounts {
@@ -3230,6 +3778,7 @@ mod tests {
         for other in [0u32, 2] {
             let job = HarvestJob {
                 keep: Some(keep.clone()),
+                siblings: false,
                 cap: other,
                 ..base.clone()
             };
@@ -3711,6 +4260,7 @@ mod tests {
                 "trick 4, targeted",
                 HarvestJob {
                     keep: Some(keep.clone()),
+                    siblings: false,
                     cap: 1,
                     ..base(4, 1, 30)
                 },
@@ -3721,6 +4271,7 @@ mod tests {
                 "trick 4, targeted, network",
                 HarvestJob {
                     keep: Some(keep.clone()),
+                    siblings: false,
                     cap: 1,
                     ..base(4, 1, 30)
                 },
@@ -3731,6 +4282,7 @@ mod tests {
                 "trick 3, targeted, network",
                 HarvestJob {
                     keep: Some(keep.clone()),
+                    siblings: false,
                     cap: 1,
                     schedule: position_schedule(parse_band_shares("0,0,1").expect("shares")),
                     ..base(3, 1, 8)
@@ -3971,6 +4523,7 @@ mod tests {
             let hy = Labeller::Hybrid(HybridLabels {
                 net: &net,
                 exact_ppm: 0,
+                exact_leaves: None,
             });
             let job = |threads| LabelJob {
                 trick,
@@ -4040,6 +4593,132 @@ mod tests {
         }
     }
 
+    /// Hybrid labels with exact leaves (`HybridLabels::exact_leaves`, `search labels
+    /// --exact-leaves`): `all` gives the exact labels byte for byte (random-play, rules-v1 and
+    /// harvested shards: every frontier position solved exactly is exact search); a race policy
+    /// gives H_{k+1} with exactly those leaves solved (the naive solver through the same
+    /// policy), byte-identical over thread counts and chunk sizes with the same leaf counts; a
+    /// policy that picks nothing is the plain hybrid; the values version names the policy.
+    #[test]
+    fn hybrid_labels_with_exact_leaves() {
+        let starts = collect_starts(400, 9);
+        let l = leaf();
+        for (trick, source, count) in [(4, Source::Random, 16), (3, Source::Rules, 8)] {
+            let net = random_oracle(trick + 1, 61 + u64::from(trick));
+            let job = |threads| LabelJob {
+                trick,
+                count,
+                seed: 31,
+                source,
+                threads,
+            };
+            fn with<'a>(net: &'a nn::Oracle, p: Option<&'a LeafPolicy>) -> Labeller<'a> {
+                Labeller::Hybrid(HybridLabels {
+                    net,
+                    exact_ppm: 0,
+                    exact_leaves: p,
+                })
+            }
+            let hy = |p| with(&net, p);
+            let shard = |labeller, threads, chunk| {
+                let mut out = Vec::new();
+                let sum = write_label_shard_by(
+                    &job(threads),
+                    LabelExec::for_trick(trick),
+                    &starts,
+                    &*l,
+                    labeller,
+                    None,
+                    chunk,
+                    &mut out,
+                )
+                .expect("written");
+                (out, sum)
+            };
+            // Every leaf exact: the exact shard.
+            let (exact, _) = shard(Labeller::Exact, 2, 3);
+            let all = LeafPolicy::all(8);
+            let (h_all, s_all) = shard(hy(Some(&all)), 3, 5);
+            assert!(
+                exact == h_all,
+                "trick {trick}: every leaf exact is exact search"
+            );
+            assert_eq!(s_all.counts.hybrid, count);
+            assert_eq!(s_all.counts.leaves.exact, s_all.counts.leaves.distinct);
+            assert!(s_all.counts.leaves.distinct > 0 && s_all.counts.leaves.nodes > 0);
+            // Nothing picked: the plain hybrid, byte for byte.
+            let nothing = LeafPolicy::race(0, 8);
+            let (plain, _) = shard(hy(None), 2, 3);
+            let (h_nothing, s_nothing) = shard(hy(Some(&nothing)), 1, 1);
+            assert!(plain == h_nothing, "trick {trick}");
+            assert_eq!(s_nothing.counts.leaves.exact, 0);
+            assert!(plain != exact, "a random network is not the exact solver");
+            // Race classes 1-4: H_{k+1} with those leaves solved, as the naive solver gets it.
+            let race = LeafPolicy::race(0b11110, 8);
+            let rows = label_rows_by(&job(1), &starts, &*l, hy(Some(&race)), None);
+            for (i, (row, info)) in rows.iter().enumerate() {
+                let (pos, ctx, _) = row_position(&job(1), i as u64, &starts, &BeliefSource::new());
+                let x = ExactLeaves::new(&net, &*l, &race, team_of(pos.leader), None);
+                let h = naive_hybrid(&pos, ctx, &x);
+                let r = nn::encode::rotation(&canonical(&pos));
+                assert_eq!(row.value, h.rotate(r % 4), "trick {trick} row {i}");
+                assert!(info.hybrid && info.leaves.exact <= info.leaves.distinct);
+            }
+            let (a, sa) = shard(hy(Some(&race)), 1, 1);
+            let (b, sb) = shard(hy(Some(&race)), 3, 5);
+            let want = nn::shard::to_npy(
+                &rows.iter().map(|r| r.0.clone()).collect::<Vec<_>>(),
+                nn::outcome::vocab(trick),
+            );
+            assert!(a == want && b == want, "trick {trick}");
+            assert_eq!(identity(&sa), identity(&sb));
+            assert_eq!(sa.counts.leaves, sb.counts.leaves);
+        }
+        // A harvest with every leaf exact: the exact harvest, byte for byte.
+        let net5 = random_oracle(5, 67);
+        let all = LeafPolicy::all(8);
+        let job = |threads| HarvestJob {
+            count: 24,
+            threads,
+            ..harvest_job(4, vec![3], parse_band_shares("0.4,0.4,0.2").expect("s"), 4)
+        };
+        let harvest = |labeller, threads| {
+            let mut out = Vec::new();
+            write_harvest_shard_by(
+                &job(threads),
+                LabelExec::for_trick(4),
+                None,
+                &starts,
+                &*l,
+                Driver::Exact,
+                labeller,
+                None,
+                &mut out,
+            )
+            .expect("written");
+            out
+        };
+        let hy_all = Labeller::Hybrid(HybridLabels {
+            net: &net5,
+            exact_ppm: 0,
+            exact_leaves: Some(&all),
+        });
+        assert!(harvest(Labeller::Exact, 2) == harvest(hy_all, 3));
+        // The values version names the network, the policy and a learned model.
+        let v = crate::measure::VALUES_VERSION;
+        let sha = "a".repeat(64);
+        assert_eq!(
+            hybrid_values_version(2, &sha, None),
+            format!("{v}+O3:{sha}")
+        );
+        let race = LeafPolicy::parse("race:4,1", 8).expect("ok").expect("some");
+        assert_eq!(
+            hybrid_values_version(2, &sha, Some(&race)),
+            format!("{v}+O3:{sha}+exact:race:1,4")
+        );
+        assert_eq!(LeafPolicy::parse("none", 8), Ok(None));
+    }
+
     /// The nearest outcome is the exact rule's label for every exact value, so an exact row's
     /// label never depends on which rule made it.
     #[test]
@@ -4092,6 +4771,7 @@ mod tests {
                 Labeller::Hybrid(HybridLabels {
                     net: &net,
                     exact_ppm: ppm,
+                    exact_leaves: None,
                 }),
                 None,
             )
@@ -4144,6 +4824,7 @@ mod tests {
             Labeller::Hybrid(HybridLabels {
                 net: &net5,
                 exact_ppm: ppm,
+                exact_leaves: None,
             })
         };
         let exec = LabelExec::for_trick(4);

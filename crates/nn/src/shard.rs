@@ -11,7 +11,7 @@
 //! - `value`: the target, the exact solver's money chance of the position in the encoder's
 //!   rotated team order (four u64 in units of 2^-32, summing to exactly 2^32);
 //! - `source`: where the position came from ([`SOURCE_RANDOM`], [`SOURCE_RULES`],
-//!   [`SOURCE_HARVEST`]);
+//!   [`SOURCE_HARVEST`], [`SOURCE_SIBLINGS`]);
 //! - `trick`: the trick whose start the position is (2..=5);
 //! - `label`, `mask`, `outcomes`: the outcome head's target (spec §6a, `crate::outcome`): the
 //!   label (first possible outcome whose money vector equals `value`), the possible outcomes
@@ -31,6 +31,10 @@ pub const SOURCE_RANDOM: u8 = 1;
 pub const SOURCE_RULES: u8 = 2;
 /// Frontier positions harvested from the hybrid's own searches (second round of a rung).
 pub const SOURCE_HARVEST: u8 = 3;
+/// Frontier positions in sibling groups: the positions one choice point separates, each choice
+/// played on by a fixed rule to the frontier (`search labels --source siblings`; the groups are in
+/// the sidecar `NAME.npy.groups`, [`crate::groups`]).
+pub const SOURCE_SIBLINGS: u8 = 4;
 /// Synthetic positions for tests (`nn-tool fixture`).
 pub const SOURCE_FIXTURE: u8 = 9;
 

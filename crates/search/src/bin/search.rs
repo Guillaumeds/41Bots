@@ -45,7 +45,8 @@
 //!                  [--harvest-keep PRED.json [--keep-cap 256]] [--max-decisions N]
 //!                  [--harvest-schedule pooled|decision]
 //!                  [--seat-weights 2,1,1]
-//!                  [--label-net WEIGHTS [--exact-share 0.1]]
+//!                  [--label-net WEIGHTS [--exact-share 0.1] [--exact-leaves SPEC
+//!                   [--exact-leaf-tt-mb N]]]
 //! search student-check --net STUDENT.safetensors --teacher SHARD.npy [--teacher …] --equity TABLE
 //!                  [--allow-stamp KEY …] [--boot 1000] [--boot-seed 1] [--json OUT]
 //!                  [--baseline rules] [--baseline random] [--split-half] [--top-k 2,3]
@@ -66,7 +67,45 @@
 //!                  [--verify-solve-threads 1] [--verify-tt-mb M] [--threads T] [--tt-mb 64]
 //!                  [--boot 1000] [--boot-seed 1] [--json OUT] [--progress FILE] [--plan-only]
 //!                  [--slices PRED.json [--slice-share 0.5]] [--standard 0.01]
+//! search hybrid-check … --net A,B,… (or --net A --net B …: an ensemble, golden-set form only)
+//! search hybrid-check … --truth net --noise-sd-by-class P0,P1,P2,P3,P4 [--noise-seed 1]
+//!                  [--noise-calibrate N [--noise-calibrate-worlds 8] [--noise-calibrate-rounds 4]]
+//! search hybrid-check … --exact-leaves none|all|race:4|race:2,4|race:1-4[+band:LO-HI]
+//!                  [+learned:MODEL.json:t=T|t=inf|budget=S]
+//!                  [--exact-leaf-tt-mb (64 at --cut 3)]
+//! search hybrid-paired --a A.json --b B.json [--a-name A] [--b-name B] [--boot 1000]
+//!                  [--boot-seed 1] [--json OUT]
 //! ```
+//! **Exact leaves** (`search::exact_leaves`, docs/m3-hybrid/rung2.md "Exact leaves (G)"):
+//! `--exact-leaves` solves the hybrid's frontier positions the policy picks exactly (the labels'
+//! exact solver and tie rule) instead of valuing them with the network: `race:LIST` every leaf of
+//! those race classes, `band:LO-HI` every leaf the network gives the decider's team LO% to HI%,
+//! `all` every leaf, joined by `+`; `none` (the default) is the hybrid as before, byte for byte.
+//! The report adds, per race class, the distinct leaves a world and the share solved exactly, the
+//! leaf solves' nodes and thread time a world, and the hybrid's thread time a world with and
+//! without them (JSON `exact_leaves`); `values.hybrid` ends `+exact:<policy>`. Golden-set form
+//! only (not `--saved`, `--explain` or `--truth net`). `hybrid-paired` also prints both checks'
+//! thread time a world.
+//! **Ensembles** (`nn::ensemble`): `--net` takes several networks of the cut's trick, comma-separated
+//! or repeated; the leaf value is the integer mean of their money chances (u128 totals per team,
+//! largest-remainder rounding to exactly 2^32, ties to the lower team), each member valuing its
+//! batches with its own kernel. One network is exactly that network (the same values and report);
+//! an ensemble's JSON adds `ensemble` (its id `ens<N>:<sha>+…` and the members) and names it in
+//! `values.hybrid`. Not with `--saved` or `--explain`.
+//! **The optimizer's-curse test** (`search::curse`): `--truth net` takes the network itself as
+//! the truth (H_K with its noise-free values, recomputed; no `--worlds`, `--reference`,
+//! `--saved`, `--explain`) and the player is the same search with seeded zero-mean noise on each
+//! leaf's money vector, SD `--noise-sd-by-class` (five percentages of money chance, race classes
+//! 0-4) keyed by (`--noise-seed`, decision, world, position); the report adds the noise asked for
+//! and realised per race class (JSON `noise`); `--noise-calibrate N` first rescales the SDs asked
+//! for on a sample of N decisions (every k-th; `--noise-calibrate-worlds` worlds, 8;
+//! `--noise-calibrate-rounds` rounds, 4) so the realised SD per class matches the SDs given,
+//! which become the targets (JSON `noise_calibration`); the tables are the usual ones (decision loss
+//! by band and position, every team's bias per position). With zero noise the loss and every bias
+//! are exactly 0.
+//! `hybrid-paired` compares two checks' JSONs on the same decisions (`search::hybrid::paired`):
+//! mean decision loss and own-team bias, overall, by band, seat 1 and seat 2, for A and B, B − A
+//! and its bootstrap 95% interval (decisions resampled within each group, the same for both).
 //! `teacher --trick` writes the student's teacher records (docs/STUDENT.md §3–§4,
 //! `search::student_teacher`): decisions `--first`..`--first + --count` at trick 1 or 2 from
 //! `--source` (stratum `i mod 4 + 1`, place `(i div 4) mod 8`), each valued by PIMC over deals
@@ -164,6 +203,19 @@
 //! Without it every row is exact, byte for byte as before, and the sidecar says
 //! `label_source` `exact`. The runner never asks for hybrid labels on a validation, audit or
 //! golden set.
+//! `--exact-leaves SPEC` (with `--label-net` only; the syntax of `hybrid-check --exact-leaves`:
+//! `race:LIST`, `band:LO-HI`, `learned:MODEL:t=T|budget=S`, `all`, `none`, joined by `+`) solves
+//! the hybrid's trick-(K+1) frontier positions the policy picks exactly
+//! (`search::exact_leaves::ExactLeaves`, the wrapper `hybrid-check` uses) and values the others
+//! with the network; a band reads the money chance of the team to lead the labelled position; a
+//! learned model must be one made for trick K+1 leaves of this network. `none` (the default) is
+//! the hybrid labels as before, byte for byte; `all` gives the exact labels' values. Each leaf
+//! solve has a table of `--exact-leaf-tt-mb` (default the smaller of `--tt-mb` and the trick
+//! K+1 table; never changes a value). The sidecar then records `label_exact_leaves` (the
+//! policy's normal form), `label_leafrisk_sha256` (a learned term's model), `exact_leaves`
+//! (leaves seen and solved exactly, their nodes) and a values version
+//! `"<exact>+O<K+1>:<sha256>+exact:<policy>[+leafrisk:<model sha256>]"`
+//! (`oracle_labels::hybrid_values_version`).
 //! `hybrid-check` measures the hybrid H_K (exact to the start of trick K, the oracle network
 //! there) against exact search on the same worlds (docs/M3-HYBRID-SPEC.md §3, `search::hybrid`):
 //! decision loss with its bootstrap 95% upper bound, value error and agreement, overall, per
@@ -363,9 +415,10 @@ fn main() -> ExitCode {
         Some("robber-burn") => robber_burn(&a),
         Some("labels") => labels_cmd(&a),
         Some("hybrid-check") => hybrid_check(&a),
+        Some("hybrid-paired") => hybrid_paired(&a),
         Some("student-check") => student_check(&a),
         _ => Err(
-            "usage: search decisions|worlds|agree|curves|score|teacher|bench-t1|robber-burn|labels|hybrid-check|student-check … (see the source docs)"
+            "usage: search decisions|worlds|agree|curves|score|teacher|bench-t1|robber-burn|labels|hybrid-check|hybrid-paired|student-check … (see the source docs)"
                 .into(),
         ),
     };
@@ -2105,7 +2158,24 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         Some(w) if job.source == Source::Harvest => Some((w.to_string(), parse_seat_weights(w)?)),
         _ => None,
     };
-    let harvest = if job.source == Source::Harvest {
+    let siblings = job.source == Source::Siblings;
+    if siblings {
+        // A sibling run keeps its groups: the other harvests' selections do not apply.
+        for f in [
+            "--harvest-keep",
+            "--keep-cap",
+            "--harvest-race-classes",
+            "--harvest-race-cap",
+            "--seat-weights",
+        ] {
+            if a.has(f) {
+                return Err(format!(
+                    "{f} is not for --source siblings (its rows are whole groups)"
+                ));
+            }
+        }
+    }
+    let harvest = if matches!(job.source, Source::Harvest | Source::Siblings) {
         let keep = match a.get("--harvest-keep") {
             None => {
                 if a.has("--keep-cap") {
@@ -2231,6 +2301,7 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
                 strata,
                 race,
                 keep: keep.as_ref().map(|(k, _)| k.clone()),
+                siblings,
             },
             shares.to_string(),
             weights,
@@ -2239,7 +2310,7 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         ))
     } else {
         if let Some(f) = harvest_flags.iter().find(|f| a.has(f)) {
-            return Err(format!("{f} is for --source harvest only"));
+            return Err(format!("{f} is for --source harvest (or siblings) only"));
         }
         None
     };
@@ -2306,10 +2377,6 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         }
         Some(x) => parse_exact_share(x).map_err(|e| format!("--exact-share {e}"))?,
     };
-    let labeller = match &label_net {
-        Some((o, _)) => Labeller::Hybrid(HybridLabels { net: o, exact_ppm }),
-        None => Labeller::Exact,
-    };
     // How the run is carried out (never changes a row): the exact label solves' table
     // (`--tt-mb`, the runner lowers it to fit the machine's memory) and how a harvest's work is
     // shared out over the threads (`--harvest-schedule`: `pooled`, the default, or `decision`,
@@ -2318,6 +2385,67 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
     exec.tt_mb = a.num("--tt-mb", tt_mb_for(trick) as u64)?.max(1) as usize;
     exec.schedule = HarvestSchedule::parse(a.get("--harvest-schedule").unwrap_or("pooled"))
         .map_err(|e| format!("--harvest-schedule: {e}"))?;
+    // Exact leaves of the hybrid labels (`--exact-leaves`, as `hybrid-check`'s): the frontier
+    // positions the policy picks are solved exactly; `none` (the default) is the hybrid as before.
+    let exact_leaves = match a.get("--exact-leaves") {
+        None => {
+            if a.has("--exact-leaf-tt-mb") {
+                return Err("--exact-leaf-tt-mb is for --exact-leaves".into());
+            }
+            None
+        }
+        Some(_) if label_net.is_none() => {
+            return Err(
+                "--exact-leaves picks the hybrid labels' frontier positions to solve exactly: \
+                 give --label-net (exact labels are exact everywhere)"
+                    .into(),
+            );
+        }
+        Some(text) => {
+            let leaf_tt = a.num(
+                "--exact-leaf-tt-mb",
+                exec.tt_mb.min(tt_mb_for(trick + 1)) as u64,
+            )? as usize;
+            search::exact_leaves::LeafPolicy::parse(text, leaf_tt)?
+        }
+    };
+    if let (Some(p), Some((o, _))) = (&exact_leaves, &label_net)
+        && let Some(l) = &p.learned
+    {
+        if l.model.trick != trick + 1 {
+            return Err(format!(
+                "--exact-leaves: the leaf-risk model {} was made for trick-{} leaves; hybrid \
+                 labels at trick {trick} have their leaves at the start of trick {}",
+                &l.model.sha256[..12],
+                l.model.trick,
+                trick + 1
+            ));
+        }
+        if !l.model.net_sha256.is_empty() && l.model.net_sha256 != o.sha256 {
+            return Err(format!(
+                "--exact-leaves: the leaf-risk model {} predicts the errors of network {}, not \
+                 of --label-net (sha256 {})",
+                &l.model.sha256[..12],
+                l.model.net_sha256,
+                o.sha256
+            ));
+        }
+    }
+    if let Some(p) = &exact_leaves {
+        eprintln!(
+            "labels: hybrid labels: exact leaves {} (leaf tables {} MB)",
+            p.describe(),
+            p.tt_mb
+        );
+    }
+    let labeller = match &label_net {
+        Some((o, _)) => Labeller::Hybrid(HybridLabels {
+            net: o,
+            exact_ppm,
+            exact_leaves: exact_leaves.as_ref(),
+        }),
+        None => Labeller::Exact,
+    };
     let start_hands = a.num("--start-hands", 20_000)?;
     let starts = collect_starts_with(start_hands, seed, job.threads);
     eprintln!(
@@ -2408,6 +2536,13 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
             }
             nn::rowweights::write(&out, &weights)?;
         }
+        // A sibling run's groups (`NAME.npy.groups`), in place before the shard is renamed.
+        if let Some(g) = &summary.siblings {
+            if g.len() as u64 != summary.rows {
+                return Err(format!("{} group rows for {} rows", g.len(), summary.rows));
+            }
+            nn::groups::write(&out, g)?;
+        }
         std::fs::rename(&part, &out).map_err(|e| format!("{}: {e}", out.display()))?;
         Ok::<_, String>(summary)
     })?;
@@ -2425,6 +2560,7 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         shard.label_time.as_secs_f64(),
     );
     let decisions = shard.decisions;
+    let sibling_groups = shard.siblings;
     let secs = t0.elapsed().as_secs_f64();
     let mut side = serde_json::json!({
         "format": "41bots-label-shard-v1",
@@ -2461,11 +2597,10 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
     // a hybrid one names its network, its values version and its rows by label.
     side["label_source"] = serde_json::json!(labeller.name());
     if let Some((o, p)) = &label_net {
-        side["values_version"] = serde_json::json!(format!(
-            "{}+O{}:{}",
-            search::measure::VALUES_VERSION,
-            trick + 1,
-            o.sha256
+        side["values_version"] = serde_json::json!(search::oracle_labels::hybrid_values_version(
+            trick,
+            &o.sha256,
+            exact_leaves.as_ref()
         ));
         side["label_net_sha256"] = serde_json::json!(o.sha256);
         side["label_net"] = serde_json::json!({
@@ -2484,6 +2619,36 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
             "the first possible outcome whose money vector is nearest the value (sum of absolute \
              differences); an exact value's own outcome"
         );
+        if let Some(pol) = &exact_leaves {
+            let l = c.leaves;
+            side["label_exact_leaves"] = serde_json::json!(pol.describe());
+            if let Some(m) = &pol.learned {
+                side["label_leafrisk_sha256"] = serde_json::json!(m.model.sha256);
+            }
+            side["exact_leaves"] = serde_json::json!({
+                "policy": pol.describe(),
+                "what": "the hybrid searches' frontier positions the policy picks are solved \
+                         exactly (search::exact_leaves, the labels' exact solver and tie rule) \
+                         instead of being valued by the network; counts are distinct leaves per \
+                         row's search, summed over the hybrid rows",
+                "leaf_tt_mb": pol.tt_mb,
+                "leaves": l.distinct,
+                "leaves_exact": l.exact,
+                "share_exact": if l.distinct > 0 { l.exact as f64 / l.distinct as f64 } else { 0.0 },
+                "leaf_nodes": l.nodes,
+                "learned": pol.learned.as_ref().map(|m| serde_json::json!({
+                    "model_sha256": m.model.sha256, "net_sha256": m.model.net_sha256,
+                    "trees": m.model.n_trees(), "t": m.t, "budget": m.budget,
+                })),
+            });
+            eprintln!(
+                "labels: exact leaves {}: {} of {} distinct leaves solved exactly ({} nodes)",
+                pol.describe(),
+                l.exact,
+                l.distinct,
+                l.nodes
+            );
+        }
         eprintln!(
             "labels: hybrid labels: {} rows by the hybrid ({} frontier evaluations), {} exact \
              (anchor share {exact_ppm} per million)",
@@ -2504,6 +2669,30 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
             "rowweights": path.file_name().map(|n| n.to_string_lossy().into_owned()),
             "rowweights_sha256": equity::sha256::sha256_hex(&bytes),
             "rows_by_position": &by_position[1..] });
+    }
+    if let Some(g) = &sibling_groups {
+        let path = nn::groups::path_for(&out);
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let sm = nn::groups::summary(g);
+        side["siblings"] = serde_json::json!({
+            "groups": sm.groups,
+            "groups_file": path.file_name().map(|n| n.to_string_lossy().into_owned()),
+            "groups_sha256": equity::sha256::sha256_hex(&bytes),
+            "groups_by_size": sm.by_size,
+            "sizes": format!("index = rows in the group (the last entry counts {} or more)",
+                             nn::groups::SIZES),
+            "max_groups_per_decision": harvest.as_ref().map(|(h, ..)| h.cap),
+            "what": "groups of frontier positions that one choice point separates                      (search::oracle_labels::sibling_plan): from each decision, every seat still                      to play in the trick is a choice point along the line the search expects;                      each legal card of that seat is followed to the start of the frontier trick                      along its principal line (every later card the best for its seat's team by                      the search's values: the network's at the frontier, or exact ones; the                      solver's tie rule), the distinct positions reached (canonical form) are the                      group, the seat's team the mover; groups of fewer than two positions are                      dropped; every position is labelled exactly",
+            "mover": "an index into each row's own (rotated) value order",
+            "last_group_cut": "the shard ends at the row count, so its last group may be cut",
+        });
+        eprintln!(
+            "labels: siblings: {} groups in {} rows (groups by size 0-{}+: {:?})",
+            sm.groups,
+            sm.rows,
+            nn::groups::SIZES,
+            sm.by_size
+        );
     }
     if let Some((h, shares, weights, keep_file, max)) = &harvest {
         // Rows written and decisions played: fewer rows than `count` only when the bound on
@@ -2528,6 +2717,12 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
             HARVEST_TT_MB,
             net.as_ref().map(|(o, p)| (o, p.as_str())),
         );
+        if h.siblings {
+            side["harvest"]["what"] = serde_json::json!(
+                "sibling groups from training decisions (see siblings): not a sample of the \
+                 reached positions; cap_per_decision is the most groups a decision gives"
+            );
+        }
         // The label solves (the search's own table is `search` above).
         side["harvest"]["label_solves"] = serde_json::json!({
             "table_mb": exec.tt_mb,
@@ -2578,6 +2773,11 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
                         .iter()
                         .filter(|d| h.keep.as_ref().is_some_and(|k| d.keep_distinct > k.cap))
                         .count()
+                ),
+                None if h.siblings => format!(
+                    "{} sibling rows a decision (at most {} groups a decision)",
+                    format_args!("{:.1}", n_rows as f64 / n),
+                    h.cap
                 ),
                 None => format!(
                     "{} decisions capped at {}",
@@ -2836,13 +3036,101 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
     let t0 = Instant::now();
     let (table, table_sha) = load_equity_sha(a.req("--equity")?)?;
     let leaf: Arc<SharedLeaf> = Arc::new(table);
-    let net_path = a.req("--net")?;
-    let oracle = nn::Oracle::load(Path::new(net_path), leaf.clone())?;
-    if oracle.trick != cut {
-        return Err(format!(
-            "{net_path} was trained for trick {} positions, not trick {cut}",
-            oracle.trick
-        ));
+    // One network, or several (`--net A,B` or `--net A --net B`): an ensemble valued as the
+    // integer mean of its members (`nn::ensemble`); one network is exactly that network.
+    let net_paths: Vec<String> = a
+        .all("--net")
+        .iter()
+        .flat_map(|v| v.split(','))
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    if net_paths.is_empty() {
+        return Err("missing --net".into());
+    }
+    let mut members = Vec::new();
+    for p in &net_paths {
+        let o = nn::Oracle::load(Path::new(p), leaf.clone())?;
+        if o.trick != cut {
+            return Err(format!(
+                "{p} was trained for trick {} positions, not trick {cut}",
+                o.trick
+            ));
+        }
+        members.push(o);
+    }
+    let ensemble = nn::Ensemble::new(members)?;
+    let oracle = &ensemble.members()[0];
+    let net_path = net_paths[0].as_str();
+    let n_nets = net_paths.len();
+    if n_nets > 1 && (a.has("--saved") || a.has("--explain")) {
+        return Err(
+            "several networks (an ensemble) are for the golden-set form of the check, not \
+             --saved or --explain"
+                .into(),
+        );
+    }
+    // The optimizer's-curse test (`search::curse`): the network itself as the truth, the player
+    // the same search with seeded zero-mean noise at each leaf.
+    let truth_net = match a.get("--truth").unwrap_or("exact") {
+        "exact" => false,
+        "net" => true,
+        t => return Err(format!("--truth {t}: exact or net")),
+    };
+    let noise = if truth_net {
+        for k in [
+            "--worlds",
+            "--reference",
+            "--saved",
+            "--explain",
+            "--recompute",
+        ] {
+            if a.has(k) {
+                return Err(format!(
+                    "{k} is not for --truth net (the truth is the network itself, recomputed)"
+                ));
+            }
+        }
+        let text = a
+            .get("--noise-sd-by-class")
+            .ok_or("--truth net needs --noise-sd-by-class (five percentages, race classes 0-4)")?;
+        Some(search::curse::NoiseSpec::parse(
+            text,
+            a.num("--noise-seed", 1)?,
+        )?)
+    } else {
+        if a.has("--noise-sd-by-class") || a.has("--noise-seed") {
+            return Err("--noise-sd-by-class and --noise-seed are for --truth net".into());
+        }
+        None
+    };
+    // Exact leaves (`search::exact_leaves`): the frontier positions the policy picks are solved
+    // exactly instead of being valued by the network; `none` (the default) is the hybrid as
+    // before, byte for byte.
+    let exact_leaves = match a.get("--exact-leaves") {
+        None => {
+            if a.has("--exact-leaf-tt-mb") {
+                return Err("--exact-leaf-tt-mb is for --exact-leaves".into());
+            }
+            None
+        }
+        Some(text) => search::exact_leaves::LeafPolicy::parse(
+            text,
+            a.num(
+                "--exact-leaf-tt-mb",
+                search::oracle_labels::tt_mb_for(cut) as u64,
+            )? as usize,
+        )?,
+    };
+    if exact_leaves.is_some() {
+        for k in ["--saved", "--explain", "--truth"] {
+            if a.has(k) {
+                return Err(format!(
+                    "--exact-leaves is for the golden-set form of the check against exact or \
+                     silver values, not {k}"
+                ));
+            }
+        }
     }
     // The silver reference's network and fingerprint (its records must carry exactly this).
     let reference = if silver {
@@ -2897,7 +3185,7 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
         return Err(format!("no decisions at trick {trick}"));
     }
     let tt_mb = a.num("--tt-mb", 64)? as usize;
-    let job = CheckJob {
+    let mut job = CheckJob {
         cut,
         seed,
         label: a.num("--label", 1)?,
@@ -2909,6 +3197,8 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
         rules_robber_burn: false,
         exact_solve_threads: a.num("--verify-solve-threads", 1)?.max(1) as usize,
         exact_tt_mb: a.num("--verify-tt-mb", tt_mb as u64)? as usize,
+        noise: noise.clone(),
+        exact_leaves: exact_leaves.clone(),
     };
     let src = world_source(a)?;
     let ctx = Ctx {
@@ -2958,7 +3248,7 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
                 selected: &selected,
                 job,
                 ctx: &ctx,
-                oracle: &oracle,
+                oracle,
                 net_path,
                 table_sha: &table_sha,
                 boots,
@@ -3010,10 +3300,35 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
         ));
     }
     if let Some(ids) = a.get("--explain") {
-        return hybrid_explain(a, ids, &ds, &stored, &job, &ctx, &oracle);
+        return hybrid_explain(a, ids, &ds, &stored, &job, &ctx, oracle);
     }
+    // The network's description: one, or the ensemble's members.
+    let net_desc = if n_nets == 1 {
+        format!("net {} {:?}", &oracle.sha256[..12], oracle.net().widths())
+    } else {
+        format!(
+            "an ensemble of {n_nets} nets (integer mean): {}",
+            ensemble
+                .members()
+                .iter()
+                .map(|o| format!("{} {:?}", &o.sha256[..12], o.net().widths()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let truth_fp = FrontierFp {
+        cut,
+        net_sha256: ensemble.id(),
+        encoder: nn::encode::ENCODER.to_string(),
+    };
     let n_exact_stored = stored.values().filter(|r| r.method == "exact").count();
     let ref_name = match &reference {
+        None if truth_net => format!(
+            "the network itself (H_{cut} with its noise-free values; the player adds noise of SD \
+             {}% by race class 0-4, seed {}: the optimizer's-curse test)",
+            noise.as_ref().map_or(String::new(), |n| n.sd_pct.join("/")),
+            noise.as_ref().map_or(0, |n| n.seed)
+        ),
         None => "exact".to_string(),
         Some((o, _, fp)) => format!(
             "silver (H_{}, net {} {:?}){}",
@@ -3027,7 +3342,11 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             }
         ),
     };
-    let ref_values = if silver { "reference" } else { "exact" };
+    let ref_values = if silver || truth_net {
+        "reference"
+    } else {
+        "exact"
+    };
     let exact_from = if stored.is_empty() || job.recompute {
         "recomputed by this binary".to_string()
     } else {
@@ -3037,16 +3356,85 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             job.verify_pct
         )
     };
+    let net_desc = match &exact_leaves {
+        None => net_desc,
+        Some(p) => format!(
+            "{net_desc}, exact leaves {} (leaf tables {} MB)",
+            p.describe(),
+            p.tt_mb
+        ),
+    };
     eprintln!(
-        "hybrid-check: {} decisions at trick {trick}, frontier at trick {cut}, net {} {:?}, {} worlds each (seed {seed}, label {}, {} source), {} threads; against {ref_name}; {ref_values} values {exact_from}",
+        "hybrid-check: {} decisions at trick {trick}, frontier at trick {cut}, {net_desc}, {} worlds each (seed {seed}, label {}, {} source), {} threads; against {ref_name}; {ref_values} values {exact_from}",
         ds.len(),
-        &oracle.sha256[..12],
-        oracle.net().widths(),
         job.to,
         job.label,
         src.name(),
         job.threads
     );
+    // The curse test's calibration (`--noise-calibrate N`): on a sample of N decisions (every
+    // k-th) and their first `--noise-calibrate-worlds` worlds, the SDs asked for are rescaled
+    // round by round until the realised SD per race class matches the target (the SDs given).
+    let mut calibration = Vec::new();
+    let n_cal = a.num("--noise-calibrate", 0)? as usize;
+    if n_cal > 0 && !truth_net {
+        return Err("--noise-calibrate is for --truth net".into());
+    }
+    if let Some(spec) = job.noise.clone().filter(|s| n_cal > 0 && !s.is_zero()) {
+        let stride = (ds.len() / n_cal).max(1);
+        let sample: Vec<DecisionSpec> = ds.iter().step_by(stride).take(n_cal).cloned().collect();
+        let mut cjob = job.clone();
+        cjob.to = a.num("--noise-calibrate-worlds", 8)?.clamp(1, job.to);
+        let rounds = a.num("--noise-calibrate-rounds", 4)?.max(1);
+        let mut cur = spec;
+        for r in 0..rounds {
+            cjob.noise = Some(cur.clone());
+            let run = search::hybrid::run_check_ref(
+                &sample,
+                &BTreeMap::new(),
+                &cjob,
+                &ctx,
+                &ensemble,
+                None,
+                Some((
+                    Reference {
+                        cut,
+                        net: &ensemble as &dyn solver::frontier::Frontier,
+                    },
+                    &truth_fp,
+                )),
+                false,
+                None,
+            )?;
+            let st = run.noise.unwrap_or_default();
+            let rep = st.report(&cur);
+            eprintln!(
+                "noise calibration round {}: {} decisions x {} worlds; class: asked -> realised (target) {}",
+                r + 1,
+                sample.len(),
+                cjob.to,
+                rep.classes
+                    .iter()
+                    .map(|c| format!(
+                        "{}: {:.4}% -> {:.4}% ({:.4}%)",
+                        c.class, c.asked_sd_pct, c.realised_sd_pct, c.target_sd_pct
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            calibration.push(serde_json::json!({ "round": r + 1, "noise": rep }));
+            cur = cur.calibrated(&st);
+        }
+        eprintln!(
+            "noise calibrated: asked SDs {} (%, race classes 0-4)",
+            cur.sd
+                .iter()
+                .map(|&x| format!("{:.4}", x as f64 / equity::ONE as f64 * 100.0))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        job.noise = Some(cur);
+    }
     let progress_path = a.get("--progress").map(PathBuf::from);
     let prog = CheckProgress::default();
     let finished = AtomicBool::new(false);
@@ -3096,17 +3484,26 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             &stored,
             &job,
             &ctx,
-            &oracle,
+            &ensemble,
             slice_preds.as_ref().map(|(p, _)| p),
-            reference.as_ref().map(|(o, _, fp)| {
-                (
+            match &reference {
+                Some((o, _, fp)) => Some((
                     Reference {
                         cut: fp.cut,
                         net: o as &dyn solver::frontier::Frontier,
                     },
                     fp,
-                )
-            }),
+                )),
+                // The curse test's truth: the same search with the same network, no noise.
+                None if truth_net => Some((
+                    Reference {
+                        cut,
+                        net: &ensemble as &dyn solver::frontier::Frontier,
+                    },
+                    &truth_fp,
+                )),
+                None => None,
+            },
             race,
             progress_path.as_ref().map(|_| &prog),
         )
@@ -3137,13 +3534,11 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
     }
     let n_silver = run.decisions.iter().filter(|d| d.silver).count();
     println!(
-        "H_{cut} vs {ref_name}, trick {trick}: {} decisions x {} worlds (seed {seed}, label {}, {} source); net {} {:?}; {ref_values} values {exact_from}{}",
+        "H_{cut} vs {ref_name}, trick {trick}: {} decisions x {} worlds (seed {seed}, label {}, {} source); {net_desc}; {ref_values} values {exact_from}{}",
         run.decisions.len(),
         job.to,
         job.label,
         src.name(),
-        &oracle.sha256[..12],
-        oracle.net().widths(),
         if run.verified.0 > 0 {
             format!(" ({} worlds verified byte-identical)", run.verified.0)
         } else {
@@ -3159,6 +3554,19 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             reference.as_ref().map_or(0, |r| r.2.cut),
             run.decisions.len() - n_silver
         );
+    }
+    let noise_report = job
+        .noise
+        .as_ref()
+        .zip(run.noise.as_ref())
+        .map(|(spec, st)| st.report(spec));
+    if let Some(nr) = &noise_report {
+        println!(
+            "(the optimizer's-curse test: the truth is H_{cut} with the network's own values, the \
+             player the same search with zero-mean noise at each leaf; any loss or bias below \
+             comes from the search's choices over noisy values alone)"
+        );
+        print_noise(nr);
     }
     print_groups(&groups, &std_txt);
     let sl = slice_preds.as_ref().map(|(p, _)| {
@@ -3188,6 +3596,11 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
         print_score_groups(st, rg, race_share_text, min_group, &std_txt);
     }
     let time = check_time(&run, job.threads, wall);
+    let leaves_json = job
+        .exact_leaves
+        .as_ref()
+        .zip(run.exact_leaves.as_ref())
+        .map(|(p, st)| print_exact_leaves(p, st, &time));
     if silver {
         // The reference's solves are the silver hybrid's, not exact ones.
         print_time_as(&time, "reference (silver)", "by the reference");
@@ -3235,6 +3648,15 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
         }
     );
     if let Some(out) = a.get("--json") {
+        // The hybrid's values: the network's, with the exact leaves' policy when there is one.
+        let hybrid_values = format!(
+            "{}+O{cut}:{}{}",
+            search::measure::VALUES_VERSION,
+            ensemble.id(),
+            job.exact_leaves
+                .as_ref()
+                .map_or(String::new(), |p| format!("+exact:{}", p.describe()))
+        );
         let group_rows = |g: &[(String, search::hybrid::Summary)]| {
             g.iter()
                 .map(|(n, s)| {
@@ -3253,6 +3675,15 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             "worlds": job.to,
             "world_source": src.name(),
             "reference": match &reference {
+                None if truth_net => serde_json::json!({
+                    "kind": "net",
+                    "what": "the optimizer's-curse test (search::curse): the reference is H_cut \
+                             with the network's own noise-free values, the player the same search \
+                             with seeded zero-mean noise at each leaf; the `exact_*` fields of a \
+                             decision hold the noise-free network's values",
+                    "cut": cut,
+                    "net": ensemble.id(),
+                }),
                 None => serde_json::json!({ "kind": "exact" }),
                 Some((o, p, fp)) => serde_json::json!({
                     "kind": "silver",
@@ -3270,15 +3701,30 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             },
             "exact_values": exact_from,
             "verified_worlds": run.verified.0,
-            "net": net_record(net_path, &oracle),
+            "net": net_record(net_path, oracle),
             "values": match &reference {
+                None if truth_net => serde_json::json!({
+                    "reference": format!("{}+O{cut}:{}", search::measure::VALUES_VERSION, ensemble.id()),
+                    "hybrid": format!(
+                        "{}+O{cut}:{}+noise:{}:{}",
+                        search::measure::VALUES_VERSION,
+                        ensemble.id(),
+                        job.noise.as_ref().map_or(0, |n| n.seed),
+                        job.noise.as_ref().map_or(String::new(), |n| n
+                            .sd
+                            .iter()
+                            .map(u64::to_string)
+                            .collect::<Vec<_>>()
+                            .join("/"))
+                    ),
+                }),
                 None => serde_json::json!({
                     "exact": search::measure::VALUES_VERSION,
-                    "hybrid": format!("{}+O{cut}:{}", search::measure::VALUES_VERSION, oracle.sha256),
+                    "hybrid": hybrid_values,
                 }),
                 Some((_, _, fp)) => serde_json::json!({
                     "reference": fp.values(),
-                    "hybrid": format!("{}+O{cut}:{}", search::measure::VALUES_VERSION, oracle.sha256),
+                    "hybrid": hybrid_values,
                 }),
             },
             "equity_sha256": table_sha,
@@ -3318,9 +3764,264 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             "time": time_json(&time, t1.duration_since(t0).as_secs_f64()),
             "decisions": run.decisions,
         });
+        let mut v = v;
+        // Only an ensemble or a curse test adds these (a single network's JSON is as before).
+        if n_nets > 1 {
+            v["ensemble"] = serde_json::json!({
+                "what": "the leaf value is the integer mean of the members' money chances \
+                         (nn::ensemble: u128 totals per team, largest-remainder rounding to \
+                         exactly 2^32, ties to the lower team)",
+                "id": ensemble.id(),
+                "members": ensemble.members().iter().zip(&net_paths).map(|(o, p)| net_record(p, o)).collect::<Vec<_>>(),
+            });
+        }
+        if let Some(nr) = &noise_report {
+            v["noise"] = serde_json::json!(nr);
+        }
+        if let Some(l) = &leaves_json {
+            v["exact_leaves"] = l.clone();
+        }
+        if !calibration.is_empty() {
+            v["noise_calibration"] = serde_json::json!({
+                "what": "the SDs asked for, rescaled round by round on a sample of decisions (every k-th, the first worlds) until the realised SD per race class matches the target (search::curse::NoiseSpec::calibrated); the main run uses the last round's rescaled SDs",
+                "decisions": n_cal,
+                "rounds": calibration,
+            });
+        }
         write_json(out, &v)?;
     }
     Ok(())
+}
+
+/// `search hybrid-paired --a A.json --b B.json`: the paired comparison of two `hybrid-check`
+/// JSONs on the same decisions (`search::hybrid::paired`).
+fn hybrid_paired(a: &Args) -> Result<(), String> {
+    let load =
+        |k: &str| -> Result<(String, serde_json::Value, Vec<search::hybrid::PairedRow>), String> {
+            let f = a.req(k)?;
+            let text = std::fs::read_to_string(f).map_err(|e| format!("{f}: {e}"))?;
+            let v: serde_json::Value =
+                serde_json::from_str(&text).map_err(|e| format!("{f}: {e}"))?;
+            let rows: Vec<search::hybrid::PairedRow> =
+                serde_json::from_value(v["decisions"].clone()).map_err(|e| {
+                    format!("{f}: decisions: {e} (a hybrid-check JSON of this binary or later)")
+                })?;
+            Ok((f.to_string(), v, rows))
+        };
+    let (fa, va, ra) = load("--a")?;
+    let (fb, vb, rb) = load("--b")?;
+    for k in ["trick", "cut", "seed", "label", "worlds"] {
+        if va[k] != vb[k] {
+            return Err(format!(
+                "{fa} and {fb} differ in `{k}` ({} against {}): not the same decisions and worlds",
+                va[k], vb[k]
+            ));
+        }
+    }
+    let name = |k: &str, v: &serde_json::Value| {
+        a.get(k).map_or_else(
+            || {
+                v["values"]["hybrid"]
+                    .as_str()
+                    .unwrap_or("?")
+                    .chars()
+                    .take(40)
+                    .collect::<String>()
+            },
+            str::to_string,
+        )
+    };
+    let (na, nb) = (name("--a-name", &va), name("--b-name", &vb));
+    let boots = a.num("--boot", 1000)?;
+    let boot_seed = a.num("--boot-seed", 1)?;
+    let ms = search::hybrid::paired(&ra, &rb, boots, boot_seed)?;
+    println!(
+        "paired comparison on {} decisions (trick {}, cut {}, {} worlds): A = {na} ({fa}), B = {nb} ({fb}); {boots} bootstrap replicates (seed {boot_seed}), the same decisions for both",
+        ra.len(),
+        va["trick"],
+        va["cut"],
+        va["worlds"]
+    );
+    let p = |x: f64| format!("{:+.4}%", 100.0 * x);
+    println!(
+        "{:<20} {:>5} {:>10} {:>10} {:>10} {:>23} {:>8} {:>8}",
+        "measure", "dec", "A", "B", "B - A", "95% interval of B - A", "P(<0)", "P(>0)"
+    );
+    for m in &ms {
+        println!(
+            "{:<20} {:>5} {:>10} {:>10} {:>10} {:>23} {:>7.1}% {:>7.1}%",
+            m.measure,
+            m.decisions,
+            p(m.a),
+            p(m.b),
+            p(m.diff),
+            format!("{} .. {}", p(m.diff_lo95), p(m.diff_hi95)),
+            100.0 * m.share_below,
+            100.0 * m.share_above
+        );
+    }
+    println!(
+        "(loss: mean decision loss; own bias: the decider's own team's mean value error; B - A \
+         below 0 means B loses less, or undervalues its own team less when A's bias is negative)"
+    );
+    // The hybrid's thread time per world of each (reports only), and the exact leaves' share.
+    let hms = |v: &serde_json::Value| v["time"]["hybrid_ms_per_world"].as_f64();
+    let time = match (hms(&va), hms(&vb)) {
+        (Some(x), Some(y)) => {
+            let leaves = |v: &serde_json::Value| {
+                v["exact_leaves"]["policy"].as_str().map_or(
+                    "no exact leaves".to_string(),
+                    |p| {
+                        format!(
+                            "exact leaves {p}: {:.2}% of the leaves, {:.3} ms a world in leaf solves",
+                            100.0 * v["exact_leaves"]["share_exact"].as_f64().unwrap_or(0.0),
+                            v["exact_leaves"]["leaf_ms_per_world"].as_f64().unwrap_or(0.0)
+                        )
+                    },
+                )
+            };
+            println!(
+                "time: A {x:.3} thread-ms a world ({}), B {y:.3} ({}); B / A {:.2}",
+                leaves(&va),
+                leaves(&vb),
+                y / x.max(1e-9)
+            );
+            serde_json::json!({ "a_hybrid_ms_per_world": x, "b_hybrid_ms_per_world": y,
+                                "a_exact_leaves": va["exact_leaves"]["policy"],
+                                "b_exact_leaves": vb["exact_leaves"]["policy"] })
+        }
+        _ => serde_json::Value::Null,
+    };
+    if let Some(out) = a.get("--json") {
+        write_json(
+            out,
+            &serde_json::json!({
+                "a": { "file": fa, "name": na, "values": va["values"], "net": va["net"]["sha256"], "ensemble": va["ensemble"]["id"] },
+                "b": { "file": fb, "name": nb, "values": vb["values"], "net": vb["net"]["sha256"], "ensemble": vb["ensemble"]["id"] },
+                "trick": va["trick"], "cut": va["cut"], "seed": va["seed"], "worlds": va["worlds"],
+                "decisions": ra.len(),
+                "boot": { "replicates": boots, "seed": boot_seed,
+                          "what": "decisions resampled with replacement within each group, the same for both players; the interval is the 2.5th to 97.5th percentile of B - A" },
+                "measures": ms,
+                "time": time,
+            }),
+        )?;
+    }
+    Ok(())
+}
+
+/// The exact leaves' report (`search::exact_leaves`): per race class, the distinct frontier
+/// positions the hybrid's searches reached (summed over worlds) and the share solved exactly;
+/// the leaf solves' nodes and thread time per world, and the hybrid's thread time per world with
+/// them and without them (the rest: the search and the network). Returns the JSON record.
+fn print_exact_leaves(
+    p: &search::exact_leaves::LeafPolicy,
+    st: &search::exact_leaves::LeafStats,
+    t: &CheckTime,
+) -> serde_json::Value {
+    let k = search::exact_leaves::CLASSES;
+    let share = |e: u64, d: u64| e as f64 / d.max(1) as f64;
+    let (d_all, e_all): (u64, u64) = (st.distinct.iter().sum(), st.exact.iter().sum());
+    let hybrid_ms = t.hybrid_us as f64 / 1000.0 / t.worlds;
+    let leaf_ms = st.us as f64 / 1000.0 / t.worlds;
+    println!(
+        "exact leaves {} (leaf tables {} MB): race class, distinct leaves a world, solved exactly a world, share",
+        p.describe(),
+        p.tt_mb
+    );
+    let mut classes = Vec::new();
+    for c in 0..k {
+        println!(
+            "  class {c} {:<60} {:>10.2} {:>10.2} {:>7.2}%",
+            search::hybrid_explain::RACE_CLASSES[c],
+            st.distinct[c] as f64 / t.worlds,
+            st.exact[c] as f64 / t.worlds,
+            100.0 * share(st.exact[c], st.distinct[c])
+        );
+        classes.push(serde_json::json!({
+            "class": c, "name": search::hybrid_explain::RACE_CLASSES[c],
+            "distinct": st.distinct[c], "exact": st.exact[c],
+            "share_exact": share(st.exact[c], st.distinct[c]),
+        }));
+    }
+    println!(
+        "  {:<68} {:>10.2} {:>10.2} {:>7.2}%",
+        "all",
+        d_all as f64 / t.worlds,
+        e_all as f64 / t.worlds,
+        100.0 * share(e_all, d_all)
+    );
+    println!(
+        "  leaf solves: {:.0} nodes and {:.3} ms a world ({:.3} ms a solve); hybrid {:.3} thread-ms a world with them, {:.3} without them (search and network)",
+        st.nodes as f64 / t.worlds,
+        leaf_ms,
+        st.us as f64 / 1000.0 / e_all.max(1) as f64,
+        hybrid_ms,
+        hybrid_ms - leaf_ms
+    );
+    if let Some(l) = &p.learned {
+        println!(
+            "  learned: model {} ({} trees, network {}), threshold {}{}; {:.1} leaves scored a world, {:.3} ms a world scoring",
+            &l.model.sha256[..12],
+            l.model.n_trees(),
+            &l.model.net_sha256[..l.model.net_sha256.len().min(12)],
+            l.t.map_or("inf".to_string(), |t| t.to_string()),
+            l.budget
+                .as_ref()
+                .map_or(String::new(), |b| format!(" (budget {b})")),
+            st.scored as f64 / t.worlds,
+            st.score_us as f64 / 1000.0 / t.worlds
+        );
+    }
+    let learned = p.learned.as_ref().map(|l| {
+        serde_json::json!({
+            "model_sha256": l.model.sha256, "net_sha256": l.model.net_sha256,
+            "trees": l.model.n_trees(), "t": l.t, "budget": l.budget,
+            "scored": st.scored, "score_ms_per_world": st.score_us as f64 / 1000.0 / t.worlds,
+        })
+    });
+    serde_json::json!({
+        "learned": learned,
+        "what": "the frontier positions the policy picks are solved exactly (search::exact_leaves, the labels' exact solver and tie rule) instead of being valued by the network; counts are distinct canonical leaves per world's search, summed over worlds; times are thread time (reports only)",
+        "policy": p.describe(),
+        "leaf_tt_mb": p.tt_mb,
+        "classes": classes,
+        "distinct": d_all,
+        "exact": e_all,
+        "share_exact": share(e_all, d_all),
+        "leaf_nodes": st.nodes,
+        "leaf_nodes_per_world": st.nodes as f64 / t.worlds,
+        "leaf_ms_per_world": leaf_ms,
+        "leaf_ms_per_solve": st.us as f64 / 1000.0 / e_all.max(1) as f64,
+        "hybrid_ms_per_world": hybrid_ms,
+        "hybrid_ms_per_world_without_leaf_solves": hybrid_ms - leaf_ms,
+    })
+}
+
+/// The curse test's noise per race class: asked for and realised (`search::curse`).
+fn print_noise(nr: &search::curse::NoiseReport) {
+    println!(
+        "noise (seed {}): race class, distinct leaves, SD target, SD asked, SD realised, mean, mean |change|, share shrunk",
+        nr.seed
+    );
+    for c in &nr.classes {
+        println!(
+            "  class {}: {:>11} {:>8.4}% {:>8.4}% {:>8.4}% {:>+9.5}% {:>8.4}% {:>6.2}%",
+            c.class,
+            c.leaves,
+            c.target_sd_pct,
+            c.asked_sd_pct,
+            c.realised_sd_pct,
+            c.realised_mean_pct,
+            c.realised_mean_abs_pct,
+            100.0 * c.shrunk_share
+        );
+    }
+    println!(
+        "  all:     {:>11}                     {:>8.4}% (every team of every distinct leaf; transfers \
+         with a team of little money are shrunk, so the realised SD can fall short of the asked)",
+        nr.leaves, nr.realised_sd_pct
+    );
 }
 
 /// The score (stratum) and race-group tables of `hybrid-check --race-groups`
@@ -4365,6 +5066,7 @@ mod tests {
             strata: vec![1, 2, 3, 4],
             race: None,
             keep: None,
+            siblings: false,
         };
         let ds = [
             decision(1, 2000, 2500, 16),

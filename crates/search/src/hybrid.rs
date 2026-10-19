@@ -140,6 +140,13 @@ pub struct CheckJob {
     pub exact_solve_threads: usize,
     /// Transposition-table megabytes per exact solve.
     pub exact_tt_mb: usize,
+    /// The optimizer's-curse test's noise at every leaf of the hybrid's search (`crate::curse`;
+    /// `None`: none, the ordinary check). The noise never touches the reference's values.
+    pub noise: Option<crate::curse::NoiseSpec>,
+    /// Exact leaves (`crate::exact_leaves`): the hybrid's frontier positions this policy picks
+    /// are solved exactly instead of being valued by the network (`None`: none, the hybrid as
+    /// before, byte for byte). The reference's values are never touched.
+    pub exact_leaves: Option<crate::exact_leaves::LeafPolicy>,
 }
 
 impl CheckJob {
@@ -224,7 +231,9 @@ pub struct DecisionWorlds<'a> {
 }
 
 /// A silver reference (module notes; docs/m3-hybrid/silver.md): the deeper hybrid H_`cut` with
-/// network `net` at the start of trick `cut`, whose values stand in for exact ones.
+/// network `net` at the start of trick `cut`, whose values stand in for exact ones. With the
+/// same cut as the check's own it is the optimizer's-curse test's truth (`crate::curse`): the
+/// same search with the network's noise-free values, against the player's noisy ones.
 #[derive(Clone, Copy)]
 pub struct Reference<'a> {
     /// The reference's frontier trick (after the check's own).
@@ -329,6 +338,9 @@ pub struct WorldCheck {
     /// With race groups: the distinct frontier positions the hybrid's search reached, by race
     /// class ([`RaceRecorder`]).
     pub race: Option<Reach>,
+    /// With exact leaves: the search's distinct leaves by race class, those solved exactly, and
+    /// the leaf solves' nodes and time.
+    pub leaves: Option<crate::exact_leaves::LeafStats>,
 }
 
 /// The check of one decision.
@@ -354,6 +366,10 @@ pub struct DecisionCheck {
     pub loss: u64,
     /// The hybrid's choice is exact's or ties it exactly.
     pub agree: bool,
+    /// The decider's own team's errors (hybrid minus exact, every world and candidate) summed,
+    /// units of 2^-32: the own-team bias is this over `cands × worlds` (the paired comparison
+    /// of two checks, [`paired`], reads it).
+    pub own_error_sum: i64,
     /// Per world, candidate and team relative to the decider (`(team − decider) mod 4`, the
     /// innermost index): hybrid minus exact, units of 2^-32.
     #[serde(skip)]
@@ -379,6 +395,10 @@ pub struct DecisionCheck {
     /// world, summed), by race class ([`RaceRecorder`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub race: Option<Reach>,
+    /// With exact leaves: its worlds' leaves by race class, those solved exactly, the leaf
+    /// solves' nodes and time (summed over worlds).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exact_leaves: Option<crate::exact_leaves::LeafStats>,
     /// The reference values (the `exact_*` fields) are a silver reference's ([`Reference`]),
     /// not exact.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -400,6 +420,11 @@ pub struct CheckRun {
     /// Recomputed worlds whose stored exact values differ (decision, world). When there is any,
     /// the hybrid was not run and `decisions` is empty: the stored values are not this solver's.
     pub mismatched: Vec<(u64, u64)>,
+    /// With [`CheckJob::noise`]: the realised noise (`crate::curse::NoiseStats`).
+    pub noise: Option<crate::curse::NoiseStats>,
+    /// With [`CheckJob::exact_leaves`]: the exact leaves over every world
+    /// (`crate::exact_leaves::LeafStats`).
+    pub exact_leaves: Option<crate::exact_leaves::LeafStats>,
 }
 
 /// Live counters of a running check, for progress reports (they never change a value).
@@ -728,12 +753,16 @@ pub fn check_worlds_ref(
         view: engine::view::SeatView,
         cands: Vec<Candidate>,
     }
+    // A silver reference looks deeper than the hybrid it checks; the curse test's truth (a
+    // check with noise) is the same search without the noise, at the same cut.
     if let Some(r) = &reference
-        && !(job.cut < r.cut && r.cut <= engine::game::TRICKS_PER_HAND)
+        && !((job.cut < r.cut || (job.cut == r.cut && job.noise.is_some()))
+            && r.cut <= engine::game::TRICKS_PER_HAND)
     {
         return Err(format!(
             "a silver reference H_{} must look deeper than the hybrid it checks, H_{} (its \
-             frontier after the check's, at most trick 5)",
+             frontier after the check's, at most trick 5; the same cut only as the truth of the \
+             optimizer's-curse test, a check with noise)",
             r.cut, job.cut
         ));
     }
@@ -870,6 +899,8 @@ pub fn check_worlds_ref(
             verified,
             net: (0, 0),
             mismatched,
+            noise: None,
+            exact_leaves: None,
         });
     }
     // The hybrid's solves.
@@ -880,15 +911,42 @@ pub fn check_worlds_ref(
         WorldSolve,
         Option<Reach>,
         Option<Reach>,
+        Option<crate::exact_leaves::LeafStats>,
     );
+    let noise_total: Mutex<crate::curse::NoiseStats> = Mutex::default();
     let solve_hybrid = |i: usize, mem: &mut SolveMem| -> HybridOut {
         let m = world_of(i);
         let mut run = WorldSolve::default();
         let t = Instant::now();
-        let rec = slices.map(|p| GroupRecorder::new(&timed, p, ctx.leaf));
+        // The curse test's noise sits right on the network, under every recorder.
+        let noisy = job.noise.as_ref().map(|spec| {
+            let (k, j) = tasks[i];
+            crate::curse::NoisyLeaf::new(&timed, ctx.leaf, spec, plan[k].d.id, plan[k].worlds[j].w)
+        });
+        let noised: &dyn Frontier = match &noisy {
+            Some(n) => n,
+            None => &timed,
+        };
+        // Exact leaves replace the network's value where the policy says, under every recorder
+        // (which see the values the search uses).
+        let exacts = job.exact_leaves.as_ref().map(|policy| {
+            let k = tasks[i].0;
+            crate::exact_leaves::ExactLeaves::new(
+                noised,
+                ctx.leaf,
+                policy,
+                engine::team_of(plan[k].d.seat),
+                solver::SolveFamily::of_match(&m),
+            )
+        });
+        let base: &dyn Frontier = match &exacts {
+            Some(x) => x,
+            None => noised,
+        };
+        let rec = slices.map(|p| GroupRecorder::new(base, p, ctx.leaf));
         let inner: &dyn Frontier = match &rec {
             Some(r) => r,
-            None => &timed,
+            None => base,
         };
         let races = race.then(|| RaceRecorder::new(inner, ctx.leaf));
         let h = exact_world(
@@ -901,13 +959,23 @@ pub fn check_worlds_ref(
             &mut run,
             Some(match &races {
                 Some(r) => FrontierCut::new(job.cut, r),
-                None if rec.is_some() => FrontierCut::new(job.cut, inner),
+                None if rec.is_some() || noisy.is_some() || exacts.is_some() => {
+                    FrontierCut::new(job.cut, inner)
+                }
                 None => cut,
             }),
         )
         .expect("nothing stops a solve here");
         let race_reach = races.map(RaceRecorder::into_reach);
         let reach = rec.map(GroupRecorder::into_reach);
+        let leaves = exacts.as_ref().map(crate::exact_leaves::ExactLeaves::stats);
+        drop(exacts);
+        if let Some(n) = noisy {
+            noise_total
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .add(&n.into_stats());
+        }
         let us = t.elapsed().as_micros() as u64;
         if let Some(p) = progress {
             let (k, j) = tasks[i];
@@ -920,12 +988,13 @@ pub fn check_worlds_ref(
             ]);
             p.hybrid_done.fetch_add(1, Ordering::Relaxed);
         }
-        (h, us, run, reach, race_reach)
+        (h, us, run, reach, race_reach, leaves)
     };
     let hybrid = pool(job.threads, &order, &solve_hybrid, tasks.len());
     let mut outs: Vec<WorldCheck> = Vec::with_capacity(tasks.len());
     for (i, (hy, ex)) in hybrid.into_iter().zip(exact).enumerate() {
-        let (h, hus, run, reach, race_reach) = hy.expect("every world valued by the hybrid");
+        let (h, hus, run, reach, race_reach, leaves) =
+            hy.expect("every world valued by the hybrid");
         let (k, j) = tasks[i];
         let t = &plan[k].worlds[j];
         let (exact, exact_us, exact_nodes, verified) = match (ex, &t.stored) {
@@ -952,6 +1021,7 @@ pub fn check_worlds_ref(
             robber: run.robber,
             reach,
             race: race_reach,
+            leaves,
         });
     }
     let mut decisions = Vec::new();
@@ -968,12 +1038,14 @@ pub fn check_worlds_ref(
         let hc = best_index(&hm, team);
         let loss = em[ec].get(team) - em[hc].get(team);
         let mut errors = Vec::with_capacity(4 * ws.len() * cands.len());
+        let mut own_error_sum = 0i64;
         for o in ws {
             for (e, h) in o.exact.iter().zip(&o.hybrid) {
                 for rel in 0..4u8 {
                     let t = (team + rel) % 4;
                     errors.push(h.get(t) as i64 - e.get(t) as i64);
                 }
+                own_error_sum += h.get(team) as i64 - e.get(team) as i64;
             }
         }
         decisions.push(DecisionCheck {
@@ -987,6 +1059,7 @@ pub fn check_worlds_ref(
             hybrid_choice: hc,
             loss,
             agree: loss == 0,
+            own_error_sum,
             errors,
             exact_worlds: ws.iter().filter(|o| o.exact_solved).count() as u64,
             exact_us: ws.iter().map(|o| o.exact_us).sum(),
@@ -1008,10 +1081,24 @@ pub fn check_worlds_ref(
                 }
                 r
             }),
+            exact_leaves: job.exact_leaves.as_ref().map(|_| {
+                let mut st = crate::exact_leaves::LeafStats::default();
+                for o in ws {
+                    st.add(o.leaves.as_ref().expect("every world counted"));
+                }
+                st
+            }),
             silver: p.silver && reference.is_some(),
             world_checks: ws.to_vec(),
         });
     }
+    let exact_leaves = job.exact_leaves.as_ref().map(|_| {
+        let mut st = crate::exact_leaves::LeafStats::default();
+        for d in &decisions {
+            st.add(d.exact_leaves.as_ref().expect("every decision counted"));
+        }
+        st
+    });
     Ok(CheckRun {
         decisions,
         verified,
@@ -1020,6 +1107,11 @@ pub fn check_worlds_ref(
             timed.n.load(Ordering::Relaxed),
         ),
         mismatched,
+        noise: job
+            .noise
+            .as_ref()
+            .map(|_| noise_total.into_inner().unwrap_or_else(|e| e.into_inner())),
+        exact_leaves,
     })
 }
 
@@ -1302,6 +1394,150 @@ pub fn slices(
     out
 }
 
+/// Seed label of the paired bootstrap.
+const PAIRED: u64 = 0xBA12;
+
+/// One decision of a check as the paired comparison reads it (a `hybrid-check` JSON's
+/// `decisions` entry, [`DecisionCheck`]).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct PairedRow {
+    /// Decision id.
+    pub id: u64,
+    /// Position in the trick (1 = leader … 8).
+    pub position: u8,
+    /// Candidates.
+    pub cands: usize,
+    /// Worlds.
+    pub worlds: u64,
+    /// Decision loss (units of 2^-32).
+    pub loss: u64,
+    /// The decider's own team's errors summed (units of 2^-32).
+    pub own_error_sum: i64,
+}
+
+/// One measure of the paired comparison: both players' values, their difference (B − A) and
+/// its bootstrap distribution (fractions of money chance).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PairedMeasure {
+    /// What is measured: `loss` (mean decision loss) or `own bias` (the decider's own team's
+    /// mean value error), and over which decisions (`all`, `pos 1-2`, `pos 1`, …).
+    pub measure: String,
+    /// Decisions in the group.
+    pub decisions: usize,
+    /// Player A's value.
+    pub a: f64,
+    /// Player B's value.
+    pub b: f64,
+    /// B − A.
+    pub diff: f64,
+    /// The bootstrap's 2.5th and 97.5th percentiles of B − A (the 95% interval).
+    pub diff_lo95: f64,
+    /// See `diff_lo95`.
+    pub diff_hi95: f64,
+    /// The share of replicates with B − A below 0, and above 0.
+    pub share_below: f64,
+    /// See `share_below`.
+    pub share_above: f64,
+}
+
+/// The groups of the paired comparison: (name, lowest position, highest position).
+pub const PAIRED_GROUPS: [(&str, u8, u8); 6] = [
+    ("all", 1, 8),
+    ("pos 1-2", 1, 2),
+    ("pos 3-4", 3, 4),
+    ("pos 5-8", 5, 8),
+    ("pos 1", 1, 1),
+    ("pos 2", 2, 2),
+];
+
+/// The paired comparison of two players' checks on the same decisions and worlds (e.g. one
+/// network against an ensemble): for each group of [`PAIRED_GROUPS`], the mean decision loss and
+/// the own-team bias of each, B − A, and its bootstrap distribution: replicate `r` resamples the
+/// group's decisions with replacement (`Rng::derive(boot_seed, &[PAIRED, group, r])`, the same
+/// decisions for both players, so what they share cancels) and takes B − A on the resample.
+/// The decisions must be the same, in the same order, with the same candidates and worlds.
+pub fn paired(
+    a: &[PairedRow],
+    b: &[PairedRow],
+    boots: u64,
+    boot_seed: u64,
+) -> Result<Vec<PairedMeasure>, String> {
+    if a.len() != b.len() || a.is_empty() {
+        return Err(format!(
+            "the two checks hold {} and {} decisions: a paired comparison needs the same ones",
+            a.len(),
+            b.len()
+        ));
+    }
+    for (x, y) in a.iter().zip(b) {
+        if (x.id, x.position, x.cands, x.worlds) != (y.id, y.position, y.cands, y.worlds) {
+            return Err(format!(
+                "decision {} (position {}, {} candidates, {} worlds) is paired with decision {} \
+                 (position {}, {} candidates, {} worlds): not the same decisions",
+                x.id, x.position, x.cands, x.worlds, y.id, y.position, y.cands, y.worlds
+            ));
+        }
+    }
+    let unit = ONE as f64;
+    let loss = |rows: &[PairedRow], ix: &[usize]| -> f64 {
+        let s: u128 = ix.iter().map(|&i| u128::from(rows[i].loss)).sum();
+        s as f64 / ix.len().max(1) as f64 / unit
+    };
+    let bias = |rows: &[PairedRow], ix: &[usize]| -> f64 {
+        let s: i128 = ix.iter().map(|&i| i128::from(rows[i].own_error_sum)).sum();
+        let n: u128 = ix
+            .iter()
+            .map(|&i| rows[i].cands as u128 * u128::from(rows[i].worlds))
+            .sum();
+        s as f64 / n.max(1) as f64 / unit
+    };
+    let mut out = Vec::new();
+    for (kind, f) in [
+        ("loss", &loss as &dyn Fn(&[PairedRow], &[usize]) -> f64),
+        ("own bias", &bias),
+    ] {
+        for (g, &(name, lo, hi)) in PAIRED_GROUPS.iter().enumerate() {
+            let members: Vec<usize> = (0..a.len())
+                .filter(|&i| (lo..=hi).contains(&a[i].position))
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
+            let (va, vb) = (f(a, &members), f(b, &members));
+            let tag = g as u64 + if kind == "loss" { 0 } else { 100 };
+            let n = members.len() as u64;
+            let mut diffs: Vec<f64> = (0..boots)
+                .map(|r| {
+                    let mut rng = Rng::derive(boot_seed, &[PAIRED, tag, r]);
+                    let ix: Vec<usize> = (0..n).map(|_| members[rng.bounded(n) as usize]).collect();
+                    f(b, &ix) - f(a, &ix)
+                })
+                .collect();
+            diffs.sort_by(f64::total_cmp);
+            let pick = |q: f64| -> f64 {
+                if diffs.is_empty() {
+                    vb - va
+                } else {
+                    diffs[((diffs.len() as f64 * q).ceil() as usize).clamp(1, diffs.len()) - 1]
+                }
+            };
+            let m = diffs.len().max(1) as f64;
+            out.push(PairedMeasure {
+                measure: format!("{kind}, {name}"),
+                decisions: members.len(),
+                a: va,
+                b: vb,
+                diff: vb - va,
+                diff_lo95: pick(0.025),
+                diff_hi95: pick(0.975),
+                share_below: diffs.iter().filter(|&&d| d < 0.0).count() as f64 / m,
+                share_above: diffs.iter().filter(|&&d| d > 0.0).count() as f64 / m,
+            });
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1329,6 +1565,7 @@ mod tests {
             hybrid_choice: 1,
             loss,
             agree: loss == 0,
+            own_error_sum: e,
             errors: vec![e, -e, 0, 0],
             exact_worlds: 0,
             exact_us: 0,
@@ -1338,6 +1575,7 @@ mod tests {
             frontier: 0,
             reach: None,
             race: None,
+            exact_leaves: None,
             silver: false,
             world_checks: Vec::new(),
         };
@@ -1402,6 +1640,8 @@ mod tests {
             rules_robber_burn: false,
             exact_solve_threads: 1,
             exact_tt_mb: 4,
+            noise: None,
+            exact_leaves: None,
         };
         let a = run_check(&ds, &BTreeMap::new(), &job(1), &ctx, &f).expect("runs");
         let b = run_check(&ds, &BTreeMap::new(), &job(3), &ctx, &f).expect("runs");
@@ -1478,6 +1718,8 @@ mod tests {
             rules_robber_burn: false,
             exact_solve_threads: 1,
             exact_tt_mb: 4,
+            noise: None,
+            exact_leaves: None,
         };
         let text = format!(
             r#"[{{"name": "next team no trick", "conditions": [{{"feature": {}, "op": "==", "value": 1}}]}},
@@ -1593,6 +1835,8 @@ mod tests {
             rules_robber_burn: false,
             exact_solve_threads: 1,
             exact_tt_mb: 4,
+            noise: None,
+            exact_leaves: None,
         }
     }
 
@@ -1957,5 +2201,523 @@ mod tests {
         let e = crate::saved::parse_saved(&serde_json::to_string(&ck).expect("json"), "x")
             .expect_err("a silver checkpoint line");
         assert!(e.contains("silver"), "{e}");
+    }
+
+    // ------------------------------------------------------------ the curse test and ensembles
+
+    /// Trick-3 decisions at seats 5-8 (cheap), checked with a frontier at trick 4.
+    fn curse_setup() -> Vec<DecisionSpec> {
+        let ds = decisions_at(3, &[16, 17, 20, 21, 24, 25, 28, 29]);
+        assert!(ds.iter().all(|d| d.trick == 3));
+        ds
+    }
+
+    fn noise_job(threads: usize, sd: &str, seed: u64) -> CheckJob {
+        CheckJob {
+            verify_pct: 0.0,
+            noise: Some(crate::curse::NoiseSpec::parse(sd, seed).expect("valid")),
+            ..check_job(4, threads, 3)
+        }
+    }
+
+    /// The optimizer's-curse test: with the network as the truth and zero noise, the loss and
+    /// every error are exactly 0; with noise, the result (values, choices, the realised noise) is
+    /// the same on 1 and 3 threads, changes with the noise's seed, and the noise is really there.
+    /// A reference at the check's own cut is refused without noise.
+    #[test]
+    fn curse_test_is_exact_at_zero_noise_and_thread_independent() {
+        let ds = curse_setup();
+        let l = syn_leaf();
+        let src = BeliefSource::new();
+        let ctx = Ctx {
+            leaf: &*l,
+            source: &src,
+            rules: engine::game::Rules::HOUSE,
+        };
+        let o4 = oracle(4, 41);
+        let f4 = fp(&o4);
+        let truth = || {
+            Some((
+                Reference {
+                    cut: 4,
+                    net: &o4 as &dyn Frontier,
+                },
+                &f4,
+            ))
+        };
+        let none = BTreeMap::new();
+        let run = |job: &CheckJob| {
+            run_check_ref(&ds, &none, job, &ctx, &o4, None, truth(), false, None).expect("runs")
+        };
+        let zero = run(&noise_job(2, "0,0,0,0,0", 1));
+        assert_eq!(zero.decisions.len(), 8);
+        for d in &zero.decisions {
+            assert_eq!(d.loss, 0, "decision {}", d.id);
+            assert!(d.errors.iter().all(|&e| e == 0) && d.own_error_sum == 0);
+            assert_eq!(d.exact_choice, d.hybrid_choice);
+        }
+        let g = report(&zero, 50, 1);
+        assert_eq!((g[0].1.mean_loss, g[0].1.loss_upper95), (0.0, 0.0));
+        assert_eq!(g[0].1.bias, [0.0; 4]);
+        let st = zero.noise.as_ref().expect("recorded");
+        assert!(st.leaves.iter().sum::<u64>() > 0 && st.sum_sq.iter().all(|&x| x == 0));
+        // Noise: thread-independent, seeded.
+        let sd = "3,3,5,5,8";
+        let a = run(&noise_job(1, sd, 7));
+        let b = run(&noise_job(3, sd, 7));
+        assert_eq!(key(&a), key(&b));
+        assert_eq!(a.noise, b.noise);
+        let own = |r: &CheckRun| {
+            r.decisions
+                .iter()
+                .map(|d| d.own_error_sum)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(own(&a), own(&b));
+        assert!(a.decisions.iter().any(|d| d.errors.iter().any(|&e| e != 0)));
+        let c = run(&noise_job(2, sd, 8));
+        assert_ne!(key(&a), key(&c), "another seed, other noise");
+        let rep = a
+            .noise
+            .as_ref()
+            .expect("recorded")
+            .report(&crate::curse::NoiseSpec::parse(sd, 7).expect("valid"));
+        assert!(rep.realised_sd_pct > 1.0, "{rep:?}");
+        // The same cut as a reference is the curse test's truth only.
+        let plain = check_job(4, 1, 3);
+        let e = run_check_ref(&ds, &none, &plain, &ctx, &o4, None, truth(), false, None)
+            .expect_err("refused");
+        assert!(e.contains("deeper"), "{e}");
+    }
+
+    /// An ensemble of one network is that network, byte for byte (every value, choice and error
+    /// of the check); the integer mean of identical networks is the network; and an ensemble of
+    /// different networks differs from each member and stays thread-independent.
+    #[test]
+    fn ensembles_of_one_or_identical_networks_are_the_network() {
+        let ds = curse_setup();
+        let l = syn_leaf();
+        let src = BeliefSource::new();
+        let ctx = Ctx {
+            leaf: &*l,
+            source: &src,
+            rules: engine::game::Rules::HOUSE,
+        };
+        let none = BTreeMap::new();
+        let job = |t| CheckJob {
+            verify_pct: 0.0,
+            ..check_job(4, t, 3)
+        };
+        let single = oracle(4, 51);
+        let base = run_check(&ds, &none, &job(2), &ctx, &single).expect("runs");
+        let one = nn::Ensemble::new(vec![oracle(4, 51)]).expect("one");
+        assert_eq!(one.id(), single.sha256);
+        let r1 = run_check(&ds, &none, &job(3), &ctx, &one).expect("runs");
+        assert_eq!(key(&base), key(&r1));
+        let world_values = |r: &CheckRun| -> Vec<Vec<MoneyChance>> {
+            r.decisions
+                .iter()
+                .flat_map(|d| d.world_checks.iter().map(|w| w.hybrid.clone()))
+                .collect()
+        };
+        assert_eq!(world_values(&base), world_values(&r1));
+        let three =
+            nn::Ensemble::new(vec![oracle(4, 51), oracle(4, 51), oracle(4, 51)]).expect("three");
+        let r3 = run_check(&ds, &none, &job(1), &ctx, &three).expect("runs");
+        assert_eq!(world_values(&base), world_values(&r3));
+        let mixed =
+            nn::Ensemble::new(vec![oracle(4, 51), oracle(4, 52), oracle(4, 53)]).expect("mixed");
+        assert!(mixed.id().starts_with("ens3:"));
+        let m1 = run_check(&ds, &none, &job(1), &ctx, &mixed).expect("runs");
+        let m3 = run_check(&ds, &none, &job(3), &ctx, &mixed).expect("runs");
+        assert_eq!(key(&m1), key(&m3));
+        assert_eq!(world_values(&m1), world_values(&m3));
+        assert_ne!(world_values(&m1), world_values(&base));
+        assert!(nn::Ensemble::new(vec![oracle(4, 51), oracle(3, 52)]).is_err());
+    }
+
+    /// The paired bootstrap on toy checks: identical players differ by exactly 0; a player whose
+    /// every loss is larger by a fixed amount differs by exactly that in every replicate; the
+    /// own-team bias is the ratio of sums; different decisions are refused.
+    #[test]
+    fn paired_bootstrap_on_a_toy_case() {
+        let row = |id: u64, position: u8, loss: u64, own: i64| PairedRow {
+            id,
+            position,
+            cands: 2,
+            worlds: 5,
+            loss,
+            own_error_sum: own,
+        };
+        let a: Vec<PairedRow> = (0..40)
+            .map(|i| row(i, 1 + (i % 8) as u8, 1000 * (i % 7), -(i as i64) * 10))
+            .collect();
+        let same = paired(&a, &a, 200, 1).expect("paired");
+        assert_eq!(same.len(), 12);
+        for m in &same {
+            assert_eq!((m.diff, m.diff_lo95, m.diff_hi95), (0.0, 0.0, 0.0), "{m:?}");
+            assert_eq!((m.share_below, m.share_above), (0.0, 0.0));
+        }
+        let b: Vec<PairedRow> = a
+            .iter()
+            .map(|r| PairedRow {
+                loss: r.loss + 4096,
+                own_error_sum: r.own_error_sum + 10 * 30,
+                ..r.clone()
+            })
+            .collect();
+        let up = paired(&a, &b, 200, 1).expect("paired");
+        let unit = ONE as f64;
+        for m in &up {
+            let want = if m.measure.starts_with("loss") {
+                4096.0 / unit
+            } else {
+                30.0 / unit
+            };
+            assert!((m.diff - want).abs() < 1e-15, "{m:?}");
+            assert!((m.diff_lo95 - want).abs() < 1e-15 && (m.diff_hi95 - want).abs() < 1e-15);
+            assert_eq!((m.share_below, m.share_above), (0.0, 1.0));
+        }
+        let all = &up[0];
+        assert_eq!((all.measure.as_str(), all.decisions), ("loss, all", 40));
+        let seat1 = up
+            .iter()
+            .find(|m| m.measure == "own bias, pos 1")
+            .expect("seat 1");
+        assert_eq!(seat1.decisions, 5);
+        let want_a: f64 =
+            [0i64, 8, 16, 24, 32].iter().map(|i| -i * 10).sum::<i64>() as f64 / 50.0 / unit;
+        assert!((seat1.a - want_a).abs() < 1e-18);
+        // A noisy difference: the interval holds the observed difference.
+        let c: Vec<PairedRow> = a
+            .iter()
+            .map(|r| PairedRow {
+                loss: r.loss + 37 * (r.id % 5),
+                ..r.clone()
+            })
+            .collect();
+        let n = paired(&a, &c, 500, 3).expect("paired");
+        assert!(n[0].diff_lo95 <= n[0].diff && n[0].diff <= n[0].diff_hi95);
+        assert_eq!(n, paired(&a, &c, 500, 3).expect("paired"), "seeded");
+        let mut d = a.clone();
+        d[3].id = 99;
+        assert!(paired(&a, &d, 10, 1).is_err());
+        assert!(paired(&a, &a[..10], 10, 1).is_err());
+    }
+
+    // ------------------------------------------------------------ exact leaves
+
+    use crate::exact_leaves::{ExactLeaves, LeafPolicy, LeafStats};
+    use crate::worlds::WorldSource;
+
+    fn leaf_job(threads: usize, policy: Option<LeafPolicy>) -> CheckJob {
+        CheckJob {
+            verify_pct: 0.0,
+            exact_leaves: policy,
+            ..check_job(4, threads, 3)
+        }
+    }
+
+    fn world_values(r: &CheckRun) -> Vec<Vec<MoneyChance>> {
+        r.decisions
+            .iter()
+            .flat_map(|d| d.world_checks.iter().map(|w| w.hybrid.clone()))
+            .collect()
+    }
+
+    /// No policy is the check as before, and a policy that picks no leaf changes no value, choice
+    /// or error either, byte for byte (it only counts the leaves); with every leaf exact, H_k is
+    /// exact search: its values are the exact values in every world (no loss, no error); and the
+    /// leaves of chosen race classes are solved, the others not, the same on 1 and 3 threads.
+    #[test]
+    fn exact_leaves_none_all_and_race_classes() {
+        let ds = curse_setup();
+        let l = syn_leaf();
+        let src = BeliefSource::new();
+        let ctx = Ctx {
+            leaf: &*l,
+            source: &src,
+            rules: engine::game::Rules::HOUSE,
+        };
+        let none = BTreeMap::new();
+        let net = oracle(4, 61);
+        let run = |job: &CheckJob| run_check(&ds, &none, job, &ctx, &net).expect("runs");
+        let base = run(&leaf_job(2, None));
+        assert!(base.exact_leaves.is_none());
+        assert!(base.decisions.iter().all(|d| d.exact_leaves.is_none()));
+        assert!(
+            base.decisions
+                .iter()
+                .any(|d| d.loss > 0 || d.errors.iter().any(|&e| e != 0))
+        );
+        // Nothing picked: the same, byte for byte.
+        let nothing = run(&leaf_job(3, Some(LeafPolicy::race(0, 4))));
+        assert_eq!(key(&base), key(&nothing));
+        assert_eq!(world_values(&base), world_values(&nothing));
+        let st0 = nothing.exact_leaves.clone().expect("counted");
+        assert_eq!(st0.exact, [0; 5]);
+        assert_eq!(st0.nodes, 0);
+        assert!(st0.distinct.iter().sum::<u64>() > 0);
+        // Every leaf exact: exact search.
+        let all = run(&leaf_job(2, Some(LeafPolicy::all(4))));
+        for d in &all.decisions {
+            assert_eq!(d.loss, 0, "decision {}", d.id);
+            assert!(d.errors.iter().all(|&e| e == 0) && d.own_error_sum == 0);
+            for w in &d.world_checks {
+                assert_eq!(w.hybrid, w.exact, "decision {} world {}", d.id, w.w);
+            }
+        }
+        let sa = all.exact_leaves.clone().expect("counted");
+        assert_eq!(sa.exact, sa.distinct);
+        assert!(sa.nodes > 0);
+        // One race class: the most common (not every leaf), exact there only; thread-independent.
+        let c = (0..5)
+            .max_by_key(|&k| (st0.distinct[k], std::cmp::Reverse(k)))
+            .expect("a class");
+        assert!(
+            st0.distinct[c] < st0.distinct.iter().sum::<u64>(),
+            "{st0:?}"
+        );
+        let p = LeafPolicy::race(1 << c, 4);
+        let r1 = run(&leaf_job(1, Some(p.clone())));
+        let r3 = run(&leaf_job(3, Some(p)));
+        assert_eq!(key(&r1), key(&r3));
+        assert_eq!(world_values(&r1), world_values(&r3));
+        let counts = |r: &CheckRun| -> Vec<_> {
+            r.decisions
+                .iter()
+                .map(|d| d.exact_leaves.as_ref().expect("counted").counts())
+                .collect()
+        };
+        assert_eq!(counts(&r1), counts(&r3));
+        let s1: LeafStats = r1.exact_leaves.clone().expect("counted");
+        for k in 0..5 {
+            assert_eq!(s1.exact[k], if k == c { s1.distinct[k] } else { 0 });
+        }
+        assert!(s1.exact[c] > 0);
+        assert_ne!(
+            world_values(&r1),
+            world_values(&base),
+            "the exact leaves change values"
+        );
+    }
+
+    /// In one world's search, each leaf the policy picks holds exactly the exact solver's value
+    /// of its position (the value its label would carry: `oracle_labels::exact_value`, from
+    /// empty tables), and every other leaf the network's; a band picks the leaves whose network
+    /// value for the decider's team is inside it, and a band of 0-100% picks every leaf.
+    #[test]
+    fn an_exact_leaf_is_the_exact_solvers_value() {
+        let ds = curse_setup();
+        let l = syn_leaf();
+        let src = BeliefSource::new();
+        let ctx = Ctx {
+            leaf: &*l,
+            source: &src,
+            rules: engine::game::Rules::HOUSE,
+        };
+        let net = oracle(4, 62);
+        let cfg = SearchConfig {
+            tt_mb: 4,
+            ..SearchConfig::default()
+        };
+        let mut checked = (0, 0, 0);
+        for d in ds.iter().take(4) {
+            let (_, view, legal) = d.replay();
+            let (_, cands) = candidates(&view, &legal);
+            let worlds = src.prepare(&view, ctx.rules);
+            let team = engine::team_of(d.seat);
+            for w in 0..2 {
+                let m = world_match(&view, &*worlds, w, measure_seed(7, 1, d.id), ctx.rules);
+                for text in ["race:0,2,4", "race:1+band:30-70", "band:0-100"] {
+                    let policy = LeafPolicy::parse(text, 4).expect("valid").expect("some");
+                    let x = ExactLeaves::new(
+                        &net,
+                        &*l,
+                        &policy,
+                        team,
+                        solver::SolveFamily::of_match(&m),
+                    );
+                    let mut run = WorldSolve::default();
+                    exact_world(
+                        &m,
+                        &cands,
+                        &ctx,
+                        &cfg,
+                        None,
+                        &mut SolveMem::new(),
+                        &mut run,
+                        Some(FrontierCut::new(4, &x)),
+                    )
+                    .expect("solves");
+                    let leaves = x.leaves();
+                    assert!(!leaves.is_empty());
+                    for (pos, mctx, canon, v, exact) in leaves {
+                        let class = nn::outcome::race_class_of(&canon, &mctx, &*l);
+                        let nv = net.value(&canon, &mctx);
+                        let in_band = policy
+                            .band
+                            .is_some_and(|(lo, hi)| (lo..=hi).contains(&nv.get(team)));
+                        assert_eq!(exact, policy.has_class(class) || in_band, "{text}");
+                        if exact {
+                            let (e, _) = crate::oracle_labels::exact_value(
+                                &pos,
+                                mctx,
+                                &*l,
+                                solver::FastOptions::default(),
+                                &mut SolveMem::new(),
+                            );
+                            assert_eq!(v, e, "{text}: an exact leaf is its exact value");
+                            checked.0 += 1;
+                        } else {
+                            assert_eq!(v, nv, "{text}: the network's value");
+                            checked.1 += 1;
+                        }
+                        if text.starts_with("band:0-100") {
+                            assert!(exact);
+                            checked.2 += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            checked.0 > 0 && checked.1 > 0 && checked.2 > 0,
+            "{checked:?}"
+        );
+    }
+
+    // ------------------------------------------------------------ learned exact leaves
+
+    /// A leaf-risk model of one split: `feature` ≤ `threshold` scores `lo`, otherwise `hi`
+    /// (`nn::leafrisk`'s format).
+    fn risk_model(
+        feature: usize,
+        threshold: i64,
+        lo: i64,
+        hi: i64,
+    ) -> Arc<nn::leafrisk::RiskModel> {
+        let tree = if lo == hi {
+            serde_json::json!({"f": [-1], "t": [0], "l": [0], "r": [0], "v": [lo]})
+        } else {
+            serde_json::json!({"f": [feature, -1, -1], "t": [threshold, 0, 0], "l": [1, 0, 0],
+                               "r": [2, 0, 0], "v": [0, lo, hi]})
+        };
+        let v = serde_json::json!({
+            "format": nn::leafrisk::FORMAT, "encoder": nn::encode::ENCODER,
+            "n_inputs": nn::leafrisk::N_INPUTS, "extras": nn::leafrisk::EXTRA_NAMES,
+            "net_sha256": "synthetic", "trick": 4, "base": 0, "trees": [tree],
+            "budget": {"quantiles": [hi, lo]},
+        });
+        Arc::new(nn::leafrisk::RiskModel::parse(v.to_string().as_bytes()).expect("a valid model"))
+    }
+
+    /// The learned policy: an infinite threshold is the check without exact leaves, byte for
+    /// byte (values, choices, errors); a threshold of 0 is every leaf exact, byte for byte the
+    /// same as `all`; a split model solves exactly the leaves it scores at or above the
+    /// threshold, the same on 1 and 3 threads; and the predictor's scores are the same in every
+    /// world and thread (a pure function of the position and the network's value).
+    #[test]
+    fn learned_exact_leaves_inf_zero_and_split() {
+        let ds = curse_setup();
+        let l = syn_leaf();
+        let src = BeliefSource::new();
+        let ctx = Ctx {
+            leaf: &*l,
+            source: &src,
+            rules: engine::game::Rules::HOUSE,
+        };
+        let none = BTreeMap::new();
+        let net = oracle(4, 61);
+        let run = |job: &CheckJob| run_check(&ds, &none, job, &ctx, &net).expect("runs");
+        let base = run(&leaf_job(2, None));
+        let m = risk_model(nn::encode::N_FEATURES + 9, 0, 5, 50);
+        // t = ∞: nothing solved, nothing scored, the check as before.
+        let inf = run(&leaf_job(3, Some(LeafPolicy::learned(m.clone(), None, 4))));
+        assert_eq!(key(&base), key(&inf));
+        assert_eq!(world_values(&base), world_values(&inf));
+        let si = inf.exact_leaves.clone().expect("counted");
+        assert_eq!((si.exact, si.nodes, si.scored), ([0; 5], 0, 0));
+        // t = 0: every leaf solved: exactly `all`.
+        let all = run(&leaf_job(2, Some(LeafPolicy::all(4))));
+        let zero = run(&leaf_job(
+            3,
+            Some(LeafPolicy::learned(m.clone(), Some(0), 4)),
+        ));
+        assert_eq!(key(&all), key(&zero));
+        assert_eq!(world_values(&all), world_values(&zero));
+        let sz = zero.exact_leaves.clone().expect("counted");
+        assert_eq!(sz.exact, sz.distinct);
+        assert_eq!(sz.exact, all.exact_leaves.clone().expect("counted").exact);
+        // A threshold above every score: nothing solved, but every leaf scored.
+        let above = run(&leaf_job(
+            2,
+            Some(LeafPolicy::learned(m.clone(), Some(51), 4)),
+        ));
+        assert_eq!(world_values(&base), world_values(&above));
+        let sa = above.exact_leaves.clone().expect("counted");
+        assert_eq!(sa.exact, [0; 5]);
+        assert_eq!(sa.scored, sa.distinct.iter().sum::<u64>());
+        // The split (L1 to the farthest possible outcome above 0: some leaves, not all).
+        let p = LeafPolicy::learned(m.clone(), Some(50), 4);
+        assert_eq!(p.describe(), format!("learned:{}:t=50", &m.sha256[..12]));
+        let r1 = run(&leaf_job(1, Some(p.clone())));
+        let r3 = run(&leaf_job(3, Some(p.clone())));
+        assert_eq!(key(&r1), key(&r3));
+        assert_eq!(world_values(&r1), world_values(&r3));
+        let (s1, s3) = (
+            r1.exact_leaves.clone().expect("counted"),
+            r3.exact_leaves.clone().expect("counted"),
+        );
+        assert_eq!(s1.counts(), s3.counts());
+        let solved: u64 = s1.exact.iter().sum();
+        assert!(
+            solved > 0 && solved < s1.distinct.iter().sum::<u64>(),
+            "{s1:?}"
+        );
+        // Leaf by leaf: exact exactly where the score reaches the threshold.
+        let cfg = SearchConfig {
+            tt_mb: 4,
+            ..SearchConfig::default()
+        };
+        let mut seen = (0, 0);
+        for (d, w) in ds.iter().flat_map(|d| [(d, 0), (d, 1)]) {
+            let (_, view, legal) = d.replay();
+            let (_, cands) = candidates(&view, &legal);
+            let worlds = src.prepare(&view, ctx.rules);
+            let m0 = world_match(&view, &*worlds, w, measure_seed(7, 1, d.id), ctx.rules);
+            let x = ExactLeaves::new(
+                &net,
+                &*l,
+                &p,
+                engine::team_of(d.seat),
+                solver::SolveFamily::of_match(&m0),
+            );
+            let mut run = WorldSolve::default();
+            exact_world(
+                &m0,
+                &cands,
+                &ctx,
+                &cfg,
+                None,
+                &mut SolveMem::new(),
+                &mut run,
+                Some(FrontierCut::new(4, &x)),
+            )
+            .expect("solves");
+            for (_, mctx, canon, _, exact) in x.leaves() {
+                let nv = net.value(&canon, &mctx);
+                let score = m.score(&canon, &mctx, &*l, &nv);
+                assert_eq!(score, m.score(&canon, &mctx, &*l, &nv), "a pure function");
+                assert!(score == 5 || score == 50);
+                assert_eq!(exact, score >= 50);
+                if exact {
+                    seen.0 += 1;
+                } else {
+                    seen.1 += 1;
+                }
+            }
+        }
+        assert!(seen.0 > 0 && seen.1 > 0, "{seen:?}");
     }
 }

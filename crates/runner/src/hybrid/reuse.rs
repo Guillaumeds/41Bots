@@ -13,7 +13,9 @@
 //! key, the set it stands for (`random`, `rules`, `harvest`, `race`, `val`, or `extra`: any
 //! other training shard, such as an earlier run's targeted harvest) and its seed; optionally its
 //! rows, its loss weight (`weight`, a training shard's `NAME.npy.weight`; not for `val`) and its
-//! per-row weights (`rowweights`, the key of its `NAME.npy.rowweights`). A run with
+//! per-row weights (`rowweights`, the key of its `NAME.npy.rowweights`) and its sibling groups
+//! (`groups`, the key of its `NAME.npy.groups`: set `siblings`, `search labels --source
+//! siblings`, needs it; another set may carry one). A run with
 //! `upload_shards` writes these entries, ready to paste, in `out/hybrid/shards.json`
 //! (`label_inputs`: stored shards only; a shard whose upload failed waits in `label_inputs_pending`
 //! until the chunk's end retry stores it), and in the audit loop (additive mode, or trick 2 where the targeted shards are
@@ -59,10 +61,12 @@ use crate::remote::{fetch_input, input_hex, input_key};
 pub(crate) const KEYS: [&str; 1] = ["label_inputs"];
 
 /// The sets an entry can stand for.
-const SETS: [&str; 6] = ["random", "rules", "harvest", "race", "val", "extra"];
+const SETS: [&str; 7] = [
+    "random", "rules", "harvest", "race", "siblings", "val", "extra",
+];
 
 /// The keys of an entry.
-const ENTRY_KEYS: [&str; 8] = [
+const ENTRY_KEYS: [&str; 9] = [
     "set",
     "seed",
     "rows",
@@ -71,6 +75,7 @@ const ENTRY_KEYS: [&str; 8] = [
     "weight",
     "rowweights",
     "label_source",
+    "groups",
 ];
 
 /// One stored shard to reuse.
@@ -83,6 +88,8 @@ pub(crate) struct LabelInput {
     pub shard: String,
     pub sidecar: String,
     pub rowweights: Option<String>,
+    /// SHA-256 of its sibling groups (`NAME.npy.groups`), if any.
+    pub groups: Option<String>,
     /// The shard's loss weight (1: no weight file).
     pub weight: f64,
     /// `label_source`: `"exact"` (the default) or `"hybrid"` (`hlabels`).
@@ -111,6 +118,9 @@ impl LabelInput {
         if self.label_source != "exact" {
             v["label_source"] = json!(self.label_source);
         }
+        if let Some(g) = &self.groups {
+            v["groups"] = json!(input_key(g));
+        }
         v
     }
 
@@ -120,6 +130,7 @@ impl LabelInput {
             "random" | "val" => Some("random"),
             "rules" => Some("rules"),
             "harvest" | "race" => Some("harvest"),
+            "siblings" => Some("siblings"),
             _ => None,
         }
     }
@@ -193,6 +204,13 @@ pub(crate) fn parse(o: &Map<String, Value>, label_parts: u64) -> Result<Vec<Labe
         let shard = key("shard", true)?.expect("needed");
         let sidecar = key("sidecar", true)?.expect("needed");
         let rowweights = key("rowweights", false)?;
+        let groups = key("groups", false)?;
+        if set == "siblings" && groups.is_none() {
+            return Err(format!(
+                "hybrid_rung: label_inputs entry {n}: a siblings shard needs its groups (the key of \
+                 its NAME.npy.groups)"
+            ));
+        }
         let rows = match e.get("rows") {
             None | Some(Value::Null) => None,
             Some(v) => Some(v.as_u64().filter(|r| *r > 0).ok_or_else(|| {
@@ -211,10 +229,10 @@ pub(crate) fn parse(o: &Map<String, Value>, label_parts: u64) -> Result<Vec<Labe
                     )
                 })?,
         };
-        if set == "val" && (weight != 1.0 || rowweights.is_some()) {
+        if set == "val" && (weight != 1.0 || rowweights.is_some() || groups.is_some()) {
             return Err(format!(
-                "hybrid_rung: label_inputs entry {n}: the validation shard takes no weight (its \
-                 loss is the plain mean)"
+                "hybrid_rung: label_inputs entry {n}: the validation shard takes no weight or \
+                 groups (its loss is the plain mean)"
             ));
         }
         let label_source = match e.get("label_source") {
@@ -254,6 +272,7 @@ pub(crate) fn parse(o: &Map<String, Value>, label_parts: u64) -> Result<Vec<Labe
             shard,
             sidecar,
             rowweights,
+            groups,
             weight,
             label_source,
         });
@@ -269,6 +288,7 @@ pub(crate) fn generating_keys(set: &str) -> &'static [&'static str] {
         "rules" => &["labels_rules", "labels_rules_seed"],
         "harvest" => &["labels_harvest", "labels_harvest_seed"],
         "race" => &["labels_race", "labels_race_seed"],
+        "siblings" => &["labels_siblings", "labels_siblings_seed"],
         "val" => &["val_count", "val_seed"],
         _ => &[],
     }
@@ -356,6 +376,7 @@ impl Rung<'_> {
                 ("shard", Some(x.shard.clone()), path.clone()),
                 ("sidecar", Some(x.sidecar.clone()), with(".json")),
                 ("rowweights", x.rowweights.clone(), with(".rowweights")),
+                ("groups", x.groups.clone(), with(".groups")),
             ] {
                 let Some(hex) = hex else { continue };
                 let (r, h, l) = (Arc::clone(&remote), hex.clone(), local.clone());
@@ -385,6 +406,12 @@ impl Rung<'_> {
                     .unwrap_or_default();
                 if w.len() as u64 != rows {
                     return Err(bad(format!("{} row weights for {rows} rows", w.len())));
+                }
+            }
+            if x.groups.is_some() {
+                let g = nn::groups::read(&path).map_err(bad)?.unwrap_or_default();
+                if g.len() as u64 != rows {
+                    return Err(bad(format!("{} group rows for {rows} rows", g.len())));
                 }
             }
             let weight_file = with(".weight");
@@ -471,6 +498,11 @@ impl Rung<'_> {
         } else {
             None
         };
+        let groups = if with(".groups").is_file() {
+            Some(put(with(".groups"))?)
+        } else {
+            None
+        };
         let side = read_json(&with(".json")).unwrap_or(Value::Null);
         let mut e = json!({ "set": rec["name"], "seed": rec["seed"], "shard": input_key(sha),
                             "sidecar": sidecar });
@@ -490,6 +522,9 @@ impl Rung<'_> {
         }
         if let Some(k) = rowweights {
             e["rowweights"] = json!(k);
+        }
+        if let Some(k) = groups {
+            e["groups"] = json!(k);
         }
         Ok(e)
     }
@@ -688,6 +723,7 @@ mod tests {
             shard: "a".repeat(64),
             sidecar: "b".repeat(64),
             rowweights: None,
+            groups: None,
             weight: 1.0,
             label_source: "exact",
         };
@@ -733,7 +769,7 @@ mod tests {
             Ok(()),
             "any source; rows over count"
         );
-        for set in ["random", "rules", "harvest", "race", "val"] {
+        for set in ["random", "rules", "harvest", "race", "siblings", "val"] {
             assert_eq!(generating_keys(set).len(), 2);
         }
         // Label sources (hybrid labels, `hlabels`): the sidecar's must be the entry's.
@@ -775,6 +811,19 @@ mod tests {
             s[k] = v.clone();
             assert!(check_sidecar(&xh, &s, 3, 7).is_err(), "{k} {v}");
         }
+        // A siblings shard: its sidecar's source is siblings.
+        let sib = LabelInput {
+            set: "siblings",
+            groups: Some("d".repeat(64)),
+            ..x.clone()
+        };
+        let mut s = good.clone();
+        s["source"] = json!("siblings");
+        assert_eq!(check_sidecar(&sib, &s, 3, 7), Ok(()));
+        assert!(
+            check_sidecar(&sib, &good, 3, 7).is_err(),
+            "a random shard is no siblings shard"
+        );
         assert!(generating_keys("extra").is_empty());
     }
 }

@@ -541,3 +541,58 @@ loses, on the positions H_2 meets in play; the true loss is at most the loss aga
 the silver's own error (O_3: 0.0068% overall at trick 2, 0.012–0.016% at seats 1–2; at trick 1 the
 optional exact anchor of a few dozen leader decisions measures it). It never replaces the
 position-level audit, and it is never trained on.
+
+## 12. Trick-k labels from the trick-(k+1) network (build of 2026-10-19, branch `eng-hlabels`)
+
+An exact label at trick 2 costs about 3 thread-seconds; most of it is spent solving tricks 3–5
+again for every position. **Hybrid labels** value a training position at the start of trick `k`
+by H_{k+1} instead: exact search through trick `k`, then the stored, adopted integer network
+O_{k+1} at the start of trick `k + 1` [bootstrapping: the next trick's proven network supplies
+the values beyond the current trick, as TreeStrap (Veness et al. 2009) and TD-Leaf do]. Only
+the money chance at the start of trick `k + 1` is approximate, and O_{k+1} has already passed
+its own audit. Code: `search::oracle_labels` (`Labeller`, `HybridLabels`, `hybrid_value`),
+`search labels --label-net`, the runner's `crates/runner/src/hybrid/hlabels.rs`.
+
+**Settings** (`hybrid_rung`, all optional; the default is every label exact, byte for byte as
+before):
+
+| Setting | Values | Meaning |
+|---|---|---|
+| `label_source` | `"exact"` (default), `"hybrid"` | Hybrid labels for the training shards this run makes. |
+| `label_net` | `"inputs/sha256/<hex>"` | Required with `"hybrid"`: the stored integer O_{cut+1}. Fetched at step 0 and refused unless it is a trick-`cut + 1` network. |
+| `hybrid_exact_share` | 0 (default) to 1, six decimals | The exact anchor: this share of each hybrid shard's rows is labelled exactly all the same, drawn from each row's own key (the same rows on any machine or thread count). 1 gives the exact shard byte for byte. |
+| `label_exact_leaves` | `"none"` (default) or a policy | Exact leaves (§ "Exact leaves (G)" of `rung2.md`, `learned-leaves.md`): the positions at the start of trick `cut + 1` the policy picks are solved exactly, the network values the rest. Syntax of `search hybrid-check --exact-leaves`: `race:LIST`, `band:LO-HI` (the money chance of the team to lead the labelled position), `learned:MODEL:t=T` or `:budget=S`, `all`, joined by `+`. A learned term names its leaf-risk model by its stored input key (`learned:inputs/sha256/<hex>:t=T`); it is fetched at step 0 and refused unless it was made for trick-`cut + 1` leaves of `label_net` itself. `"none"` gives exactly the hybrid labels without the setting; `"all"` gives the exact labels byte for byte. |
+
+**What is never hybrid.** Only the generated training shards (`random`, `rules`, `harvest`,
+`race`, `siblings`) and the audit loop's targeted harvests get hybrid labels. The validation
+shard, every audit shard, the golden set, the mini golden sets, the rough test and the silver
+set stay exact, always: no setting asks otherwise, a reused (`label_inputs`) validation entry
+marked hybrid is refused, and a validation or audit shard whose sidecar says hybrid stops the
+chunk. So every standard the loop judges by is still exact search.
+
+**Provenance.** A hybrid shard's sidecar records `label_source: "hybrid"`, the network's SHA-256
+(`label_net_sha256`), the exact share, the rows by label (`rows_hybrid`, `rows_exact`) and its
+own values version, `"<exact>+O<k+1>:<net sha256>"`, extended with exact leaves to
+`…+exact:<policy in normal form>` and, for a learned term, `…+leafrisk:<model sha256>`; with
+exact leaves it also records the policy (`label_exact_leaves`), the model (`label_leafrisk_sha256`)
+and the leaves seen and solved exactly (`exact_leaves`). An exact shard keeps the plain values
+version, so nothing that reads exact labels can take a hybrid one for one. `rung.json` lists
+every shard by label source (`label_sources`), and a reused shard's entry must say the label
+source its sidecar says (`reuse::check_sidecar`).
+
+**Row format.** Unchanged. The value is H_{k+1}'s fixed-point money chance (same tie rule); the
+outcome label is the first possible outcome whose money vector is nearest the value (for an
+exact value, its own outcome, so exact rows are unchanged). Labels are byte-identical for any
+thread count, chunk size and harvest schedule (tested).
+
+**Memory.** With exact leaves, each label thread holds a leaf-solve table (the trick `cut + 1`
+size, 64 MB at cut 2) beside its label table; the runner counts it and lowers the label table if
+the machine would not hold both (never changes a label).
+
+**Measured on the build VM (2026-10-19, 4 threads, 400 random-play trick-2 labels, the adopted
+O_3 f5766a…):** plain hybrid labels about 86 thread-ms a label (exact random-play labels: about
+3,650); with exact leaves `race:1-4`, 63% of the trick-3 leaves are solved exactly and a label
+costs about 2,800 thread-ms; with the learned model at the cost-matched threshold of the o3-
+learnedleaf check (`t=277338260`), 40% of the leaves and about 2,000 thread-ms. Random-play
+positions reach far more contested leaves than the golden set's, so exact leaves take back most
+of the hybrid's saving on these rows; choose the rule with that in mind.

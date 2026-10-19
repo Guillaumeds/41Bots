@@ -74,10 +74,40 @@
 //! decisions), `tt_mb` (64, the solver table per thread of the golden worlds
 //! and the check), `verify_pct` (1, the check's recomputed sample of stored exact worlds),
 //! `train_threads` (CPU threads of the trainer: all usable threads on the CPU, at most 8 beside
-//! a GPU), `compare_cpu` (false; after a GPU training, train once more on the CPU with the same
+//! a GPU), `train_feed` (`"auto"`: where the trainer holds its rows, its `--feed`; `"disk"`
+//! forces them onto disk, `"resident"` or `"staged"` into memory; passed only when not `auto`),
+//! `train_beside_gb` (`"auto"`: the memory the work beside a training will take, the trainer's
+//! `--host-others-gb`: [`LABEL_GB_PER_THREAD`] times the usable threads for a training beside the
+//! CPU steps, nothing for one alone; a number is passed to every training). With `--feed auto`
+//! the trainer keeps its rows on disk (`fortyone_nn.train` class `DiskRows`, in
+//! `hybrid-work/train-rows/`, always its `--rows-dir`, never in `out/`) when they do not fit in
+//! memory beside that and its own reserve, and trains the same network, byte for byte; on a
+//! machine with enough memory nothing changes (docs/m3-hybrid/vast.md, the trainer's rows and
+//! RAM). `train_fraction` (1; above 0, at most 1; not with the audit loop): each training shard
+//! gives only its first ceil(fraction × rows) rows, the same prefix every time (the trainer's
+//! `--train-fraction`, passed only below 1, in every feed; the row weights cut to match; never
+//! the validation shard, the golden set or the check), for the learning-curve test of whether
+//! more base rows help (owner, 2026-10-19; docs/vast/o3-basecurve-*.manifest.json); `rung.json` records it
+//! and the rows used (`net.train_fraction`, `net.train_rows_used`). `compare_cpu` (false; after a GPU training, train once more on the CPU with the same
 //! settings and record both, for small checks), `upload_shards` (false; see step 4), `table`
 //! (the equity table, as `search_measure`'s), and the scheduler's `threads`, `est_seconds`,
 //! `equity_input`.
+//!
+//! Sibling groups and the pairwise ranking loss (owner, 2026-10-19, "fix E": train on what a
+//! decision needs; `search labels --source siblings`, `search::oracle_labels::sibling_plan`):
+//! `labels_siblings` (rows, default 0: none), `labels_siblings_seed` (107), `siblings_positions`
+//! (the shares of decisions by the decider's position band, default the harvest's
+//! `harvest_positions`) and `siblings_cap` (8: the most groups a decision gives; a trick has at most
+//! eight choice points): groups of frontier positions that one choice point's cards lead to, each
+//! card followed along the search's own principal line (driven by `harvest_net`, required at cut 3
+//! or 2), every position labelled exactly; the shard (with its groups sidecar `NAME.npy.groups`)
+//! joins the training set after the race shard, and `upload_shards` stores the sidecar too (its
+//! `label_inputs` entry gives it as `groups`). The trainer's settings: `pair_weight` (0: none, the
+//! command as before) passes `--pair-weight` (and `pair_scale`, default 100, `--pair-scale`): the
+//! pairwise ranking loss over the groups of the training shards (`fortyone_nn.train`, refused
+//! without a sibling shard, with `label_parts` above 1 or with the audit loop: the trainer takes
+//! groups from whole shards only); `tie_aware` (false) passes `--tie-aware` (the partial-label loss
+//! over outcomes whose money vectors are equal).
 //!
 //! Training modes, reused labels and the leader focus (docs/m3-hybrid/audit-loop.md §10; owner,
 //! 2026-10-17): `train_mode` (`"scratch"`, the default: everything above, unchanged; or
@@ -189,7 +219,7 @@ mod reuse;
 use audit::additive;
 
 /// The settings a `hybrid_rung` chunk takes; any other key is refused.
-pub(crate) const KEYS: [&str; 72] = [
+pub(crate) const KEYS: [&str; 82] = [
     "cut",
     "check",
     "audit_rounds",
@@ -233,6 +263,13 @@ pub(crate) const KEYS: [&str; 72] = [
     "race_strata",
     "race_positions",
     "race_other_cap",
+    "labels_siblings",
+    "labels_siblings_seed",
+    "siblings_positions",
+    "siblings_cap",
+    "pair_weight",
+    "pair_scale",
+    "tie_aware",
     "val_count",
     "val_seed",
     "golden_trick",
@@ -256,6 +293,9 @@ pub(crate) const KEYS: [&str; 72] = [
     "mix_weight",
     "device",
     "train_threads",
+    "train_feed",
+    "train_beside_gb",
+    "train_fraction",
     "compare_cpu",
     "upload_shards",
     "table",
@@ -273,6 +313,10 @@ const GOLDEN_SEED: u64 = 1;
 
 /// CPU threads of the trainer beside a GPU (it only gathers batches and launches GPU work).
 pub(crate) const GPU_TRAIN_THREADS: u64 = 8;
+
+/// The label solves' memory a usable thread, for `train_beside_gb` `"auto"` (GiB): measured at
+/// about 200 MB a thread (docs/m3-hybrid/vast.md), rounded up.
+pub(crate) const LABEL_GB_PER_THREAD: f64 = 0.25;
 
 /// Attempts at `uv sync` (it downloads about 3.7 GB for the GPU build), and each one's limit.
 const SYNC_ATTEMPTS: u32 = 3;
@@ -370,6 +414,20 @@ pub(crate) struct Params {
     pub mix_weight: f64,
     pub device: Device,
     pub train_threads: Option<u64>,
+    /// `train_feed` (`"auto"`): where the trainer holds its rows, its `--feed` (`auto`,
+    /// `resident`, `staged`, `disk`); passed only when not `auto`.
+    pub train_feed: String,
+    /// `train_beside_gb` (`"auto"`, `None` here): the memory the work beside a training will
+    /// take at most, the trainer's `--host-others-gb` (with `--feed auto` its rows go to disk
+    /// unless they, its reserve and this fit in the machine's memory). `"auto"`: a training
+    /// beside the CPU steps (in the background) passes [`LABEL_GB_PER_THREAD`] times the usable
+    /// threads, one alone nothing. A number: passed to every training.
+    pub train_beside_gb: Option<f64>,
+    /// `train_fraction` (1: every row, the trainer's command as before): each training shard
+    /// gives only its first ceil(fraction × rows) rows, the trainer's `--train-fraction` (the
+    /// learning-curve test; owner, 2026-10-19). Never the validation shard, the golden set or a
+    /// check's data.
+    pub train_fraction: f64,
     pub compare_cpu: bool,
     pub upload_shards: bool,
     /// `harvest_net`: the SHA-256 of the integer network (`int.safetensors` of an earlier run,
@@ -406,6 +464,18 @@ pub(crate) struct Params {
     pub reused_harvest_args: Option<Vec<String>>,
     /// `label_source` `"hybrid"`'s settings ([`hlabels`]); `None`: exact labels, as before.
     pub hybrid_labels: Option<hlabels::HybridLabels>,
+    /// `pair_weight` (0: none) and `pair_scale` (100): the trainer's pairwise ranking loss over
+    /// the sibling groups (`--pair-weight`, `--pair-scale`, passed only when the weight is above 0).
+    pub pair_weight: f64,
+    pub pair_scale: f64,
+    /// `tie_aware` (false): the trainer's `--tie-aware`.
+    pub tie_aware: bool,
+}
+
+/// Whether a set of `search labels --source` comes by decision (a harvest or sibling groups): one
+/// shard, never made in parts.
+pub(crate) fn harvested(source: &str) -> bool {
+    source == "harvest" || source == "siblings"
 }
 
 /// One label shard to make: its set, and its part (`(k, of)`, 1-based) when the set is made in
@@ -473,6 +543,9 @@ impl Params {
                      "train_stall_minutes": self.train_stall_minutes,
                      "mix_weight": self.mix_weight },
             "device": self.device.name(), "train_threads": self.train_threads,
+            "train_feed": self.train_feed,
+            "train_beside_gb": self.train_beside_gb.map_or(json!("auto"), |g| json!(g)),
+            "train_fraction": self.train_fraction,
             "compare_cpu": self.compare_cpu, "upload_shards": self.upload_shards,
             "label_parts": self.label_parts, "overlap": self.overlap,
             "partial_epochs": self.partial_epochs,
@@ -481,6 +554,8 @@ impl Params {
             "label_inputs": self.label_inputs.iter().map(reuse::LabelInput::to_json).collect::<Vec<_>>(),
             "harvest_seat_weights": self.seat_weights,
             "label_source": hlabels::to_json(self.hybrid_labels.as_ref()),
+            "pair_weight": self.pair_weight, "pair_scale": self.pair_scale,
+            "tie_aware": self.tie_aware,
         })
     }
 
@@ -505,7 +580,7 @@ impl Params {
         let n = self.label_parts;
         let mut out = vec![one(&self.val)];
         for k in 1..=n {
-            for s in self.train.iter().filter(|s| s.source != "harvest") {
+            for s in self.train.iter().filter(|s| !harvested(s.source)) {
                 out.push(ShardJob {
                     set: LabelSet {
                         count: part_count(s.count, k, n),
@@ -516,7 +591,7 @@ impl Params {
                 });
             }
         }
-        out.extend(self.train.iter().filter(|s| s.source == "harvest").map(one));
+        out.extend(self.train.iter().filter(|s| harvested(s.source)).map(one));
         out
     }
 
@@ -674,16 +749,28 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         "labels_race_seed",
         (0, 105),
     )?;
+    let mut siblings = set(
+        "siblings",
+        "siblings",
+        "labels_siblings",
+        "labels_siblings_seed",
+        (0, 107),
+    )?;
     let harvest_net = input("harvest_net")?;
     // The audit loop's harvests (its audit shards and targeted harvests) are harvests too: at
     // trick 3, round 1's audit shard is driven by `harvest_net` (no network of the loop's own
     // exists yet), later rounds by the latest network. At trick 2 round 1's audit shard waits
     // for round 1's own network instead (`audit.rs`, "Trick 2"), so the loop needs none there.
     let audit_rounds = o.get("audit_rounds").and_then(Value::as_u64).unwrap_or(0);
-    if harvest_net.is_some() && harvest.count == 0 && race.count == 0 && audit_rounds == 0 {
+    if harvest_net.is_some()
+        && harvest.count == 0
+        && race.count == 0
+        && siblings.count == 0
+        && audit_rounds == 0
+    {
         return Err(
             "hybrid_rung: harvest_net drives the harvest's search: it needs labels_harvest, \
-             labels_race or audit_rounds above 0"
+             labels_race, labels_siblings or audit_rounds above 0"
                 .into(),
         );
     }
@@ -702,11 +789,14 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
     // before any network of the run exists, so without `harvest_net` every reached frontier
     // position would be solved exactly (thousands a decision, seconds each at trick 2). The
     // driver must be a network of the cut's own trick (`search labels` refuses another).
-    if (harvest.count > 0 || race.count > 0) && cut <= 3 && harvest_net.is_none() {
+    if (harvest.count > 0 || race.count > 0 || siblings.count > 0)
+        && cut <= 3
+        && harvest_net.is_none()
+    {
         return Err(format!(
-            "hybrid_rung: labels_harvest and labels_race at cut {cut} need harvest_net (an \
-             integer O_{cut}, trained for trick-{cut} positions): exact values at the frontier of \
-             trick {cut} for every reached position would not finish"
+            "hybrid_rung: labels_harvest, labels_race and labels_siblings at cut {cut} need \
+             harvest_net (an integer O_{cut}, trained for trick-{cut} positions): exact values at \
+             the frontier of trick {cut} for every reached position would not finish"
         ));
     }
     let golden_inputs = match (
@@ -809,6 +899,41 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
             other_cap,
         })
     };
+    // Sibling groups (`labels_siblings`): their settings are refused without them, not ignored.
+    if siblings.count == 0 {
+        if let Some(k) = ["labels_siblings_seed", "siblings_positions", "siblings_cap"]
+            .iter()
+            .find(|k| o.contains_key(**k))
+        {
+            return Err(format!(
+                "hybrid_rung: {k} is set but labels_siblings is 0: the sibling groups' settings \
+                 need labels_siblings above 0"
+            ));
+        }
+    } else {
+        let positions = s("siblings_positions", &shares)?;
+        parse_band_shares(&positions)
+            .map_err(|e| format!("hybrid_rung: siblings_positions: {e}"))
+            .and_then(|w| {
+                if w.iter().sum::<u64>() > 1 << 24 {
+                    Err(format!(
+                        "hybrid_rung: siblings_positions {positions:?}: use fewer decimals"
+                    ))
+                } else {
+                    Ok(())
+                }
+            })?;
+        let cap = u("siblings_cap", 8)?;
+        if !(1..=u64::from(u32::MAX)).contains(&cap) {
+            return Err("hybrid_rung: siblings_cap must be at least 1".into());
+        }
+        siblings.args = vec![
+            "--harvest-cap".into(),
+            cap.to_string(),
+            "--harvest-positions".into(),
+            positions,
+        ];
+    }
     let mut val = set("val", "random", "val_count", "val_seed", (100_000, 201))?;
     // Stored shards reused instead of generated (`label_inputs`): the sets they give are not
     // made, and their own settings are refused rather than ignored.
@@ -832,6 +957,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
                 harvest.count = 0;
             }
             "race" => race.count = 0,
+            "siblings" => siblings.count = 0,
             "val" => {
                 val.count = 0;
                 val.seed = x.seed;
@@ -839,7 +965,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
             _ => {}
         }
     }
-    let train: Vec<LabelSet> = [random, rules, harvest, race]
+    let train: Vec<LabelSet> = [random, rules, harvest, race, siblings]
         .into_iter()
         .filter(|s| s.count > 0)
         .collect();
@@ -857,8 +983,8 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
     }
     if train.is_empty() && reused_train == 0 {
         return Err(
-            "hybrid_rung: labels_random, labels_rules, labels_harvest and labels_race are all 0: \
-             no training labels"
+            "hybrid_rung: labels_random, labels_rules, labels_harvest, labels_race and \
+             labels_siblings are all 0: no training labels"
                 .into(),
         );
     }
@@ -891,7 +1017,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
     // The seeds the shards are made with: a set's own, or with parts each part's.
     let mut effective: Vec<LabelSet> = Vec::new();
     for x in train.iter().chain(std::iter::once(&val)) {
-        if label_parts > 1 && x.source != "harvest" && x.name != "val" {
+        if label_parts > 1 && !harvested(x.source) && x.name != "val" {
             for k in 1..=label_parts {
                 let seed = part_seed(x.seed, k).ok_or_else(|| {
                     format!(
@@ -991,6 +1117,73 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
                 .ok_or("hybrid_rung: train_threads must be a whole number, at least 1")?,
         ),
     };
+    let train_feed = s("train_feed", "auto")?;
+    if !["auto", "resident", "staged", "disk"].contains(&train_feed.as_str()) {
+        return Err(format!(
+            "hybrid_rung: train_feed {train_feed:?}: auto, resident, staged or disk"
+        ));
+    }
+    let train_beside_gb = match o.get("train_beside_gb") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(t)) if t == "auto" => None,
+        Some(v) => Some(v.as_f64().filter(|x| x.is_finite() && *x >= 0.0).ok_or(
+            "hybrid_rung: train_beside_gb must be \"auto\" or a number of GiB, 0 or more",
+        )?),
+    };
+    let train_fraction = match o.get("train_fraction") {
+        None | Some(Value::Null) => 1.0,
+        Some(v) => v
+            .as_f64()
+            .filter(|x| x.is_finite() && *x > 0.0 && *x <= 1.0)
+            .ok_or(
+                "hybrid_rung: train_fraction must be a number above 0 and at most 1 (the share \
+                    of each training shard's rows trained on, its first rows; 1: every row)",
+            )?,
+    };
+    // One training only: the audit loop's rounds would cut their targeted shards too.
+    if train_fraction < 1.0 && audit_rounds > 0 {
+        return Err(
+            "hybrid_rung: train_fraction below 1 is for one training (the learning-curve test): \
+             not with audit_rounds"
+                .into(),
+        );
+    }
+    // The pairwise ranking loss over sibling groups: whole shards with groups (generated or
+    // reused) and one plain training (the trainer refuses streamed shards for it).
+    let pair_weight = f("pair_weight", 0.0)?;
+    let pair_scale = f("pair_scale", 100.0)?;
+    if pair_scale <= 0.0 {
+        return Err("hybrid_rung: pair_scale must be above 0".into());
+    }
+    if pair_weight == 0.0 && o.contains_key("pair_scale") {
+        return Err(
+            "hybrid_rung: pair_scale is set but pair_weight is 0: it goes with pair_weight".into(),
+        );
+    }
+    if pair_weight > 0.0 {
+        let groups = train.iter().any(|x| x.source == "siblings")
+            || label_inputs
+                .iter()
+                .any(|x| x.set == "siblings" || x.groups.is_some());
+        if !groups {
+            return Err(
+                "hybrid_rung: pair_weight needs sibling groups: labels_siblings above 0, or a \
+                 label_inputs entry of set siblings (or with groups)"
+                    .into(),
+            );
+        }
+        if label_parts > 1 || audit_rounds > 0 {
+            return Err(
+                "hybrid_rung: pair_weight is for one training on whole shards: not with \
+                 label_parts above 1 or audit_rounds"
+                    .into(),
+            );
+        }
+    }
+    let tie_aware = b("tie_aware")?;
+    if tie_aware && head != "outcome" {
+        return Err("hybrid_rung: tie_aware is for the outcome head".into());
+    }
     let verify_pct = f("verify_pct", 1.0)?;
     if verify_pct > 100.0 {
         return Err("hybrid_rung: verify_pct is a percentage (0 to 100)".into());
@@ -1047,6 +1240,9 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         mix_weight: f("mix_weight", 1.0)?,
         device,
         train_threads,
+        train_feed,
+        train_beside_gb,
+        train_fraction,
         compare_cpu: b("compare_cpu")?,
         upload_shards: b("upload_shards")?,
         harvest_net,
@@ -1061,6 +1257,9 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         seat_weights: additive::parse_seat_weights(o)?,
         reused_harvest_args,
         hybrid_labels,
+        pair_weight,
+        pair_scale,
+        tie_aware,
     })
 }
 
@@ -1689,16 +1888,25 @@ struct SharedShard {
 /// only if those tables, beside the equity table (`equity_bytes`), the process's own memory and a
 /// pooled harvest's window of finished rows (`LABEL_WINDOW_BYTES`), would not fit (`crate::mem`;
 /// the table never changes a label, only its speed). Returns `--tt-mb N` when lowered (nothing
-/// otherwise) and the plan.
+/// otherwise) and the plan. `leaf_tables`: hybrid labels with exact leaves, whose leaf solves
+/// have a table of their own per thread (`search labels --exact-leaf-tt-mb`'s default, the
+/// trick after the cut's), counted beside the label tables.
 fn label_tables(
     cut: u8,
     threads: u64,
     equity_bytes: u64,
     limit: &crate::mem::Limit,
+    leaf_tables: bool,
 ) -> (Vec<String>, crate::mem::Plan) {
     use crate::mem::{PROCESS_BASE, Requested, STACK_PER_THREAD, Tables, plan};
     let want = search::oracle_labels::tt_mb_for(cut) as u64;
-    let other = equity_bytes
+    let leaf = if leaf_tables {
+        threads * ((search::oracle_labels::tt_mb_for(cut + 1) as u64) << 20)
+    } else {
+        0
+    };
+    let other = leaf
+        + equity_bytes
         + PROCESS_BASE
         + threads * STACK_PER_THREAD
         + search::oracle_labels::LABEL_WINDOW_BYTES;
@@ -1753,10 +1961,17 @@ impl Rung<'_> {
     /// ([`label_tables`] on this machine); a lowering is a warning. Returns the arguments to add
     /// (`--tt-mb`, none unless lowered, so the step's command is otherwise as before) and the
     /// plan's record.
-    fn label_tt_args(&mut self, threads: u64, what: &str) -> (Vec<String>, Value) {
+    fn label_tt_args(&mut self, threads: u64, what: &str, set: &str) -> (Vec<String>, Value) {
         let limit = crate::mem::Sys::host().limit();
         let equity = fs::metadata(&self.table).map_or(128 << 20, |m| m.len());
-        let (args, plan) = label_tables(self.p.cut as u8, threads, equity, &limit);
+        // Exact leaves' tables, for the shards the hybrid labels (`label_args`).
+        let leaves = self
+            .p
+            .hybrid_labels
+            .as_ref()
+            .is_some_and(|h| h.exact_leaves.is_some())
+            && !matches!(set, "val" | "audit");
+        let (args, plan) = label_tables(self.p.cut as u8, threads, equity, &limit, leaves);
         if let Some(w) = &plan.warning {
             self.warn(format!("{what}: {w}"));
         }
@@ -1800,6 +2015,10 @@ impl Rung<'_> {
         // Hybrid labels' network (`label_net`, the integer O_{cut+1}).
         if let Some(h) = &self.p.hybrid_labels {
             want.push(("label_net".into(), h.net.clone()));
+            // A learned exact-leaves term's leaf-risk model (`label_exact_leaves`).
+            if let Some(m) = &h.leafrisk {
+                want.push(("label_leafrisk".into(), m.clone()));
+            }
         }
         if let Some((d, w)) = &self.p.golden_inputs {
             want.push(("golden_decisions".into(), d.clone()));
@@ -1891,6 +2110,39 @@ impl Rung<'_> {
             }
             if let Some(x) = recs.get_mut("label_net") {
                 x["trick"] = json!(trick);
+            }
+        }
+        // A learned exact-leaves term's model must predict that network's errors at the start of
+        // trick `k + 1` (`search labels --exact-leaves` refuses another, but only when the first
+        // shard starts).
+        if let Some(m) = self.inputs.get("label_leafrisk") {
+            let next = self.p.cut + 1;
+            let model = nn::leafrisk::RiskModel::load(m).map_err(|e| {
+                format!("hybrid_rung: label_exact_leaves: the learned term's model: {e}")
+            })?;
+            if u64::from(model.trick) != next {
+                return Err(format!(
+                    "hybrid_rung: label_exact_leaves: the leaf-risk model was made for trick-{} \
+                     leaves; hybrid labels at cut {} have their leaves at the start of trick \
+                     {next}",
+                    model.trick, self.p.cut
+                ));
+            }
+            let net = self
+                .p
+                .hybrid_labels
+                .as_ref()
+                .map_or(String::new(), |h| h.net.clone());
+            if !model.net_sha256.is_empty() && model.net_sha256 != net {
+                return Err(format!(
+                    "hybrid_rung: label_exact_leaves: the leaf-risk model predicts the errors of \
+                     network {}, not of label_net ({net})",
+                    model.net_sha256
+                ));
+            }
+            if let Some(x) = recs.get_mut("label_leafrisk") {
+                x["trick"] = json!(model.trick);
+                x["net_sha256"] = json!(model.net_sha256);
             }
         }
         // The rough test's decisions file must hold trick-1 decisions (its worlds are checked
@@ -2140,7 +2392,7 @@ impl Rung<'_> {
                 .map_or(String::new(), |(k, n)| format!(" p{k}/{n}"));
             let step = format!("labels {}{part} ({} of {})", s.name, i + 1, jobs.len());
             let threads = self.step_threads();
-            let (tt_args, tt_rec) = self.label_tt_args(threads, &step);
+            let (tt_args, tt_rec) = self.label_tt_args(threads, &step, s.name);
             let mut c = Command::new(&self.tools.search);
             c.args(["labels", "--trick", &self.p.cut.to_string()])
                 .args([
@@ -2161,7 +2413,7 @@ impl Rung<'_> {
             let net = self
                 .inputs
                 .get("harvest_net")
-                .filter(|_| s.source == "harvest");
+                .filter(|_| harvested(s.source));
             if let Some(net) = net {
                 c.arg("--harvest-net").arg(net);
             }
@@ -2208,6 +2460,10 @@ impl Rung<'_> {
             let labels = self.note_labels(&file, s.name, &side)?;
             if let (Some(o), Value::Object(l)) = (rec.as_object_mut(), labels) {
                 o.extend(l);
+            }
+            if let Some(g) = side.get("siblings") {
+                rec["siblings"] = json!({ "groups": g["groups"], "groups_by_size": g["groups_by_size"],
+                                          "groups_sha256": g["groups_sha256"] });
             }
             rec["label_tables"] = tt_rec;
             recs.push(rec);
@@ -2704,8 +2960,40 @@ impl Rung<'_> {
             .args(["--mix-weight", &self.p.mix_weight.to_string()])
             .args(["--device", device, "--progress"])
             .arg(prog)
-            .args(self.init_args());
+            .args(self.init_args())
+            // Rows the trainer puts on disk (`--feed disk`, or `auto` short of memory) go to the
+            // work directory, never into `out/` (bundled and uploaded); removed at its end.
+            .arg("--rows-dir")
+            .arg(self.work.join("train-rows"));
+        if self.p.train_feed != "auto" {
+            c.args(["--feed", &self.p.train_feed]);
+        }
+        if let Some(g) = self.p.train_beside_gb {
+            c.args(["--host-others-gb", &g.to_string()]);
+        }
+        // Only below 1, so that every other command is the former one.
+        if self.p.train_fraction < 1.0 {
+            c.args(["--train-fraction", &self.p.train_fraction.to_string()]);
+        }
+        // Only when set, likewise: the pairwise loss over the sibling groups, the tie-aware loss.
+        if self.p.pair_weight > 0.0 {
+            c.args(["--pair-weight", &self.p.pair_weight.to_string()])
+                .args(["--pair-scale", &self.p.pair_scale.to_string()]);
+        }
+        if self.p.tie_aware {
+            c.arg("--tie-aware");
+        }
         c
+    }
+
+    /// `--host-others-gb` of a training beside the CPU steps with `train_beside_gb` `"auto"`:
+    /// [`LABEL_GB_PER_THREAD`] times the usable threads (the label solves on all of them).
+    fn beside_args(&self) -> Vec<String> {
+        if self.p.train_beside_gb.is_some() {
+            return Vec::new(); // already in the command (`train_cmd`)
+        }
+        let gb = LABEL_GB_PER_THREAD * self.threads() as f64;
+        vec!["--host-others-gb".into(), gb.to_string()]
     }
 
     /// The trainer's watch ([`TRAIN_STALL_MINUTES`]) on its progress file `prog`. Its own
@@ -2762,7 +3050,7 @@ impl Rung<'_> {
     /// arguments: the audit loop's rounds), its network into `dir`, its progress to `prog`.
     fn start_train_with(
         &mut self,
-        c: Command,
+        mut c: Command,
         dir: PathBuf,
         prog: PathBuf,
         log: &str,
@@ -2770,6 +3058,7 @@ impl Rung<'_> {
         let device = self.device.clone();
         let threads = self.train_threads();
         let stall = self.train_stall(&prog);
+        c.args(self.beside_args());
         self.ctx.spawn_bg(c, log, "train", None)?;
         self.ctx.watch_bg("train", stall);
         self.beside
@@ -2868,6 +3157,15 @@ impl Rung<'_> {
         if !report["stream"].is_null() {
             rec["stream"] = report["stream"].clone();
         }
+        // The share of the training rows used (`train_fraction`) and the rows actually trained
+        // on, from the trainer's report (each training shard's rows in its file and used).
+        let used = &report["data"]["train_rows_used"];
+        rec["train_fraction"] = json!(self.p.train_fraction);
+        rec["train_rows_used"] = used.as_array().map_or(Value::Null, |a| {
+            json!(a.iter().filter_map(Value::as_u64).sum::<u64>())
+        });
+        rec["train_rows_used_by_shard"] = used.clone();
+        rec["train_rows_in_files_by_shard"] = report["data"]["train_rows_in_files"].clone();
         self.rec.insert(key.into(), rec);
         self.done(step, t)
     }
@@ -3030,7 +3328,7 @@ mod tests {
     fn label_tables_fit_the_machine() {
         let eq = 26 << 20;
         for (cut, threads, gib) in [(2, 384, 120), (2, 245, 251), (3, 384, 64), (4, 384, 16)] {
-            let (args, p) = label_tables(cut, threads, eq, &machine(gib));
+            let (args, p) = label_tables(cut, threads, eq, &machine(gib), false);
             assert!(
                 args.is_empty(),
                 "cut {cut}, {threads} threads, {gib} GiB: {args:?}"
@@ -3038,7 +3336,7 @@ mod tests {
             assert_eq!(p.tt_mb, search::oracle_labels::tt_mb_for(cut) as u64);
             assert!(p.warning.is_none());
         }
-        let (args, p) = label_tables(2, 384, eq, &machine(64));
+        let (args, p) = label_tables(2, 384, eq, &machine(64), false);
         assert!(p.tt_mb < 256 && p.tt_mb >= 64, "{}", p.tt_mb);
         assert_eq!(args, vec!["--tt-mb".to_string(), p.tt_mb.to_string()]);
         assert!(
@@ -3050,6 +3348,315 @@ mod tests {
             p.record["tables_peak_mb"].as_u64().expect("peak")
                 <= p.record["budget_mb"].as_u64().expect("budget")
         );
+    }
+
+    /// `train_feed` and `train_beside_gb`: the defaults pass nothing new but the rows' directory;
+    /// set, they reach the trainer's command; anything else is refused.
+    #[test]
+    fn train_feed_settings() {
+        let p = parse(&json!({})).expect("defaults");
+        assert_eq!((p.train_feed.as_str(), p.train_beside_gb), ("auto", None));
+        assert_eq!(p.to_json()["train_beside_gb"], json!("auto"));
+        let p = parse(&json!({ "train_feed": "disk", "train_beside_gb": 40 })).expect("set");
+        assert_eq!(
+            (p.train_feed.as_str(), p.train_beside_gb),
+            ("disk", Some(40.0))
+        );
+        assert_eq!(p.to_json()["train_feed"], json!("disk"));
+        assert!(parse(&json!({ "train_beside_gb": "auto" })).is_ok());
+        for bad in [
+            json!({ "train_feed": "ram" }),
+            json!({ "train_beside_gb": -1 }),
+            json!({ "train_beside_gb": "lots" }),
+        ] {
+            assert!(parse(&bad).is_err(), "{bad}");
+        }
+    }
+
+    /// `train_fraction`: 1 by default; above 0 and at most 1, else refused; not with the audit
+    /// loop (its rounds would cut their targeted shards too).
+    #[test]
+    fn train_fraction_settings() {
+        let p = parse(&json!({})).expect("defaults");
+        assert_eq!(p.train_fraction, 1.0);
+        assert_eq!(p.to_json()["train_fraction"], json!(1.0));
+        for (v, want) in [(json!(0.5), 0.5), (json!(1), 1.0), (json!(1e-3), 1e-3)] {
+            let p = parse(&json!({ "train_fraction": v })).expect("in range");
+            assert_eq!(p.train_fraction, want);
+        }
+        for bad in [
+            json!(0),
+            json!(-0.5),
+            json!(1.01),
+            json!(2),
+            json!("half"),
+            json!(true),
+        ] {
+            let e = parse(&json!({ "train_fraction": bad })).expect_err("refused");
+            assert!(
+                e.contains("train_fraction must be a number above 0 and at most 1"),
+                "{e}"
+            );
+        }
+        let e = parse(&json!({ "train_fraction": 0.5, "cut": 4, "audit_rounds": 2 }))
+            .expect_err("not with the audit loop");
+        assert!(e.contains("not with audit_rounds"), "{e}");
+    }
+
+    /// The trainer's command carries `--train-fraction` only below 1 (1: the command exactly as
+    /// before), and a training's record gives the fraction and the rows used from its report.
+    #[cfg(unix)]
+    #[test]
+    fn the_trainer_gets_the_fraction_and_the_rows_are_recorded() {
+        let root = std::env::temp_dir().join(format!("hybrid-fraction-cmd-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let tools = Tools {
+            search: root.join("search"),
+            uv: root.join("uv"),
+            python_dir: root.join("py"),
+            nvidia_smi: root.join("nvidia-smi"),
+            remote: None,
+        };
+        let args = |p: &Params| -> Vec<String> {
+            let mut ctx = Ctx::local("hybrid-test", &root, 4);
+            let r = test_rung(&mut ctx, p, &tools, &root);
+            let files = Feed::Files(vec![root.join("a.npy"), root.join("v.npy")]);
+            let c = r.train_cmd(&files, &root.join("net"), "cpu", 4, &root.join("prog"));
+            c.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let whole = args(&parse(&json!({})).expect("defaults"));
+        assert!(!whole.iter().any(|a| a == "--train-fraction"), "{whole:?}");
+        let half = args(&parse(&json!({ "train_fraction": 0.5 })).expect("half"));
+        assert_eq!(&half[half.len() - 2..], ["--train-fraction", "0.5"]);
+        assert_eq!(
+            &half[..half.len() - 2],
+            &whole[..],
+            "the flag is the only difference"
+        );
+
+        let p = parse(&json!({ "train_fraction": 0.5 })).expect("half");
+        let mut ctx = Ctx::local("hybrid-test", &root, 4);
+        let mut r = test_rung(&mut ctx, &p, &tools, &root);
+        let dir = r.out.join("net");
+        fs::create_dir_all(&dir).expect("mkdir");
+        fs::write(dir.join("int.safetensors"), "int").expect("write");
+        fs::write(dir.join("float.safetensors"), "float").expect("write");
+        let report = json!({ "history": [{ "val_loss": 1.5 }], "best_epoch": 0,
+                             "data": { "train_fraction": 0.5, "train_rows_in_files": [7, 5],
+                                       "train_rows_used": [4, 3] } });
+        fs::write(dir.join("report.json"), report.to_string()).expect("write");
+        r.train_record(&dir, "cpu", 4, "net_cpu", "train", Instant::now())
+            .expect("recorded");
+        let rec = &r.rec["net_cpu"];
+        assert_eq!(rec["train_fraction"], json!(0.5));
+        assert_eq!(rec["train_rows_used"], json!(7));
+        assert_eq!(rec["train_rows_used_by_shard"], json!([4, 3]));
+        assert_eq!(rec["train_rows_in_files_by_shard"], json!([7, 5]));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Sibling groups (`labels_siblings`) and the trainer's pairwise and tie-aware losses: the
+    /// set's arguments, its need of `harvest_net` at cut 3, settings refused without it, the
+    /// pairwise loss refused without groups or with streamed shards, and the trainer's command
+    /// carrying the flags only when set.
+    #[cfg(unix)]
+    #[test]
+    fn sibling_settings_and_the_trainers_flags() {
+        let net = format!("inputs/sha256/{}", "a".repeat(64));
+        let p = parse(&json!({ "cut": 4, "labels_random": 10, "labels_rules": 0,
+                               "labels_siblings": 30, "siblings_positions": "0.5,0.25,0.25" }))
+        .expect("siblings");
+        let sib = p.train.iter().find(|s| s.name == "siblings").expect("set");
+        assert_eq!((sib.source, sib.count, sib.seed), ("siblings", 30, 107));
+        assert_eq!(
+            sib.args,
+            ["--harvest-cap", "8", "--harvest-positions", "0.5,0.25,0.25"]
+        );
+        assert_eq!(
+            p.train.iter().map(|s| s.name).collect::<Vec<_>>(),
+            ["random", "siblings"]
+        );
+        // One shard, never in parts.
+        let parts = parse(&json!({ "cut": 4, "labels_random": 10, "labels_rules": 0,
+                                   "labels_siblings": 30, "label_parts": 2 }))
+        .expect("parts");
+        assert_eq!(
+            parts
+                .shards()
+                .iter()
+                .filter(|j| j.set.name == "siblings")
+                .map(|j| j.part)
+                .collect::<Vec<_>>(),
+            [None]
+        );
+        let e = parse(&json!({ "cut": 3, "labels_siblings": 30 })).expect_err("no driver");
+        assert!(e.contains("labels_siblings at cut 3 need"), "{e}");
+        parse(&json!({ "cut": 3, "labels_siblings": 30, "harvest_net": net })).expect("driven");
+        for k in ["labels_siblings_seed", "siblings_positions", "siblings_cap"] {
+            let mut o = json!({ "cut": 4 });
+            o[k] = json!(if k == "siblings_positions" {
+                json!("1,1,1")
+            } else {
+                json!(3)
+            });
+            let e = parse(&o).expect_err(k);
+            assert!(e.contains("labels_siblings is 0"), "{k}: {e}");
+        }
+        let e = parse(&json!({ "cut": 4, "pair_weight": 1 })).expect_err("no groups");
+        assert!(e.contains("pair_weight needs sibling groups"), "{e}");
+        let e =
+            parse(&json!({ "cut": 4, "labels_siblings": 30, "pair_weight": 1, "label_parts": 2 }))
+                .expect_err("streamed");
+        assert!(e.contains("not with label_parts"), "{e}");
+        let e = parse(&json!({ "cut": 4, "pair_scale": 50 })).expect_err("scale alone");
+        assert!(e.contains("pair_scale is set but pair_weight is 0"), "{e}");
+        let e =
+            parse(&json!({ "cut": 4, "tie_aware": true, "head": "money4" })).expect_err("money4");
+        assert!(e.contains("tie_aware is for the outcome head"), "{e}");
+        // A stored sibling shard counts as groups.
+        let key = |c: char| format!("inputs/sha256/{}", c.to_string().repeat(64));
+        let stored = parse(&json!({ "cut": 4, "pair_weight": 0.5, "labels_random": 0, "labels_rules": 0,
+            "label_inputs": [
+                { "set": "siblings", "seed": 351, "shard": key('b'), "sidecar": key('c'), "groups": key('d') },
+                { "set": "val", "seed": 401, "shard": key('e'), "sidecar": key('f') } ] }))
+        .expect("stored groups");
+        assert_eq!(
+            stored.label_inputs[0].groups.as_deref(),
+            Some(&"d".repeat(64)[..])
+        );
+        let e = parse(
+            &json!({ "cut": 4, "labels_random": 0, "labels_rules": 0, "label_inputs": [
+                { "set": "siblings", "seed": 351, "shard": key('b'), "sidecar": key('c') },
+                { "set": "val", "seed": 401, "shard": key('e'), "sidecar": key('f') } ] }),
+        )
+        .expect_err("no groups key");
+        assert!(e.contains("needs its groups"), "{e}");
+
+        let root = std::env::temp_dir().join(format!("hybrid-pair-cmd-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let tools = Tools {
+            search: root.join("search"),
+            uv: root.join("uv"),
+            python_dir: root.join("py"),
+            nvidia_smi: root.join("nvidia-smi"),
+            remote: None,
+        };
+        let args = |p: &Params| -> Vec<String> {
+            let mut ctx = Ctx::local("hybrid-test", &root, 4);
+            let r = test_rung(&mut ctx, p, &tools, &root);
+            let files = Feed::Files(vec![root.join("a.npy"), root.join("v.npy")]);
+            let c = r.train_cmd(&files, &root.join("net"), "cpu", 4, &root.join("prog"));
+            c.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let plain = args(&p);
+        assert!(
+            !plain
+                .iter()
+                .any(|a| a == "--pair-weight" || a == "--tie-aware" || a == "--pair-scale"),
+            "{plain:?}"
+        );
+        let pw = parse(&json!({ "cut": 4, "labels_random": 10, "labels_rules": 0,
+                                "labels_siblings": 30, "siblings_positions": "0.5,0.25,0.25",
+                                "pair_weight": 0.75, "tie_aware": true }))
+        .expect("pairs");
+        assert_eq!(
+            (pw.pair_weight, pw.pair_scale, pw.tie_aware),
+            (0.75, 100.0, true)
+        );
+        let with = args(&pw);
+        assert_eq!(
+            &with[with.len() - 5..],
+            [
+                "--pair-weight",
+                "0.75",
+                "--pair-scale",
+                "100",
+                "--tie-aware"
+            ]
+        );
+        assert_eq!(
+            &with[..with.len() - 5],
+            &plain[..],
+            "the flags are the only difference"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The sibling A/B (owner, 2026-10-19, fix E): A and B are the same run but for the run id,
+    /// the note and B's pairwise and tie-aware losses; both reuse the stored 40M trick-3 base,
+    /// make 6M sibling rows with the stored O_3 driving, store them, train O_3's shape from scratch
+    /// and check on the stored trick-2 golden set.
+    #[test]
+    fn the_sibling_ab_manifests() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/vast");
+        let read = |n: &str| -> Value {
+            let path = dir.join(format!("{n}.manifest.json"));
+            serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("json")
+        };
+        let (a, b) = (read("o3-sibrank-a"), read("o3-sibrank-b"));
+        let mut same = b.clone();
+        same["run_id"] = a["run_id"].clone();
+        same["note"] = a["note"].clone();
+        let params = same["streams"][0]["params"]
+            .as_object_mut()
+            .expect("params");
+        for k in ["pair_weight", "pair_scale", "tie_aware"] {
+            assert!(params.remove(k).is_some(), "{k}");
+        }
+        assert_eq!(same, a, "only the run id, the note and B's losses differ");
+        for (v, run, pair) in [(&a, "o3-sibrank-a-1", 0.0), (&b, "o3-sibrank-b-1", 1.0)] {
+            assert_eq!(v["run_id"], run);
+            let m = crate::sched::parse_v2(v).unwrap_or_else(|e| panic!("{run}: {e}"));
+            let p = parse(&m.streams[0].params).expect("settings");
+            assert_eq!((p.cut, p.check, p.upload_shards), (3, true, true));
+            assert_eq!((p.pair_weight, p.tie_aware), (pair, pair > 0.0));
+            assert_eq!(p.pair_scale, 100.0);
+            assert_eq!(
+                p.train
+                    .iter()
+                    .map(|s| (s.name, s.count, s.seed))
+                    .collect::<Vec<_>>(),
+                [("siblings", 6_000_000, 351)]
+            );
+            assert_eq!(
+                p.train[0].args,
+                ["--harvest-cap", "8", "--harvest-positions", "0.5,0.25,0.25"]
+            );
+            assert_eq!(
+                p.harvest_net.as_deref(),
+                Some("b89b26d6e2f0bd25dac7f57411a35e2531abd087e964d6bd4df54621319efcc5")
+            );
+            assert_eq!(
+                p.label_inputs
+                    .iter()
+                    .map(|x| (x.set, x.seed, x.rows, x.rowweights.is_some()))
+                    .collect::<Vec<_>>(),
+                [
+                    ("extra", 321, Some(25_600_000), false),
+                    ("extra", 322, Some(6_400_000), false),
+                    ("extra", 313, Some(8_000_000), true),
+                    ("val", 401, Some(100_000), false)
+                ]
+            );
+            assert_eq!(
+                (p.golden_trick, p.golden_count, p.golden_worlds),
+                (2, 2000, 320)
+            );
+            assert!(p.golden_inputs.is_some());
+            assert_eq!(
+                (p.widths_arg().as_str(), p.epochs, p.batch, p.train_seed),
+                ("2048,1024,256", 40, 1024, 1)
+            );
+            assert_eq!(p.device, Device::Cuda);
+            assert_eq!(
+                (&v["machine"]["min_ram_gb"], &v["machine"]["min_gpu_ram_gb"]),
+                (&json!(60), &json!(16))
+            );
+        }
     }
 
     #[test]
@@ -3250,13 +3857,15 @@ mod tests {
             p.hybrid_labels,
             Some(hlabels::HybridLabels {
                 net: "a".repeat(64),
-                exact_ppm: 0
+                exact_ppm: 0,
+                exact_leaves: None,
+                leafrisk: None,
             })
         );
         assert_eq!(p.to_json()["label_source"]["label_net"], key('a'));
         // Every training set reused and no audit loop: nothing to label with it.
         let reused = json!({ "cut": 2, "check": false, "label_source": "hybrid",
-            "label_net": key('a'),
+            "label_net": key('a'), "labels_rules": 0,
             "label_inputs": [
                 { "set": "random", "seed": 511, "shard": key('b'), "sidecar": key('c') },
                 { "set": "val", "seed": 601, "shard": key('d'), "sidecar": key('e') } ] });
@@ -3534,8 +4143,8 @@ mod tests {
         let key = format!("inputs/sha256/{}", "ab".repeat(32));
         bad(
             json!({ "harvest_net": key }),
-            "harvest_net drives the harvest's search: it needs labels_harvest, labels_race or \
-             audit_rounds above 0",
+            "harvest_net drives the harvest's search: it needs labels_harvest, labels_race, \
+             labels_siblings or audit_rounds above 0",
         );
         bad(
             json!({ "labels_harvest": 5, "harvest_net": "o3/int.safetensors" }),
@@ -3663,6 +4272,37 @@ mod tests {
             }
         }
         assert!(rungs >= 6, "{rungs} hybrid rungs");
+    }
+
+    /// The committed hybrid-labels manifest (docs/vast/m3-hybrid-t2-hlabels.manifest.json): the
+    /// trick-2 loop of m3-hybrid-t2-loop-2 with hybrid training labels from the adopted O_3, an
+    /// exact share of 0.1 and exact leaves; everything else as that loop's.
+    #[test]
+    fn committed_hlabels_manifest_parses() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/vast");
+        let read = |n: &str| -> Value {
+            serde_json::from_str(&fs::read_to_string(dir.join(n)).expect("read")).expect("json")
+        };
+        let v = read("m3-hybrid-t2-hlabels.manifest.json");
+        assert_eq!(v["run_id"], "m3-hybrid-t2-hlabels-1");
+        let m = crate::sched::parse_v2(&v).expect("the runner accepts it");
+        let p = parse(&m.streams[0].params).expect("hybrid_rung");
+        assert_eq!(p.cut, 2);
+        let h = p.hybrid_labels.clone().expect("hybrid labels");
+        assert_eq!(
+            h.net,
+            "f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad"
+        );
+        assert_eq!(h.exact_ppm, 100_000);
+        assert_eq!(h.exact_leaves.as_deref(), Some("race:1,2,3,4"));
+        // The rest is the loop's own.
+        let base = read("m3-hybrid-t2-loop2.manifest.json");
+        let mut ours = v["streams"][0]["params"].clone();
+        for k in hlabels::KEYS {
+            ours.as_object_mut().expect("object").remove(k);
+        }
+        assert_eq!(ours, base["streams"][0]["params"]);
+        assert_eq!(v["machine"], base["machine"]);
     }
 
     /// The cu130 smoke manifest (docs/vast/cu130-smoke.manifest.json) trains only, on the GPU,
@@ -3985,6 +4625,86 @@ mod tests {
                 .is_some_and(|n| !n.contains("PLACEHOLDER") && n.contains("--max-dollars 35"))
         );
         assert!(v.get("bin_sha").is_none());
+
+        // The learning-curve pair (owner, 2026-10-19): the same scratch training on the stored
+        // trick-3 base shards, 50% and 100% of each, then the stored trick-2 golden set's check;
+        // identical but for the run id and the fraction.
+        let read = |n: &str| -> Value {
+            let path = dir.join(format!("{n}.manifest.json"));
+            serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("json")
+        };
+        let (v50, v100) = (read("o3-basecurve-50"), read("o3-basecurve-100"));
+        let mut same = v50.clone();
+        same["run_id"] = v100["run_id"].clone();
+        same["streams"][0]["params"]["train_fraction"] = json!(1);
+        assert_eq!(same, v100, "only the run id and the fraction differ");
+        for (v, run, fraction) in [
+            (&v50, "o3-basecurve-50-1", 0.5),
+            (&v100, "o3-basecurve-100-1", 1.0),
+        ] {
+            assert_eq!(v["run_id"], run);
+            let m = crate::sched::parse_v2(v).unwrap_or_else(|e| panic!("{run}: {e}"));
+            assert_eq!(m.streams.len(), 1);
+            let s = &m.streams[0];
+            assert_eq!((s.kind.as_str(), s.threads_all), ("hybrid_rung", true));
+            let p = parse(&s.params).expect("settings");
+            assert_eq!(p.train_fraction, fraction);
+            assert_eq!((p.cut, p.check), (3, true));
+            assert!(p.audit.is_none() && p.additive.is_none() && !p.upload_shards);
+            assert!(
+                p.train.is_empty() && p.shards().is_empty(),
+                "{run}: nothing to label"
+            );
+            assert!(p.harvest_net.is_none());
+            assert_eq!(
+                p.label_inputs
+                    .iter()
+                    .map(|x| (x.set, x.seed, x.rows, x.rowweights.is_some()))
+                    .collect::<Vec<_>>(),
+                [
+                    ("random", 321, Some(25_600_000), false),
+                    ("rules", 322, Some(6_400_000), false),
+                    ("harvest", 313, Some(8_000_000), true),
+                    ("val", 401, Some(100_000), false)
+                ]
+            );
+            assert_eq!(
+                (
+                    p.golden_trick,
+                    p.golden_count,
+                    p.golden_worlds,
+                    p.golden_seed
+                ),
+                (2, 2000, 320, 1)
+            );
+            assert_eq!(
+                p.golden_inputs,
+                Some((
+                    "635e9aef196c816380f3f15c05ede90b38b875fa4817061a57e6d39550065ab0".into(),
+                    "6ddc59b191e1fd534f260f9dfe103f742d6026768ca74acdbbb4fd430eb8265e".into()
+                ))
+            );
+            assert_eq!(p.verify_pct, 1.0);
+            assert_eq!(
+                (p.widths_arg().as_str(), p.head.as_str()),
+                ("2048,1024,256", "outcome")
+            );
+            assert_eq!(
+                (p.epochs, p.batch, p.patience, p.train_seed),
+                (40, 1024, 4, 1)
+            );
+            assert_eq!(p.device, Device::Cuda);
+            let mach = &v["machine"];
+            assert_eq!(
+                (
+                    &mach["min_ram_gb"],
+                    &mach["min_gpu_ram_gb"],
+                    &mach["blackwell"]
+                ),
+                (&json!(60), &json!(16), &json!(true))
+            );
+            assert!(v.get("bin_sha").is_none());
+        }
 
         // A typo in a hybrid stream stops the manifest at once.
         let bad = json!({ "format": 2, "run_id": "x", "run_seed": 1, "streams": [
@@ -5047,10 +5767,17 @@ esac
             "--partial-epochs 3 ",
             "--threads 8 ",
             "--device cuda ",
+            // Beside the label parts: their memory on all 16 threads (`LABEL_GB_PER_THREAD`).
+            "--host-others-gb 4",
+            "/hybrid-work/train-rows",
         ] {
             assert!(train.contains(has), "{has} in {train}");
         }
         assert!(!train.contains("--train "), "{train}");
+        assert!(
+            !train.contains("--feed "),
+            "auto, the trainer's default: {train}"
+        );
         let work = root.join("hybrid-work/labels");
         for p in [
             "train/t2-random-p1of2-s51101.npy",
@@ -5111,8 +5838,9 @@ esac
         assert!(
             train.contains("--train ")
                 && train.contains("t2-random-p2of2-s51102.npy")
-                && !train.contains("--watch-dir"),
-            "{train}"
+                && !train.contains("--watch-dir")
+                && !train.contains("--host-others-gb"),
+            "a training alone has nothing beside it: {train}"
         );
         assert_eq!(
             log.lines()
@@ -5397,6 +6125,56 @@ esac
                 .contains("search labels"),
             "nothing is labelled"
         );
+
+        // Exact leaves with a learned term: the stored leaf-risk model is fetched, checked and
+        // its local path given to the training shards' `--exact-leaves`; the validation shard
+        // gets none of it.
+        let risk = |trick: u8, net: &str| {
+            json!({
+                "format": nn::leafrisk::FORMAT, "encoder": nn::encode::ENCODER,
+                "n_inputs": nn::leafrisk::N_INPUTS, "extras": nn::leafrisk::EXTRA_NAMES,
+                "net_sha256": net, "trick": trick, "base": 7,
+                "trees": [{"f": [-1], "t": [0], "l": [0], "r": [0], "v": [0]}],
+                "budget": {"quantiles": [90, 80, 70, 60]},
+            })
+            .to_string()
+        };
+        let good = store("risk4.json", risk(4, &net4).as_bytes());
+        let with_leaves = |model: &str| {
+            let mut v = settings(&net4);
+            v["label_exact_leaves"] = json!(format!("race:4+learned:inputs/sha256/{model}:t=70"));
+            parse(&v).expect("params")
+        };
+        run("leaves", &with_leaves(&good)).expect("the chunk runs");
+        let log = fs::read_to_string(&f.calls).expect("calls");
+        let inputs = std::path::absolute(f.base.join("leaves/hybrid-work/inputs")).expect("abs");
+        let leaves = format!(
+            "--exact-leaves race:4+learned:{}:t=70",
+            inputs.join(&good).display()
+        );
+        let lines: Vec<&str> = log
+            .lines()
+            .filter(|l| l.starts_with("search labels"))
+            .collect();
+        assert_eq!(lines.len(), 3, "{log}");
+        for l in &lines {
+            assert_eq!(l.contains(&leaves), !l.contains("--seed 201"), "{l}");
+        }
+        let rung = read_json(&f.base.join("leaves/out/hybrid/rung.json")).expect("rung");
+        assert_eq!(rung["inputs"]["label_leafrisk"]["trick"], 4);
+        assert_eq!(
+            rung["params"]["label_source"]["label_exact_leaves"],
+            format!("race:4+learned:inputs/sha256/{good}:t=70")
+        );
+        // A model of another trick's leaves, or of another network, is refused at step 0.
+        for (name, model, want) in [
+            ("risk3", risk(3, &net4), "trick-3 leaves"),
+            ("riskx", risk(4, &"9".repeat(64)), "not of label_net"),
+        ] {
+            let bad = store(&format!("{name}.json"), model.as_bytes());
+            let e = run(name, &with_leaves(&bad)).expect_err("refused");
+            assert!(e.contains(want), "{e}");
+        }
     }
 
     #[cfg(unix)]
@@ -5805,8 +6583,8 @@ fi
             };
             assert!(
                 e.contains(&format!(
-                    "labels_harvest and labels_race at cut {cut} need harvest_net (an integer \
-                     O_{cut}"
+                    "labels_harvest, labels_race and labels_siblings at cut {cut} need \
+                     harvest_net (an integer O_{cut}"
                 )),
                 "{e}"
             );
@@ -6219,7 +6997,9 @@ case $1 in
     '{search}' "$@" || exit 1
     out=$(arg --out "$@")
     if [ -n "$(arg --harvest-keep "$@")" ]; then
-      echo '{{"shard_sha256": "{sha}", "count": 7, "harvest": {{"keep": {{"groups": [{{"name": "g-one", "rows": 7}}], "rows_in_any_group": 7}}}}}}' > "$out.json"
+      hy=''
+      case "$*" in *--label-net*) hy=', "label_source": "hybrid", "label_net_sha256": "{sha}", "rows_hybrid": 7, "rows_exact": 0';; esac
+      echo '{{"shard_sha256": "{sha}", "count": 7, "harvest": {{"keep": {{"groups": [{{"name": "g-one", "rows": 7}}], "rows_in_any_group": 7}}}}'"$hy"'}}' > "$out.json"
     fi;;
   decisions)
     echo "search $*" >> '{calls}'

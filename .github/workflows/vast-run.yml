@@ -79,6 +79,10 @@ on:
       cpu_match:
         description: "Regex the offer's CPU name must match, e.g. EPYC (blank = any)"
         default: ""
+      any_host:
+        description: "Rank verified, unverified and deverified hosts together from the start, by cost per unit of work (owner, 2026-10-19). Off: verified hosts first"
+        type: boolean
+        default: false
       verified_only:
         description: "Rent only from vast.ai-verified hosts. Off (the default): verified hosts are preferred, and when no verified offer fits, unverified or deverified hosts are searched too (owner rule 2026-10-16)"
         type: boolean
@@ -172,7 +176,7 @@ jobs:
           if [ "$DRY_RUN" = "true" ]; then
             # Prints the offer that would be rented (the named one with offer_id, else the search's choice); rents nothing.
             # The manifest's "machine" needs (GPUs, cores, disk) apply to the plan too.
-            python3 python/launcher/launch.py plan --manifest "$MANIFEST" --min-cores "$MIN_CORES" --min-ram-gb "${MIN_RAM_GB:-32}" --min-reliability "${MIN_RELIABILITY:-0.90}" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} ${{ inputs.cheapest && '--cheapest' || '' }} ${{ inputs.verified_only && '--verified-only' || '' }} \
+            python3 python/launcher/launch.py plan --manifest "$MANIFEST" --min-cores "$MIN_CORES" --min-ram-gb "${MIN_RAM_GB:-32}" --min-reliability "${MIN_RELIABILITY:-0.90}" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} ${{ inputs.cheapest && '--cheapest' || '' }} ${{ inputs.verified_only && '--verified-only' || '' }} ${{ inputs.any_host && '--any-host' || '' }} \
               --gpus "${GPUS:-0}" --min-gpu-ram-gb "${MIN_GPU_RAM_GB:-0}" --disk-gb "${DISK_GB:-20}" $OFFER_ARGS
             exit 0
           fi
@@ -194,7 +198,7 @@ jobs:
           )
           python3 python/launcher/launch.py run --manifest "$MANIFEST" --min-cores "$MIN_CORES" --min-ram-gb "${MIN_RAM_GB:-32}" --min-reliability "${MIN_RELIABILITY:-0.90}" --cpu-match "$CPU_MATCH" ${{ inputs.cpu_only && '--cpu-only' || '' }} \
             --max-minutes "${MAX_MINUTES:-0}" --low-cpu-pct "$LOW_CPU_PCT" --low-cpu-s "${LOW_CPU_S:-300}" --poll-s "${POLL_S:-60}" --max-dollars "${MAX_DOLLARS:-20}" \
-            --image "$IMAGE" --bin-sha "$BIN_SHA" --state-file instance-id.txt ${{ inputs.cheapest && '--cheapest' || '' }} ${{ inputs.verified_only && '--verified-only' || '' }} --handover-min 330 \
+            --image "$IMAGE" --bin-sha "$BIN_SHA" --state-file instance-id.txt ${{ inputs.cheapest && '--cheapest' || '' }} ${{ inputs.verified_only && '--verified-only' || '' }} ${{ inputs.any_host && '--any-host' || '' }} --handover-min 330 \
             --gpus "${GPUS:-0}" --min-gpu-ram-gb "${MIN_GPU_RAM_GB:-0}" --disk-gb "${DISK_GB:-20}" \
             $OFFER_ARGS
       - name: Cancelled - ask the run to stop and wait (at most 5 minutes) for it to upload what it finished

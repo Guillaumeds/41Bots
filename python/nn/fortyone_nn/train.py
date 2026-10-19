@@ -3,9 +3,11 @@
     uv run python -m fortyone_nn.train --train A.npy [B.npy ...] --val V.npy --out DIR
         [--head outcome|money4] [--mix-weight 1.0] [--widths 512,256,64] [--epochs 40]
         [--batch 512] [--lr 1e-3] [--patience 4] [--seed 1] [--threads 4] [--max-minutes M]
-        [--device cpu|cuda|auto] [--feed auto|resident|staged] [--cuda-graph auto|off]
+        [--device cpu|cuda|auto] [--feed auto|resident|staged|disk] [--host-reserve-gb G]
+        [--host-others-gb G] [--rows-dir DIR] [--prefetch-threads T] [--prefetch-depth K] [--cuda-graph auto|off]
         [--profile-batches N] [--progress FILE]
-        [--watch-dir DIR --expect N [--partial-epochs K]]
+        [--watch-dir DIR --expect N [--partial-epochs K]] [--train-fraction F]
+        [--pair-weight W [--pair-scale S]] [--tie-aware]
 
 A plain MLP: the binary features through an embedding-bag sum (exactly a linear layer on the
 one-hot inputs), plus the dense features through a linear layer, ReLU clipped at 64 (as the
@@ -18,6 +20,17 @@ integer inference), hidden layers, then the head:
 - ``money4`` (spec 6): four logits, soft cross-entropy against the exact four-vector.
 
 Adam, seeded, early stopping on the validation shard.
+
+Sibling groups and the pairwise ranking loss (``--pair-weight W``, ``--pair-scale S``; owner,
+2026-10-19, "fix E", docs/m3-hybrid/sibrank.md): training shards with a groups sidecar
+(``NAME.npy.groups``, ``formats.load_groups``, written by ``search labels --source siblings``) hold
+groups of frontier positions that one choice point separates. Each epoch puts every group whole at
+the start of a full batch (``PairIndex.epoch``: mixed batches, the rest ordinary rows, every row
+still once an epoch), and the loss adds W times ``pair_loss`` (RankNet's logistic loss on the
+order of the mover's money chance, each pair weighted by its true gap). ``--tie-aware``: the
+outcome target is every possible outcome whose exact money vector equals the label's
+(``formats.tie_bits``; ``tied_logp``). Both off by default: the training is then exactly the
+former one, byte for byte (tested against the trainer before them).
 
 Additive training (``--init FLOAT [--init-int INT] [--shrink-perturb L [--perturb-seed S]]``;
 docs/m3-hybrid/audit-loop.md §10, owner 2026-10-17): the network starts from a stored float network
@@ -62,6 +75,32 @@ it; ``staged`` gathers each batch on the host into page-locked ("pinned") stagin
 copies it while the GPU works on the previous batch; ``auto`` (default) is resident when the rows
 fit in the GPU's free memory with ``RESERVE`` to spare (always on the CPU). The batch size is
 ``--batch`` everywhere, so results stay comparable between devices.
+
+Rows on disk (``--feed disk``, class ``DiskRows``; owner, 2026-10-19: a 64 GB machine labelling on
+every thread beside the trainer cannot also hold 43-55 GB of rows): the compact rows are written
+once, shard by shard and a block at a time (``DISK_BLOCK``, with ``os.pwrite``: never all in
+memory), to one ``.npy`` file of records per shard (``record_dtype``: the compact columns and the
+row's loss weight, 1,024 bytes a row at trick 3, padded so that no row straddles two pages) in a
+directory of their own under ``--rows-dir`` (default the system's temporary directory), removed at
+the end. Training then reads each batch's rows from those files through read-only memory maps
+advised ``MADV_RANDOM`` (one 4 KB page read a row not in the page cache, measured), in the same
+epoch permutation and the same batches as ``staged``: the network is the same, byte for byte
+(tested against ``resident`` and ``staged``, with weights, streamed shards and the CUDA-graph
+step's buffers). ``--prefetch-threads`` threads (16) gather the next ``--prefetch-depth`` batches
+(32) into page-locked staging sets of their own (depth + 2 sets, each refilled only once its last
+copy has finished), so up to that many reads are in flight while the device trains. Host memory:
+the batch buffers, the validation rows (``tensors`` of the validation shard: about 1.4 KB a row,
+140 MB for 100,000 rows) and the build's block buffers (about 20 MB a loading thread), not the rows.
+``auto`` (the default) holds the rows on disk when they do not fit in host memory (``host_memory``:
+``MemAvailable``, or the process's memory cgroup's limit less its anonymous memory, if lower) with
+``--host-reserve-gb`` (8) to spare, or do not fit in the machine's memory (``MemTotal`` or the
+cgroup's limit) with that reserve and ``--host-others-gb`` (0; what other work on the machine,
+such as the runner's label solves beside the trainer, will take, whether it has started or not);
+otherwise it chooses exactly as before. A streamed training (``--watch-dir``) makes the choice for
+each shard as it arrives (its load buffer and the columns' growth, twice its rows, must fit): once
+one goes to disk, the rows already in memory follow it there (``stream.rows_to_disk``) and so does
+every later shard, each straight into a file of its own. The report's ``device.feed`` gives the
+mode, bytes, the files, the prefetch settings and the memory the choice saw (``host``).
 
 Training step (``--cuda-graph``, class ``Step``): on a GPU, by default, the whole step for a full
 batch (gathering its rows, forward, loss, backward, Adam, the loss sum) is captured once as a CUDA
@@ -116,6 +155,16 @@ generalising worse than one trained on all of it from the start (Ash & Adams, "O
 neural network training", 2020; measured in docs/m3-hybrid/overlap.md); the validation loss of
 the best (full-data) epoch is what tells.
 
+A fraction of the training rows (``--train-fraction F``, 0 < F <= 1, default 1; owner, 2026-10-19:
+the learning-curve test of whether more base rows help): each training shard gives only its first
+``prefix_rows(F, rows)`` = ceil(F x rows) rows (exact arithmetic on F as written),
+the same prefix every time and on any number of threads, and its row weights are cut to the same
+prefix. It applies to every training shard, given (``--train``) or streamed, in every feed
+(resident, staged, disk: only the prefix rows are written), never to the validation shard. 1 reads
+every row exactly as before (the same network, byte for byte). The report gives the fraction and
+each shard's rows in its file and used (``data.train_fraction``, ``data.train_rows_in_files``,
+``data.train_rows_used``), and the network's metadata ``train_fraction`` when it is below 1.
+
 Streamed shards (``--watch-dir``) join between epochs in place (class ``Columns``): host memory
 holds the rows in, plus the joining shard's load buffer while it joins (847 bytes a row at
 trick 4), whatever the number of joins.
@@ -143,12 +192,17 @@ steps). The integer check runs the integer network exactly (``intnet.exact_matmu
 """
 
 import argparse
+import collections
+import contextlib
 import copy
+import fractions
 import gc
 import json
 import math
 import mmap
 import os
+import shutil
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -166,7 +220,9 @@ from .formats import (
     RACE_CLASS_NAMES,
     ROW_WEIGHT_ONE,
     ROW_WEIGHTS_SUFFIX,
+    GROUPS_SUFFIX,
     VALUE_FAULTS,
+    load_groups,
     load_row_weights,
     load_shard,
     mask_bits,
@@ -174,6 +230,7 @@ from .formats import (
     race_classes,
     read_safetensors,
     sha256_file,
+    tie_bits,
     value_fault,
     write_safetensors,
 )
@@ -212,37 +269,39 @@ class Net(nn.Module):
         return [(w.detach().cpu().double().numpy(), b.detach().cpu().double().numpy()) for w, b in layers]
 
 
-def columns(a):
+def columns(a, ties=False):
     """Index array (padding -> N_BINARY), dense, target, label, mask, outcome vectors (numpy) of a
-    record array or a slice of one."""
+    record array or a slice of one. ``ties`` (``--tie-aware``): the label column is the rows' tied
+    outcomes as an int64 bitmask (``formats.tie_bits``) instead of the label."""
     idx = np.asarray(a["active"]).astype(np.int64)
     idx[idx == PAD] = N_BINARY
     dense = np.asarray(a["dense"]).astype(np.float32) / float(1 << INPUT_SHIFT)
     tgt = (np.asarray(a["value"]).astype(np.float64) / float(ONE)).astype(np.float32)
     v = a.dtype["outcomes"].shape[0]
-    lab = np.asarray(a["label"]).astype(np.int64)
+    lab = tie_bits(a) if ties else np.asarray(a["label"]).astype(np.int64)
     mask = mask_bits(a["mask"], v)
     vecs = (np.asarray(a["outcomes"]).astype(np.float64) / float(ONE)).astype(np.float32)
     return idx, dense, tgt, lab, mask, vecs
 
 
-def tensors(a):
+def tensors(a, ties=False):
     """``columns`` of a whole record array, as CPU tensors."""
-    return [torch.from_numpy(x) for x in columns(a)]
+    return [torch.from_numpy(x) for x in columns(a, ties)]
 
 
-def compact(a):
+def compact(a, ties=False):
     """The training columns of a record array (or a slice of one) in compact form: the active
     indices as int16 (the shard's u16 values; the padding 0xFFFF reads -1), dense, target, the
     label as uint8, mask, outcome vectors (dense, target, mask and vectors by ``columns``' own
-    expressions). ``expand`` of rows of these is exactly ``columns`` of the same rows."""
+    expressions). ``expand`` of rows of these is exactly ``columns`` of the same rows. ``ties``
+    (``--tie-aware``): the label column is the tied outcomes' int64 bitmask (``formats.tie_bits``)."""
     act = np.asarray(a["active"])
     if np.any((act >= N_BINARY) & (act != PAD)):
         raise ValueError(f"an active index outside 0..{N_BINARY - 1} that is not the padding")
     dense = np.asarray(a["dense"]).astype(np.float32) / float(1 << INPUT_SHIFT)
     tgt = (np.asarray(a["value"]).astype(np.float64) / float(ONE)).astype(np.float32)
     v = a.dtype["outcomes"].shape[0]
-    lab = np.asarray(a["label"]).astype(np.uint8)
+    lab = tie_bits(a) if ties else np.asarray(a["label"]).astype(np.uint8)
     mask = mask_bits(a["mask"], v)
     vecs = (np.asarray(a["outcomes"]).astype(np.float64) / float(ONE)).astype(np.float32)
     return act.view(np.int16), dense, tgt, lab, mask, vecs
@@ -302,18 +361,18 @@ def check_shards(shards, block=LOAD_BLOCK, threads=1):
     return tricks
 
 
-def load_compact(shards, block=LOAD_BLOCK, threads=1):
+def load_compact(shards, block=LOAD_BLOCK, threads=1, ties=False):
     """``compact`` of the shards one after another (as of one concatenated array), built a block
     of rows at a time from the memory-mapped shards (the full record array is never held in
     memory) on ``threads`` threads, each block into its own rows, as numpy arrays: 847 bytes a row
     at trick 4 (``columns`` takes 1430). The same arrays for any block size and thread count."""
     n = sum(len(s) for s in shards)
-    first = compact(shards[0][:1])
+    first = compact(shards[0][:1], ties)
     out = [np.empty((n,) + c.shape[1:], dtype=c.dtype) for c in first]
 
     def fill(job):
         k, j, before = job
-        part = compact(shards[k][j : j + block])
+        part = compact(shards[k][j : j + block], ties)
         at = before + j
         for o, p in zip(out, part):
             o[at : at + len(p)] = p
@@ -337,9 +396,311 @@ def expand(act, dense, tgt, lab, mask, vecs, weight=None):
 RESERVE = 1 << 30
 
 
+# Host memory kept free beside training rows held in RAM (``--host-reserve-gb``, this by default):
+# the trainer's own use besides the rows (PyTorch, the validation rows, a batch's buffers) and
+# slack. ``auto`` holds the rows on disk (``DiskRows``) when they do not fit beside it in the
+# memory available now, or beside it and ``--host-others-gb`` (what other work on the machine,
+# such as the runner's label solves beside the trainer, will take at most, whether it has started
+# or not) in the machine's memory (``fits_host``).
+HOST_RESERVE_GB = 8.0
+GIB = 1 << 30
+
+
+def host_memory(root="/"):
+    """The host memory the trainer may still take, in bytes, read from ``root`` (``/``; a directory
+    of fake files in the tests): ``MemAvailable`` of ``/proc/meminfo`` (free and reclaimable memory,
+    the page cache included), capped, inside a memory cgroup with a limit below ``MemTotal``, by
+    that limit less the group's anonymous memory. The cgroups are this process's own (from
+    ``/proc/self/cgroup``) and every one above it up to the root (cgroup v2 ``memory.max`` and
+    ``memory.stat`` ``anon``, else v1 ``memory.limit_in_bytes`` and ``total_rss``), the tightest
+    taken. A dict: ``available`` (None when nothing can be read) and what it came from."""
+
+    def read(rel):
+        try:
+            with open(os.path.join(root, rel)) as f:
+                return f.read()
+        except OSError:
+            return None
+
+    def meminfo(field):
+        for line in (read("proc/meminfo") or "").splitlines():
+            if line.startswith(field + ":"):
+                try:
+                    return int(line.split()[1]) * 1024
+                except (IndexError, ValueError):
+                    return None
+        return None
+
+    def stat(text, key):
+        for line in (text or "").splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[0] == key and parts[1].isdigit():
+                return int(parts[1])
+        return None
+
+    def ancestors(path):
+        parts = [x for x in (path or "/").split("/") if x]
+        return ["/".join(parts[:k]) for k in range(len(parts), -1, -1)]
+
+    v2_path = v1_path = None
+    for line in (read("proc/self/cgroup") or "").splitlines():
+        fields = line.split(":", 2)
+        if len(fields) == 3 and fields[0] == "0" and fields[1] == "":
+            v2_path = fields[2]
+        elif len(fields) == 3 and "memory" in fields[1].split(","):
+            v1_path = fields[2]
+    groups = []  # (limit, anonymous memory) of each limited group
+    for d in ancestors(v2_path):
+        lim = read(os.path.join("sys/fs/cgroup", d, "memory.max"))
+        if lim is not None and lim.strip().isdigit():
+            groups.append((int(lim.strip()), stat(read(os.path.join("sys/fs/cgroup", d, "memory.stat")), "anon")))
+    if not groups:
+        for d in ancestors(v1_path):
+            lim = read(os.path.join("sys/fs/cgroup/memory", d, "memory.limit_in_bytes"))
+            if lim is not None and lim.strip().isdigit():
+                groups.append((int(lim.strip()),
+                               stat(read(os.path.join("sys/fs/cgroup/memory", d, "memory.stat")), "total_rss")))
+    avail, total = meminfo("MemAvailable"), meminfo("MemTotal")
+    out = {"mem_available": avail, "mem_total": total, "cgroup_limit": None, "cgroup_anon": None,
+           "available": avail, "source": "MemAvailable" if avail is not None else "none"}
+    limited = [g for g in groups if total is None or g[0] < total]
+    if limited:
+        limit, anon = min(limited, key=lambda g: g[0] - (g[1] or 0))
+        out.update(cgroup_limit=limit, cgroup_anon=anon)
+        room = max(0, limit - (anon or 0))
+        if avail is None or room < avail:
+            out.update(available=room, source="cgroup limit less its anonymous memory")
+    return out
+
+
+def host_total(host):
+    """The machine's memory for this container: ``MemTotal``, or a lower cgroup limit."""
+    totals = [x for x in (host.get("mem_total"), host.get("cgroup_limit")) if x is not None]
+    return min(totals) if totals else None
+
+
+def fits_host(need, reserve_bytes, host, others_bytes=0):
+    """Whether ``need`` more bytes of rows fit: with ``reserve_bytes`` to spare in the memory
+    available now, and with ``reserve_bytes`` and ``others_bytes`` (other work's planned memory,
+    started or not) in the machine's memory (``host_total``). Memory that cannot be read counts
+    as fitting (the former behaviour)."""
+    avail, total = host.get("available"), host_total(host)
+    if avail is not None and need + reserve_bytes > avail:
+        return False
+    return total is None or need + reserve_bytes + others_bytes <= total
+
+
+def compact_specs(shard, ties=False):
+    """(dtype, row shape) of each of ``compact``'s columns for the shard's record type, and the
+    bytes of one row of them."""
+    specs = [(c.dtype, tuple(c.shape[1:])) for c in compact(shard[:1], ties)]
+    return specs, sum(dt.itemsize * math.prod(sh) for dt, sh in specs)
+
+
+def weight_block(sizes, start, stop):
+    """The loss weights (float32) of rows ``start..stop`` of shards ``sizes`` ([(rows, shard weight,
+    row weights or None)], one after another): exactly those rows of ``with_weights``' column."""
+    out, before = [], 0
+    for n, w, rw in sizes:
+        a, b = max(start, before), min(stop, before + n)
+        if a < b:
+            if rw is None:
+                out.append(np.full(b - a, w, dtype=np.float32))
+            else:
+                out.append((rw[a - before : b - before].astype(np.float32) / np.float32(ROW_WEIGHT_ONE))
+                           * np.float32(w))
+        before += n
+    return np.concatenate(out) if out else np.zeros(0, dtype=np.float32)
+
+
+def weighted(sizes):
+    """``with_weights`` adds the loss-weight column (some row weighs other than 1)."""
+    return not all(w == 1.0 and (rw is None or np.all(rw == ROW_WEIGHT_ONE)) for _, w, rw in sizes)
+
+
+# Rows of the disk files are padded up to a size that divides a page when that costs at most an
+# eighth of a row (1,017 bytes become 1,024 at trick 3), so no row straddles two pages and a row
+# not in the page cache is one random read.
+DISK_PAGE = 4096
+
+# Rows a block when the disk files are built: a quarter of ``LOAD_BLOCK``, so a building thread's
+# temporaries are about 20 MB (85 MB at ``LOAD_BLOCK``: 2.9 GB on 32 threads, measured at trick 3).
+DISK_BLOCK = 1 << 13
+
+
+def record_dtype(specs):
+    """The disk files' record: ``compact``'s columns as fields ``c0..`` then the row's loss weight
+    ``w`` (float32; always written, read only when some row weighs other than 1), packed, padded
+    as ``DISK_PAGE`` says."""
+    base = np.dtype([(f"c{k}", dt, sh) for k, (dt, sh) in enumerate(specs)] + [("w", "<f4")])
+    size = base.itemsize
+    target = next((d for d in (64, 128, 256, 512, 1024, 2048, 4096) if size <= d and d - size <= size // 8), size)
+    if target == size:
+        return base
+    names = list(base.names)
+    return np.dtype({"names": names, "formats": [base.fields[n][0] for n in names],
+                     "offsets": [base.fields[n][1] for n in names], "itemsize": target})
+
+
+class DiskRows:
+    """The compact training rows on disk (``--feed disk``): one ``.npy`` file of records
+    (``record_dtype``) per training shard, in a directory of their own under ``--rows-dir``,
+    removed by ``close``. Built a block of rows at a time (``compact`` of the memory-mapped shard,
+    written with ``os.pwrite`` at its place, on threads): the rows are never all in memory, and the
+    files are not mapped while they are written. Read through read-only memory maps advised
+    ``MADV_RANDOM`` (no read-ahead: a batch's rows are scattered). ``gather`` gives any rows, in
+    any order, exactly as the in-memory columns hold them (tested)."""
+
+    def __init__(self, directory, specs):
+        os.makedirs(directory, exist_ok=True)
+        self.dir = tempfile.mkdtemp(prefix="rows-", dir=directory)
+        self.specs = list(specs)
+        # ``--tie-aware``: the label column holds the tied outcomes' int64 bitmask.
+        self.ties = np.dtype(self.specs[3][0]) == np.dtype(np.int64)
+        self.dtype = record_dtype(self.specs)
+        self.segments = []  # (path, memory map, first row, rows), in row order
+        self.sizes = []  # (rows, shard weight, row weights or None) of each segment's shards
+        self.rows = 0
+        self.lock = threading.Lock()
+        self.made = 0
+        self.joins, self.copied = 0, 0  # parts joined, as ``Columns`` counts them
+
+    def _new_file(self, rows):
+        with self.lock:
+            path = os.path.join(self.dir, f"seg-{self.made:05d}.npy")
+            self.made += 1
+        m = np.lib.format.open_memmap(path, mode="w+", dtype=self.dtype, shape=(rows,))
+        offset = int(m.offset)
+        del m
+        return path, offset
+
+    def _write(self, fd, offset, at, rec):
+        buf = memoryview(rec.view(np.uint8)).cast("B")
+        pos = offset + at * self.dtype.itemsize
+        while len(buf):
+            k = os.pwrite(fd, buf, pos)
+            buf, pos = buf[k:], pos + k
+
+    def _record(self, cols, wts):
+        rec = np.zeros(len(cols[0]), dtype=self.dtype)
+        for k, c in enumerate(cols):
+            rec[f"c{k}"] = c
+        rec["w"] = wts
+        return rec
+
+    def build(self, shard, sizes, threads=1, block=DISK_BLOCK):
+        """A new file of ``compact`` of the record array ``shard`` (memory-mapped), with its loss
+        weights from ``sizes`` ([(rows, shard weight, row weights or None)]), written a block at a
+        time on ``threads`` threads; not yet among the rows (``join``). Returns the part."""
+        specs, _ = compact_specs(shard, self.ties)
+        if specs != self.specs:
+            raise ValueError(f"compact columns {specs}, the training's {self.specs}")
+        n = len(shard)
+        path, offset = self._new_file(n)
+        fd = os.open(path, os.O_RDWR)
+        try:
+            def fill(j):
+                part = compact(shard[j : j + block], self.ties)
+                self._write(fd, offset, j, self._record(part, weight_block(sizes, j, j + len(part[0]))))
+
+            on_threads(fill, list(range(0, n, block)), threads)
+        finally:
+            os.close(fd)
+        return {"path": path, "rows": n, "sizes": list(sizes)}
+
+    def build_arrays(self, cols, sizes, block=DISK_BLOCK):
+        """A new file of rows already in compact columns (``cols``: a streamed training's rows that
+        move from memory to disk), with their loss weights from ``sizes``; not yet joined."""
+        specs = [(c.dtype, tuple(c.shape[1:])) for c in cols]
+        if specs != self.specs:
+            raise ValueError(f"compact columns {specs}, the training's {self.specs}")
+        n = len(cols[0])
+        path, offset = self._new_file(n)
+        fd = os.open(path, os.O_RDWR)
+        try:
+            for j in range(0, n, block):
+                part = [c[j : j + block] for c in cols]
+                self._write(fd, offset, j, self._record(part, weight_block(sizes, j, j + len(part[0]))))
+        finally:
+            os.close(fd)
+        return {"path": path, "rows": n, "sizes": list(sizes)}
+
+    def join(self, parts):
+        """Appends built parts (``build``, ``build_arrays``) in order; a streamed part that still
+        holds its rows in memory (``part["comp"]``, loaded before the training went to disk) is
+        written first, and its arrays dropped."""
+        for p in parts:
+            if "segment" in p:
+                seg = p.pop("segment")
+            elif "comp" in p:
+                comp = p.pop("comp")
+                seg = self.build_arrays(comp, [(p["rows"], p["weight"], p["row_weights"])])
+                del comp
+            else:
+                seg = p
+            m = np.load(seg["path"], mmap_mode="r")
+            if m.dtype != self.dtype or len(m) != seg["rows"]:
+                raise ValueError(f"{seg['path']}: {m.dtype} x {len(m)}, not the rows written")
+            if hasattr(mmap, "MADV_RANDOM") and getattr(m, "_mmap", None) is not None:
+                try:
+                    m._mmap.madvise(mmap.MADV_RANDOM)
+                except (OSError, ValueError):
+                    pass
+            self.segments.append((seg["path"], m, self.rows, seg["rows"]))
+            self.sizes += seg["sizes"]
+            self.rows += seg["rows"]
+            self.joins += 1
+
+    def weighted(self):
+        return weighted(self.sizes)
+
+    def files(self):
+        return [p for p, _, _, _ in self.segments]
+
+    def disk_bytes(self):
+        return sum(os.path.getsize(p) for p in self.files())
+
+    def compact_bytes(self):
+        """The bytes these rows take as in-memory columns (``with_weights`` included)."""
+        row = sum(dt.itemsize * math.prod(sh) for dt, sh in self.specs)
+        return self.rows * (row + (4 if self.weighted() else 0))
+
+    @staticmethod
+    def gather(segments, dtype, idx, outs, names, tmp=None):
+        """Rows ``idx`` (int64 numpy) of ``segments`` into ``outs`` (one array per field of
+        ``names``, at least ``len(idx)`` rows): read in increasing row order (each file's rows
+        in one ``take``), then put in ``idx``'s order. ``outs[f][i]`` is field f of row ``idx[i]``."""
+        n = len(idx)
+        order = np.argsort(idx, kind="stable")
+        s = idx[order]
+        if tmp is None or len(tmp) < n:
+            tmp = np.empty(n, dtype=dtype)
+        tmp = tmp[:n]
+        for _, m, first, rows in segments:
+            a, b = np.searchsorted(s, first), np.searchsorted(s, first + rows)
+            if a < b:
+                np.take(m, s[a:b] - first, axis=0, out=tmp[a:b], mode="clip")
+        for name, out in zip(names, outs):
+            out[order] = tmp[name]
+        return n
+
+    def close(self):
+        """Drops the maps and removes the directory and its files."""
+        self.segments = []
+        gc.collect()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+
+# The disk feed's prefetch: threads that gather the next batches' rows from the disk files while
+# the device trains (each thread one batch at a time, so this many reads are in flight), and how
+# many batches ahead they gather.
+PREFETCH_THREADS = 16
+PREFETCH_DEPTH = 32
+
+
 class Feed:
     """The training batches on the training device: ``feed(b)`` is ``columns`` of the rows ``b``,
-    a slice of ``feed.order(perm)`` (the epoch's permutation). Two ways, the same rows:
+    a slice of ``feed.order(perm)`` (the epoch's permutation). Three ways, the same rows:
 
     - ``resident`` (always on the CPU; on a GPU whose free memory holds the compact columns with
       ``RESERVE`` to spare): the compact columns live on the device, the epoch's permutation is
@@ -347,16 +708,34 @@ class Feed:
       host work, no host-to-device copy and nothing that makes the host wait for the GPU within
       an epoch, so the host queues work ahead while the GPU computes.
     - ``staged`` (a GPU too small for that, or ``mode="staged"``): the compact columns stay on the
-      host; each batch's rows are gathered there into page-locked staging buffers (two sets, used
+      host; each batch's rows are gathered there into page-locked ("pinned") staging buffers (two sets, used
       in turn) and copied asynchronously, so a copy overlaps the GPU's work on the previous batch
       (a set is reused only once its last copy has finished); then expanded on the device.
+    - ``disk`` (``comp`` is a ``DiskRows``: rows that do not fit in host memory, or
+      ``--feed disk``): as ``staged``, but the rows are read from the disk files. ``order``
+      starts ``prefetch_threads`` threads gathering the epoch's first ``prefetch_depth`` batches,
+      each into a staging set of its own (``prefetch_depth`` + 2 sets, used in turn); every batch
+      taken queues the next. A set is refilled only once its last copy has finished, as in
+      ``staged``. A batch that is not the next slice of the permutation (the CUDA-graph trial's)
+      is gathered at once. ``close`` stops the threads.
     """
 
-    def __init__(self, comp, device, batch, mode="auto"):
-        if mode not in ("auto", "resident", "staged"):
-            raise ValueError(f"feed {mode!r}: auto, resident or staged")
+    def __init__(self, comp, device, batch, mode="auto", prefetch_threads=PREFETCH_THREADS,
+                 prefetch_depth=PREFETCH_DEPTH):
+        if mode not in ("auto", "resident", "staged", "disk"):
+            raise ValueError(f"feed {mode!r}: auto, resident, staged or disk")
         self.device = device
         self.cuda = device.type == "cuda"
+        self.batch = batch
+        self.disk = isinstance(comp, DiskRows)
+        if mode == "disk" and not self.disk:
+            raise ValueError("feed 'disk' takes the rows on disk (DiskRows)")
+        if self.disk and mode not in ("auto", "disk"):
+            raise ValueError(f"feed {mode!r}: rows on disk are fed 'disk'")
+        self.pool = None
+        if self.disk:
+            self._disk(comp, prefetch_threads, prefetch_depth)
+            return
         need = sum(int(c.nbytes) for c in comp)
         self.facts = {"rows": int(len(comp[0])), "bytes": need}
         fits = True
@@ -380,17 +759,60 @@ class Feed:
         self.copied = [None, None]
         self.turn = 0
 
+    def _disk(self, store, threads, depth):
+        self.resident = False
+        self.store = store
+        self.segments = list(store.segments)
+        self.rdtype = store.dtype
+        self.names = [f"c{k}" for k in range(len(store.specs))]
+        specs = list(store.specs)
+        if store.weighted():
+            self.names.append("w")
+            specs.append((np.dtype(np.float32), ()))
+        self.depth = max(1, int(depth))
+        sets = self.depth + 2
+
+        def buffer(dt, shape):
+            t = torch.from_numpy(np.zeros((self.batch,) + shape, dtype=dt))
+            return t.pin_memory() if self.cuda else t
+
+        self.stage = [[buffer(dt, sh) for dt, sh in specs] for _ in range(sets)]
+        self.stage_np = [[t.numpy() for t in s] for s in self.stage]
+        self.tmp = [np.empty(self.batch, dtype=self.rdtype) for _ in range(sets)]
+        self.copied = [None] * sets
+        self.turn = 0
+        self.pool = ThreadPoolExecutor(max(1, int(threads)), thread_name_prefix="prefetch")
+        self.pending = collections.deque()
+        self.perm = None
+        self.facts = {"rows": int(store.rows), "bytes": int(store.compact_bytes()), "mode": "disk",
+                      "rows_dir": store.dir, "files": store.files(), "disk_bytes": int(store.disk_bytes()),
+                      "record_bytes": int(self.rdtype.itemsize), "prefetch_threads": int(threads),
+                      "prefetch_depth": self.depth}
+
     def order(self, perm):
         """The epoch's permutation (an int64 CPU tensor), where ``__call__``'s slices come from."""
-        return perm.to(self.device) if self.resident else perm
+        if self.resident:
+            return perm.to(self.device)
+        if self.disk:
+            self._drain()
+            self.perm = perm.contiguous()
+            self.perm_np = self.perm.numpy()
+            self.cursor = self.submitted = 0
+            self.nb = (len(perm) + self.batch - 1) // self.batch
+            self._more()
+        return perm if not self.disk else self.perm
 
     def __call__(self, b):
         if self.resident:
             return expand(*(c.index_select(0, b) for c in self.cols))
-        k, rows = self._staged(b)
+        k, rows = self._rows(b)
         out = [s.to(self.device, non_blocking=True) for s in rows]
         self._copied(k)
+        self._more()
         return expand(*out)
+
+    def _rows(self, b):
+        return self._fetched(b) if self.disk else self._staged(b)
 
     def _staged(self, b):
         """The rows ``b`` gathered on the host into the next set of staging buffers, once that
@@ -404,6 +826,66 @@ class Feed:
             torch.index_select(c, 0, b, out=s[:n])
         return k, [s[:n] for s in self.stage[k]]
 
+    # The disk feed's prefetch.
+
+    def _next_set(self):
+        k = self.turn
+        self.turn = (self.turn + 1) % len(self.stage)
+        return k
+
+    def _fill(self, k, idx, ev):
+        if ev is not None:
+            ev.synchronize()
+        return DiskRows.gather(self.segments, self.rdtype, idx, self.stage_np[k], self.names, self.tmp[k])
+
+    def _more(self):
+        """Queues the next batches of the permutation, up to ``depth`` ahead."""
+        if not self.disk or self.perm is None:
+            return
+        while len(self.pending) < self.depth and self.submitted < self.nb:
+            j = self.submitted
+            k = self._next_set()
+            idx = self.perm_np[j * self.batch : (j + 1) * self.batch]
+            self.pending.append((j, k, self.pool.submit(self._fill, k, idx, self.copied[k])))
+            self.submitted += 1
+
+    def _drain(self):
+        """Waits for every queued gather (none is left writing into a staging set)."""
+        err = None
+        while self.pending:
+            _, _, f = self.pending.popleft()
+            try:
+                f.result()
+            except Exception as e:  # noqa: BLE001 (raised once all have stopped)
+                err = err or e
+        if err is not None:
+            raise err
+
+    def _fetched(self, b):
+        """The rows ``b``: the next queued batch when ``b`` is the permutation's next slice, else
+        gathered now. (the set, the filled slices)."""
+        p = self.perm
+        if (p is not None and self.pending and len(b) == min(self.batch, len(p) - self.cursor * self.batch)
+                and b.data_ptr() == p.data_ptr() + self.cursor * self.batch * p.element_size()):
+            j, k, f = self.pending.popleft()
+            n = f.result()
+            self.cursor += 1
+        else:
+            self._drain()
+            self.perm = None
+            k = self._next_set()
+            n = self._fill(k, b.numpy(), self.copied[k])
+        return k, [s[:n] for s in self.stage[k]]
+
+    def close(self):
+        """Stops the disk feed's threads (nothing to do for the others)."""
+        if self.pool is not None:
+            try:
+                self._drain()
+            finally:
+                self.pool.shutdown(wait=True)
+                self.pool = None
+
     def _copied(self, k):
         """Marks the copies from staging set ``k`` just queued (the set is reused once they end)."""
         if self.cuda:
@@ -415,7 +897,7 @@ class Feed:
 
     def inputs(self, batch):
         """Fixed device buffers for a batch of ``batch`` rows, which a captured step reads: the
-        row indices (resident) or the compact rows (staged)."""
+        row indices (resident) or the compact rows (staged, disk)."""
         if self.resident:
             return [torch.zeros(batch, dtype=torch.int64, device=self.device)]
         return [torch.zeros(s.shape, dtype=s.dtype, device=self.device) for s in self.stage[0]]
@@ -425,10 +907,11 @@ class Feed:
         if self.resident:
             bufs[0].copy_(b, non_blocking=True)
             return
-        k, rows = self._staged(b)
+        k, rows = self._rows(b)
         for d, s in zip(bufs, rows):
             d.copy_(s, non_blocking=True)
         self._copied(k)
+        self._more()
 
     def read(self, bufs):
         """``columns`` of the batch in ``inputs``' buffers: what ``self(b)`` gives after
@@ -541,9 +1024,29 @@ def outcome_terms(z, mask, vecs):
     return logp, mix
 
 
-def loss_of(head, z, tgt, lab, mask, vecs, mix_weight, weight=None):
+def tied_logp(logp, bits):
+    """log of the summed probability of each row's tied outcomes (``bits``: int64 bitmasks,
+    ``formats.tie_bits``): the partial-label log-likelihood (Cour, Sapp & Taskar, "Learning from
+    partial labels", JMLR 2011). With one outcome in the set it is exactly that outcome's
+    log-probability (a log-sum-exp over one term), with the same gradient."""
+    v = logp.shape[1]
+    tie = ((bits[:, None] >> torch.arange(v, device=bits.device)) & 1).bool()
+    return torch.logsumexp(logp.masked_fill(~tie, float("-inf")), dim=1)
+
+
+def loss_of(head, z, tgt, lab, mask, vecs, mix_weight, weight=None, tie_aware=False):
     """The batch's loss: the mean over its rows, or with ``weight`` (the rows' loss weights,
-    ``shard_weight``) the weighted mean, sum(w * loss) / sum(w)."""
+    ``shard_weight``) the weighted mean, sum(w * loss) / sum(w). ``tie_aware`` (``--tie-aware``,
+    outcome head): ``lab`` holds each row's tied outcomes (``formats.tie_bits``) and the
+    outcome term is -log of their summed probability (``tied_logp``) rather than of the first."""
+    if tie_aware and head != "money4":
+        logp, mix = outcome_terms(z, mask, vecs)
+        nll = -tied_logp(logp, lab)
+        lmix = -(tgt * torch.log(mix.clamp_min(1e-12))).sum(dim=1)
+        if weight is None:
+            return nll.mean() + mix_weight * lmix.mean()
+        total = weight.sum()
+        return (weight * nll).sum() / total + mix_weight * (weight * lmix).sum() / total
     if weight is None:
         if head == "money4":
             return -(tgt * torch.log_softmax(z, dim=1)).sum(dim=1).mean()
@@ -558,6 +1061,147 @@ def loss_of(head, z, tgt, lab, mask, vecs, mix_weight, weight=None):
     ce = -(weight * logp.gather(1, lab[:, None])[:, 0]).sum() / total
     soft = -(weight * (tgt * torch.log(mix.clamp_min(1e-12))).sum(dim=1)).sum() / total
     return ce + mix_weight * soft
+
+
+def row_values(head, z, mask, vecs):
+    """Each row's predicted money chances [rows, 4] (fractions): the outcome head's mixture (the
+    outcomes' exact money vectors weighted by the softmax, as the value is derived everywhere), or
+    the money4 head's softmax."""
+    if head == "money4":
+        return torch.softmax(z, dim=1)
+    return outcome_terms(z, mask, vecs)[1]
+
+
+def pair_loss(value, tgt, gid, mover, scale):
+    """The pairwise ranking loss of sibling groups (RankNet, Burges et al., ICML 2005; with the
+    pairs weighted by their true gap, as LambdaRank weighs pairs by what swapping them costs,
+    Burges, Ragno & Le, NIPS 2006): over every pair (i, j), i < j, of rows in the same group
+    (``gid`` equal and at least 0; -1 is no group), with m the mover's money chance (``mover``: an
+    index into the row's own value order), true gap d = tgt_i[m_i] - tgt_j[m_j] and predicted gap
+    p = value_i[m_i] - value_j[m_j], the logistic loss softplus(-scale * sign(d) * p), weighted by
+    |d|: sum(|d| * loss) / sum(|d|) (0 without a pair of unequal true values). ``scale`` turns a gap
+    in money chance into a logit (100: a gap of 1% is a logit of 1)."""
+    m = value.gather(1, mover[:, None])[:, 0]
+    t = tgt.gather(1, mover[:, None])[:, 0]
+    n = len(gid)
+    same = (gid[:, None] == gid[None, :]) & (gid[:, None] >= 0)
+    upper = torch.ones(n, n, dtype=torch.bool, device=gid.device).triu(1)
+    d = t[:, None] - t[None, :]
+    p = m[:, None] - m[None, :]
+    w = d.abs() * (same & upper).to(d.dtype)
+    loss = torch.nn.functional.softplus(-scale * torch.sign(d) * p)
+    return (w * loss).sum() / w.sum().clamp_min(1e-12)
+
+
+class PairCfg:
+    """The pairwise loss's settings (``--pair-weight``, ``--pair-scale``) and its slots: the first
+    ``slots`` rows of every full batch are where its groups go (``PairIndex.epoch``)."""
+
+    def __init__(self, weight, scale, slots):
+        self.weight, self.scale, self.slots = float(weight), float(scale), int(slots)
+
+
+class PairPlan:
+    """One epoch's sibling groups by batch (``PairIndex.epoch``): for each full batch ``k`` the
+    group of each of its first ``slots`` rows (-1: no group) and the mover's index (int64 arrays
+    [batches, slots])."""
+
+    def __init__(self, gid, mover):
+        self.gid, self.mover = gid, mover
+        self.batches = len(gid)
+
+
+class PairIndex:
+    """The sibling groups of the training rows (from the shards' ``NAME.npy.groups`` sidecars,
+    ``formats.load_groups``): ``gid`` (int64, the row's group numbered over every shard, -1 for a
+    row in none) and ``mover`` (each row's mover index). ``epoch`` orders an epoch's rows so that
+    every group is whole inside one full batch, at its start (mixed batches: groups first, then
+    ordinary rows, so the cross-entropy still sees every row once an epoch and keeps the network's
+    calibration)."""
+
+    def __init__(self, gid, mover):
+        self.gid = np.asarray(gid, dtype=np.int64)
+        self.mover = np.asarray(mover, dtype=np.int64)
+        self.n = len(self.gid)
+        inside = np.flatnonzero(self.gid >= 0)
+        if len(inside) == 0:
+            raise ValueError("no row of the training shards is in a sibling group")
+        g = self.gid[inside]
+        cut = np.flatnonzero(np.diff(g) != 0) + 1
+        if np.any(np.diff(g) < 0) or np.any(np.diff(inside)[np.diff(g) == 0] != 1):
+            raise ValueError("a sibling group's rows are not consecutive")
+        self.starts = inside[np.concatenate([[0], cut])].astype(np.int64)
+        self.sizes = np.diff(np.concatenate([[0], cut, [len(inside)]])).astype(np.int64)
+        self.ordinary = np.flatnonzero(self.gid < 0)
+        self.rows_in_groups = int(len(inside))
+        self.max_size = int(self.sizes.max())
+
+    def slots(self, batch):
+        """The rows at the start of every full batch that may hold groups: the groups' rows spread
+        evenly over the full batches, plus room for the largest group (``ValueError`` when that
+        is more than a batch)."""
+        nb = self.n // batch
+        if nb == 0:
+            raise ValueError(f"fewer training rows ({self.n}) than a batch ({batch})")
+        p = -(-self.rows_in_groups // nb) + self.max_size
+        if p > batch:
+            raise ValueError(f"the sibling groups need {p} rows of every batch of {batch}: use a larger --batch")
+        return p
+
+    def epoch(self, rng, batch):
+        """(the epoch's order of the rows, an int64 permutation; its ``PairPlan``), drawn from
+        ``rng``: the groups in a random order, cut into the full batches by their running row
+        count (each batch takes the groups that start in its share of the groups' rows: whole
+        groups, at most ``slots`` rows), each batch filled up with ordinary rows in a random order,
+        the last partial batch ordinary rows only."""
+        nb, p = self.n // batch, self.slots(batch)
+        perm = rng.permutation(len(self.starts))
+        sz, st = self.sizes[perm], self.starts[perm]
+        r = int(sz.sum())
+        before = np.cumsum(sz) - sz
+        bk = (before * nb) // r
+        rows = np.repeat(st - before, sz) + np.arange(r)
+        gb = np.repeat(bk, sz)
+        first = np.searchsorted(gb, np.arange(nb), side="left")
+        slot = np.arange(r) - first[gb]
+        pos = gb * batch + slot
+        order = np.empty(self.n, dtype=np.int64)
+        taken = np.zeros(self.n, dtype=bool)
+        order[pos] = rows
+        taken[pos] = True
+        order[~taken] = self.ordinary[rng.permutation(len(self.ordinary))]
+        gid = np.full((nb, p), -1, dtype=np.int64)
+        mover = np.zeros((nb, p), dtype=np.int64)
+        gid[gb, slot] = np.repeat(np.arange(len(perm)), sz)
+        mover[gb, slot] = self.mover[rows]
+        return order, PairPlan(gid, mover)
+
+
+def load_pair_index(paths, rows_in_files, rows_used):
+    """The ``PairIndex`` of the training shards ``paths`` (their rows in the files and used: a
+    ``--train-fraction`` prefix cuts a group at its end) and what the report says of each groups
+    sidecar."""
+    gids, movers, rec, base = [], [], [], 0
+    for p, nf, nu in zip(paths, rows_in_files, rows_used):
+        try:
+            g = load_groups(p, nf)
+        except ValueError as e:
+            raise SystemExit(str(e)) from None
+        if g is None:
+            gids.append(np.full(nu, -1, dtype=np.int64))
+            movers.append(np.zeros(nu, dtype=np.int64))
+            rec.append(None)
+            continue
+        g = g[:nu]
+        k = np.asarray(g["group"]).astype(np.int64)
+        gids.append(k + base)
+        movers.append(np.asarray(g["mover"]).astype(np.int64))
+        base += int(k[-1]) + 1 if len(k) else 0
+        sizes = np.bincount(k) if len(k) else np.zeros(0, dtype=np.int64)
+        rec.append({"file": os.path.basename(p) + GROUPS_SUFFIX, "sha256": sha256_file(p + GROUPS_SUFFIX),
+                    "rows": int(nu), "groups": int(len(sizes)),
+                    "groups_by_size": np.bincount(sizes, minlength=10)[:10].tolist() if len(sizes) else []})
+    return PairIndex(np.concatenate(gids), np.concatenate(movers)), rec
 
 
 # Eager steps (on a side stream) before each capture of the training step, as PyTorch's CUDA-graph
@@ -635,8 +1279,14 @@ class Step:
     """
 
     def __init__(self, model, opt, head, mix_weight, feed, batch, graphed=False, not_before=0,
-                 graph_class=CudaGraph, on_fail=None):
+                 graph_class=CudaGraph, on_fail=None, tie_aware=False, pair=None):
         self.model, self.opt, self.head, self.mix_weight = model, opt, head, mix_weight
+        # ``--tie-aware`` (``loss_of``) and the sibling groups' pairwise loss (``PairCfg``; its
+        # epoch's ``PairPlan`` in ``plan``, set by the training loop): both off by default, the
+        # step then exactly the former one.
+        self.tie_aware, self.pair, self.plan = tie_aware, pair, None
+        self.pair_total = torch.zeros((), dtype=torch.float64, device=feed.device) if pair else None
+        self.pair_batches = 0
         self.feed, self.batch, self.device = feed, batch, feed.device
         self.total = torch.zeros((), dtype=torch.float64, device=self.device)
         self.loss = None
@@ -650,12 +1300,48 @@ class Step:
                 self.side = torch.cuda.Stream(self.device)
                 self.capture_stream = torch.cuda.Stream(self.device)
             self.bufs = feed.inputs(batch)
+            if pair:
+                # The batch's groups and movers, which a captured step reads (``_slots``).
+                self.pbufs = [torch.full((pair.slots,), -1, dtype=torch.int64, device=self.device),
+                              torch.zeros(pair.slots, dtype=torch.int64, device=self.device)]
+
+    def set_plan(self, plan):
+        """The epoch's ``PairPlan``, copied to the training device once (so a batch's groups are
+        a device-to-device copy: the host never waits for the GPU within an epoch)."""
+        self.plan = plan
+        self.plan_dev = (torch.from_numpy(plan.gid).to(self.device), torch.from_numpy(plan.mover).to(self.device))
+
+    def _slots(self, k):
+        """Batch ``k``'s groups and movers (int64 device tensors) in the epoch's plan, or None for
+        a batch without (the last partial batch, or no plan: the CUDA-graph trial)."""
+        if self.pair is None or self.plan is None or k is None or k >= self.plan.batches:
+            return None
+        return self.plan_dev[0][k], self.plan_dev[1][k]
+
+    def _loss(self, cols, slots):
+        """The batch's loss (``loss_of``), plus with sibling groups the pairwise loss of its first
+        rows (``pair_loss``) times ``--pair-weight``; ``slots``: (groups, movers) as device
+        tensors, or None."""
+        idx, dense, tgt, lab, mask, vecs, *w = cols
+        z = self.model(idx, dense)
+        if self.tie_aware:
+            loss = loss_of(self.head, z, tgt, lab, mask, vecs, self.mix_weight, *w, tie_aware=True)
+        else:
+            loss = loss_of(self.head, z, tgt, lab, mask, vecs, self.mix_weight, *w)
+        if slots is None:
+            return loss, None
+        gid, mover = slots
+        p = len(gid)
+        pl = pair_loss(row_values(self.head, z[:p], mask[:p], vecs[:p]), tgt[:p], gid, mover, self.pair.scale)
+        return loss + self.pair.weight * pl, pl
 
     def describe(self):
         return "cuda-graph" if self.graphed else f"eager ({self.reason})" if self.reason else "eager"
 
-    def __call__(self, b):
+    def __call__(self, b, k=None):
+        """The step on rows ``b``, batch ``k`` of the epoch (its sibling groups, if any)."""
         self.calls += 1
+        self.k = k
         if not self.graphed or len(b) != self.batch:
             return self.eager(b)
         if self.graph is not None and self.opt.param_groups[0]["lr"] != self.graph_lr:
@@ -667,6 +1353,14 @@ class Step:
             if not self.capture():
                 return self.eager(b)
         self.feed.put(b, self.bufs)
+        if self.pair:
+            sl = self._slots(k)
+            if sl is None:
+                self.pbufs[0].fill_(-1)
+            else:
+                for d, h in zip(self.pbufs, sl):
+                    d.copy_(h)
+                self.pair_batches += 1
         self.graph.replay()
         self.loss = self.graph.out
         self.counts["replays"] += 1
@@ -681,9 +1375,15 @@ class Step:
         here.wait_stream(self.side)
 
     def _eager(self, b):
-        idx, dense, tgt, lab, mask, vecs, *w = self.feed(b)
-        z = self.model(idx, dense)
-        loss = loss_of(self.head, z, tgt, lab, mask, vecs, self.mix_weight, *w)
+        if self.tie_aware or self.pair:
+            loss, pl = self._loss(self.feed(b), self._slots(getattr(self, "k", None)))
+            if pl is not None:
+                self.pair_total += pl.detach().double()
+                self.pair_batches += 1
+        else:
+            idx, dense, tgt, lab, mask, vecs, *w = self.feed(b)
+            z = self.model(idx, dense)
+            loss = loss_of(self.head, z, tgt, lab, mask, vecs, self.mix_weight, *w)
         self.opt.zero_grad()
         loss.backward()
         self.opt.step()
@@ -695,9 +1395,14 @@ class Step:
         """The step on the batch in the input buffers, as captured. The gradients are made by the
         captured backward in the graph's memory and rewritten (not added to) by every replay."""
         self.opt.zero_grad(set_to_none=True)
-        idx, dense, tgt, lab, mask, vecs, *w = self.feed.read(self.bufs)
-        z = self.model(idx, dense)
-        loss = loss_of(self.head, z, tgt, lab, mask, vecs, self.mix_weight, *w)
+        if self.tie_aware or self.pair:
+            loss, pl = self._loss(self.feed.read(self.bufs), self.pbufs if self.pair else None)
+            if pl is not None:
+                self.pair_total += pl.detach().double()
+        else:
+            idx, dense, tgt, lab, mask, vecs, *w = self.feed.read(self.bufs)
+            z = self.model(idx, dense)
+            loss = loss_of(self.head, z, tgt, lab, mask, vecs, self.mix_weight, *w)
         loss.backward()
         self.opt.step()
         self.total += loss.detach().double() * self.batch
@@ -720,7 +1425,8 @@ class Step:
         return True
 
 
-def graph_trial(model, head, mix_weight, feed, batch, lr, graph_class=CudaGraph, steps=2 * WARMUP):
+def graph_trial(model, head, mix_weight, feed, batch, lr, graph_class=CudaGraph, steps=2 * WARMUP,
+                tie_aware=False, pair=None):
     """The CUDA-graph step tried before training, on two copies of the network (the network
     itself is not touched): ``steps`` full batches (rows 0, 1, ... cycling) through ``Step``
     (``WARMUP`` eager steps, a capture, replays) on one copy and all eager on the other, with the
@@ -735,7 +1441,7 @@ def graph_trial(model, head, mix_weight, feed, batch, lr, graph_class=CudaGraph,
         for g in (False, True):
             m = copy.deepcopy(model)
             st = Step(m, adam(m.parameters(), lr, True), head, mix_weight, feed, batch, graphed=g,
-                      graph_class=graph_class)
+                      graph_class=graph_class, tie_aware=tie_aware, pair=pair)
             ls = []
             for b in rows:
                 st(b)
@@ -778,14 +1484,41 @@ def shard_weight(path):
     return w
 
 
-def data_weights(path, rows):
+def prefix_rows(fraction, rows):
+    """The rows a training shard of ``rows`` rows gives under ``--train-fraction fraction``:
+    ceil(fraction x rows) in exact arithmetic on the number as written (its shortest decimal form,
+    ``repr``: 0.1 of 10 is 1, not 2 from the binary float a little above 0.1; 0.5 of 7 is 4), at
+    least 1 for a shard with rows; every row at 1."""
+    if fraction >= 1:
+        return rows
+    return min(rows, math.ceil(fractions.Fraction(repr(fraction)) * rows))
+
+
+def check_fraction(fraction):
+    """``--train-fraction``'s range, (0, 1]: the reason it is refused, or None."""
+    if not (math.isfinite(fraction) and 0 < fraction <= 1):
+        return f"--train-fraction {fraction} must be above 0 and at most 1"
+    return None
+
+
+def prefix_shard(sh, fraction):
+    """The shard ``sh`` (a memory map) cut to its first ``prefix_rows`` rows (a view: nothing
+    read); the shard itself at 1."""
+    k = prefix_rows(fraction, len(sh))
+    return sh if k == len(sh) else sh[:k]
+
+
+def data_weights(path, rows, keep=None):
     """A training shard's loss weights: (its shard weight, its row weights as uint16 in units of
     1/256 or None, the row weights' SHA-256 or None). See ``shard_weight`` and
-    ``formats.load_row_weights``."""
+    ``formats.load_row_weights``. ``rows``: the rows in the shard's file (the sidecar holds one a
+    row); ``keep``: the rows used (``--train-fraction``), the row weights cut to that prefix."""
     try:
         rw = load_row_weights(path, rows)
     except ValueError as e:
         raise SystemExit(str(e)) from None
+    if rw is not None and keep is not None and keep < rows:
+        rw = rw[:keep]
     sha = sha256_file(path + ROW_WEIGHTS_SUFFIX) if rw is not None else None
     return shard_weight(path), rw, sha
 
@@ -794,7 +1527,7 @@ def with_weights(comp, sizes):
     """The compact columns for the feed: ``comp``, plus the rows' loss weights (float32) when one
     is not 1; ``sizes`` is [(rows, shard weight, row weights or None)] of the shards in order. A
     row's weight is its shard's weight times its own (row weight / 256, exact in float32)."""
-    if all(w == 1.0 and (rw is None or np.all(rw == ROW_WEIGHT_ONE)) for _, w, rw in sizes):
+    if not weighted(sizes):
         return comp
     col = []
     for n, w, rw in sizes:
@@ -820,16 +1553,24 @@ def weights_record(names, sizes, shas):
     return rec
 
 
-def load_part(path, threads):
-    """One training shard for the streamed data: checked (``check_shards``), converted
-    (``load_compact``) and hashed, on ``threads`` threads."""
-    sh = load_shard(path)
+def load_part(path, threads, store_for=None, fraction=1.0, ties=False):
+    """One training shard for the streamed data: checked (``check_shards``), converted and hashed,
+    on ``threads`` threads. Converted into memory (``load_compact``: ``part["comp"]``), or, when
+    ``store_for(shard)`` gives a ``DiskRows``, into a new file of it (``part["segment"]``; the rows
+    never all in memory). ``fraction``: ``--train-fraction`` (its first rows only)."""
+    full = load_shard(path)
+    sh = prefix_shard(full, fraction)
     tricks = check_shards([sh], threads=threads)
-    comp = load_compact([sh], threads=threads)
-    w, rw, rsha = data_weights(path, len(sh))
-    return {"path": path, "name": os.path.basename(path), "rows": int(len(sh)), "tricks": tricks,
-            "comp": comp, "sha256": sha256_file(path), "weight": w, "row_weights": rw,
-            "row_weights_sha256": rsha}
+    w, rw, rsha = data_weights(path, len(full), len(sh))
+    part = {"path": path, "name": os.path.basename(path), "rows": int(len(sh)), "rows_in_file": int(len(full)),
+            "tricks": tricks,
+            "sha256": sha256_file(path), "weight": w, "row_weights": rw, "row_weights_sha256": rsha}
+    disk = store_for(sh) if store_for is not None else None
+    if disk is None:
+        part["comp"] = load_compact([sh], threads=threads, ties=ties)
+    else:
+        part["segment"] = disk.build(sh, [(len(sh), w, rw)], threads=threads)
+    return part
 
 
 class Watcher:
@@ -839,10 +1580,17 @@ class Watcher:
     are loaded. ``take()`` hands over the loaded shards not yet taken (raising the loading's error,
     if any); ``all_in()``: every expected shard taken."""
 
-    def __init__(self, directory, expect, given=(), threads=1, poll=1.0):
+    def __init__(self, directory, expect, given=(), threads=1, poll=1.0, store_for=None, fraction=1.0,
+                 ties=False):
         if expect < 1:
             raise ValueError("--expect must be at least 1")
         self.dir, self.expect, self.threads, self.poll = directory, expect, threads, poll
+        # ``--train-fraction``: each shard's first rows only (``load_part``).
+        self.fraction = fraction
+        # ``--tie-aware``: the label column holds the tied outcomes (``compact``).
+        self.ties = ties
+        # Where each shard's rows go (``load_part``): memory, or the training's rows on disk.
+        self.store_for = store_for
         self.given = list(given)
         self.cond = threading.Condition()
         self.ready, self.seen, self.loaded, self.taken, self.error = [], set(), 0, 0, None
@@ -869,7 +1617,7 @@ class Watcher:
                     with self.cond:
                         if self.loaded >= self.expect:
                             raise ValueError(f"more training shards than --expect {self.expect}: {p}")
-                    part = load_part(p, self.threads)
+                    part = load_part(p, self.threads, self.store_for, self.fraction, self.ties)
                     part["ready_s"] = round(time.time() - self.t0, 3)
                     with self.cond:
                         self.ready.append(part)
@@ -1036,9 +1784,11 @@ def error_by_race_class(pred, target, classes):
     return out
 
 
-def evaluate(model, head, data, mix_weight, batch=8192, device=None):
+def evaluate(model, head, data, mix_weight, batch=8192, device=None, tie_aware=False):
     """(mean loss, money values [n, 4] in units of 2^-32, outcome accuracy) on ``data`` (CPU
-    tensors, moved to ``device`` a batch at a time)."""
+    tensors, moved to ``device`` a batch at a time). ``tie_aware``: the label column holds the
+    tied outcomes (``tensors(val, True)``), the loss is the tie-aware one and a hit is the most
+    likely outcome being one of them."""
     device = device or torch.device("cpu")
     model.eval()
     losses, vals, hits = [], [], 0
@@ -1047,13 +1797,19 @@ def evaluate(model, head, data, mix_weight, batch=8192, device=None):
         for i in range(0, n, batch):
             idx, dense, tgt, lab, mask, vecs = (x[i : i + batch].to(device) for x in data)
             z = model(idx, dense)
-            losses.append(float(loss_of(head, z, tgt, lab, mask, vecs, mix_weight)) * len(z))
+            if tie_aware:
+                losses.append(float(loss_of(head, z, tgt, lab, mask, vecs, mix_weight, tie_aware=True)) * len(z))
+            else:
+                losses.append(float(loss_of(head, z, tgt, lab, mask, vecs, mix_weight)) * len(z))
             if head == "money4":
                 vals.append(torch.softmax(z.double(), dim=1).cpu())
             else:
                 logp, _ = outcome_terms(z.double(), mask, vecs.double())
                 vals.append(torch.einsum("bv,bvt->bt", logp.exp(), vecs.double()).cpu())
-                hits += int((logp.argmax(dim=1) == lab).sum())
+                if tie_aware:
+                    hits += int(((lab >> logp.argmax(dim=1)) & 1).sum())
+                else:
+                    hits += int((logp.argmax(dim=1) == lab).sum())
     v = torch.cat(vals).numpy() * ONE
     return sum(losses) / n, v, hits / n
 
@@ -1242,6 +1998,12 @@ def check_init_trick(args, init, trick, v):
 
 
 def main(argv=None):
+    # Whatever happens, the rows written to disk (``DiskRows``) are removed at the end.
+    with contextlib.ExitStack() as stack:
+        return _main(argv, stack)
+
+
+def _main(argv, stack):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--train", nargs="+", default=[])
     ap.add_argument("--val", help="the validation shard (required, but with --check-init-only)")
@@ -1262,8 +2024,23 @@ def main(argv=None):
     ap.add_argument("--device", choices=["cpu", "cuda", "auto"], default="cpu",
                     help="cpu (default), cuda (the GPU, or an error), auto (the GPU if it passes the checks, else the CPU)")
     ap.add_argument("--progress", help="rewrite this JSON file with the training's progress")
-    ap.add_argument("--feed", choices=["auto", "resident", "staged"], default="auto",
-                    help="where the training rows live on a GPU (class Feed): auto (resident if they fit), resident, staged")
+    ap.add_argument("--feed", choices=["auto", "resident", "staged", "disk"], default="auto",
+                    help="where the training rows live (class Feed): auto (on disk if they do not fit in host memory "
+                         "with --host-reserve-gb to spare, else on a GPU resident if they fit there, staged if not), "
+                         "resident, staged, disk (class DiskRows)")
+    ap.add_argument("--host-reserve-gb", type=float, default=HOST_RESERVE_GB,
+                    help="with --feed auto: host memory (GiB) to keep free beside rows held in memory: the trainer's own "
+                         "use and anything that runs beside it (default %(default)s)")
+    ap.add_argument("--host-others-gb", type=float, default=0.0,
+                    help="with --feed auto: memory (GiB) that other work on the machine will take at most, started or "
+                         "not (the runner's label solves beside the trainer); the rows, --host-reserve-gb and this must "
+                         "fit in the machine's memory (default 0)")
+    ap.add_argument("--rows-dir", help="with the rows on disk: where their files go (a directory of their own inside, "
+                                       "removed at the end; default the system's temporary directory)")
+    ap.add_argument("--prefetch-threads", type=int, default=PREFETCH_THREADS,
+                    help="with the rows on disk: threads reading the next batches (default %(default)s)")
+    ap.add_argument("--prefetch-depth", type=int, default=PREFETCH_DEPTH,
+                    help="with the rows on disk: batches read ahead (default %(default)s)")
     ap.add_argument("--profile-batches", type=int, default=None,
                     help="profile this many batches of the first epoch (class BatchProfile; default 16 on a GPU, 0 on the CPU)")
     ap.add_argument("--cuda-graph", choices=["auto", "off"], default="auto",
@@ -1274,6 +2051,9 @@ def main(argv=None):
     ap.add_argument("--partial-epochs", type=int, default=0,
                     help="with --watch-dir: at most this many epochs on each partial set of shards, then wait (0: no limit)")
     ap.add_argument("--watch-poll", type=float, default=1.0, help=argparse.SUPPRESS)
+    ap.add_argument("--train-fraction", type=float, default=1.0,
+                    help="train on the first ceil(F x rows) rows of each training shard, 0 < F <= 1 (default 1: "
+                         "every row); never the validation shard")
     ap.add_argument("--init", help="additive training: start from this float network (a float.safetensors) instead of "
                                    "a fresh initialisation; its widths and head must be --widths and --head")
     ap.add_argument("--init-int", help="with --init: the integer network it must quantise to, byte for byte (proves the "
@@ -1281,6 +2061,16 @@ def main(argv=None):
     ap.add_argument("--shrink-perturb", type=float, default=None,
                     help="with --init: shrink and perturb, every weight lambda*w + N(0, sigma^2) (SIGMA_RULE)")
     ap.add_argument("--perturb-seed", type=int, default=None, help="the shrink-and-perturb noise's seed (default --seed)")
+    ap.add_argument("--pair-weight", type=float, default=0.0,
+                    help="weight of the sibling groups' pairwise ranking loss (pair_loss; the groups come from the "
+                         "training shards' NAME.npy.groups sidecars, search labels --source siblings); 0 (default): "
+                         "none, the training exactly as before")
+    ap.add_argument("--pair-scale", type=float, default=100.0,
+                    help="with --pair-weight: logits per unit of money chance in the pairwise loss (default 100: a "
+                         "gap of 1%% is a logit of 1)")
+    ap.add_argument("--tie-aware", action="store_true",
+                    help="outcome head: the target is the set of outcomes whose money vector equals the label's "
+                         "(-log of their summed probability) instead of the first of them; off by default")
     ap.add_argument("--check-init-only", action="store_true",
                     help="with --init and --init-int: only check the start (shape, head, the quantisation proof), "
                          "write OUT/init-check.json and stop; no data is read")
@@ -1299,6 +2089,20 @@ def main(argv=None):
         ap.error("--train (or --watch-dir with --expect) is required")
     if args.watch_dir is not None and args.expect < max(1, len(args.train)):
         ap.error("--watch-dir needs --expect: the training shards in all, at least 1 and the --train ones")
+    if not all(x >= 0 and math.isfinite(x) for x in (args.host_reserve_gb, args.host_others_gb)):
+        ap.error("--host-reserve-gb and --host-others-gb must be 0 or more")
+    if args.prefetch_threads < 1 or args.prefetch_depth < 1:
+        ap.error("--prefetch-threads and --prefetch-depth must be at least 1")
+    if check_fraction(args.train_fraction):
+        ap.error(check_fraction(args.train_fraction))
+    if not (math.isfinite(args.pair_weight) and args.pair_weight >= 0):
+        ap.error("--pair-weight must be 0 or more")
+    if not (math.isfinite(args.pair_scale) and args.pair_scale > 0):
+        ap.error("--pair-scale must be above 0")
+    if args.pair_weight > 0 and args.watch_dir is not None:
+        ap.error("--pair-weight takes its groups from --train shards, not streamed ones (--watch-dir)")
+    if args.tie_aware and args.head != "outcome":
+        ap.error("--tie-aware is for the outcome head")
     # Before anything else (no data loaded, no GPU probed, no output made): a layer wider than the
     # integer inference allows (formats.MAX_WIDTH, Rust's nn::MAX_WIDTH) would train for nothing.
     try:
@@ -1361,8 +2165,41 @@ def main(argv=None):
 
     load_threads = args.load_threads if args.load_threads > 0 else load_threads_default()
     watcher, stream = None, None
+    # Where the training rows are held (``--feed``): in memory, or on disk (``DiskRows``) when
+    # ``--feed disk``, or with ``auto`` when they do not fit in the host's available memory with
+    # ``--host-reserve-gb`` to spare. ``disk["store"]`` is the rows on disk once chosen.
+    reserve, others = int(args.host_reserve_gb * GIB), int(args.host_others_gb * GIB)
+    rows_dir = args.rows_dir or tempfile.gettempdir()
+    disk = {"store": None, "host": None, "lock": threading.Lock()}
+    stack.callback(lambda: disk["store"] is not None and disk["store"].close())
+
+    def host_choice(need):
+        """Whether rows of ``need`` more bytes go to disk; recorded in ``disk["host"]``."""
+        host = host_memory()
+        to_disk = args.feed == "disk" or (args.feed == "auto" and not fits_host(need, reserve, host, others))
+        disk["host"] = {"need_bytes": int(need), "reserve_bytes": reserve, "others_bytes": others,
+                        "available_bytes": host["available"], "total_bytes": host_total(host),
+                        "mem_available_bytes": host["mem_available"], "cgroup_limit_bytes": host["cgroup_limit"],
+                        "source": host["source"], "rows": "disk" if to_disk else "memory"}
+        return to_disk
+
+    def store_for(sh):
+        """A streamed shard's rows: to disk once the training's rows are there, or when the shard
+        (its load buffer and the columns' growth: twice its rows) does not fit beside them."""
+        with disk["lock"]:
+            if disk["store"] is None and args.feed in ("auto", "disk"):
+                specs, row = compact_specs(sh, args.tie_aware)
+                if host_choice(2 * len(sh) * (row + 4)):
+                    disk["store"] = DiskRows(rows_dir, specs)
+            return disk["store"]
     if args.watch_dir is None:
-        shards = [load_shard(p) for p in args.train]
+        # ``--train-fraction``: each shard's first rows (a view of its memory map; 1: the shard).
+        full_rows = []
+        shards = []
+        for p in args.train:
+            sh = load_shard(p)
+            full_rows.append(int(len(sh)))
+            shards.append(prefix_shard(sh, args.train_fraction))
         val = np.asarray(load_shard(args.val))
         # The files' SHA-256 (for the report and the network's metadata), each on a thread of its own
         # while the rows are checked and converted (hashlib lets other threads run as it hashes).
@@ -1376,7 +2213,8 @@ def main(argv=None):
         v = shards[0].dtype["outcomes"].shape[0]
     else:
         # Streamed shards: wait for the validation shard and a first training shard.
-        watcher = Watcher(args.watch_dir, args.expect, args.train, load_threads, args.watch_poll)
+        watcher = Watcher(args.watch_dir, args.expect, args.train, load_threads, args.watch_poll, store_for,
+                          args.train_fraction, args.tie_aware)
         progress(step="wait", shards_in=0, shards=args.expect)
         while not os.path.exists(args.val):
             time.sleep(args.watch_poll)
@@ -1397,28 +2235,42 @@ def main(argv=None):
 
     def add_parts(new, epoch):
         """The streamed shards ``new`` (their tricks checked) joined in place to the columns
-        ``store`` (class ``Columns``: each shard's own arrays are dropped as they are copied),
-        recorded as first trained in ``epoch``."""
+        ``store`` (class ``Columns``: each shard's own arrays are dropped as they are copied; or
+        ``DiskRows``), recorded as first trained in ``epoch``. Once a shard has gone to disk
+        (``store_for``), the rows in memory follow it there first, and every later shard too."""
+        nonlocal store
+        if disk["store"] is not None and not isinstance(store, DiskRows):
+            d = disk["store"]
+            if store.rows:
+                d.join([d.build_arrays(store.arrays(), list(sizes))])
+            d.joins, d.copied = store.joins, store.copied
+            stream["rows_to_disk"] = {"epoch": epoch, "rows": int(store.rows), "host": disk["host"]}
+            store = d
+            gc.collect()
         for p in new:
             if p["tricks"] != {trick}:
                 raise SystemExit(f"{p['path']} holds tricks {sorted(p['tricks'])}, the validation shard {trick}")
-            stream["parts"].append({"name": p["name"], "rows": p["rows"], "sha256": p["sha256"],
+            stream["parts"].append({"name": p["name"], "rows": p["rows"], "rows_in_file": p["rows_in_file"],
+                                    "sha256": p["sha256"],
                                     "weight": p["weight"], "row_weights_sha256": p["row_weights_sha256"],
                                     "ready_s": p["ready_s"], "first_epoch": epoch})
             hashes["train"].append(p["sha256"])
+            rows_in_files.append(p["rows_in_file"])
             sizes.append((p["rows"], p["weight"], p["row_weights"]))
             names.append(p["name"])
             rw_shas.append(p["row_weights_sha256"])
         store.join(new)
 
+    store = None
     if watcher is None:
         n = sum(len(sh) for sh in shards)
-        dw = [data_weights(p, len(sh)) for sh, p in zip(shards, args.train)]
+        dw = [data_weights(p, r, len(sh)) for sh, p, r in zip(shards, args.train, full_rows)]
+        rows_in_files = full_rows
         sizes = [(len(sh), w, rw) for sh, (w, rw, _) in zip(shards, dw)]
         names = [os.path.basename(p) for p in args.train]
         rw_shas = [sha for _, _, sha in dw]
     else:
-        sizes, names, rw_shas = [], [], []
+        sizes, names, rw_shas, rows_in_files = [], [], [], []
         hashes = {"train": [], "val": sha256_file(args.val)}
         store = Columns()
         add_parts(parts, 0)
@@ -1431,21 +2283,51 @@ def main(argv=None):
         flush=True,
     )
 
+    def make_feed():
+        """The feed of the rows in ``store`` (``DiskRows``: the disk feed) or ``comp``."""
+        if isinstance(store, DiskRows):
+            f = Feed(store, device, args.batch, "disk", args.prefetch_threads, args.prefetch_depth)
+        else:
+            f = Feed(with_weights(store.arrays() if store is not None else comp, sizes), device, args.batch,
+                     args.feed)
+        if disk["host"] is not None:
+            f.facts["host"] = dict(disk["host"])
+        return f
+
+    comp = None
     if watcher is None:
-        comp = load_compact(shards, threads=load_threads)
+        specs, row = compact_specs(shards[0], args.tie_aware)
+        if host_choice(n * (row + (4 if weighted(sizes) else 0))):
+            store = disk["store"] = DiskRows(rows_dir, specs)
+            for sh, sz in zip(shards, sizes):
+                store.join([store.build(sh, [sz], threads=load_threads)])
+        else:
+            comp = load_compact(shards, threads=load_threads, ties=args.tie_aware)
         del shards
         hashes = {"train": [f.result() for f in train_sha], "val": val_sha.result()}
         hashing.shutdown()
-    else:
-        comp = store.arrays()
-    va = tensors(val)
+    va = tensors(val, args.tie_aware)
     val_classes = race_classes(val)
-    feed = Feed(with_weights(comp, sizes), device, args.batch, args.feed)
-    del comp
+    # The sibling groups (``--pair-weight``): which rows are in which group, from the training
+    # shards' sidecars; every epoch then orders the rows by ``PairIndex.epoch``.
+    pairs, pair_cfg, groups_rec = None, None, None
+    if args.pair_weight > 0:
+        pairs, groups_rec = load_pair_index(args.train, rows_in_files, [r for r, _, _ in sizes])
+        try:
+            pair_cfg = PairCfg(args.pair_weight, args.pair_scale, pairs.slots(args.batch))
+        except ValueError as e:
+            raise SystemExit(f"--pair-weight: {e}") from None
+        print(f"sibling groups: {len(pairs.starts)} groups, {pairs.rows_in_groups} rows (largest {pairs.max_size}); "
+              f"the first {pair_cfg.slots} rows of each batch of {args.batch} hold them; pairwise loss weight "
+              f"{args.pair_weight}, scale {args.pair_scale}", flush=True)
+    feed = make_feed()
+    stack.callback(lambda: feed is not None and feed.close())
+    comp = None
     weighting = weights_record(names, sizes, rw_shas)
     facts["feed"] = feed.facts
     print(f"training rows {feed.facts['mode']} ({feed.facts['bytes'] / 2**20:.0f} MiB compact)"
-          + (f", GPU free {feed.facts['gpu_free_bytes'] / 2**20:.0f} MiB" if device.type == "cuda" else ""),
+          + (f", GPU free {feed.facts['gpu_free_bytes'] / 2**20:.0f} MiB" if "gpu_free_bytes" in feed.facts else "")
+          + (f", files in {feed.facts['rows_dir']}" if feed.facts["mode"] == "disk" else ""),
           flush=True)
     # Wall-clock seconds: loading, each epoch's training loop (not its validation), the integer
     # check; and each epoch's milliseconds per batch.
@@ -1471,7 +2353,8 @@ def main(argv=None):
         elif n < args.batch:
             why = f"fewer training rows ({n}) than a batch ({args.batch})"
         else:
-            why, trial = graph_trial(model, args.head, args.mix_weight, feed, args.batch, args.lr, GRAPH_CLASS)
+            why, trial = graph_trial(model, args.head, args.mix_weight, feed, args.batch, args.lr, GRAPH_CLASS,
+                                     tie_aware=args.tie_aware, pair=pair_cfg)
             graphed = why is None
     opt = adam(model.parameters(), args.lr, graphed)
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, factor=0.3, patience=1)
@@ -1488,7 +2371,7 @@ def main(argv=None):
     # The first capture waits for the warm-up and the eager profile; replays are profiled from
     # the capture's third (the first replays also load the graph), among the full batches.
     step = Step(model, opt, args.head, args.mix_weight, feed, args.batch, graphed=graphed, not_before=prof.end,
-                graph_class=GRAPH_CLASS, on_fail=fell_back)
+                graph_class=GRAPH_CLASS, on_fail=fell_back, tie_aware=args.tie_aware, pair=pair_cfg)
     gprof = BatchProfile(nprof, n // args.batch, device, start=max(WARMUP, prof.end) + 2) if graphed else None
     step_facts = {"cuda_graph": args.cuda_graph, "mode": "cuda-graph" if graphed else "eager",
                   "reason": why, "trial": trial, "warmup": WARMUP,
@@ -1522,6 +2405,7 @@ def main(argv=None):
                 # collection), so the columns grow in place: peak host memory is the rows in,
                 # the joining shard's and its load buffer, and the GPU's free memory is
                 # measured without the old copy.
+                feed.close()
                 step = feed = None
                 gc.collect()
                 if device.type == "cuda":
@@ -1530,11 +2414,11 @@ def main(argv=None):
                 del new
                 n = store.rows
                 steps = (n + args.batch - 1) // args.batch
-                feed = Feed(with_weights(store.arrays(), sizes), device, args.batch, args.feed)
+                feed = make_feed()
                 facts["feed"] = feed.facts
                 weighting = weights_record(names, sizes, rw_shas)
                 step = Step(model, opt, args.head, args.mix_weight, feed, args.batch, graphed=was_graphed,
-                            graph_class=GRAPH_CLASS, on_fail=fell_back)
+                            graph_class=GRAPH_CLASS, on_fail=fell_back, tie_aware=args.tie_aware)
                 step.reason = was_reason
                 on_this_set = 0
                 print(f"streamed: {len(stream['parts'])} of {args.expect} shards in, {n} rows, from epoch {epoch}",
@@ -1545,7 +2429,14 @@ def main(argv=None):
             break
         model.train()
         te = time.time()
-        order = feed.order(torch.from_numpy(rng.permutation(n)))
+        if pairs is None:
+            order = feed.order(torch.from_numpy(rng.permutation(n)))
+        else:
+            perm, plan = pairs.epoch(rng, args.batch)
+            step.set_plan(plan)
+            order = feed.order(torch.from_numpy(perm))
+            step.pair_total.zero_()
+            step.pair_batches = 0
         # The epoch's loss sum in float64 on the device (each term float(loss) * rows, exactly the
         # Python float sum), so the GPU is not stopped to read every batch's loss.
         step.total.zero_()
@@ -1554,7 +2445,10 @@ def main(argv=None):
                 prof.before(k)
                 if gprof:
                     gprof.before(k)
-            step(order[i : i + args.batch])
+            if pairs is None:
+                step(order[i : i + args.batch])
+            else:
+                step(order[i : i + args.batch], k)
             if epoch == 0:
                 prof.after(k)
                 if gprof:
@@ -1573,7 +2467,7 @@ def main(argv=None):
             for name, p in (("batch profile", prof.result), ("batch profile, replayed", gprof and gprof.result)):
                 if p:
                     print(f"{name}: {json.dumps({k: x for k, x in p.items() if not k.startswith('top')})}", flush=True)
-        vloss, vv, acc = evaluate(model, args.head, va, args.mix_weight, device=device)
+        vloss, vv, acc = evaluate(model, args.head, va, args.mix_weight, device=device, tie_aware=args.tie_aware)
         if full_from is not None:
             sched.step(vloss)
         sd = float(((vv - val["value"].astype(np.float64)) / ONE).std())
@@ -1583,6 +2477,13 @@ def main(argv=None):
                         "minutes": (time.time() - t0) / 60})
         if stream is not None:
             history[-1].update(shards=len(stream["parts"]), rows=n, all_in=full_from is not None)
+        if pairs is not None:
+            # The pairwise loss's mean over the epoch's batches with groups, and its share of the
+            # epoch's loss (train_loss counts it, times --pair-weight).
+            pmean = float(step.pair_total) / max(step.pair_batches, 1)
+            history[-1].update(train_pair_loss=pmean, pair_batches=step.pair_batches,
+                               train_pair_share=args.pair_weight * pmean * step.pair_batches * args.batch
+                               / max(total, 1e-12))
         print(json.dumps(history[-1]), flush=True)
         improved = full_from is not None and vloss < best[0]
         progress(step="train", epoch=epoch, epochs=args.epochs, batches_done=steps, batches=steps,
@@ -1598,6 +2499,7 @@ def main(argv=None):
         if args.max_minutes and (time.time() - t_full) / 60 > args.max_minutes:
             print("time limit reached", flush=True)
             break
+    feed.close()
     if watcher is not None and watcher.extra():
         raise SystemExit(f"more training shards than --expect {args.expect}: {watcher.extra()}")
     model.load_state_dict(best[1])
@@ -1613,7 +2515,7 @@ def main(argv=None):
         stream["partial_epochs"] = full_from
         stream["epochs_trained_on"] = {
             p["name"]: sum(1 for h in history if h["epoch"] >= p["first_epoch"]) for p in stream["parts"]}
-    vloss, pf, acc = evaluate(model, args.head, va, args.mix_weight, device=device)
+    vloss, pf, acc = evaluate(model, args.head, va, args.mix_weight, device=device, tie_aware=args.tie_aware)
     progress(step="quantise", best_epoch=best[2])
 
     layers = model.float_layers()
@@ -1630,6 +2532,16 @@ def main(argv=None):
     }
     if "train_weights" in weighting:
         meta["train_weights"] = json.dumps(weighting["train_weights"])
+    # Only below 1: every row trains the same network, which then stays the same file.
+    if args.train_fraction < 1:
+        meta["train_fraction"] = repr(args.train_fraction)
+    # Only when on: with neither, the network and its file are exactly the former ones.
+    if args.tie_aware:
+        meta["tie_aware"] = "1"
+    if pairs is not None:
+        meta["pair_weight"] = repr(args.pair_weight)
+        meta["pair_scale"] = repr(args.pair_scale)
+        meta["groups_sha256"] = json.dumps([None if r is None else r["sha256"] for r in groups_rec])
     # The network it continued (additive training): part of its identity.
     if init is not None:
         meta["init_float_sha256"] = init["record"]["float_sha256"]
@@ -1666,7 +2578,8 @@ def main(argv=None):
         "trick": trick,
         "head": head_name,
         "outcomes": v,
-        "data": dict(hashes, **weighting),
+        "data": dict(hashes, **weighting, train_fraction=args.train_fraction, train_rows_in_files=rows_in_files,
+                     train_rows_used=[r for r, _, _ in sizes]),
         "history": history,
         "best_epoch": best[2],
         "float": {"val_loss": vloss, "outcome_accuracy": acc, "error": error_stats(pf, val["value"]),
@@ -1685,6 +2598,17 @@ def main(argv=None):
     }
     if stream is not None:
         report["stream"] = stream
+    if args.tie_aware:
+        report["tie_aware"] = {"what": "the outcome target is every possible outcome whose exact money vector equals "
+                                       "the label's (-log of their summed probability); the validation loss and "
+                                       "outcome_accuracy (the most likely outcome among them) likewise"}
+    if pairs is not None:
+        report["pairs"] = {"weight": args.pair_weight, "scale": args.pair_scale, "slots": pair_cfg.slots,
+                           "groups": int(len(pairs.starts)), "rows_in_groups": pairs.rows_in_groups,
+                           "largest_group": pairs.max_size, "sidecars": groups_rec,
+                           "what": "each full batch starts with whole sibling groups (PairIndex.epoch), the rest "
+                                   "ordinary rows; loss = the usual loss of every row + weight x the pairwise "
+                                   "ranking loss of the groups (pair_loss)"}
     if init is not None:
         report["init"] = dict(init["record"], evaluated_only=False)
     with open(os.path.join(args.out, "report.json"), "w") as f:

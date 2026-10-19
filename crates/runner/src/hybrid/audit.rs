@@ -1851,7 +1851,6 @@ impl Rung<'_> {
         let summary = st.lines.join("\n")
             + if st.lines.is_empty() { "" } else { "\n" }
             + &note
-            + &self.label_line()
             + &format!(
                 "stop: {stop}\nfinal network: {}\n",
                 best.as_ref()
@@ -1862,7 +1861,8 @@ impl Rung<'_> {
                         n["int_sha256"].as_str().unwrap_or("?"),
                         n["int_key"].as_str().unwrap_or("not shared")
                     ))
-            );
+            )
+            + &self.label_line();
         let summary_path = st.dir.join("audit-summary.txt");
         fs::write(&summary_path, &summary)
             .map_err(|e| format!("write {}: {e}", summary_path.display()))?;
@@ -2254,7 +2254,8 @@ impl Rung<'_> {
         let own_driver = earlier.is_none() && own.is_some();
         let driver = earlier.or_else(|| own.map(Path::to_path_buf));
         let threads = self.fg_threads();
-        let (tt_args, tt_rec) = self.label_tt_args(threads, &format!("audit shard (round {r})"));
+        let (tt_args, tt_rec) =
+            self.label_tt_args(threads, &format!("audit shard (round {r})"), "audit");
         let mut c = Command::new(&self.tools.search);
         c.args(["labels", "--trick", &self.p.cut.to_string()])
             .args([
@@ -3334,7 +3335,8 @@ impl Rung<'_> {
                 w[1].clone()
             });
         let threads = self.fg_threads();
-        let (tt_args, _) = self.label_tt_args(threads, &format!("targeted harvest (round {r})"));
+        let (tt_args, _) =
+            self.label_tt_args(threads, &format!("targeted harvest (round {r})"), "extra");
         let mut c = Command::new(&self.tools.search);
         c.args(["labels", "--trick", &self.p.cut.to_string()])
             .args(["--count", &rows.to_string(), "--seed", &seed.to_string()])

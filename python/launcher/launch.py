@@ -206,6 +206,7 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 # The thresholds and checks for which offers may be rented live in offer_rules.py (next to this file),
 # shared with the market tools so that their "the launcher can rent it" labels cannot drift.
@@ -622,13 +623,50 @@ def link_note(o: dict) -> str:
     return f", link {mbps:.0f} Mbps" + (f" (slow: cost/work x{f:.2f})" if f > 1.0 else "")
 
 
+SPEED_FACTORS = Path(__file__).resolve().parents[2] / "docs" / "vast" / "speed-factors.json"
+_FACTORS: tuple[list[tuple[re.Pattern, float]], float] | None = None
+
+
+def load_factors() -> tuple[list[tuple[re.Pattern, float]], float]:
+    """docs/vast/speed-factors.json: (each model's match pattern and per-thread speed, `compute`, its measured value
+    when there is one, else the published-benchmark estimate; the speed assumed for an unknown CPU). Read once;
+    a missing or unreadable file gives no models and 1.0 (every thread alike, the old behaviour)."""
+    global _FACTORS
+    if _FACTORS is None:
+        try:
+            d = json.loads(SPEED_FACTORS.read_text(encoding="utf-8"))
+            models = []
+            for m in d.get("models", []):
+                v = (m.get("measured") or {}).get("compute") if isinstance(m.get("measured"), dict) else None
+                v = v if v is not None else (m.get("estimate") or {}).get("compute")
+                if m.get("match") and v:
+                    models.append((re.compile(m["match"], re.I), float(v)))
+            _FACTORS = (models, float((d.get("default") or {}).get("compute") or 1.0))
+        except (OSError, ValueError, TypeError, re.error):
+            _FACTORS = ([], 1.0)
+    return _FACTORS
+
+
+def speed_factor(cpu_name: str | None) -> float | None:
+    """Per-thread speed of this CPU from docs/vast/speed-factors.json, or None when no model matches."""
+    models, _ = load_factors()
+    return next((v for rx, v in models if rx.search(cpu_name or "")), None)
+
+
 def rank(offers: list[dict], bench: dict[str, float], premium: float,
          link_penalty: bool = True) -> tuple[dict | None, list[dict]]:
-    default_rate = statistics.median(bench.values()) if bench else 1.0
+    # A CPU we have benchmarked uses its measured rate. Any other uses its per-thread speed factor (published
+    # benchmarks, docs/vast/speed-factors.json) scaled to the measured unit (2026-10-19: a flat rate counted a 2016
+    # thread like a 2025 one, so "cost per work" was cost per thread); an unknown CPU gets the file's slow default.
+    _, unknown = load_factors()
+    pairs = [(rate, f) for name, rate in bench.items() if (f := speed_factor(name.replace("-", " "))) is not None]
+    scale = statistics.median(r / f for r, f in pairs) if pairs else (statistics.median(bench.values()) if bench else 1.0)
     for o in offers:
         slug = cpu_slug(o.get("cpu_name"))
-        o["_rate"] = bench.get(slug, default_rate)
+        f = speed_factor(o.get("cpu_name"))
+        o["_rate"] = bench[slug] if slug in bench else scale * (f if f is not None else unknown)
         o["_measured"] = slug in bench
+        o["_factor"] = f
         o["_work_per_hour"] = o["cpu_cores_effective"] * o["_rate"]
         o["_link_factor"] = link_factor(o) if link_penalty else 1.0
         o["_cost_per_work"] = o["dph_total"] / o["_work_per_hour"] * o["_link_factor"]
@@ -642,7 +680,8 @@ def rank(offers: list[dict], bench: dict[str, float], premium: float,
 
 
 def describe(o: dict) -> str:
-    unit = "matches/s/core measured" if o["_measured"] else "assumed rate"
+    unit = ("matches/s/core measured" if o["_measured"] else
+            f"speed factor {o['_factor']:.2f} from published benchmarks" if o.get("_factor") is not None else "unknown CPU, assumed slow")
     host = "host verified" if is_verified(o) else f"host NOT verified ({host_status(o)})"
     return (f"offer {o['id']}: ${o['dph_total']:.3f}/h, {o['cpu_cores_effective']:.0f} eff. cores, "
             f"{o.get('cpu_name')}, {o.get('num_gpus')}x {o.get('gpu_name')}"
@@ -711,6 +750,21 @@ def why_offer_missing(oid: int) -> str:
     return "; " + "; ".join(found)
 
 
+def market_offer(oid: int) -> dict | None:
+    """The offer `oid` as the on-demand market listing has it, matched by id here, or None. vast answers at most
+    512 offers a search, so the big machines (150+ threads) are read first, then the whole listing; a failed
+    search counts as not found."""
+    for q in ("verified=any external=any rentable=any cpu_cores_effective>=150", "verified=any external=any rentable=any"):
+        try:
+            rows = vast("search", "offers", q, "--type", "on-demand", "--limit", "512")
+        except RuntimeError:
+            continue
+        hit = next((o for o in rows if isinstance(o, dict) and o.get("id") == oid), None) if isinstance(rows, list) else None
+        if hit:
+            return hit
+    return None
+
+
 def lookup_offer(a) -> dict:
     """The one offer the owner named (--offer-id), read back from vast by its id (one search,
     `id=N`, on-demand) and checked like every searched offer (`offer_check_failures`). Stops the
@@ -728,8 +782,16 @@ def lookup_offer(a) -> dict:
         sys.exit(f"launch: offer {oid} could not be checked (vast's search answered {LAST_VAST_OUTPUT!r}); nothing was rented")
     row = next((o for o in rows if isinstance(o, dict) and o.get("id") == oid), None)
     if row is None:
-        sys.exit(f"launch: offer {oid} is not on offer (on-demand) any more; nothing was rented"
-                 f"{why_offer_missing(oid)}")
+        # vast's `id=N` filter misses some live offers (2026-10-19: offer 56041192, rentable and not rented in
+        # the market listing, read as gone twice and was lost); the market listing, matched by id here, decides.
+        row = market_offer(oid)
+        if row is None:
+            sys.exit(f"launch: offer {oid} is not on offer (on-demand) any more; nothing was rented"
+                     f"{why_offer_missing(oid)}")
+        if row.get("rentable") is False or row.get("rented") is True:
+            sys.exit(f"launch: offer {oid} is listed but not rentable now (rentable {row.get('rentable')}, rented "
+                     f"{row.get('rented')}); nothing was rented")
+        log(f"named offer {oid}: vast's search by id missed it; found in the market listing, checked as usual")
     log(f"named offer {oid}: {named_text(row)}")
     verified_only = bool(getattr(a, "verified_only", False))
     failed = offer_check_failures(row, float(a.min_reliability), verified_only)
@@ -810,7 +872,8 @@ def choose(a, quiet: bool = False) -> dict | None:
         log(f"offer {best['id']} chosen by the owner and checked by id (reliability "
             f"{float(best.get('reliability2') or 0):.3f}, whole machine, on-demand): {describe(best)}{link_note(best)}")
         return best
-    offers = search_offers(a)
+    # --any-host: verified, unverified and deverified hosts ranked together from the start (owner, 2026-10-19).
+    offers = search_offers(a, verified=not getattr(a, "any_host", False))
     if not offers:
         # Owner, 2026-10-16: prefer verified hosts, accept unverified or deverified ones when no
         # verified offer fits. Same filters, only `verified` lifted; a replacement machine
@@ -2523,6 +2586,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="GPU job: also rent Blackwell cards (compute capability 10.0 and above: RTX 50-series, B200) on a host "
                             "whose driver supports CUDA 13.0; the same as the manifest's machine.blackwell: true. Needs a runner "
                             "binary from eng-cu130 or later (the cu130 PyTorch build). Without it a Blackwell offer is refused")
+        s.add_argument("--any-host", action="store_true",
+                       help="rank verified, unverified and deverified hosts together from the start (default: verified first)")
         s.add_argument("--verified-only", action="store_true",
                        help="rent only from vast.ai-verified hosts (the strict behaviour). Without it, verified hosts are "
                             "still preferred, but when no verified offer fits, unverified or deverified hosts are searched "

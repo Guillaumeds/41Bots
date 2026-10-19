@@ -1,0 +1,58 @@
+{
+ "format": 2,
+ "run_id": "o3-exactleaf-1",
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "2026-10-19, fix G: in H_3 (trick-2 decisions), the trick-3 frontier positions where O_3 is least reliable are solved exactly instead of valued by the network (search::exact_leaves, docs/m3-hybrid/rung2.md 'Exact leaves (G)'). The adopted O_3 (f5766a) on the stored 2,000-decision trick-2 golden set x 320 worlds: (a) no exact leaves, the baseline, which must reproduce 0.0068% overall and 0.0201% at seat 1 (1% of the worlds recomputed first); (b) race class 4 exact; (c) classes 2 and 4; (d) classes 1-4; each of (b)-(d) against (a) by the paired comparison. CPU only, no training.",
+ "machine": {
+  "min_cores": 128,
+  "min_ram_gb": 60
+ },
+ "inputs": {
+  "golden-t2-decisions": "sha256:635e9aef196c816380f3f15c05ede90b38b875fa4817061a57e6d39550065ab0",
+  "golden-t2-worlds": "sha256:6ddc59b191e1fd534f260f9dfe103f742d6026768ca74acdbbb4fd430eb8265e",
+  "o3-f5766a": "sha256:f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad"
+ },
+ "streams": [
+  {
+   "name": "checks",
+   "priority": 1,
+   "kind": "hybrid_checks",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "est_seconds": 9000,
+    "trick": 2,
+    "cut": 3,
+    "worlds": 320,
+    "seed": 1,
+    "decisions_input": "golden-t2-decisions",
+    "worlds_input": "golden-t2-worlds",
+    "verify_pct": 1,
+    "tt_mb": 64,
+    "boot": 1000,
+    "boot_seed": 1,
+    "standard": "0.01",
+    "race_groups": true,
+    "checks": [
+     { "name": "none", "nets": ["o3-f5766a"] },
+     { "name": "race4", "nets": ["o3-f5766a"], "exact_leaves": "race:4" },
+     { "name": "race24", "nets": ["o3-f5766a"], "exact_leaves": "race:2,4" },
+     { "name": "race1to4", "nets": ["o3-f5766a"], "exact_leaves": "race:1-4" }
+    ],
+    "paired": [
+     { "name": "none-vs-race4", "a": "none", "b": "race4" },
+     { "name": "none-vs-race24", "a": "none", "b": "race24" },
+     { "name": "none-vs-race1to4", "a": "none", "b": "race1to4" }
+    ],
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  }
+ ]
+}
