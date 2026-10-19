@@ -9,7 +9,7 @@
   "note": "Mechanism test of the trick-3 additive audit loop (owner 2026-10-19: task 9, push O_3 lower): the real manifest's settings at small sizes, 2 rounds, to prove the additive path end to end (step-0 proof of the starting network, adoption rule, float/int sharing, shards.json) before the real run.",
   "machine": {
     "gpus": 1,
-    "min_gpu_ram_gb": 20,
+    "min_gpu_ram_gb": 16,
     "min_compute_cap": 600,
     "min_cores": 190,
     "min_ram_gb": 192,

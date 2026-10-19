@@ -9,7 +9,7 @@
   "note": "Trick-4 audit loop, second mechanism test (2026-10-16 night) on the binary with the auditor at scale: gamma 0.0001 on 4M-row audit shards, a generated 4,000-decision golden set, standard 0.01 then push 0.005, every waiting group measured (mini sets of 100 decisions), the start shape 1024-1024-512-128. Small base data on purpose (9M rows), two rounds: it measures the auditor's and the checks' real times before the overnight loops.",
   "machine": {
     "gpus": 1,
-    "min_gpu_ram_gb": 20,
+    "min_gpu_ram_gb": 16,
     "min_compute_cap": 600,
     "min_cores": 120,
     "min_ram_gb": 128,

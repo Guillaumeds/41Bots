@@ -380,7 +380,7 @@ one); 2048-1024-256 on the ladder `<widths>;2048,2048,1024,256;4096,2048,1024,25
 patience 6, `max_minutes` 0, `overlap` with `partial_epochs` 2; 4 rounds of 200,000 audit rows
 (seed 221, gamma 0.001) and 250,000 targeted rows (weight 2); `upload_shards`; the rough test on
 the saved trick-1 worlds by the SHA-256 of the t1check manifest. Machine (owner, 2026-10-17: a
-cheap machine with at least 300 threads): 1 GPU of 20 GB or more (any model: the run is CPU-bound),
+cheap machine with at least 300 threads): 1 GPU of 16 GB or more (owner, 2026-10-19: the floor for every run; any model: the run is CPU-bound, and the trainer streams rows a smaller GPU cannot hold),
 at least 300 threads and 192 GB (labels hold about 200 MB a thread with 256 MB tables, at most 98 GB
 at 384 threads; the trainer about 3 GB of rows; the rough test's verification table 8 GB), 80 GB of
 disk (about 4 GB of shards), $2.00/h at most on the ladder 1.40 / 1.70 / 2.00 with ten searches a
