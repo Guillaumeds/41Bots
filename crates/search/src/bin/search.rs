@@ -69,6 +69,7 @@
 //! search hybrid-check … --truth net --noise-sd-by-class P0,P1,P2,P3,P4 [--noise-seed 1]
 //!                  [--noise-calibrate N [--noise-calibrate-worlds 8] [--noise-calibrate-rounds 4]]
 //! search hybrid-check … --exact-leaves none|all|race:4|race:2,4|race:1-4[+band:LO-HI]
+//!                  [+learned:MODEL.json:t=T|t=inf|budget=S]
 //!                  [--exact-leaf-tt-mb (64 at --cut 3)]
 //! search hybrid-paired --a A.json --b B.json [--a-name A] [--b-name B] [--boot 1000]
 //!                  [--boot-seed 1] [--json OUT]
@@ -3707,7 +3708,29 @@ fn print_exact_leaves(
         hybrid_ms,
         hybrid_ms - leaf_ms
     );
+    if let Some(l) = &p.learned {
+        println!(
+            "  learned: model {} ({} trees, network {}), threshold {}{}; {:.1} leaves scored a world, {:.3} ms a world scoring",
+            &l.model.sha256[..12],
+            l.model.n_trees(),
+            &l.model.net_sha256[..l.model.net_sha256.len().min(12)],
+            l.t.map_or("inf".to_string(), |t| t.to_string()),
+            l.budget
+                .as_ref()
+                .map_or(String::new(), |b| format!(" (budget {b})")),
+            st.scored as f64 / t.worlds,
+            st.score_us as f64 / 1000.0 / t.worlds
+        );
+    }
+    let learned = p.learned.as_ref().map(|l| {
+        serde_json::json!({
+            "model_sha256": l.model.sha256, "net_sha256": l.model.net_sha256,
+            "trees": l.model.n_trees(), "t": l.t, "budget": l.budget,
+            "scored": st.scored, "score_ms_per_world": st.score_us as f64 / 1000.0 / t.worlds,
+        })
+    });
     serde_json::json!({
+        "learned": learned,
         "what": "the frontier positions the policy picks are solved exactly (search::exact_leaves, the labels' exact solver and tie rule) instead of being valued by the network; counts are distinct canonical leaves per world's search, summed over worlds; times are thread time (reports only)",
         "policy": p.describe(),
         "leaf_tt_mb": p.tt_mb,

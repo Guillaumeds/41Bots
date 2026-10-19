@@ -2586,4 +2586,138 @@ mod tests {
             "{checked:?}"
         );
     }
+
+    // ------------------------------------------------------------ learned exact leaves
+
+    /// A leaf-risk model of one split: `feature` ≤ `threshold` scores `lo`, otherwise `hi`
+    /// (`nn::leafrisk`'s format).
+    fn risk_model(
+        feature: usize,
+        threshold: i64,
+        lo: i64,
+        hi: i64,
+    ) -> Arc<nn::leafrisk::RiskModel> {
+        let tree = if lo == hi {
+            serde_json::json!({"f": [-1], "t": [0], "l": [0], "r": [0], "v": [lo]})
+        } else {
+            serde_json::json!({"f": [feature, -1, -1], "t": [threshold, 0, 0], "l": [1, 0, 0],
+                               "r": [2, 0, 0], "v": [0, lo, hi]})
+        };
+        let v = serde_json::json!({
+            "format": nn::leafrisk::FORMAT, "encoder": nn::encode::ENCODER,
+            "n_inputs": nn::leafrisk::N_INPUTS, "extras": nn::leafrisk::EXTRA_NAMES,
+            "net_sha256": "synthetic", "trick": 4, "base": 0, "trees": [tree],
+            "budget": {"quantiles": [hi, lo]},
+        });
+        Arc::new(nn::leafrisk::RiskModel::parse(v.to_string().as_bytes()).expect("a valid model"))
+    }
+
+    /// The learned policy: an infinite threshold is the check without exact leaves, byte for
+    /// byte (values, choices, errors); a threshold of 0 is every leaf exact, byte for byte the
+    /// same as `all`; a split model solves exactly the leaves it scores at or above the
+    /// threshold, the same on 1 and 3 threads; and the predictor's scores are the same in every
+    /// world and thread (a pure function of the position and the network's value).
+    #[test]
+    fn learned_exact_leaves_inf_zero_and_split() {
+        let ds = curse_setup();
+        let l = syn_leaf();
+        let src = BeliefSource::new();
+        let ctx = Ctx {
+            leaf: &*l,
+            source: &src,
+            rules: engine::game::Rules::HOUSE,
+        };
+        let none = BTreeMap::new();
+        let net = oracle(4, 61);
+        let run = |job: &CheckJob| run_check(&ds, &none, job, &ctx, &net).expect("runs");
+        let base = run(&leaf_job(2, None));
+        let m = risk_model(nn::encode::N_FEATURES + 9, 0, 5, 50);
+        // t = ∞: nothing solved, nothing scored, the check as before.
+        let inf = run(&leaf_job(3, Some(LeafPolicy::learned(m.clone(), None, 4))));
+        assert_eq!(key(&base), key(&inf));
+        assert_eq!(world_values(&base), world_values(&inf));
+        let si = inf.exact_leaves.clone().expect("counted");
+        assert_eq!((si.exact, si.nodes, si.scored), ([0; 5], 0, 0));
+        // t = 0: every leaf solved: exactly `all`.
+        let all = run(&leaf_job(2, Some(LeafPolicy::all(4))));
+        let zero = run(&leaf_job(
+            3,
+            Some(LeafPolicy::learned(m.clone(), Some(0), 4)),
+        ));
+        assert_eq!(key(&all), key(&zero));
+        assert_eq!(world_values(&all), world_values(&zero));
+        let sz = zero.exact_leaves.clone().expect("counted");
+        assert_eq!(sz.exact, sz.distinct);
+        assert_eq!(sz.exact, all.exact_leaves.clone().expect("counted").exact);
+        // A threshold above every score: nothing solved, but every leaf scored.
+        let above = run(&leaf_job(
+            2,
+            Some(LeafPolicy::learned(m.clone(), Some(51), 4)),
+        ));
+        assert_eq!(world_values(&base), world_values(&above));
+        let sa = above.exact_leaves.clone().expect("counted");
+        assert_eq!(sa.exact, [0; 5]);
+        assert_eq!(sa.scored, sa.distinct.iter().sum::<u64>());
+        // The split (L1 to the farthest possible outcome above 0: some leaves, not all).
+        let p = LeafPolicy::learned(m.clone(), Some(50), 4);
+        assert_eq!(p.describe(), format!("learned:{}:t=50", &m.sha256[..12]));
+        let r1 = run(&leaf_job(1, Some(p.clone())));
+        let r3 = run(&leaf_job(3, Some(p.clone())));
+        assert_eq!(key(&r1), key(&r3));
+        assert_eq!(world_values(&r1), world_values(&r3));
+        let (s1, s3) = (
+            r1.exact_leaves.clone().expect("counted"),
+            r3.exact_leaves.clone().expect("counted"),
+        );
+        assert_eq!(s1.counts(), s3.counts());
+        let solved: u64 = s1.exact.iter().sum();
+        assert!(
+            solved > 0 && solved < s1.distinct.iter().sum::<u64>(),
+            "{s1:?}"
+        );
+        // Leaf by leaf: exact exactly where the score reaches the threshold.
+        let cfg = SearchConfig {
+            tt_mb: 4,
+            ..SearchConfig::default()
+        };
+        let mut seen = (0, 0);
+        for (d, w) in ds.iter().flat_map(|d| [(d, 0), (d, 1)]) {
+            let (_, view, legal) = d.replay();
+            let (_, cands) = candidates(&view, &legal);
+            let worlds = src.prepare(&view, ctx.rules);
+            let m0 = world_match(&view, &*worlds, w, measure_seed(7, 1, d.id), ctx.rules);
+            let x = ExactLeaves::new(
+                &net,
+                &*l,
+                &p,
+                engine::team_of(d.seat),
+                solver::SolveFamily::of_match(&m0),
+            );
+            let mut run = WorldSolve::default();
+            exact_world(
+                &m0,
+                &cands,
+                &ctx,
+                &cfg,
+                None,
+                &mut SolveMem::new(),
+                &mut run,
+                Some(FrontierCut::new(4, &x)),
+            )
+            .expect("solves");
+            for (_, mctx, canon, _, exact) in x.leaves() {
+                let nv = net.value(&canon, &mctx);
+                let score = m.score(&canon, &mctx, &*l, &nv);
+                assert_eq!(score, m.score(&canon, &mctx, &*l, &nv), "a pure function");
+                assert!(score == 5 || score == 50);
+                assert_eq!(exact, score >= 50);
+                if exact {
+                    seen.0 += 1;
+                } else {
+                    seen.1 += 1;
+                }
+            }
+        }
+        assert!(seen.0 > 0 && seen.1 > 0, "{seen:?}");
+    }
 }

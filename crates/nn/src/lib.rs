@@ -20,6 +20,8 @@
 //! - [`ensemble`]: several networks as one evaluator, the integer mean of their money chances.
 //! - [`predicate`]: the audit loop's groups of positions, as conditions on the encoder's
 //!   features (docs/m3-hybrid/audit-loop.md §6), shared with the Python auditor.
+//! - [`leafrisk`]: the leaf-risk predictor, integer regression trees that predict the oracle
+//!   network's squared error at a frontier position (which leaves the hybrid solves exactly).
 //! - [`synthetic`]: a synthetic leaf, network and features for tests and fixtures.
 //!
 //! Everything here is integer arithmetic, so a network's money chances are byte-identical on
@@ -29,6 +31,7 @@ pub mod encode;
 pub mod ensemble;
 pub mod fast;
 pub mod kernel;
+pub mod leafrisk;
 pub mod mlp;
 pub mod money;
 pub mod oracle;

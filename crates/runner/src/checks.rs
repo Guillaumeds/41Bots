@@ -40,7 +40,10 @@
 //!   --exact-leaves`, `search::exact_leaves`: `race:4`, `race:2,4`, `race:1-4`, `+band:LO-HI`,
 //!   `all`; `none` or absent: none), each leaf solve with a table of `tt_mb` (a second table per
 //!   thread in the memory plan) (fix G, docs/m3-hybrid/rung2.md "Exact leaves (G)"; manifest
-//!   docs/vast/o3-exactleaf.manifest.json).
+//!   docs/vast/o3-exactleaf.manifest.json). A learned term `learned:NAME:t=T` (or
+//!   `:budget=S`) names its leaf-risk model (`nn::leafrisk`) as a manifest input, whose path
+//!   replaces the name in the command (rung2.md "Learned exact leaves"; manifest
+//!   docs/vast/o3-learnedleaf.manifest.json).
 //!
 //! with `--race-groups` when `race_groups` (true), into `out/hybrid/checks/<name>.json` and the
 //! printed tables in `<name>.txt`. Then each `paired` entry is `search hybrid-paired --a
@@ -89,7 +92,7 @@ pub(crate) const KEYS: [&str; 19] = [
 ];
 
 /// Keys `v2.rs` adds: the local paths of the named inputs.
-const RESOLVED: [&str; 3] = ["decisions", "worlds_path", "net_paths"];
+const RESOLVED: [&str; 4] = ["decisions", "worlds_path", "net_paths", "model_paths"];
 
 /// Keys of a check.
 const CHECK_KEYS: [&str; 8] = [
@@ -117,8 +120,11 @@ pub(crate) struct Check {
     pub noise_calibrate: u64,
     pub noise_calibrate_worlds: u64,
     /// The exact leaves' policy (`search hybrid-check --exact-leaves`, `search::exact_leaves`),
-    /// in its normal form; `None`: none (the hybrid as before).
+    /// in its normal form (as written when it has a learned term, whose model is an input
+    /// name); `None`: none (the hybrid as before).
     pub exact_leaves: Option<String>,
+    /// Input names of the leaf-risk models of a learned term (`learned:NAME:t=T`).
+    pub models: Vec<String>,
 }
 
 /// The checked settings.
@@ -276,8 +282,23 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
                 ));
             }
         }
+        let mut models = Vec::new();
         let exact_leaves = match s(c, "exact_leaves")? {
             None => None,
+            Some(text) if text.contains("learned:") => {
+                // A learned term names a manifest input (the leaf-risk model): checked here
+                // without it, kept as written, its name turned into a path when the command is
+                // made.
+                models = search::exact_leaves::check_spec(&text)
+                    .map_err(|e| format!("hybrid_checks: check `{name}`: {e}"))?;
+                if truth_net {
+                    return Err(format!(
+                        "hybrid_checks: check `{name}`: exact_leaves is for checks against \
+                         exact values, not truth net"
+                    ));
+                }
+                Some(text.trim().to_string())
+            }
             Some(text) => {
                 let p = search::exact_leaves::LeafPolicy::parse(&text, 1)
                     .map_err(|e| format!("hybrid_checks: check `{name}`: {e}"))?;
@@ -299,6 +320,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
             noise_calibrate: n(c, "noise_calibrate", 0)?,
             noise_calibrate_worlds: n(c, "noise_calibrate_worlds", 8)?.max(1),
             exact_leaves,
+            models,
         });
     }
     let mut paired = Vec::new();
@@ -397,6 +419,13 @@ pub(crate) fn resolve(p: &Value, inputs: &BTreeMap<String, String>) -> Result<Va
         }
     }
     out["net_paths"] = Value::Object(nets);
+    let mut models = serde_json::Map::new();
+    for c in &q.checks {
+        for n in &c.models {
+            models.insert(n.clone(), json!(path(n)?));
+        }
+    }
+    out["model_paths"] = Value::Object(models);
     Ok(out)
 }
 
@@ -427,6 +456,13 @@ pub(crate) fn check_command(
     r: &Run,
 ) -> Result<Command, String> {
     let c = &q.checks[i];
+    let p_in = p;
+    let p_models =
+        |p: &Value, m: &str| -> Result<String, String> {
+            p["model_paths"][m].as_str().map(str::to_string).ok_or_else(|| {
+            format!("hybrid_checks: no local path for leaf-risk model `{m}` (inputs not resolved)")
+        })
+        };
     let nets: Vec<String> = c
         .nets
         .iter()
@@ -487,7 +523,12 @@ pub(crate) fn check_command(
         cmd.arg("--race-groups");
     }
     if let Some(p) = &c.exact_leaves {
-        cmd.args(["--exact-leaves", p])
+        let mut p = p.clone();
+        for m in &c.models {
+            let path = p_models(p_in, m)?;
+            p = p.replace(&format!("learned:{m}:"), &format!("learned:{path}:"));
+        }
+        cmd.args(["--exact-leaves", &p])
             .args(["--exact-leaf-tt-mb", &r.tt_mb.to_string()]);
     }
     cmd.arg("--json")
@@ -821,6 +862,48 @@ mod tests {
             ),
             "{x}"
         );
+        // A learned term names its model as an input: kept as written, its name resolved into
+        // the model's path in the command; an input it names must be there.
+        let mut pl = p.clone();
+        pl["checks"][1]["exact_leaves"] = json!("race:4+learned:risk:t=123");
+        let ql = parse(&pl).expect("valid");
+        assert_eq!(
+            ql.checks[1].exact_leaves.as_deref(),
+            Some("race:4+learned:risk:t=123")
+        );
+        assert_eq!(ql.checks[1].models, ["risk"]);
+        assert!(resolve(&pl, &inputs).is_err(), "the model input is missing");
+        let mut inl = inputs.clone();
+        inl.insert("risk".into(), "/in/risk.json".into());
+        let rl = resolve(&pl, &inl).expect("resolves");
+        let x = args(
+            check_command(
+                Path::new("search"),
+                &rl,
+                &parse(&rl).expect("valid"),
+                1,
+                false,
+                &run,
+            )
+            .expect("cmd"),
+        );
+        assert!(
+            x.contains("--exact-leaves race:4+learned:/in/risk.json:t=123 --exact-leaf-tt-mb 64"),
+            "{x}"
+        );
+        for bad_l in [
+            "learned:risk",
+            "learned:risk:t=-2",
+            "learned:a:t=1+learned:b:t=1",
+            "race:7+learned:risk:t=1",
+        ] {
+            let mut pb = p.clone();
+            pb["checks"][1]["exact_leaves"] = json!(bad_l);
+            assert!(parse(&pb).is_err(), "{bad_l}");
+        }
+        let mut pb = p.clone();
+        pb["checks"][0]["exact_leaves"] = json!("learned:risk:t=1");
+        assert!(parse(&pb).is_err(), "not with truth net");
         // Unresolved settings cannot make a command.
         assert!(check_command(Path::new("search"), &p, &q, 0, false, &run).is_err());
     }
@@ -998,6 +1081,113 @@ esac
             paired,
             [("none", "race4"), ("none", "race24"), ("none", "race1to4")]
         );
+        assert!(v.get("bin_sha").is_none(), "the launcher sets bin_sha");
+    }
+
+    /// The committed learned-leaves manifest (docs/vast/o3-learnedleaf.manifest.json): a CPU
+    /// machine, one `hybrid_checks` chunk on the stored trick-2 golden set with the adopted O_3:
+    /// no exact leaves, G v1's race classes 1-4, and the learned policy at two thresholds of the
+    /// stored leaf-risk model (an input, committed as data/leafrisk/), each against the baseline
+    /// and the learned one against G v1 by the paired comparison; the model input resolves into
+    /// the commands, and the committed model is the one the manifest names.
+    #[test]
+    fn committed_learnedleaf_manifest_parses() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let text =
+            fs::read_to_string(root.join("docs/vast/o3-learnedleaf.manifest.json")).expect("read");
+        let v: Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(v["run_id"], "o3-learnedleaf-1");
+        assert!(v["machine"].get("gpus").is_none(), "CPU only");
+        let exactleaf: Value = serde_json::from_str(
+            &fs::read_to_string(root.join("docs/vast/o3-exactleaf.manifest.json")).expect("read"),
+        )
+        .expect("json");
+        for k in ["golden-t2-decisions", "golden-t2-worlds", "o3-f5766a"] {
+            assert_eq!(
+                v["inputs"][k], exactleaf["inputs"][k],
+                "{k}: the same as fix G v1's"
+            );
+        }
+        let model = root.join("data/leafrisk/leafrisk-o3-v1.json");
+        let sha = crate::bundle::sha256_file(&model)
+            .expect("the committed model")
+            .0;
+        assert_eq!(v["inputs"]["leafrisk-o3-v1"], format!("sha256:{sha}"));
+        let m = crate::sched::parse_v2(&v).expect("runnable");
+        assert_eq!(m.streams.len(), 1);
+        let s = &m.streams[0];
+        assert_eq!((s.kind.as_str(), s.threads_all), ("hybrid_checks", true));
+        let q = parse(&s.params).expect("settings");
+        let e = parse(&exactleaf["streams"][0]["params"]).expect("settings");
+        assert_eq!(
+            (q.trick, q.cut, q.worlds, q.verify_pct, q.seed, q.tt_mb),
+            (e.trick, e.cut, e.worlds, e.verify_pct, e.seed, e.tt_mb)
+        );
+        let names: Vec<&str> = q.checks.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["none", "race1to4", "learned", "learnedhalf"]);
+        assert_eq!(q.checks[0].exact_leaves, None);
+        assert_eq!(q.checks[1].exact_leaves.as_deref(), Some("race:1,2,3,4"));
+        for c in &q.checks[2..] {
+            assert_eq!(c.models, ["leafrisk-o3-v1"]);
+            let text = c.exact_leaves.as_deref().expect("learned");
+            let (_, thr) = search::exact_leaves::learned_parts(text).expect("a learned term");
+            assert!(matches!(thr, search::exact_leaves::LearnedThreshold::At(_)));
+        }
+        assert!(
+            q.checks
+                .iter()
+                .all(|c| !c.truth_net && c.nets == ["o3-f5766a"])
+        );
+        let paired: Vec<(&str, &str)> = q
+            .paired
+            .iter()
+            .map(|(_, a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        assert_eq!(
+            paired,
+            [
+                ("none", "race1to4"),
+                ("none", "learned"),
+                ("none", "learnedhalf"),
+                ("race1to4", "learned")
+            ]
+        );
+        // The model input becomes the model's path in the commands, and the search reads the
+        // committed model at the manifest's thresholds.
+        let mut inputs: BTreeMap<String, String> = BTreeMap::new();
+        for k in v["inputs"].as_object().expect("inputs").keys() {
+            inputs.insert(k.clone(), format!("/in/{k}"));
+        }
+        let r = resolve(&s.params, &inputs).expect("resolves");
+        let run = Run {
+            table: Path::new("/t/eq.npy"),
+            threads: 8,
+            tt_mb: 64,
+            out: Path::new("/o"),
+            progress: Path::new("/p.json"),
+        };
+        for i in 2..4 {
+            let c = check_command(Path::new("search"), &r, &q, i, false, &run).expect("cmd");
+            let a: Vec<String> = c
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            let at = a
+                .iter()
+                .position(|x| x == "--exact-leaves")
+                .expect("policy");
+            assert!(
+                a[at + 1].starts_with("learned:/in/leafrisk-o3-v1:t="),
+                "{a:?}"
+            );
+            let local = a[at + 1].replace("/in/leafrisk-o3-v1", &model.display().to_string());
+            let p = search::exact_leaves::LeafPolicy::parse(&local, 64)
+                .expect("the committed model loads")
+                .expect("a policy");
+            let l = p.learned.expect("learned");
+            assert_eq!(l.model.sha256, sha);
+            assert!(l.t.is_some());
+        }
         assert!(v.get("bin_sha").is_none(), "the launcher sets bin_sha");
     }
 }

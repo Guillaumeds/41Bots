@@ -476,3 +476,16 @@ world, o3-curse-ensemble-1), so about 1.2 M thread-seconds: about 1.4 hours on 2
 **For the app** (trick-2 search, PIMC over many deals with H_3): race:4 multiplies H_3's time a world by
 about 3.4, race:2,4 by about 8 and race:1-4 by about 24 on this VM. Which policy is worth it is for the
 rented run's paired comparisons to show.
+
+## Learned exact leaves (build of 2026-10-19)
+
+The owner asked for G's choice of leaves to be found in the data rather than set by hand. A learned
+leaf-risk model (`nn::leafrisk`: gradient-boosted integer trees over O_3's own inputs and cheap
+extras of its answer, trained on fresh network-driven trick-3 harvest rows with O_3's errors)
+predicts O_3's squared error at each frontier position; `--exact-leaves learned:MODEL:t=T` solves
+the leaves scored at or above `T`, a threshold chosen by Learn then Test on a separate calibration
+split. On the held-out test split, at race:1-4's share of positions solved it leaves 1.0% of O_3's
+squared error against race:1-4's 9.6%; in the hybrid on 32 golden decisions, at race:1-4's thread
+time it solves 35% of the leaves and takes the value SD from 0.61% to 0.27%. Design, research,
+numbers and the manifest (`docs/vast/o3-learnedleaf.manifest.json`, not launched):
+`docs/m3-hybrid/learned-leaves.md`.

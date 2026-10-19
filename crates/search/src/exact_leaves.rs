@@ -12,6 +12,16 @@
 //! - `band:LO-HI`: every leaf where the network gives the decider's team a money chance from
 //!   `LO`% to `HI`% (both included; the bounds are turned into units of 2^-32 once, and the test
 //!   is on whole numbers);
+//! - `learned:MODEL:t=T` (or `t=inf`, or `budget=S`): every leaf whose predicted squared error
+//!   of the network (`nn::leafrisk`, a learned leaf-risk model: gradient-boosted integer trees
+//!   over the network's own inputs and the extras of its answer) is at least `T` (units of 2^-40
+//!   of a squared money chance), the threshold chosen with a statistical guarantee on the error
+//!   left (Learn then Test; docs/m3-hybrid/learned-leaves.md). `budget=S` takes the threshold
+//!   that picks a share `S` of the model's test rows (its budget table). The score is the value
+//!   of computing the leaf exactly with the decision's sensitivity taken as constant (Russell &
+//!   Wefald 1991: an error `e` flips a comparison whose gap density near 0 is `f(0)` with expected
+//!   loss about `f(0) e^2 / 2`); a position's score depends only on the position and the
+//!   network's value there, so a leaf's value stays a function of its canonical form;
 //! - `all`: every leaf (H_k is then exact search: a test, and a ceiling);
 //! - `none`: no leaf (the default): the hybrid as before, byte for byte (the check does not wrap
 //!   the network at all).
@@ -28,17 +38,19 @@
 //! form and the context, as the solvers require (`solver::frontier`).
 //!
 //! **Determinism.** The policy reads only whole numbers (the race class from the outcome mask,
-//! the network's integer money chance); each world's search is sequential, its leaf solves too,
+//! the network's integer money chance, the learned model's integer score); each world's search is sequential, its leaf solves too,
 //! and the leaf solves of one world share a table (`solver::SolveFamily`: the values of solves
 //! from empty tables, fewer nodes). So every value is byte-identical for any thread count and
 //! machine. The leaf solves' times are reports only.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use equity::MoneyChance;
+use nn::leafrisk::RiskModel;
 use serde::Serialize;
 use solver::frontier::{CanonPos, Frontier};
 use solver::{FastOptions, MatchCtx, Position, SolveFamily, SolveMem};
@@ -59,8 +71,123 @@ pub struct LeafPolicy {
     pub band: Option<(u64, u64)>,
     /// The band's bounds as given (percentages), for the description.
     band_text: Option<(String, String)>,
+    /// The learned term (`learned:MODEL:t=T` or `:budget=S`): every leaf whose predicted
+    /// squared error of the network is at least the threshold.
+    pub learned: Option<Learned>,
     /// Transposition-table megabytes of each leaf solve (never changes a value).
     pub tt_mb: usize,
+}
+
+/// The learned term of a policy (docs/m3-hybrid/rung2.md "Learned exact leaves"): the leaf-risk
+/// model (`nn::leafrisk`) and the threshold on its score (units of 2^-40 of a squared money
+/// chance; `None`: infinite, no leaf).
+#[derive(Clone, Debug)]
+pub struct Learned {
+    /// The model.
+    pub model: Arc<RiskModel>,
+    /// A leaf is solved exactly when its score is at least this (`None`: never).
+    pub t: Option<i64>,
+    /// The budget it came from (`budget=S`), for the report.
+    pub budget: Option<String>,
+}
+
+impl PartialEq for Learned {
+    fn eq(&self, o: &Learned) -> bool {
+        self.model.sha256 == o.model.sha256 && self.t == o.t
+    }
+}
+impl Eq for Learned {}
+
+impl Learned {
+    /// Whether a leaf of this score is solved exactly.
+    pub fn picks(&self, score: i64) -> bool {
+        self.t.is_some_and(|t| score >= t)
+    }
+
+    /// Normal form: `learned:<first 12 hex of the model's SHA-256>:t=<T or inf>`.
+    pub fn describe(&self) -> String {
+        let t = self.t.map_or("inf".to_string(), |t| t.to_string());
+        format!("learned:{}:t={t}", &self.model.sha256[..12])
+    }
+}
+
+/// The parts of a learned term `learned:MODEL:t=T` / `learned:MODEL:budget=S` (the model's
+/// path or manifest input name, and the threshold text), checked without reading the model:
+/// `T` a whole number at least 0 or `inf`, `S` a share from 0 to 1. The model is the text up to
+/// the last `:`.
+pub fn learned_parts(term: &str) -> Result<(&str, LearnedThreshold), String> {
+    let rest = term
+        .strip_prefix("learned:")
+        .ok_or_else(|| format!("{term:?} is not a learned term"))?;
+    let (model, thr) = rest.rsplit_once(':').ok_or_else(|| {
+        format!("{term:?}: learned:MODEL:t=T or learned:MODEL:budget=S (S a share 0-1)")
+    })?;
+    if model.is_empty() {
+        return Err(format!("{term:?}: no model"));
+    }
+    let thr = if let Some(t) = thr.strip_prefix("t=") {
+        if t == "inf" {
+            LearnedThreshold::Never
+        } else {
+            LearnedThreshold::At(
+                t.parse::<i64>()
+                    .ok()
+                    .filter(|&t| t >= 0)
+                    .ok_or_else(|| format!("{term:?}: t={t} is not a whole number >= 0 or inf"))?,
+            )
+        }
+    } else if let Some(b) = thr.strip_prefix("budget=") {
+        let ok = !b.is_empty() && b.bytes().all(|c| c.is_ascii_digit() || c == b'.');
+        let x: f64 = if ok {
+            b.parse().unwrap_or(f64::NAN)
+        } else {
+            f64::NAN
+        };
+        if !(x.is_finite() && (0.0..=1.0).contains(&x)) {
+            return Err(format!("{term:?}: budget={b} is not a share from 0 to 1"));
+        }
+        LearnedThreshold::Budget(b.to_string(), x)
+    } else {
+        return Err(format!("{term:?}: the threshold is t=T or budget=S"));
+    };
+    Ok((model, thr))
+}
+
+/// A learned term's threshold as written.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LearnedThreshold {
+    /// `t=inf`.
+    Never,
+    /// `t=T`.
+    At(i64),
+    /// `budget=S` (as written, and its value).
+    Budget(String, f64),
+}
+
+/// Checks a policy's text without reading a learned term's model (the runner, before the inputs
+/// are fetched): every term as [`LeafPolicy::parse`] reads it. Returns the learned terms' model
+/// names.
+pub fn check_spec(text: &str) -> Result<Vec<String>, String> {
+    let mut models = Vec::new();
+    let mut plain = Vec::new();
+    for term in text.trim().split('+').map(str::trim) {
+        if term.starts_with("learned:") {
+            let (m, _) =
+                learned_parts(term).map_err(|e| format!("--exact-leaves {text:?}: {e}"))?;
+            models.push(m.to_string());
+        } else {
+            plain.push(term);
+        }
+    }
+    if models.len() > 1 {
+        return Err(format!("--exact-leaves {text:?}: one learned term only"));
+    }
+    if !plain.is_empty() {
+        LeafPolicy::parse(&plain.join("+"), 1)?;
+    } else if models.is_empty() {
+        return Err(format!("--exact-leaves {text:?}: empty"));
+    }
+    Ok(models)
 }
 
 /// A percentage of money chance ("40", "52.5") in units of 2^-32: the decimal text parsed once
@@ -90,10 +217,30 @@ impl LeafPolicy {
             classes: 0,
             band: None,
             band_text: None,
+            learned: None,
             tt_mb: tt_mb.max(1),
         };
         for term in t.split('+').map(str::trim) {
-            if term == "all" {
+            if term.starts_with("learned:") {
+                if p.learned.is_some() {
+                    return Err(err("one learned term only".into()));
+                }
+                let (path, thr) = learned_parts(term).map_err(err)?;
+                let model = Arc::new(RiskModel::load(Path::new(path)).map_err(err)?);
+                let (t, budget) = match thr {
+                    LearnedThreshold::Never => (None, None),
+                    LearnedThreshold::At(t) => (Some(t), None),
+                    LearnedThreshold::Budget(text, x) => {
+                        let k = model.budget_steps();
+                        if k == 0 {
+                            return Err(err("the model has no budget table".into()));
+                        }
+                        let step = (x * k as f64).round() as usize;
+                        (model.threshold_for_share(step), Some(text))
+                    }
+                };
+                p.learned = Some(Learned { model, t, budget });
+            } else if term == "all" {
                 p.classes = ALL_CLASSES;
             } else if let Some(list) = term.strip_prefix("race:") {
                 let mut any = false;
@@ -139,8 +286,8 @@ impl LeafPolicy {
                 p.band_text = Some((lo.to_string(), hi.to_string()));
             } else {
                 return Err(err(format!(
-                    "term {term:?}: none, all, race:LIST (e.g. race:2,4 or race:1-4) or \
-                     band:LO-HI, joined by +"
+                    "term {term:?}: none, all, race:LIST (e.g. race:2,4 or race:1-4), \
+                     band:LO-HI or learned:MODEL:t=T (or :budget=S), joined by +"
                 )));
             }
         }
@@ -153,6 +300,7 @@ impl LeafPolicy {
             classes: ALL_CLASSES,
             band: None,
             band_text: None,
+            learned: None,
             tt_mb: tt_mb.max(1),
         }
     }
@@ -164,6 +312,22 @@ impl LeafPolicy {
             classes: classes & ALL_CLASSES,
             band: None,
             band_text: None,
+            learned: None,
+            tt_mb: tt_mb.max(1),
+        }
+    }
+
+    /// The leaves whose predicted squared error under `model` is at least `t` (`None`: none).
+    pub fn learned(model: Arc<RiskModel>, t: Option<i64>, tt_mb: usize) -> LeafPolicy {
+        LeafPolicy {
+            classes: 0,
+            band: None,
+            band_text: None,
+            learned: Some(Learned {
+                model,
+                t,
+                budget: None,
+            }),
             tt_mb: tt_mb.max(1),
         }
     }
@@ -184,6 +348,9 @@ impl LeafPolicy {
         }
         if let Some((lo, hi)) = &self.band_text {
             terms.push(format!("band:{lo}-{hi}"));
+        }
+        if let Some(l) = &self.learned {
+            terms.push(l.describe());
         }
         if terms.is_empty() {
             "nothing".into()
@@ -211,6 +378,10 @@ pub struct LeafStats {
     pub nodes: u64,
     /// Time of the leaf solves (µs; a report only, not compared by the tests).
     pub us: u64,
+    /// Leaves the learned term scored.
+    pub scored: u64,
+    /// Time of the learned term's scoring (µs; a report only).
+    pub score_us: u64,
 }
 
 impl LeafStats {
@@ -222,6 +393,8 @@ impl LeafStats {
         }
         self.nodes += o.nodes;
         self.us += o.us;
+        self.scored += o.scored;
+        self.score_us += o.score_us;
     }
 
     /// The counts without the time (what is the same on every machine and thread count).
@@ -347,6 +520,17 @@ impl Frontier for ExactLeaves<'_> {
             exact = (lo..=hi).contains(&v.get(self.team));
             net = Some(v);
         }
+        if !exact
+            && let Some(l) = &self.policy.learned
+            && l.t.is_some()
+        {
+            let v = net.unwrap_or_else(|| self.inner.value_at(pos, canon, ctx));
+            let t = Instant::now();
+            exact = l.picks(l.model.score(canon, ctx, self.leaf, &v));
+            st.stats.score_us += t.elapsed().as_micros() as u64;
+            st.stats.scored += 1;
+            net = Some(v);
+        }
         let k = usize::from(class);
         st.stats.distinct[k] += 1;
         let v = if exact {
@@ -416,5 +600,80 @@ mod tests {
             assert!(LeafPolicy::parse(bad, 8).is_err(), "{bad:?}");
         }
         assert_eq!(LeafPolicy::race(0, 8).describe(), "nothing");
+    }
+
+    /// Learned terms: the threshold forms, checked without the model; a model file read with
+    /// `t=`, `t=inf` and `budget=` (from its table), its normal form; refusals.
+    #[test]
+    fn learned_terms_parse() {
+        use LearnedThreshold::*;
+        assert_eq!(learned_parts("learned:m.json:t=12"), Ok(("m.json", At(12))));
+        assert_eq!(
+            learned_parts("learned:C:/x/m.json:t=inf"),
+            Ok(("C:/x/m.json", Never))
+        );
+        assert_eq!(
+            learned_parts("learned:o3-risk:budget=0.25"),
+            Ok(("o3-risk", Budget("0.25".into(), 0.25)))
+        );
+        for bad in [
+            "learned:m.json",
+            "learned::t=1",
+            "learned:m.json:t=-1",
+            "learned:m.json:t=1.5",
+            "learned:m.json:budget=1.5",
+            "learned:m.json:budget=x",
+            "learned:m.json:q=1",
+        ] {
+            assert!(learned_parts(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(
+            check_spec("race:4+learned:risk:t=9"),
+            Ok(vec!["risk".to_string()])
+        );
+        assert_eq!(
+            check_spec("learned:risk:budget=0.5"),
+            Ok(vec!["risk".to_string()])
+        );
+        assert_eq!(check_spec("race:2,4"), Ok(vec![]));
+        assert!(check_spec("learned:a:t=1+learned:b:t=2").is_err());
+        assert!(check_spec("race:9+learned:a:t=1").is_err());
+        // A model file.
+        let dir = std::env::temp_dir().join(format!("leafrisk-parse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("m.json");
+        let v = serde_json::json!({
+            "format": nn::leafrisk::FORMAT, "encoder": nn::encode::ENCODER,
+            "n_inputs": nn::leafrisk::N_INPUTS, "extras": nn::leafrisk::EXTRA_NAMES,
+            "net_sha256": "x", "trick": 3, "base": 7,
+            "trees": [{"f": [-1], "t": [0], "l": [0], "r": [0], "v": [0]}],
+            "budget": {"quantiles": [90, 80, 70, 60]},
+        });
+        std::fs::write(&path, v.to_string()).expect("write");
+        let at = |thr: &str| {
+            LeafPolicy::parse(&format!("learned:{}:{thr}", path.display()), 8)
+                .expect("valid")
+                .expect("some")
+        };
+        let p = at("t=70");
+        let l = p.learned.clone().expect("learned");
+        assert_eq!((l.t, l.picks(70), l.picks(69)), (Some(70), true, false));
+        assert_eq!(
+            p.describe(),
+            format!("learned:{}:t=70", &l.model.sha256[..12])
+        );
+        assert_eq!(at("t=inf").learned.expect("l").t, None);
+        assert!(!at("t=inf").learned.expect("l").picks(i64::MAX));
+        // budget=S: the table's entry round(S * steps).
+        assert_eq!(at("budget=0.5").learned.expect("l").t, Some(80));
+        assert_eq!(at("budget=1").learned.expect("l").t, Some(60));
+        assert_eq!(at("budget=0").learned.expect("l").t, None);
+        assert_eq!(at("budget=0.5"), at("t=80"));
+        let both = LeafPolicy::parse(&format!("race:4+learned:{}:t=1", path.display()), 8)
+            .expect("valid")
+            .expect("some");
+        assert!(both.has_class(4) && both.learned.is_some());
+        assert!(LeafPolicy::parse("learned:/no/such/file.json:t=1", 8).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
