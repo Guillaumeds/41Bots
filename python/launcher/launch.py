@@ -711,6 +711,21 @@ def why_offer_missing(oid: int) -> str:
     return "; " + "; ".join(found)
 
 
+def market_offer(oid: int) -> dict | None:
+    """The offer `oid` as the on-demand market listing has it, matched by id here, or None. vast answers at most
+    512 offers a search, so the big machines (150+ threads) are read first, then the whole listing; a failed
+    search counts as not found."""
+    for q in ("verified=any external=any rentable=any cpu_cores_effective>=150", "verified=any external=any rentable=any"):
+        try:
+            rows = vast("search", "offers", q, "--type", "on-demand", "--limit", "512")
+        except RuntimeError:
+            continue
+        hit = next((o for o in rows if isinstance(o, dict) and o.get("id") == oid), None) if isinstance(rows, list) else None
+        if hit:
+            return hit
+    return None
+
+
 def lookup_offer(a) -> dict:
     """The one offer the owner named (--offer-id), read back from vast by its id (one search,
     `id=N`, on-demand) and checked like every searched offer (`offer_check_failures`). Stops the
@@ -728,8 +743,16 @@ def lookup_offer(a) -> dict:
         sys.exit(f"launch: offer {oid} could not be checked (vast's search answered {LAST_VAST_OUTPUT!r}); nothing was rented")
     row = next((o for o in rows if isinstance(o, dict) and o.get("id") == oid), None)
     if row is None:
-        sys.exit(f"launch: offer {oid} is not on offer (on-demand) any more; nothing was rented"
-                 f"{why_offer_missing(oid)}")
+        # vast's `id=N` filter misses some live offers (2026-10-19: offer 56041192, rentable and not rented in
+        # the market listing, read as gone twice and was lost); the market listing, matched by id here, decides.
+        row = market_offer(oid)
+        if row is None:
+            sys.exit(f"launch: offer {oid} is not on offer (on-demand) any more; nothing was rented"
+                     f"{why_offer_missing(oid)}")
+        if row.get("rentable") is False or row.get("rented") is True:
+            sys.exit(f"launch: offer {oid} is listed but not rentable now (rentable {row.get('rentable')}, rented "
+                     f"{row.get('rented')}); nothing was rented")
+        log(f"named offer {oid}: vast's search by id missed it; found in the market listing, checked as usual")
     log(f"named offer {oid}: {named_text(row)}")
     verified_only = bool(getattr(a, "verified_only", False))
     failed = offer_check_failures(row, float(a.min_reliability), verified_only)

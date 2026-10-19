@@ -43,6 +43,7 @@ class World:
         self.deleted_keys: list[int] = []
         self.searches = 0
         self.id_lookups = 0  # searches by offer id (`id=N`), the one search --offer-id makes
+        self.id_filter_misses: set[int] = set()  # live offers vast's `id=N` filter does not return (2026-10-19)
         self.queries = []  # the query text of every full search
         self.forbid_search = False  # the account's daily search quota is used up: any full search is a bug
         self.status_fails = False  # `show instance` fails (vast's API down)
@@ -171,7 +172,7 @@ class World:
                 if self.id_lookup_fails:
                     raise RuntimeError("vastai search offers failed: 429 Too Many Requests")
                 toks = args[2].split()
-                rows = [dict(o) for o in self.offers if o["id"] == int(toks[0][3:])]
+                rows = [dict(o) for o in self.offers if o["id"] == int(toks[0][3:]) and o["id"] not in self.id_filter_misses]
                 if "verified=any" not in toks:
                     # vast's default query: verified hosts only, unless the query says `verified=any`.
                     rows = [o for o in rows if o.get("verification", "verified") == "verified"]
@@ -1305,7 +1306,32 @@ class LauncherTest(unittest.TestCase):
         self.assertIn("offer 501 is not on offer (on-demand) any more", str(e.exception))
         self.assertIn("no wider search finds it", str(e.exception))
         self.assertIn("the market's 150+ thread offers (0), matched here by id: not there either", str(e.exception))
-        self.assertEqual((w.created_on, w.id_lookups, w.searches), ([], 3, 1))
+        self.assertEqual((w.created_on, w.id_lookups, w.searches), ([], 3, 3))
+
+    def test_a_named_offer_the_id_filter_misses_is_rented_from_the_market_listing(self):
+        # 2026-10-19: offer 56041192 was rentable in the market listing but vast's `id=N` search missed it, and the
+        # launcher refused it twice; the owner lost the machine. The listing, matched by id, now decides; every check runs.
+        w = World([offer(500, 50, 1.0, cpu_cores_effective=384, rentable=True, rented=False)], ["done:1"])
+        w.id_filter_misses = {500}
+        code, _ = self.run_launch(w, self.FORMAT1, "--offer-id", "500")
+        self.assertEqual((code, w.created_on), (0, [500]))
+        self.assertIn("vast's search by id missed it; found in the market listing", self.log)
+
+    def test_a_named_offer_missed_by_the_id_filter_still_meets_every_check(self):
+        w = World([offer(500, 50, 1.0, reliability2=0.5)], ["done:1"])
+        w.id_filter_misses = {500}
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, self.FORMAT1, "--offer-id", "500")
+        self.assertIn("fails the launcher's checks", str(e.exception))
+        self.assertEqual(w.created_on, [])
+
+    def test_a_named_offer_listed_as_rented_is_not_rented(self):
+        w = World([offer(500, 50, 1.0, rentable=False, rented=True)], ["done:1"])
+        w.id_filter_misses = {500}
+        with self.assertRaises(SystemExit) as e:
+            self.run_launch(w, self.FORMAT1, "--offer-id", "500")
+        self.assertIn("listed but not rentable now", str(e.exception))
+        self.assertEqual(w.created_on, [])
 
     def test_container_error_is_replaced_at_once(self):
         # The container cannot start: destroyed at the first poll (not after --startup-minutes)
