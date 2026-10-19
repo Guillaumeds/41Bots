@@ -801,7 +801,8 @@ class WeightTest(unittest.TestCase):
             while True:
                 try:
                     with open(prog) as f:
-                        if json.load(f).get("step") == "wait":
+                        p = json.load(f)
+                        if p.get("step") == "wait" and "epoch" in p:  # a partial epoch's wait, not the start's
                             break
                 except (OSError, ValueError):
                     pass
@@ -947,7 +948,8 @@ class RowWeightTest(unittest.TestCase):
             while True:
                 try:
                     with open(prog) as f:
-                        if json.load(f).get("step") == "wait":
+                        p = json.load(f)
+                        if p.get("step") == "wait" and "epoch" in p:  # a partial epoch's wait, not the start's
                             break
                 except (OSError, ValueError):
                     pass

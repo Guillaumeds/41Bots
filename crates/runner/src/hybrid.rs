@@ -74,7 +74,16 @@
 //! decisions), `tt_mb` (64, the solver table per thread of the golden worlds
 //! and the check), `verify_pct` (1, the check's recomputed sample of stored exact worlds),
 //! `train_threads` (CPU threads of the trainer: all usable threads on the CPU, at most 8 beside
-//! a GPU), `compare_cpu` (false; after a GPU training, train once more on the CPU with the same
+//! a GPU), `train_feed` (`"auto"`: where the trainer holds its rows, its `--feed`; `"disk"`
+//! forces them onto disk, `"resident"` or `"staged"` into memory; passed only when not `auto`),
+//! `train_beside_gb` (`"auto"`: the memory the work beside a training will take, the trainer's
+//! `--host-others-gb`: [`LABEL_GB_PER_THREAD`] times the usable threads for a training beside the
+//! CPU steps, nothing for one alone; a number is passed to every training). With `--feed auto`
+//! the trainer keeps its rows on disk (`fortyone_nn.train` class `DiskRows`, in
+//! `hybrid-work/train-rows/`, always its `--rows-dir`, never in `out/`) when they do not fit in
+//! memory beside that and its own reserve, and trains the same network, byte for byte; on a
+//! machine with enough memory nothing changes (docs/m3-hybrid/vast.md, the trainer's rows and
+//! RAM). `compare_cpu` (false; after a GPU training, train once more on the CPU with the same
 //! settings and record both, for small checks), `upload_shards` (false; see step 4), `table`
 //! (the equity table, as `search_measure`'s), and the scheduler's `threads`, `est_seconds`,
 //! `equity_input`.
@@ -188,7 +197,7 @@ mod reuse;
 use audit::additive;
 
 /// The settings a `hybrid_rung` chunk takes; any other key is refused.
-pub(crate) const KEYS: [&str; 72] = [
+pub(crate) const KEYS: [&str; 74] = [
     "cut",
     "check",
     "audit_rounds",
@@ -255,6 +264,8 @@ pub(crate) const KEYS: [&str; 72] = [
     "mix_weight",
     "device",
     "train_threads",
+    "train_feed",
+    "train_beside_gb",
     "compare_cpu",
     "upload_shards",
     "table",
@@ -272,6 +283,10 @@ const GOLDEN_SEED: u64 = 1;
 
 /// CPU threads of the trainer beside a GPU (it only gathers batches and launches GPU work).
 pub(crate) const GPU_TRAIN_THREADS: u64 = 8;
+
+/// The label solves' memory a usable thread, for `train_beside_gb` `"auto"` (GiB): measured at
+/// about 200 MB a thread (docs/m3-hybrid/vast.md), rounded up.
+pub(crate) const LABEL_GB_PER_THREAD: f64 = 0.25;
 
 /// Attempts at `uv sync` (it downloads about 3.7 GB for the GPU build), and each one's limit.
 const SYNC_ATTEMPTS: u32 = 3;
@@ -369,6 +384,15 @@ pub(crate) struct Params {
     pub mix_weight: f64,
     pub device: Device,
     pub train_threads: Option<u64>,
+    /// `train_feed` (`"auto"`): where the trainer holds its rows, its `--feed` (`auto`,
+    /// `resident`, `staged`, `disk`); passed only when not `auto`.
+    pub train_feed: String,
+    /// `train_beside_gb` (`"auto"`, `None` here): the memory the work beside a training will
+    /// take at most, the trainer's `--host-others-gb` (with `--feed auto` its rows go to disk
+    /// unless they, its reserve and this fit in the machine's memory). `"auto"`: a training
+    /// beside the CPU steps (in the background) passes [`LABEL_GB_PER_THREAD`] times the usable
+    /// threads, one alone nothing. A number: passed to every training.
+    pub train_beside_gb: Option<f64>,
     pub compare_cpu: bool,
     pub upload_shards: bool,
     /// `harvest_net`: the SHA-256 of the integer network (`int.safetensors` of an earlier run,
@@ -470,6 +494,8 @@ impl Params {
                      "train_stall_minutes": self.train_stall_minutes,
                      "mix_weight": self.mix_weight },
             "device": self.device.name(), "train_threads": self.train_threads,
+            "train_feed": self.train_feed,
+            "train_beside_gb": self.train_beside_gb.map_or(json!("auto"), |g| json!(g)),
             "compare_cpu": self.compare_cpu, "upload_shards": self.upload_shards,
             "label_parts": self.label_parts, "overlap": self.overlap,
             "partial_epochs": self.partial_epochs,
@@ -972,6 +998,19 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
                 .ok_or("hybrid_rung: train_threads must be a whole number, at least 1")?,
         ),
     };
+    let train_feed = s("train_feed", "auto")?;
+    if !["auto", "resident", "staged", "disk"].contains(&train_feed.as_str()) {
+        return Err(format!(
+            "hybrid_rung: train_feed {train_feed:?}: auto, resident, staged or disk"
+        ));
+    }
+    let train_beside_gb = match o.get("train_beside_gb") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(t)) if t == "auto" => None,
+        Some(v) => Some(v.as_f64().filter(|x| x.is_finite() && *x >= 0.0).ok_or(
+            "hybrid_rung: train_beside_gb must be \"auto\" or a number of GiB, 0 or more",
+        )?),
+    };
     let verify_pct = f("verify_pct", 1.0)?;
     if verify_pct > 100.0 {
         return Err("hybrid_rung: verify_pct is a percentage (0 to 100)".into());
@@ -1028,6 +1067,8 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         mix_weight: f("mix_weight", 1.0)?,
         device,
         train_threads,
+        train_feed,
+        train_beside_gb,
         compare_cpu: b("compare_cpu")?,
         upload_shards: b("upload_shards")?,
         harvest_net,
@@ -2644,8 +2685,28 @@ impl Rung<'_> {
             .args(["--mix-weight", &self.p.mix_weight.to_string()])
             .args(["--device", device, "--progress"])
             .arg(prog)
-            .args(self.init_args());
+            .args(self.init_args())
+            // Rows the trainer puts on disk (`--feed disk`, or `auto` short of memory) go to the
+            // work directory, never into `out/` (bundled and uploaded); removed at its end.
+            .arg("--rows-dir")
+            .arg(self.work.join("train-rows"));
+        if self.p.train_feed != "auto" {
+            c.args(["--feed", &self.p.train_feed]);
+        }
+        if let Some(g) = self.p.train_beside_gb {
+            c.args(["--host-others-gb", &g.to_string()]);
+        }
         c
+    }
+
+    /// `--host-others-gb` of a training beside the CPU steps with `train_beside_gb` `"auto"`:
+    /// [`LABEL_GB_PER_THREAD`] times the usable threads (the label solves on all of them).
+    fn beside_args(&self) -> Vec<String> {
+        if self.p.train_beside_gb.is_some() {
+            return Vec::new(); // already in the command (`train_cmd`)
+        }
+        let gb = LABEL_GB_PER_THREAD * self.threads() as f64;
+        vec!["--host-others-gb".into(), gb.to_string()]
     }
 
     /// The trainer's watch ([`TRAIN_STALL_MINUTES`]) on its progress file `prog`. Its own
@@ -2702,7 +2763,7 @@ impl Rung<'_> {
     /// arguments: the audit loop's rounds), its network into `dir`, its progress to `prog`.
     fn start_train_with(
         &mut self,
-        c: Command,
+        mut c: Command,
         dir: PathBuf,
         prog: PathBuf,
         log: &str,
@@ -2710,6 +2771,7 @@ impl Rung<'_> {
         let device = self.device.clone();
         let threads = self.train_threads();
         let stall = self.train_stall(&prog);
+        c.args(self.beside_args());
         self.ctx.spawn_bg(c, log, "train", None)?;
         self.ctx.watch_bg("train", stall);
         self.beside
@@ -2990,6 +3052,29 @@ mod tests {
             p.record["tables_peak_mb"].as_u64().expect("peak")
                 <= p.record["budget_mb"].as_u64().expect("budget")
         );
+    }
+
+    /// `train_feed` and `train_beside_gb`: the defaults pass nothing new but the rows' directory;
+    /// set, they reach the trainer's command; anything else is refused.
+    #[test]
+    fn train_feed_settings() {
+        let p = parse(&json!({})).expect("defaults");
+        assert_eq!((p.train_feed.as_str(), p.train_beside_gb), ("auto", None));
+        assert_eq!(p.to_json()["train_beside_gb"], json!("auto"));
+        let p = parse(&json!({ "train_feed": "disk", "train_beside_gb": 40 })).expect("set");
+        assert_eq!(
+            (p.train_feed.as_str(), p.train_beside_gb),
+            ("disk", Some(40.0))
+        );
+        assert_eq!(p.to_json()["train_feed"], json!("disk"));
+        assert!(parse(&json!({ "train_beside_gb": "auto" })).is_ok());
+        for bad in [
+            json!({ "train_feed": "ram" }),
+            json!({ "train_beside_gb": -1 }),
+            json!({ "train_beside_gb": "lots" }),
+        ] {
+            assert!(parse(&bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
@@ -4940,10 +5025,17 @@ esac
             "--partial-epochs 3 ",
             "--threads 8 ",
             "--device cuda ",
+            // Beside the label parts: their memory on all 16 threads (`LABEL_GB_PER_THREAD`).
+            "--host-others-gb 4",
+            "/hybrid-work/train-rows",
         ] {
             assert!(train.contains(has), "{has} in {train}");
         }
         assert!(!train.contains("--train "), "{train}");
+        assert!(
+            !train.contains("--feed "),
+            "auto, the trainer's default: {train}"
+        );
         let work = root.join("hybrid-work/labels");
         for p in [
             "train/t2-random-p1of2-s51101.npy",
@@ -5004,8 +5096,9 @@ esac
         assert!(
             train.contains("--train ")
                 && train.contains("t2-random-p2of2-s51102.npy")
-                && !train.contains("--watch-dir"),
-            "{train}"
+                && !train.contains("--watch-dir")
+                && !train.contains("--host-others-gb"),
+            "a training alone has nothing beside it: {train}"
         );
         assert_eq!(
             log.lines()
