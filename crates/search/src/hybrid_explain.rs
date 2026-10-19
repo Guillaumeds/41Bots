@@ -1071,6 +1071,7 @@ mod tests {
                 rules_robber_burn: false,
                 exact_solve_threads: 1,
                 exact_tt_mb: 4,
+                noise: None,
             },
             &ctx,
             &f,

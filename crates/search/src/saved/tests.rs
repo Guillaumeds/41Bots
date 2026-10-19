@@ -57,6 +57,7 @@ fn job(cut: u8, seed: u64, to: u64, threads: usize) -> CheckJob {
         rules_robber_burn: false,
         exact_solve_threads: 1,
         exact_tt_mb: 4,
+        noise: None,
     }
 }
 

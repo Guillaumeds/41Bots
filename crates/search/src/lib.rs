@@ -20,6 +20,8 @@
 //! - [`teacher`]: teacher hands and their output files (§5.10).
 //! - [`hybrid`]: the hybrid yardstick check (docs/M3-HYBRID-SPEC.md §3): exact against H_k on the
 //!   same worlds; decision loss with a bootstrap bound, value error, agreement.
+//! - [`curse`]: the optimizer's-curse test of the hybrid check: the network as the truth and
+//!   seeded zero-mean noise at each leaf of the player's search.
 //! - [`hybrid_explain`]: why the hybrid and exact search choose differently on a decision
 //!   (`hybrid-check --explain`): per world, the frontier positions each search copied up to each
 //!   candidate, the network's error there and its outcome probabilities.
@@ -36,6 +38,7 @@
 
 pub mod audit;
 pub mod bot;
+pub mod curse;
 pub mod curves;
 pub mod eta;
 pub mod hybrid;

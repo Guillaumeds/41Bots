@@ -338,8 +338,9 @@ impl Oracle {
 
 static NEXT_ORACLE: AtomicU64 = AtomicU64::new(1);
 
-/// Oracles whose caches a thread keeps at once.
-const MAX_STATES: usize = 4;
+/// Oracles whose caches a thread keeps at once (8: an ensemble of up to eight networks keeps
+/// every member's caches; values never depend on it).
+const MAX_STATES: usize = 8;
 /// Slots of the memo of recent positions (direct-mapped).
 const MEMO_SLOTS: usize = 1 << 14;
 /// Dense-part vectors kept per thread and oracle (the cache is emptied when full).

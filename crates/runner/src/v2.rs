@@ -56,6 +56,9 @@
 //! - `hybrid_t1check` (`t1check.rs`, format 2 only): its `net_input`, `decisions_input` and
 //!   `saved[].input` name inputs whose paths are added to its params (`net`, `decisions`,
 //!   `saved[].path`);
+//! - `hybrid_checks` (`checks.rs`, format 2 only): its `decisions_input`, `worlds_input` and
+//!   every check's `nets` name inputs whose paths are added to its params (`decisions`,
+//!   `worlds_path`, `net_paths`);
 //! - `search_measure`'s silver reference (`measure.rs`): `reference.net_input`,
 //!   `check.net_input` and `worlds_input` name inputs whose paths are added to its params
 //!   (`reference.net`, `check.net`, `worlds`);
@@ -266,6 +269,10 @@ fn worker_inner(spec_path: &Path) -> Result<(), String> {
             if kind == "hybrid_t1check" {
                 p = crate::t1check::resolve(&p, &inputs)?;
             }
+            // `hybrid_checks` too (`checks.rs`).
+            if kind == "hybrid_checks" {
+                p = crate::checks::resolve(&p, &inputs)?;
+            }
             // A `search_measure` chunk's silver reference, check network and stored worlds
             // (`measure.rs`, "A silver reference") are inputs too.
             if kind == "search_measure" {
@@ -273,8 +280,14 @@ fn worker_inner(spec_path: &Path) -> Result<(), String> {
             }
             // A prebuilt equity table among the inputs (`params.equity_input`, default
             // `equity`) replaces building it; its hash is still checked against the record.
-            if ["search_measure", "t1bench", "hybrid_rung", "hybrid_t1check"]
-                .contains(&kind.as_str())
+            if [
+                "search_measure",
+                "t1bench",
+                "hybrid_rung",
+                "hybrid_t1check",
+                "hybrid_checks",
+            ]
+            .contains(&kind.as_str())
                 && let Ok(path) = equity()
                 && let Some(o) = p.as_object_mut()
             {
