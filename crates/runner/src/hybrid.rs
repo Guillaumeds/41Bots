@@ -116,9 +116,13 @@
 //!    race-harvested training shards (a count of 0 skips one) and the validation shard (random
 //!    play), at the start of trick `cut`; `rung.json` records each shard's rows by race class. The shards (about 1 KB a row: 4 GB for 4M) stay outside `out/`; their sidecars
 //!    (with the shard's SHA-256) go to `out/hybrid/labels/`. With `upload_shards`, each shard is
-//!    hashed (it must match its sidecar) and uploaded content-addressed to `inputs/sha256/<hex>`
-//!    (skipped when already there; checked by size), and `out/hybrid/shards.json` lists them in
-//!    the form a format-2 manifest's `inputs` takes.
+//!    shared as soon as it is made and its sidecar is written, before the next shard starts (a
+//!    machine lost between shards keeps the finished ones): hashed (it must match its sidecar),
+//!    uploaded content-addressed to `inputs/sha256/<hex>` (skipped when already there; checked
+//!    by size) and added to `out/hybrid/shards.json`, which lists them in the form a format-2
+//!    manifest's `inputs` takes. A failed upload is a warning and never stops the labels; the
+//!    shard is tried once more at the chunk's end. Shards reused from `label_inputs` are
+//!    checked at the end of the step and not uploaded again.
 //! 5. **Golden set** (`search decisions --allow-uneven`, its start states on all usable threads,
 //!    then `search worlds --method exact`):
 //!    `golden_count` decisions at trick `golden_trick` (seed `golden_seed`), `golden_worlds`
@@ -1480,6 +1484,7 @@ pub(crate) fn chunk_with(
         shape: None,
         additive: None,
         pending_shards: Vec::new(),
+        shared: Vec::new(),
     };
     r.rec.insert("params".into(), params.to_json());
     r.rec.insert("table".into(), table_rec);
@@ -1630,6 +1635,18 @@ struct Rung<'a> {
     /// Label shards whose upload (`upload_shards`) failed: tried once more at the chunk's end
     /// ([`Rung::retry_pending_shards`]); a failure never stops the run.
     pending_shards: Vec<PathBuf>,
+    /// Label shards shared so far (`upload_shards`), as each was made ([`Rung::share_shard`]).
+    shared: Vec<SharedShard>,
+}
+
+/// A label shard shared for later runs: its `shards.json` entry, its `manifest_inputs` pair,
+/// its `label_inputs` entry, and whether the shard itself is stored.
+struct SharedShard {
+    path: PathBuf,
+    list: Value,
+    input: Option<(String, String)>,
+    entry: Option<Value>,
+    stored: bool,
 }
 
 /// The exact label solves' table of a `search labels` step at cut `cut` on `threads` threads,
@@ -2137,9 +2154,9 @@ impl Rung<'_> {
             self.rec.insert("labels".into(), json!(recs));
             self.done(&step, t)?;
             if s.name == "val" {
-                val = Some(path);
+                val = Some(path.clone());
             } else {
-                train.push(path);
+                train.push(path.clone());
             }
             // Part 1 made (and the validation shard): the training starts beside the rest.
             let next_part = jobs.get(i + 1).and_then(|j| j.part).map(|(k, _)| k);
@@ -2166,6 +2183,14 @@ impl Rung<'_> {
                             "partial_epochs": self.p.partial_epochs }),
                 );
             }
+            // This shard shared now, before the next one starts (`upload_shards`).
+            if self.p.upload_shards && self.tools.remote.is_some() {
+                let progress = self.progress("share shard", json!({ "shard": file }));
+                self.ctx.set_phase("chunk", progress);
+                self.share_shard(&path);
+                let order: Vec<PathBuf> = train.iter().chain(val.iter()).cloned().collect();
+                self.write_shards_doc(&order)?;
+            }
         }
         if self.bg_train.is_some() {
             // The trainer's time limit counts from when its last shard is made.
@@ -2175,96 +2200,140 @@ impl Rung<'_> {
         Ok(train)
     }
 
-    /// Step 4b (`upload_shards`): each shard to `inputs/sha256/<hex>`. Sharing is for later runs
-    /// only (this run trains on the shards on its disk), so a failed upload never stops the run
-    /// (2026-10-17: a 38 MB shard on a host with a slow upload link was killed at its time limit
-    /// three times and ended the trick-2 mechanism test): it is a warning, the shard is listed as
-    /// not uploaded in `shards.json`, and it is tried once more at the chunk's end
-    /// ([`Rung::retry_pending_shards`]).
+    /// Step 4b (`upload_shards`): each shard to `inputs/sha256/<hex>`. Each shard is shared
+    /// right after it is made ([`Rung::share_shard`], called by [`Rung::labels`] before the
+    /// next shard starts), so a machine lost between shards loses only the shard in progress;
+    /// this step then shares what is left (the shards reused from `label_inputs`: already
+    /// stored, so skipped by size) and writes `shards.json` in its final order. Sharing is for
+    /// later runs only (this run trains on the shards on its disk), so a failed upload never
+    /// stops the run (2026-10-17: a 38 MB shard on a host with a slow upload link was killed at
+    /// its time limit three times and ended the trick-2 mechanism test): it is a warning, the
+    /// shard is listed as not uploaded in `shards.json`, and it is tried once more at the
+    /// chunk's end ([`Rung::retry_pending_shards`]).
     fn upload_shards(&mut self, shards: &[PathBuf]) -> Result<(), String> {
         let t = Instant::now();
         let progress = self.progress("upload shards", json!({ "shards": shards.len() }));
         self.ctx.set_phase("chunk", progress);
-        let Some(remote) = self.tools.remote.clone() else {
+        if self.tools.remote.is_none() {
             self.warn(
                 "upload_shards: no remote store (R2, or RUNNER_REMOTE_DIR): the label shards \
                  were not uploaded"
                     .into(),
             );
             return self.done("upload shards", t);
+        }
+        for path in shards {
+            self.share_shard(path);
+        }
+        self.write_shards_doc(shards)?;
+        self.done("upload shards", t)
+    }
+
+    /// One label shard shared (`upload_shards`): hashed against its sidecar, uploaded to
+    /// `inputs/sha256/<hex>` (skipped when already stored, by size), its `shards.json` entry and
+    /// its `label_inputs` entry (the sidecar and row weights shared too) kept in
+    /// [`Rung::shared`]. Nothing when there is no remote store or the shard was shared already.
+    /// A failure is a warning, never an error (the shard waits in `pending_shards`).
+    fn share_shard(&mut self, path: &Path) {
+        let Some(remote) = self.tools.remote.clone() else {
+            return;
         };
-        let labels = self.rec.get("labels").cloned().unwrap_or(Value::Null);
+        if self.shared.iter().any(|s| s.path == path) {
+            return;
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let rec = self
+            .rec
+            .get("labels")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|r| r["file"].as_str() == Some(name.as_str()))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let want = rec["shard_sha256"].as_str().unwrap_or_default().to_string();
+        let file = name;
+        let (p2, r, w2) = (path.to_path_buf(), Arc::clone(&remote), want.clone());
+        let tu = Instant::now();
+        let mut input = None;
+        let (mut list, uploaded) = match self.ctx.blocking(move || put_input(&*r, &p2, Some(&w2))) {
+            Ok((sha, bytes, status)) => {
+                println!("runner: hybrid_rung: {file}: inputs/sha256/{sha} ({status})");
+                input = Some((
+                    file.trim_end_matches(".npy").to_string(),
+                    format!("sha256:{sha}"),
+                ));
+                (
+                    json!({ "file": file, "sha256": sha, "bytes": bytes,
+                            "key": input_key(&sha), "status": status,
+                            "seconds": secs(tu) }),
+                    Some(sha),
+                )
+            }
+            Err(e) => {
+                self.warn(format!(
+                    "upload_shards: {file} was not uploaded ({e}); the run goes on (it trains \
+                     on the shard on its disk) and tries once more at its end"
+                ));
+                self.pending_shards.push(path.to_path_buf());
+                (
+                    json!({ "file": file, "sha256": want, "status": "not uploaded",
+                            "error": e, "seconds": secs(tu) }),
+                    None,
+                )
+            }
+        };
+        // What a later run's `label_inputs` names it by, with its sidecar (and row weights)
+        // shared too, also for a shard whose own upload failed (it is tried again at the
+        // end). A failure is only a warning: the sidecar is in the bundle, and a paid run
+        // never stops for it. The entry of a shard not (yet) uploaded waits in
+        // `label_inputs_pending`, so `label_inputs` names only stored shards.
+        let sha = uploaded.clone().unwrap_or_else(|| want.clone());
+        let entry = if input_hex(&format!("sha256:{sha}")).is_none() {
+            None
+        } else {
+            match self.label_input_entry(path, &rec, &sha) {
+                Ok(e) => Some(e),
+                Err(e) => {
+                    self.warn(format!(
+                        "upload_shards: {file}: its sidecar was not shared ({e}); it is in \
+                         this run's bundle (out/hybrid/labels/)"
+                    ));
+                    None
+                }
+            }
+        };
+        list["sidecar_key"] = json!(entry.as_ref().map(|e| e["sidecar"].clone()));
+        self.shared.push(SharedShard {
+            path: path.to_path_buf(),
+            list,
+            input,
+            entry,
+            stored: uploaded.is_some(),
+        });
+    }
+
+    /// `out/hybrid/shards.json` (and `rung.json`'s `shards`) from the shards shared so far, in
+    /// the order of `order` (the training shards, then the validation shard).
+    fn write_shards_doc(&mut self, order: &[PathBuf]) -> Result<(), String> {
         let mut list = Vec::new();
         let mut inputs = Map::new();
         let mut label_inputs = Vec::new();
         let mut label_inputs_pending = Vec::new();
-        for path in shards {
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let rec = labels
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|r| r["file"].as_str() == Some(name.as_str()))
-                .cloned()
-                .unwrap_or(Value::Null);
-            let want = rec["shard_sha256"].as_str().unwrap_or_default().to_string();
-            let file = name;
-            let (p2, r, w2) = (path.clone(), Arc::clone(&remote), want.clone());
-            let tu = Instant::now();
-            let uploaded = match self.ctx.blocking(move || put_input(&*r, &p2, Some(&w2))) {
-                Ok((sha, bytes, status)) => {
-                    println!("runner: hybrid_rung: {file}: inputs/sha256/{sha} ({status})");
-                    inputs.insert(
-                        file.trim_end_matches(".npy").to_string(),
-                        json!(format!("sha256:{sha}")),
-                    );
-                    list.push(json!({ "file": file, "sha256": sha, "bytes": bytes,
-                                      "key": input_key(&sha), "status": status,
-                                      "seconds": secs(tu) }));
-                    Some(sha)
-                }
-                Err(e) => {
-                    self.warn(format!(
-                        "upload_shards: {file} was not uploaded ({e}); the run goes on (it trains \
-                         on the shard on its disk) and tries once more at its end"
-                    ));
-                    list.push(
-                        json!({ "file": file, "sha256": want, "status": "not uploaded",
-                                      "error": e, "seconds": secs(tu) }),
-                    );
-                    self.pending_shards.push(path.clone());
-                    None
-                }
+        for path in order {
+            let Some(s) = self.shared.iter().find(|s| &s.path == path) else {
+                continue;
             };
-            // What a later run's `label_inputs` names it by, with its sidecar (and row weights)
-            // shared too, also for a shard whose own upload failed (it is tried again at the
-            // end). A failure is only a warning: the sidecar is in the bundle, and a paid run
-            // never stops for it. The entry of a shard not (yet) uploaded waits in
-            // `label_inputs_pending`, so `label_inputs` names only stored shards.
-            let sha = uploaded.clone().unwrap_or_else(|| want.clone());
-            let entry = if input_hex(&format!("sha256:{sha}")).is_none() {
-                None
-            } else {
-                match self.label_input_entry(path, &rec, &sha) {
-                    Ok(e) => Some(e),
-                    Err(e) => {
-                        self.warn(format!(
-                            "upload_shards: {file}: its sidecar was not shared ({e}); it is in \
-                             this run's bundle (out/hybrid/labels/)"
-                        ));
-                        None
-                    }
-                }
-            };
-            if let Some(last) = list.last_mut() {
-                last["sidecar_key"] = json!(entry.as_ref().map(|e| e["sidecar"].clone()));
+            list.push(s.list.clone());
+            if let Some((k, v)) = &s.input {
+                inputs.insert(k.clone(), json!(v));
             }
-            match (entry, uploaded.is_some()) {
-                (Some(e), true) => label_inputs.push(e),
-                (Some(e), false) => label_inputs_pending.push(e),
+            match (&s.entry, s.stored) {
+                (Some(e), true) => label_inputs.push(e.clone()),
+                (Some(e), false) => label_inputs_pending.push(e.clone()),
                 (None, _) => {}
             }
         }
@@ -2273,7 +2342,7 @@ impl Rung<'_> {
                           "label_inputs_pending": label_inputs_pending });
         write_json(&self.out.join("shards.json"), &doc)?;
         self.rec.insert("shards".into(), doc);
-        self.done("upload shards", t)
+        self.save()
     }
 
     /// The chunk's last try at the label shards whose upload failed ([`Rung::upload_shards`]):
@@ -2878,6 +2947,9 @@ mod tests {
 
     /// The additive mode and stored label shards reused (`hybrid/tests/additive.rs`).
     mod additive;
+
+    /// Label shards shared as each is made (`hybrid/tests/shard_share.rs`).
+    mod shard_share;
 
     /// A machine of `gib` GiB (`MemTotal`, no cgroup limit).
     fn machine(gib: u64) -> crate::mem::Limit {
@@ -3849,6 +3921,7 @@ mod tests {
             shape: None,
             additive: None,
             pending_shards: Vec::new(),
+            shared: Vec::new(),
         }
     }
 

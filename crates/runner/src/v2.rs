@@ -52,7 +52,7 @@
 //! - `benchmark`, `solver_spike`, `search_measure`, `t1bench`, `hybrid_rung`: as in format 1,
 //!   params unchanged, except that `search_measure`'s `params.ids_input` names an input whose
 //!   path becomes `params.ids`; `hybrid_rung` (`hybrid.rs`) trains in Python and keeps its label
-//!   shards outside `out/` (uploaded content-addressed when `params.upload_shards`);
+//!   shards outside `out/` (uploaded content-addressed when `params.upload_shards`, each as soon as it is made);
 //! - `hybrid_t1check` (`t1check.rs`, format 2 only): its `net_input`, `decisions_input` and
 //!   `saved[].input` name inputs whose paths are added to its params (`net`, `decisions`,
 //!   `saved[].path`);
