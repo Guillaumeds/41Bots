@@ -1308,6 +1308,15 @@ class LauncherTest(unittest.TestCase):
         self.assertIn("the market's 150+ thread offers (0), matched here by id: not there either", str(e.exception))
         self.assertEqual((w.created_on, w.id_lookups, w.searches), ([], 3, 3))
 
+    def test_ranking_uses_per_thread_speed_for_unmeasured_cpus(self):
+        # 2026-10-19: unmeasured CPUs all got one flat rate, so a 2016 Xeon Phi thread counted like a Zen 5 one.
+        # With the published per-thread factors, the faster chip wins at the same price and thread count.
+        phi = big(1, 1, 0.5, cpu_name="Xeon Phi 7250", cpu_cores_effective=272)
+        tr = big(2, 2, 0.6, cpu_name="AMD Ryzen Threadripper PRO 9995WX 96-Cores", cpu_cores_effective=192)
+        best, ranked = launch.rank([phi, tr], {}, 0.0)
+        self.assertEqual(best["id"], 2)
+        self.assertLess(ranked[0]["_cost_per_work"] * 5, ranked[1]["_cost_per_work"])
+
     def test_a_named_offer_the_id_filter_misses_is_rented_from_the_market_listing(self):
         # 2026-10-19: offer 56041192 was rentable in the market listing but vast's `id=N` search missed it, and the
         # launcher refused it twice; the owner lost the machine. The listing, matched by id, now decides; every check runs.

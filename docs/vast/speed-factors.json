@@ -602,6 +602,32 @@
    "caveats": ""
   },
   {
+   "name": "AMD EPYC 7W83",
+   "match": "EPYC 7W83\\b",
+   "arch": "Zen 3 (Milan, 2021)",
+   "cores_per_socket": 64,
+   "clock_ghz": {
+    "base": 2.45,
+    "boost": 3.5
+   },
+   "l3_mb_per_socket": 256,
+   "l3_mb_per_core": 4.0,
+   "l3_layout": "32 MB per 8-core cluster",
+   "memory": "8 channels DDR4-3200 per socket",
+   "estimate": {
+    "compute": 1.07,
+    "tt": 0.95,
+    "uncertainty": 0.15,
+    "basis": "SPEC EPYC 7763: cloud variant of the 64-core Milan part (vast lists it as EPYC 7W83); treated as the EPYC 7763.",
+    "sources": [
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20210301-25119.html",
+     "https://www.spec.org/cpu2017/results/res2021q1/cpu2017-20210301-25120.html"
+    ]
+   },
+   "measured": null,
+   "caveats": "Custom cloud part: no public spec sheet; treated as an EPYC 7763 (added 2026-10-19)."
+  },
+  {
    "name": "AMD EPYC 7443P",
    "match": "EPYC 7443P?\\b",
    "arch": "Zen 3 (Milan, 2021)",
