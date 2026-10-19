@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "run_id": "m3-hybrid-t3-additive-mech-4",
+  "run_id": "m3-hybrid-t3-additive-mech-5",
   "run_seed": 1,
   "threads": null,
   "benchmark_seconds": 0,
@@ -12,7 +12,7 @@
     "min_gpu_ram_gb": 16,
     "min_compute_cap": 600,
     "min_cores": 190,
-    "min_ram_gb": 64,
+    "min_ram_gb": 60,
     "disk_gb": 250,
     "min_inet_down": 100,
     "max_dph": 1.7,
