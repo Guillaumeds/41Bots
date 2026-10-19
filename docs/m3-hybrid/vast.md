@@ -386,6 +386,29 @@ at 384 threads; the trainer about 3 GB of rows; the rough test's verification ta
 disk (about 4 GB of shards), $2.00/h at most on the ladder 1.40 / 1.70 / 2.00 with ten searches a
 step. Launch with `--max-dollars 35` (the owner's trick-2 budget).
 
+**The trainer's rows and RAM (2026-10-19).** The trainer no longer needs its training rows in RAM:
+with `--feed auto` (the default) it writes them to disk (`--feed disk`, `fortyone_nn.train`
+class `DiskRows`, in `hybrid-work/train-rows/`, removed at the end) when they would not fit beside
+the labels, and reads each batch's rows from there with the same rows in the same order: the
+network is byte-identical to the one trained from RAM (tested). On a machine with enough RAM
+nothing changes. The runner tells the trainer what the label solves beside it will take
+(`train_beside_gb`, default `"auto"`: 0.25 GB a usable thread for a training beside the CPU steps,
+48 GB at 192 threads); `train_feed` forces a mode. What stays in RAM is small: about 0.5 GB of
+trainer memory besides PyTorch and the GPU's context (measured on the build VM with 2.5M trick-3
+rows: 0.45-0.56 GB peak anonymous memory on disk against 2.85 GB staged), plus up to 0.8 GB while
+the rows are written on 32 loading threads. The new floor for a trick-3 additive loop on 192
+threads is therefore set by the labels, not the trainer: about 48 GB of label solves + 4-6 GB of
+trainer + 2 GB of system, so **64 GB** runs (the trainer was 43-55 GB of the 192 GB floor). The
+price is speed when the page cache cannot hold the rows: a row not in the cache is one random 4 KB
+read. At trick 3 (42M rows, 43 GB on disk) a 64 GB machine labelling on all threads keeps about
+10 GB of them cached (about a quarter), so an epoch reads about 32M pages: about 6 minutes at a
+SATA SSD's 90,000 random reads a second, 2 minutes at 250,000 (a budget NVMe drive), against about
+1.5 minutes of GPU work, so on SATA each epoch takes about 4 times longer (8 epochs a round: about
+35 more minutes a round, beside hours of labels). 96 GB keeps about 40 GB cached and makes the
+slowdown small; NVMe with 300,000 or more random reads a second hides it. Measured on the build VM
+(a virtual disk): 20,000 random reads a second on one thread, 95,000 on 64, and 1.7-2.0M rows a
+second from the page cache.
+
 **Projection** (rented thread-seconds a label: the build VM's measurements below with item A,
 random 3.65, rules 3.5-4.2, harvested 1.4-3.5 (1.4 in item A's gate with a network driver, 3.5
 on 2026-10-16 on 416 labels of every seat band), times 1.0-1.3 for a rented thread; about 2 hours
