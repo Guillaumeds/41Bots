@@ -71,13 +71,17 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
-use engine::game::{HandStartState, Match, Phase, Rules};
+use engine::game::{Action, HandStartState, Match, Phase, Rules};
 use engine::rng::Rng;
+use engine::team_of;
 use equity::MoneyChance;
 use nn::encode::encode;
+use nn::groups::GroupRow;
 use nn::outcome::{N_RACE_CLASSES, outcomes};
 use nn::predicate::{Evaluator, Predicates};
-use nn::shard::{Row, SOURCE_HARVEST, SOURCE_RANDOM, SOURCE_RULES, row_bytes, row_bytes_for};
+use nn::shard::{
+    Row, SOURCE_HARVEST, SOURCE_RANDOM, SOURCE_RULES, SOURCE_SIBLINGS, row_bytes, row_bytes_for,
+};
 use serde::Serialize;
 use solver::frontier::{CanonPos, Frontier};
 use solver::{
@@ -107,6 +111,9 @@ pub enum Source {
     Rules,
     /// Frontier positions the hybrid's search reaches from training decisions ([`harvest_rows`]).
     Harvest,
+    /// Sibling groups ([`sibling_plan`]): the frontier positions that one choice point's cards
+    /// lead to, each played on by the hybrid's own search to the frontier.
+    Siblings,
 }
 
 impl Source {
@@ -116,6 +123,7 @@ impl Source {
             Source::Random => SOURCE_RANDOM,
             Source::Rules => SOURCE_RULES,
             Source::Harvest => SOURCE_HARVEST,
+            Source::Siblings => SOURCE_SIBLINGS,
         }
     }
 
@@ -125,6 +133,7 @@ impl Source {
             Source::Random => "random",
             Source::Rules => "rules",
             Source::Harvest => "harvest",
+            Source::Siblings => "siblings",
         }
     }
 
@@ -134,7 +143,10 @@ impl Source {
             "random" => Ok(Source::Random),
             "rules" => Ok(Source::Rules),
             "harvest" => Ok(Source::Harvest),
-            _ => Err(format!("unknown --source {s} (random, rules or harvest)")),
+            "siblings" => Ok(Source::Siblings),
+            _ => Err(format!(
+                "unknown --source {s} (random, rules, harvest or siblings)"
+            )),
         }
     }
 }
@@ -172,6 +184,53 @@ pub struct RowInfo {
     pub nodes: u64,
     /// The position's race class (`nn::outcome::race_class`, from the row: [`Row::race_class`]).
     pub class: u8,
+    /// A sibling row's group ([`Source::Siblings`]; `None` for other sources): its decision, its
+    /// group within the decision and the mover as an index into the row's rotated value order.
+    pub sib: Option<SibTag>,
+}
+
+/// A sibling row's group ([`sibling_plan`]): the decision `j` it came from, its group within the
+/// decision (0, 1, … in the order the walk meets the choice points) and the mover's team: the
+/// absolute team (`engine::team_of` of the seat that chose) in a [`Sampled`] position, an index
+/// into the row's rotated value order once labelled ([`RowInfo::sib`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SibTag {
+    /// The decision.
+    pub decision: u64,
+    /// The group within the decision.
+    pub group: u32,
+    /// The mover's team.
+    pub mover: u8,
+}
+
+/// The sidecar `NAME.npy.groups` of sibling rows (`nn::groups`) from their facts in row order:
+/// a new group number whenever a row's (decision, group) differs from the row before's, each
+/// row's mover as its own rotated index. Rows without a group ([`RowInfo::sib`] `None`) are
+/// refused.
+///
+/// # Errors
+/// If a row has no group, or a group number would overflow.
+pub fn sibling_group_rows<'a>(
+    infos: impl IntoIterator<Item = &'a RowInfo>,
+) -> Result<Vec<GroupRow>, String> {
+    let mut out = Vec::new();
+    let mut last: Option<(u64, u32)> = None;
+    let mut g: u32 = 0;
+    for (i, info) in infos.into_iter().enumerate() {
+        let s = info
+            .sib
+            .ok_or_else(|| format!("row {i} has no sibling group"))?;
+        let key = (s.decision, s.group);
+        if last.is_some_and(|l| l != key) {
+            g = g.checked_add(1).ok_or("more than 2^32 groups")?;
+        }
+        last = Some(key);
+        out.push(GroupRow {
+            group: g,
+            mover: s.mover,
+        });
+    }
+    Ok(out)
 }
 
 /// Rows' facts totalled (the sidecar's counts); the totals do not depend on the order rows are
@@ -304,7 +363,9 @@ pub fn row_position(
                 let m = Match::from_hand_start(start, deck, 0, Rules::HOUSE).expect("valid");
                 rules_to(&m, k)
             }
-            Source::Harvest => panic!("harvested rows come by decision: harvest_rows"),
+            Source::Harvest | Source::Siblings => {
+                panic!("harvested rows come by decision: harvest_rows")
+            }
         };
         match m {
             Some(m) => {
@@ -352,6 +413,18 @@ fn labelled_row(
     source: u8,
     leaf: &SharedLeaf,
 ) -> Row {
+    labelled_row_rot(pos, ctx, v, source, leaf).0
+}
+
+/// [`labelled_row`] and the encoder's rotation `r` (mod 4) of the team order: absolute team `t`
+/// is index `(t + r) mod 4` of the row's value (`MoneyChance::rotate`).
+fn labelled_row_rot(
+    pos: &Position,
+    ctx: &MatchCtx,
+    v: MoneyChance,
+    source: u8,
+    leaf: &SharedLeaf,
+) -> (Row, u8) {
     let c = canonical(pos);
     let (features, r) = encode(&c, ctx, leaf);
     let value = v.rotate(r % 4);
@@ -362,15 +435,18 @@ fn labelled_row(
              {pos:?}"
         )
     });
-    Row {
-        features,
-        value,
-        source,
-        trick: pos.hand.tricks_done + 1,
-        label,
-        mask: o.mask,
-        outcomes: o.vecs,
-    }
+    (
+        Row {
+            features,
+            value,
+            source,
+            trick: pos.hand.tricks_done + 1,
+            label,
+            mask: o.mask,
+            outcomes: o.vecs,
+        },
+        r % 4,
+    )
 }
 
 /// Row `i` of a job, labelled (its exact solve with a table of `tt_mb` megabytes), and its facts.
@@ -398,9 +474,8 @@ fn check_label_job(job: &LabelJob) {
         "seed 1 is the golden sets' seed: labels must use another"
     );
     assert!((2..=5).contains(&job.trick), "frontier tricks are 2..=5");
-    assert_ne!(
-        job.source,
-        Source::Harvest,
+    assert!(
+        !matches!(job.source, Source::Harvest | Source::Siblings),
         "harvested rows come by decision: harvest_rows"
     );
 }
@@ -498,6 +573,9 @@ pub struct ShardSummary {
     pub label_time: Duration,
     /// A targeted harvest's rows and reached positions per group (`None` for other runs).
     pub groups: Option<GroupTally>,
+    /// A sibling run's groups, one per row in row order (the sidecar `NAME.npy.groups`,
+    /// [`sibling_group_rows`]; `None` for other runs).
+    pub siblings: Option<Vec<GroupRow>>,
 }
 
 /// A targeted harvest's counts per group of its predicate file ([`PredKeep`]); a position in
@@ -742,6 +820,7 @@ fn stream_label_rows<W: Write + Send>(
         search_time: Duration::ZERO,
         label_time: Duration::ZERO,
         groups: None,
+        siblings: None,
     })
 }
 
@@ -842,6 +921,10 @@ pub struct HarvestJob {
     /// The targeted harvest (`--harvest-keep`): positions in any group of a predicate file are
     /// kept up to their own cap, the others up to `cap` (which may then be 0). Not with `race`.
     pub keep: Option<PredKeep>,
+    /// Sibling groups instead of the reached positions ([`sibling_plan`], `search labels
+    /// --source siblings`): `cap` is then the most groups a decision gives. Not with `race` or
+    /// `keep`.
+    pub siblings: bool,
 }
 
 /// The default cap of a targeted harvest's in-group positions per decision.
@@ -1328,6 +1411,9 @@ pub struct Sampled {
     /// Its exact value and the nodes of its solve when the search already solved it
     /// ([`Driver::Exact`]); `None` with a network driver (solved for the label).
     pub exact: Option<(MoneyChance, u64)>,
+    /// A sibling position's group, the mover as an absolute team ([`sibling_plan`]); `None`
+    /// for other harvests.
+    pub sib: Option<SibTag>,
 }
 
 /// A harvest decision searched and sampled ([`harvest_plan`]), its labels still to make.
@@ -1391,6 +1477,19 @@ pub fn harvest_plan(
     search_mem: &mut SolveMem,
     label_mem: &mut SolveMem,
 ) -> (DecisionPlan, Vec<Reached>) {
+    if job.siblings {
+        return sibling_plan(
+            job,
+            j,
+            starts,
+            leaf,
+            source,
+            driver,
+            label_tt_mb,
+            search_mem,
+            label_mem,
+        );
+    }
     let k = job.trick;
     let t0 = Instant::now();
     let (d, cands, m, mut rng) = harvest_root(job, j, starts, source);
@@ -1507,6 +1606,7 @@ pub fn harvest_plan(
                     Driver::Exact => Some((r.value, r.nodes)),
                     Driver::Net(_) => None,
                 },
+                sib: None,
             }
         })
         .collect();
@@ -1538,6 +1638,206 @@ pub fn harvest_plan(
     (plan, list)
 }
 
+/// A choice point's mover team, legal actions and the index of the search's best.
+type Choice = (u8, Vec<Action>, usize);
+
+/// Sibling decision `j` ([`Source::Siblings`]; owner, 2026-10-19, "fix E": train on what a
+/// decision needs, decision-focused learning, Elmachtoub & Grigas's "Smart Predict-then-Optimize",
+/// with a pairwise ranking loss, RankNet, Burges et al. 2005): the frontier positions that one
+/// choice point's cards lead to, grouped, every one labelled exactly.
+///
+/// **The walk.** The decision is a harvest decision ([`harvest_root`]: the yardstick's generator
+/// at a trick of `job.tricks`, the decider's position by `job.schedule`, a world drawn from the
+/// decider's belief), searched in that world as the hybrid H_k searches it: the solver's max^n with
+/// the frontier at the start of trick `k` valued as `driver` says (the run's network, or exact
+/// values). From the decision, every seat still to play in the trick is a choice point in turn,
+/// along the line the search itself expects (each seat's card the best for its own team by those
+/// values, the solver's tie rule: the first strictly best card in increasing card index). At
+/// each choice point, every legal card of the seat to play is followed to the frontier by the same
+/// rule ("its principal line": every later card the best for its seat's team): the card's
+/// frontier position. A choice point gives a **group**: its cards' frontier positions, distinct by
+/// canonical form, with the seat's team as the **mover**; a group of fewer than two positions (one
+/// card, or every card leading to one position, or lines on which the game ends before the
+/// frontier) gives none. At most `job.cap` groups a decision, in walk order.
+///
+/// **Why this rule.** When the hybrid decides, it compares its cards by the value at the end of
+/// each card's principal line, the network's value of that frontier position (max^n backs a
+/// leaf's vector up unchanged); every later seat in the trick decides the same way, for its own
+/// team. A decision goes wrong when the network ranks those positions differently from their exact
+/// values, even when each value is close. So the groups are exactly the positions the search
+/// compares, and the pairwise loss teaches the network their order for the team that chooses.
+/// With the network as driver the lines are the ones H_k really plays (the label is still exact);
+/// with exact values (`Driver::Exact`) they are exact best responses.
+///
+/// A pure function of (seed, trick, `j`), the job's settings and the driver, as [`harvest_plan`].
+#[allow(clippy::too_many_arguments)]
+pub fn sibling_plan(
+    job: &HarvestJob,
+    j: u64,
+    starts: &[Vec<HandStartState>; 4],
+    leaf: &SharedLeaf,
+    source: &dyn WorldSource,
+    driver: Driver<'_>,
+    label_tt_mb: usize,
+    search_mem: &mut SolveMem,
+    label_mem: &mut SolveMem,
+) -> (DecisionPlan, Vec<Reached>) {
+    let k = job.trick;
+    let t0 = Instant::now();
+    let (d, cands, m, _rng) = harvest_root(job, j, starts, source);
+    let (t, st, pos) = (d.trick, usize::from(d.stratum - 1), usize::from(d.position));
+    let family = SolveFamily::of_match(&m);
+    let mut lm = std::mem::take(label_mem);
+    match family {
+        Some(f) => lm.share(f),
+        None => lm.unshare(),
+    }
+    let rec = Recorder {
+        leaf,
+        opts: label_opts(label_tt_mb),
+        driver,
+        state: Mutex::new(RecState {
+            mem: lm,
+            seen: BTreeMap::new(),
+            list: Vec::new(),
+            evals: 0,
+        }),
+    };
+    let ctx = Ctx {
+        leaf,
+        source,
+        rules: Rules::HOUSE,
+    };
+    let cfg = SearchConfig {
+        tt_mb: HARVEST_TT_MB,
+        ..SearchConfig::default()
+    };
+    let mut run = WorldSolve::default();
+    let h = m.hand_index();
+    let over = |x: &Match| x.phase() == Phase::MatchOver || x.hand_index() != h;
+    let at_frontier = |x: &Match| {
+        let p = x.public();
+        p.trick_no == k && p.trick_cards.is_empty() && matches!(x.phase(), Phase::AwaitPlay(_))
+    };
+    // The search's value of every legal card of the seat to play at `x` (absolute team order),
+    // and the index of the best for its team (the first strictly best, in the order of
+    // `legal_actions`: increasing card index).
+    let mut choose = |x: &Match| -> Choice {
+        let seat = x.to_act().expect("someone acts before the frontier");
+        let legal = x.legal_actions();
+        let cs: Vec<Candidate> = legal.iter().map(|&a| (a, None)).collect();
+        let vals = exact_world(
+            x,
+            &cs,
+            &ctx,
+            &cfg,
+            None,
+            search_mem,
+            &mut run,
+            Some(FrontierCut::new(k, &rec)),
+        )
+        .expect("nothing stops a sibling search");
+        let team = usize::from(team_of(seat));
+        let mut best = 0;
+        for (i, v) in vals.iter().enumerate() {
+            if v.0[team] > vals[best].0[team] {
+                best = i;
+            }
+        }
+        (team_of(seat), legal, best)
+    };
+    // The frontier position at the end of `x`'s principal line, `None` when the hand (or the
+    // game) ends first.
+    let line_end = |mut x: Match, choose: &mut dyn FnMut(&Match) -> Choice| {
+        loop {
+            if over(&x) {
+                return None;
+            }
+            if at_frontier(&x) {
+                return Some(x);
+            }
+            let (_, legal, best) = choose(&x);
+            x.apply(legal[best]).expect("legal");
+        }
+    };
+    let mut groups: Vec<Vec<(Position, MatchCtx, CanonPos)>> = Vec::new();
+    let mut movers: Vec<u8> = Vec::new();
+    let mut cur = m.clone();
+    while !over(&cur) && !at_frontier(&cur) && groups.len() < job.cap as usize {
+        let (team, legal, best) = choose(&cur);
+        let mut members: Vec<(Position, MatchCtx, CanonPos)> = Vec::new();
+        for &a in &legal {
+            let mut child = cur.clone();
+            child.apply(a).expect("legal");
+            let Some(f) = line_end(child, &mut choose) else {
+                continue;
+            };
+            let (p, c, pending) = from_match(&f).expect("a play is awaited at the frontier");
+            debug_assert!(pending.is_none(), "no rob after trick 1");
+            if p.turned != 0 {
+                continue; // never shown to a network (searched exactly by the hybrid)
+            }
+            let canon = canonical(&p);
+            if !members.iter().any(|(_, _, x)| *x == canon) {
+                members.push((p, c, canon));
+            }
+        }
+        if members.len() >= 2 {
+            groups.push(members);
+            movers.push(team);
+        }
+        cur.apply(legal[best]).expect("legal");
+    }
+    let RecState {
+        mem: lm,
+        seen,
+        list,
+        evals,
+    } = rec.state.into_inner().unwrap_or_else(|e| e.into_inner());
+    *label_mem = lm;
+    let mut sample = Vec::new();
+    for (g, (members, &mover)) in groups.iter().zip(&movers).enumerate() {
+        for (p, c, canon) in members {
+            // With exact values at the frontier the search already solved it.
+            let exact = match driver {
+                Driver::Exact => seen.get(canon).map(|&i| (list[i].value, list[i].nodes)),
+                Driver::Net(_) => None,
+            };
+            sample.push(Sampled {
+                pos: *p,
+                ctx: *c,
+                exact,
+                sib: Some(SibTag {
+                    decision: j,
+                    group: g as u32,
+                    mover,
+                }),
+            });
+        }
+    }
+    let plan = DecisionPlan {
+        info: HarvestDecision {
+            id: j,
+            trick: t,
+            position: pos as u8 + 1,
+            stratum: st as u8 + 1,
+            cands: cands.len(),
+            evals,
+            distinct: list.len() as u32,
+            rows: sample.len() as u32,
+            search_nodes: run.stats.nodes,
+            race_distinct: 0,
+            keep_distinct: 0,
+        },
+        sample,
+        row_groups: Vec::new(),
+        reached_groups: Vec::new(),
+        family,
+        search_time: t0.elapsed(),
+    };
+    (plan, list)
+}
+
 /// The rows of a unit of label work, in order: each position's exact value (the search's with
 /// [`Driver::Exact`], else solved now on `mem` with a table of `tt_mb`, the unit's solves sharing
 /// one table by its decision's family, the first from empty tables), encoded with its outcomes
@@ -1560,13 +1860,24 @@ pub fn label_item(
                 Some(x) => x,
                 None => exact_value(&s.pos, s.ctx, leaf, opts, mem),
             };
-            let row = labelled_row(&s.pos, &s.ctx, value, SOURCE_HARVEST, leaf);
+            let source = if s.sib.is_some() {
+                SOURCE_SIBLINGS
+            } else {
+                SOURCE_HARVEST
+            };
+            let (row, r) = labelled_row_rot(&s.pos, &s.ctx, value, source, leaf);
             let class = row.race_class();
+            // The mover as an index into the row's own (rotated) value order.
+            let sib = s.sib.map(|t| SibTag {
+                mover: (t.mover + r) % 4,
+                ..t
+            });
             (
                 row,
                 RowInfo {
                     nodes,
                     class,
+                    sib,
                     ..item.base
                 },
             )
@@ -1680,6 +1991,11 @@ fn check_harvest_job(job: &HarvestJob) {
     assert!(
         job.race.is_none() || job.keep.is_none(),
         "a harvest keeps race classes or a predicate file's groups, not both"
+    );
+    assert!(
+        !job.siblings || (job.race.is_none() && job.keep.is_none() && job.cap >= 1),
+        "a sibling run keeps its groups (at least 1 a decision), not race classes or a \
+         predicate file's groups"
     );
     if let Some(k) = &job.keep {
         assert!(
@@ -1961,6 +2277,8 @@ pub fn write_harvest_shard_with<W: Write + Send>(
     let mut counts = RowCounts::default();
     let mut decisions = Vec::new();
     let mut groups = job.keep.as_ref().map(|k| GroupTally::new(k.preds.len()));
+    // A sibling run's row facts in row order, for its groups sidecar.
+    let mut sib_infos: Vec<RowInfo> = Vec::new();
     let mut times = (Duration::ZERO, Duration::ZERO);
     let fill = |sink: &mut ShardSink| {
         times = run_harvest(
@@ -1991,6 +2309,9 @@ pub fn write_harvest_shard_with<W: Write + Send>(
                 for i in &infos {
                     counts.add(i);
                 }
+                if job.siblings {
+                    sib_infos.extend_from_slice(&infos);
+                }
                 sink.put(bytes)
             },
         )?;
@@ -2007,6 +2328,11 @@ pub fn write_harvest_shard_with<W: Write + Send>(
         ));
     }
     let (search_time, label_time) = times;
+    let siblings = if job.siblings {
+        Some(sibling_group_rows(&sib_infos)?)
+    } else {
+        None
+    };
     Ok(ShardSummary {
         rows,
         sha256,
@@ -2017,6 +2343,7 @@ pub fn write_harvest_shard_with<W: Write + Send>(
         search_time,
         label_time,
         groups,
+        siblings,
     })
 }
 
@@ -2163,6 +2490,7 @@ mod tests {
             strata: HARVEST_STRATA.to_vec(),
             race: None,
             keep: None,
+            siblings: false,
         }
     }
 
@@ -2415,6 +2743,137 @@ mod tests {
                 .0
                 .is_empty()
         );
+    }
+
+    /// Sibling rows ([`sibling_plan`]): whole groups of at least two distinct positions (the
+    /// last may be cut by the row count), consecutive, tagged `SOURCE_SIBLINGS`; the same bytes
+    /// and groups for any thread count, through the streamed writer too; a pure function of
+    /// (seed, row index): a shorter run is a prefix of a longer one; and with exact values at the
+    /// frontier each group is the choice point's cards valued exactly: the mover's best card's
+    /// position is the one its principal line ends in.
+    #[test]
+    fn sibling_rows_are_whole_groups_and_deterministic() {
+        let starts = collect_starts(400, 9);
+        let l = leaf();
+        let job = |threads, count| HarvestJob {
+            count,
+            threads,
+            siblings: true,
+            ..harvest_job(4, vec![3], [1; 8], 16)
+        };
+        let (a, da) = harvest_rows(&job(1, 90), &starts, &*l, Driver::Exact, None);
+        let (b, db) = harvest_rows(&job(3, 90), &starts, &*l, Driver::Exact, None);
+        let (short, _) = harvest_rows(&job(2, 41), &starts, &*l, Driver::Exact, None);
+        assert_eq!(a.len(), 90);
+        let ra: Vec<Row> = a.iter().map(|x| x.0.clone()).collect();
+        let rb: Vec<Row> = b.iter().map(|x| x.0.clone()).collect();
+        assert_eq!(ra, rb);
+        let facts = |d: &[HarvestDecision]| serde_json::to_string(d).expect("json");
+        assert_eq!(facts(&da), facts(&db));
+        let ga = sibling_group_rows(a.iter().map(|x| &x.1)).expect("groups");
+        let gb = sibling_group_rows(b.iter().map(|x| &x.1)).expect("groups");
+        assert_eq!(ga, gb);
+        nn::groups::check(&ga).expect("valid groups");
+        // Pure in (seed, index): the first 41 rows and their groups are the same.
+        let rs: Vec<Row> = short.iter().map(|x| x.0.clone()).collect();
+        assert_eq!(rs[..], ra[..41]);
+        let gs = sibling_group_rows(short.iter().map(|x| &x.1)).expect("groups");
+        assert_eq!(gs[..], ga[..41]);
+        assert!(
+            ra.iter()
+                .all(|r| r.source == SOURCE_SIBLINGS && r.trick == 4)
+        );
+        // Whole groups of two or more (the last may be cut), each one decision's.
+        let sm = nn::groups::summary(&ga);
+        assert!(sm.groups >= 10, "{sm:?}");
+        let last = ga.last().expect("rows").group;
+        for g in 0..last {
+            let n = ga.iter().filter(|r| r.group == g).count();
+            assert!(n >= 2, "group {g} has {n} rows");
+        }
+        for w in a.windows(2) {
+            let (x, y) = (w[0].1.sib.expect("tag"), w[1].1.sib.expect("tag"));
+            assert!((x.decision, x.group) <= (y.decision, y.group));
+        }
+        // The mover's index names the same team in every row of a group: its money chance by the
+        // row's own value, the exact value of the position (labels are exact).
+        assert!(ga.iter().all(|r| r.mover < 4));
+        // The streamed writer gives the same bytes and groups.
+        let mut out = Vec::new();
+        let sum = write_harvest_shard(&job(2, 90), &starts, &*l, Driver::Exact, None, &mut out)
+            .expect("written");
+        assert_eq!(out, nn::shard::to_npy(&ra, nn::outcome::vocab(4)));
+        assert_eq!(sum.siblings, Some(ga.clone()));
+        // The decisions again by hand: a decision whose cards all lead to distinct frontier
+        // positions has them as its first group (its decider's choice point); with exact values
+        // the mover's best among them is the decision's exact best, the top of its group.
+        let src = BeliefSource::new();
+        let mut checked = 0;
+        for d in &da {
+            let (_, cands, m, _) = harvest_root(&job(1, 90), d.id, &starts, &src);
+            let first: Vec<&(Row, RowInfo)> = a
+                .iter()
+                .filter(|x| x.1.sib.is_some_and(|t| t.decision == d.id && t.group == 0))
+                .collect();
+            if cands.len() < 2 || first.len() != cands.len() {
+                continue;
+            }
+            let ctx = Ctx {
+                leaf: &*l,
+                source: &src,
+                rules: Rules::HOUSE,
+            };
+            let vals = exact_world(
+                &m,
+                &cands,
+                &ctx,
+                &SearchConfig::default(),
+                None,
+                &mut SolveMem::new(),
+                &mut WorldSolve::default(),
+                None,
+            )
+            .expect("solved");
+            let team = usize::from(team_of(m.to_act().expect("acts")));
+            let mut want: Vec<u64> = vals.iter().map(|v| v.0[team]).collect();
+            let mut got: Vec<u64> = first
+                .iter()
+                .map(|x| x.0.value.0[usize::from(x.1.sib.expect("tag").mover)])
+                .collect();
+            want.sort_unstable();
+            got.sort_unstable();
+            assert_eq!(
+                got, want,
+                "decision {}: the group is the cards' exact values",
+                d.id
+            );
+            checked += 1;
+        }
+        assert!(checked >= 2, "only {checked} decisions checked");
+    }
+
+    #[test]
+    fn sibling_group_rows_number_groups_in_row_order() {
+        let info = |decision, group, mover| RowInfo {
+            stratum: 1,
+            sib: Some(SibTag {
+                decision,
+                group,
+                mover,
+            }),
+            ..RowInfo::default()
+        };
+        let rows = [
+            info(0, 0, 1),
+            info(0, 0, 3),
+            info(0, 1, 2),
+            info(2, 0, 0),
+            info(2, 0, 0),
+        ];
+        let g = sibling_group_rows(&rows).expect("groups");
+        let got: Vec<(u32, u8)> = g.iter().map(|r| (r.group, r.mover)).collect();
+        assert_eq!(got, [(0, 1), (0, 3), (1, 2), (2, 0), (2, 0)]);
+        assert!(sibling_group_rows(&[RowInfo::default()]).is_err());
     }
 
     fn counts_of(rows: &[(Row, RowInfo)]) -> RowCounts {
@@ -2909,6 +3368,7 @@ mod tests {
         for other in [0u32, 2] {
             let job = HarvestJob {
                 keep: Some(keep.clone()),
+                siblings: false,
                 cap: other,
                 ..base.clone()
             };
@@ -3390,6 +3850,7 @@ mod tests {
                 "trick 4, targeted",
                 HarvestJob {
                     keep: Some(keep.clone()),
+                    siblings: false,
                     cap: 1,
                     ..base(4, 1, 30)
                 },
@@ -3400,6 +3861,7 @@ mod tests {
                 "trick 4, targeted, network",
                 HarvestJob {
                     keep: Some(keep.clone()),
+                    siblings: false,
                     cap: 1,
                     ..base(4, 1, 30)
                 },
@@ -3410,6 +3872,7 @@ mod tests {
                 "trick 3, targeted, network",
                 HarvestJob {
                     keep: Some(keep.clone()),
+                    siblings: false,
                     cap: 1,
                     schedule: position_schedule(parse_band_shares("0,0,1").expect("shares")),
                     ..base(3, 1, 8)

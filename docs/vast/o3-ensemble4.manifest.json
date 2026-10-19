@@ -1,0 +1,74 @@
+{
+  "format": 2,
+  "run_id": "o3-ensemble4-1",
+  "run_seed": 1,
+  "threads": null,
+  "benchmark_seconds": 0,
+  "upload_every_s": 300,
+  "heartbeat_every_s": 30,
+  "note": "Rerun of the single vs 4-network ensemble comparison after the ensemble speed fix (59c739c): the curse check already ran in o3-curse-ensemble-1. Same golden set, same networks.",
+  "machine": {
+    "min_cores": 128,
+    "min_ram_gb": 60
+  },
+  "inputs": {
+    "golden-t2-decisions": "sha256:635e9aef196c816380f3f15c05ede90b38b875fa4817061a57e6d39550065ab0",
+    "golden-t2-worlds": "sha256:6ddc59b191e1fd534f260f9dfe103f742d6026768ca74acdbbb4fd430eb8265e",
+    "o3-f5766a": "sha256:f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
+    "o3-a099061": "sha256:a099061b6aedc09d660aa006820c6d9f450dd93a301cfbee06a2e3582193c594",
+    "o3-bfd1bec": "sha256:bfd1bec2c6473ed15bb7136f1af5857e35a4346c9ac6d714acce09f5a0d1f2ec",
+    "o3-a97ac17": "sha256:a97ac1771b984c52c851501f56edf7bbf8332b57fe9e9c99c8e2392f33566283"
+  },
+  "streams": [
+    {
+      "name": "checks",
+      "priority": 1,
+      "kind": "hybrid_checks",
+      "chunks": 1,
+      "params": {
+        "threads": "all",
+        "est_seconds": 3600,
+        "trick": 2,
+        "cut": 3,
+        "worlds": 320,
+        "seed": 1,
+        "decisions_input": "golden-t2-decisions",
+        "worlds_input": "golden-t2-worlds",
+        "verify_pct": 1,
+        "tt_mb": 64,
+        "boot": 1000,
+        "boot_seed": 1,
+        "standard": "0.01",
+        "race_groups": true,
+        "checks": [
+          {
+            "name": "single",
+            "nets": [
+              "o3-f5766a"
+            ]
+          },
+          {
+            "name": "ensemble4",
+            "nets": [
+              "o3-f5766a",
+              "o3-a099061",
+              "o3-bfd1bec",
+              "o3-a97ac17"
+            ]
+          }
+        ],
+        "paired": [
+          {
+            "name": "single-vs-ensemble4",
+            "a": "single",
+            "b": "ensemble4"
+          }
+        ],
+        "table": {
+          "hands": 1000000,
+          "seed": 1
+        }
+      }
+    }
+  ]
+}

@@ -7,6 +7,7 @@
         [--host-others-gb G] [--rows-dir DIR] [--prefetch-threads T] [--prefetch-depth K] [--cuda-graph auto|off]
         [--profile-batches N] [--progress FILE]
         [--watch-dir DIR --expect N [--partial-epochs K]] [--train-fraction F]
+        [--pair-weight W [--pair-scale S]] [--tie-aware]
 
 A plain MLP: the binary features through an embedding-bag sum (exactly a linear layer on the
 one-hot inputs), plus the dense features through a linear layer, ReLU clipped at 64 (as the
@@ -19,6 +20,17 @@ integer inference), hidden layers, then the head:
 - ``money4`` (spec 6): four logits, soft cross-entropy against the exact four-vector.
 
 Adam, seeded, early stopping on the validation shard.
+
+Sibling groups and the pairwise ranking loss (``--pair-weight W``, ``--pair-scale S``; owner,
+2026-10-19, "fix E", docs/m3-hybrid/sibrank.md): training shards with a groups sidecar
+(``NAME.npy.groups``, ``formats.load_groups``, written by ``search labels --source siblings``) hold
+groups of frontier positions that one choice point separates. Each epoch puts every group whole at
+the start of a full batch (``PairIndex.epoch``: mixed batches, the rest ordinary rows, every row
+still once an epoch), and the loss adds W times ``pair_loss`` (RankNet's logistic loss on the
+order of the mover's money chance, each pair weighted by its true gap). ``--tie-aware``: the
+outcome target is every possible outcome whose exact money vector equals the label's
+(``formats.tie_bits``; ``tied_logp``). Both off by default: the training is then exactly the
+former one, byte for byte (tested against the trainer before them).
 
 Additive training (``--init FLOAT [--init-int INT] [--shrink-perturb L [--perturb-seed S]]``;
 docs/m3-hybrid/audit-loop.md §10, owner 2026-10-17): the network starts from a stored float network
@@ -208,7 +220,9 @@ from .formats import (
     RACE_CLASS_NAMES,
     ROW_WEIGHT_ONE,
     ROW_WEIGHTS_SUFFIX,
+    GROUPS_SUFFIX,
     VALUE_FAULTS,
+    load_groups,
     load_row_weights,
     load_shard,
     mask_bits,
@@ -216,6 +230,7 @@ from .formats import (
     race_classes,
     read_safetensors,
     sha256_file,
+    tie_bits,
     value_fault,
     write_safetensors,
 )
@@ -254,37 +269,39 @@ class Net(nn.Module):
         return [(w.detach().cpu().double().numpy(), b.detach().cpu().double().numpy()) for w, b in layers]
 
 
-def columns(a):
+def columns(a, ties=False):
     """Index array (padding -> N_BINARY), dense, target, label, mask, outcome vectors (numpy) of a
-    record array or a slice of one."""
+    record array or a slice of one. ``ties`` (``--tie-aware``): the label column is the rows' tied
+    outcomes as an int64 bitmask (``formats.tie_bits``) instead of the label."""
     idx = np.asarray(a["active"]).astype(np.int64)
     idx[idx == PAD] = N_BINARY
     dense = np.asarray(a["dense"]).astype(np.float32) / float(1 << INPUT_SHIFT)
     tgt = (np.asarray(a["value"]).astype(np.float64) / float(ONE)).astype(np.float32)
     v = a.dtype["outcomes"].shape[0]
-    lab = np.asarray(a["label"]).astype(np.int64)
+    lab = tie_bits(a) if ties else np.asarray(a["label"]).astype(np.int64)
     mask = mask_bits(a["mask"], v)
     vecs = (np.asarray(a["outcomes"]).astype(np.float64) / float(ONE)).astype(np.float32)
     return idx, dense, tgt, lab, mask, vecs
 
 
-def tensors(a):
+def tensors(a, ties=False):
     """``columns`` of a whole record array, as CPU tensors."""
-    return [torch.from_numpy(x) for x in columns(a)]
+    return [torch.from_numpy(x) for x in columns(a, ties)]
 
 
-def compact(a):
+def compact(a, ties=False):
     """The training columns of a record array (or a slice of one) in compact form: the active
     indices as int16 (the shard's u16 values; the padding 0xFFFF reads -1), dense, target, the
     label as uint8, mask, outcome vectors (dense, target, mask and vectors by ``columns``' own
-    expressions). ``expand`` of rows of these is exactly ``columns`` of the same rows."""
+    expressions). ``expand`` of rows of these is exactly ``columns`` of the same rows. ``ties``
+    (``--tie-aware``): the label column is the tied outcomes' int64 bitmask (``formats.tie_bits``)."""
     act = np.asarray(a["active"])
     if np.any((act >= N_BINARY) & (act != PAD)):
         raise ValueError(f"an active index outside 0..{N_BINARY - 1} that is not the padding")
     dense = np.asarray(a["dense"]).astype(np.float32) / float(1 << INPUT_SHIFT)
     tgt = (np.asarray(a["value"]).astype(np.float64) / float(ONE)).astype(np.float32)
     v = a.dtype["outcomes"].shape[0]
-    lab = np.asarray(a["label"]).astype(np.uint8)
+    lab = tie_bits(a) if ties else np.asarray(a["label"]).astype(np.uint8)
     mask = mask_bits(a["mask"], v)
     vecs = (np.asarray(a["outcomes"]).astype(np.float64) / float(ONE)).astype(np.float32)
     return act.view(np.int16), dense, tgt, lab, mask, vecs
@@ -344,18 +361,18 @@ def check_shards(shards, block=LOAD_BLOCK, threads=1):
     return tricks
 
 
-def load_compact(shards, block=LOAD_BLOCK, threads=1):
+def load_compact(shards, block=LOAD_BLOCK, threads=1, ties=False):
     """``compact`` of the shards one after another (as of one concatenated array), built a block
     of rows at a time from the memory-mapped shards (the full record array is never held in
     memory) on ``threads`` threads, each block into its own rows, as numpy arrays: 847 bytes a row
     at trick 4 (``columns`` takes 1430). The same arrays for any block size and thread count."""
     n = sum(len(s) for s in shards)
-    first = compact(shards[0][:1])
+    first = compact(shards[0][:1], ties)
     out = [np.empty((n,) + c.shape[1:], dtype=c.dtype) for c in first]
 
     def fill(job):
         k, j, before = job
-        part = compact(shards[k][j : j + block])
+        part = compact(shards[k][j : j + block], ties)
         at = before + j
         for o, p in zip(out, part):
             o[at : at + len(p)] = p
@@ -473,10 +490,10 @@ def fits_host(need, reserve_bytes, host, others_bytes=0):
     return total is None or need + reserve_bytes + others_bytes <= total
 
 
-def compact_specs(shard):
+def compact_specs(shard, ties=False):
     """(dtype, row shape) of each of ``compact``'s columns for the shard's record type, and the
     bytes of one row of them."""
-    specs = [(c.dtype, tuple(c.shape[1:])) for c in compact(shard[:1])]
+    specs = [(c.dtype, tuple(c.shape[1:])) for c in compact(shard[:1], ties)]
     return specs, sum(dt.itemsize * math.prod(sh) for dt, sh in specs)
 
 
@@ -538,6 +555,8 @@ class DiskRows:
         os.makedirs(directory, exist_ok=True)
         self.dir = tempfile.mkdtemp(prefix="rows-", dir=directory)
         self.specs = list(specs)
+        # ``--tie-aware``: the label column holds the tied outcomes' int64 bitmask.
+        self.ties = np.dtype(self.specs[3][0]) == np.dtype(np.int64)
         self.dtype = record_dtype(self.specs)
         self.segments = []  # (path, memory map, first row, rows), in row order
         self.sizes = []  # (rows, shard weight, row weights or None) of each segment's shards
@@ -573,7 +592,7 @@ class DiskRows:
         """A new file of ``compact`` of the record array ``shard`` (memory-mapped), with its loss
         weights from ``sizes`` ([(rows, shard weight, row weights or None)]), written a block at a
         time on ``threads`` threads; not yet among the rows (``join``). Returns the part."""
-        specs, _ = compact_specs(shard)
+        specs, _ = compact_specs(shard, self.ties)
         if specs != self.specs:
             raise ValueError(f"compact columns {specs}, the training's {self.specs}")
         n = len(shard)
@@ -581,7 +600,7 @@ class DiskRows:
         fd = os.open(path, os.O_RDWR)
         try:
             def fill(j):
-                part = compact(shard[j : j + block])
+                part = compact(shard[j : j + block], self.ties)
                 self._write(fd, offset, j, self._record(part, weight_block(sizes, j, j + len(part[0]))))
 
             on_threads(fill, list(range(0, n, block)), threads)
@@ -1005,9 +1024,29 @@ def outcome_terms(z, mask, vecs):
     return logp, mix
 
 
-def loss_of(head, z, tgt, lab, mask, vecs, mix_weight, weight=None):
+def tied_logp(logp, bits):
+    """log of the summed probability of each row's tied outcomes (``bits``: int64 bitmasks,
+    ``formats.tie_bits``): the partial-label log-likelihood (Cour, Sapp & Taskar, "Learning from
+    partial labels", JMLR 2011). With one outcome in the set it is exactly that outcome's
+    log-probability (a log-sum-exp over one term), with the same gradient."""
+    v = logp.shape[1]
+    tie = ((bits[:, None] >> torch.arange(v, device=bits.device)) & 1).bool()
+    return torch.logsumexp(logp.masked_fill(~tie, float("-inf")), dim=1)
+
+
+def loss_of(head, z, tgt, lab, mask, vecs, mix_weight, weight=None, tie_aware=False):
     """The batch's loss: the mean over its rows, or with ``weight`` (the rows' loss weights,
-    ``shard_weight``) the weighted mean, sum(w * loss) / sum(w)."""
+    ``shard_weight``) the weighted mean, sum(w * loss) / sum(w). ``tie_aware`` (``--tie-aware``,
+    outcome head): ``lab`` holds each row's tied outcomes (``formats.tie_bits``) and the
+    outcome term is -log of their summed probability (``tied_logp``) rather than of the first."""
+    if tie_aware and head != "money4":
+        logp, mix = outcome_terms(z, mask, vecs)
+        nll = -tied_logp(logp, lab)
+        lmix = -(tgt * torch.log(mix.clamp_min(1e-12))).sum(dim=1)
+        if weight is None:
+            return nll.mean() + mix_weight * lmix.mean()
+        total = weight.sum()
+        return (weight * nll).sum() / total + mix_weight * (weight * lmix).sum() / total
     if weight is None:
         if head == "money4":
             return -(tgt * torch.log_softmax(z, dim=1)).sum(dim=1).mean()
@@ -1022,6 +1061,147 @@ def loss_of(head, z, tgt, lab, mask, vecs, mix_weight, weight=None):
     ce = -(weight * logp.gather(1, lab[:, None])[:, 0]).sum() / total
     soft = -(weight * (tgt * torch.log(mix.clamp_min(1e-12))).sum(dim=1)).sum() / total
     return ce + mix_weight * soft
+
+
+def row_values(head, z, mask, vecs):
+    """Each row's predicted money chances [rows, 4] (fractions): the outcome head's mixture (the
+    outcomes' exact money vectors weighted by the softmax, as the value is derived everywhere), or
+    the money4 head's softmax."""
+    if head == "money4":
+        return torch.softmax(z, dim=1)
+    return outcome_terms(z, mask, vecs)[1]
+
+
+def pair_loss(value, tgt, gid, mover, scale):
+    """The pairwise ranking loss of sibling groups (RankNet, Burges et al., ICML 2005; with the
+    pairs weighted by their true gap, as LambdaRank weighs pairs by what swapping them costs,
+    Burges, Ragno & Le, NIPS 2006): over every pair (i, j), i < j, of rows in the same group
+    (``gid`` equal and at least 0; -1 is no group), with m the mover's money chance (``mover``: an
+    index into the row's own value order), true gap d = tgt_i[m_i] - tgt_j[m_j] and predicted gap
+    p = value_i[m_i] - value_j[m_j], the logistic loss softplus(-scale * sign(d) * p), weighted by
+    |d|: sum(|d| * loss) / sum(|d|) (0 without a pair of unequal true values). ``scale`` turns a gap
+    in money chance into a logit (100: a gap of 1% is a logit of 1)."""
+    m = value.gather(1, mover[:, None])[:, 0]
+    t = tgt.gather(1, mover[:, None])[:, 0]
+    n = len(gid)
+    same = (gid[:, None] == gid[None, :]) & (gid[:, None] >= 0)
+    upper = torch.ones(n, n, dtype=torch.bool, device=gid.device).triu(1)
+    d = t[:, None] - t[None, :]
+    p = m[:, None] - m[None, :]
+    w = d.abs() * (same & upper).to(d.dtype)
+    loss = torch.nn.functional.softplus(-scale * torch.sign(d) * p)
+    return (w * loss).sum() / w.sum().clamp_min(1e-12)
+
+
+class PairCfg:
+    """The pairwise loss's settings (``--pair-weight``, ``--pair-scale``) and its slots: the first
+    ``slots`` rows of every full batch are where its groups go (``PairIndex.epoch``)."""
+
+    def __init__(self, weight, scale, slots):
+        self.weight, self.scale, self.slots = float(weight), float(scale), int(slots)
+
+
+class PairPlan:
+    """One epoch's sibling groups by batch (``PairIndex.epoch``): for each full batch ``k`` the
+    group of each of its first ``slots`` rows (-1: no group) and the mover's index (int64 arrays
+    [batches, slots])."""
+
+    def __init__(self, gid, mover):
+        self.gid, self.mover = gid, mover
+        self.batches = len(gid)
+
+
+class PairIndex:
+    """The sibling groups of the training rows (from the shards' ``NAME.npy.groups`` sidecars,
+    ``formats.load_groups``): ``gid`` (int64, the row's group numbered over every shard, -1 for a
+    row in none) and ``mover`` (each row's mover index). ``epoch`` orders an epoch's rows so that
+    every group is whole inside one full batch, at its start (mixed batches: groups first, then
+    ordinary rows, so the cross-entropy still sees every row once an epoch and keeps the network's
+    calibration)."""
+
+    def __init__(self, gid, mover):
+        self.gid = np.asarray(gid, dtype=np.int64)
+        self.mover = np.asarray(mover, dtype=np.int64)
+        self.n = len(self.gid)
+        inside = np.flatnonzero(self.gid >= 0)
+        if len(inside) == 0:
+            raise ValueError("no row of the training shards is in a sibling group")
+        g = self.gid[inside]
+        cut = np.flatnonzero(np.diff(g) != 0) + 1
+        if np.any(np.diff(g) < 0) or np.any(np.diff(inside)[np.diff(g) == 0] != 1):
+            raise ValueError("a sibling group's rows are not consecutive")
+        self.starts = inside[np.concatenate([[0], cut])].astype(np.int64)
+        self.sizes = np.diff(np.concatenate([[0], cut, [len(inside)]])).astype(np.int64)
+        self.ordinary = np.flatnonzero(self.gid < 0)
+        self.rows_in_groups = int(len(inside))
+        self.max_size = int(self.sizes.max())
+
+    def slots(self, batch):
+        """The rows at the start of every full batch that may hold groups: the groups' rows spread
+        evenly over the full batches, plus room for the largest group (``ValueError`` when that
+        is more than a batch)."""
+        nb = self.n // batch
+        if nb == 0:
+            raise ValueError(f"fewer training rows ({self.n}) than a batch ({batch})")
+        p = -(-self.rows_in_groups // nb) + self.max_size
+        if p > batch:
+            raise ValueError(f"the sibling groups need {p} rows of every batch of {batch}: use a larger --batch")
+        return p
+
+    def epoch(self, rng, batch):
+        """(the epoch's order of the rows, an int64 permutation; its ``PairPlan``), drawn from
+        ``rng``: the groups in a random order, cut into the full batches by their running row
+        count (each batch takes the groups that start in its share of the groups' rows: whole
+        groups, at most ``slots`` rows), each batch filled up with ordinary rows in a random order,
+        the last partial batch ordinary rows only."""
+        nb, p = self.n // batch, self.slots(batch)
+        perm = rng.permutation(len(self.starts))
+        sz, st = self.sizes[perm], self.starts[perm]
+        r = int(sz.sum())
+        before = np.cumsum(sz) - sz
+        bk = (before * nb) // r
+        rows = np.repeat(st - before, sz) + np.arange(r)
+        gb = np.repeat(bk, sz)
+        first = np.searchsorted(gb, np.arange(nb), side="left")
+        slot = np.arange(r) - first[gb]
+        pos = gb * batch + slot
+        order = np.empty(self.n, dtype=np.int64)
+        taken = np.zeros(self.n, dtype=bool)
+        order[pos] = rows
+        taken[pos] = True
+        order[~taken] = self.ordinary[rng.permutation(len(self.ordinary))]
+        gid = np.full((nb, p), -1, dtype=np.int64)
+        mover = np.zeros((nb, p), dtype=np.int64)
+        gid[gb, slot] = np.repeat(np.arange(len(perm)), sz)
+        mover[gb, slot] = self.mover[rows]
+        return order, PairPlan(gid, mover)
+
+
+def load_pair_index(paths, rows_in_files, rows_used):
+    """The ``PairIndex`` of the training shards ``paths`` (their rows in the files and used: a
+    ``--train-fraction`` prefix cuts a group at its end) and what the report says of each groups
+    sidecar."""
+    gids, movers, rec, base = [], [], [], 0
+    for p, nf, nu in zip(paths, rows_in_files, rows_used):
+        try:
+            g = load_groups(p, nf)
+        except ValueError as e:
+            raise SystemExit(str(e)) from None
+        if g is None:
+            gids.append(np.full(nu, -1, dtype=np.int64))
+            movers.append(np.zeros(nu, dtype=np.int64))
+            rec.append(None)
+            continue
+        g = g[:nu]
+        k = np.asarray(g["group"]).astype(np.int64)
+        gids.append(k + base)
+        movers.append(np.asarray(g["mover"]).astype(np.int64))
+        base += int(k[-1]) + 1 if len(k) else 0
+        sizes = np.bincount(k) if len(k) else np.zeros(0, dtype=np.int64)
+        rec.append({"file": os.path.basename(p) + GROUPS_SUFFIX, "sha256": sha256_file(p + GROUPS_SUFFIX),
+                    "rows": int(nu), "groups": int(len(sizes)),
+                    "groups_by_size": np.bincount(sizes, minlength=10)[:10].tolist() if len(sizes) else []})
+    return PairIndex(np.concatenate(gids), np.concatenate(movers)), rec
 
 
 # Eager steps (on a side stream) before each capture of the training step, as PyTorch's CUDA-graph
@@ -1099,8 +1279,14 @@ class Step:
     """
 
     def __init__(self, model, opt, head, mix_weight, feed, batch, graphed=False, not_before=0,
-                 graph_class=CudaGraph, on_fail=None):
+                 graph_class=CudaGraph, on_fail=None, tie_aware=False, pair=None):
         self.model, self.opt, self.head, self.mix_weight = model, opt, head, mix_weight
+        # ``--tie-aware`` (``loss_of``) and the sibling groups' pairwise loss (``PairCfg``; its
+        # epoch's ``PairPlan`` in ``plan``, set by the training loop): both off by default, the
+        # step then exactly the former one.
+        self.tie_aware, self.pair, self.plan = tie_aware, pair, None
+        self.pair_total = torch.zeros((), dtype=torch.float64, device=feed.device) if pair else None
+        self.pair_batches = 0
         self.feed, self.batch, self.device = feed, batch, feed.device
         self.total = torch.zeros((), dtype=torch.float64, device=self.device)
         self.loss = None
@@ -1114,12 +1300,48 @@ class Step:
                 self.side = torch.cuda.Stream(self.device)
                 self.capture_stream = torch.cuda.Stream(self.device)
             self.bufs = feed.inputs(batch)
+            if pair:
+                # The batch's groups and movers, which a captured step reads (``_slots``).
+                self.pbufs = [torch.full((pair.slots,), -1, dtype=torch.int64, device=self.device),
+                              torch.zeros(pair.slots, dtype=torch.int64, device=self.device)]
+
+    def set_plan(self, plan):
+        """The epoch's ``PairPlan``, copied to the training device once (so a batch's groups are
+        a device-to-device copy: the host never waits for the GPU within an epoch)."""
+        self.plan = plan
+        self.plan_dev = (torch.from_numpy(plan.gid).to(self.device), torch.from_numpy(plan.mover).to(self.device))
+
+    def _slots(self, k):
+        """Batch ``k``'s groups and movers (int64 device tensors) in the epoch's plan, or None for
+        a batch without (the last partial batch, or no plan: the CUDA-graph trial)."""
+        if self.pair is None or self.plan is None or k is None or k >= self.plan.batches:
+            return None
+        return self.plan_dev[0][k], self.plan_dev[1][k]
+
+    def _loss(self, cols, slots):
+        """The batch's loss (``loss_of``), plus with sibling groups the pairwise loss of its first
+        rows (``pair_loss``) times ``--pair-weight``; ``slots``: (groups, movers) as device
+        tensors, or None."""
+        idx, dense, tgt, lab, mask, vecs, *w = cols
+        z = self.model(idx, dense)
+        if self.tie_aware:
+            loss = loss_of(self.head, z, tgt, lab, mask, vecs, self.mix_weight, *w, tie_aware=True)
+        else:
+            loss = loss_of(self.head, z, tgt, lab, mask, vecs, self.mix_weight, *w)
+        if slots is None:
+            return loss, None
+        gid, mover = slots
+        p = len(gid)
+        pl = pair_loss(row_values(self.head, z[:p], mask[:p], vecs[:p]), tgt[:p], gid, mover, self.pair.scale)
+        return loss + self.pair.weight * pl, pl
 
     def describe(self):
         return "cuda-graph" if self.graphed else f"eager ({self.reason})" if self.reason else "eager"
 
-    def __call__(self, b):
+    def __call__(self, b, k=None):
+        """The step on rows ``b``, batch ``k`` of the epoch (its sibling groups, if any)."""
         self.calls += 1
+        self.k = k
         if not self.graphed or len(b) != self.batch:
             return self.eager(b)
         if self.graph is not None and self.opt.param_groups[0]["lr"] != self.graph_lr:
@@ -1131,6 +1353,14 @@ class Step:
             if not self.capture():
                 return self.eager(b)
         self.feed.put(b, self.bufs)
+        if self.pair:
+            sl = self._slots(k)
+            if sl is None:
+                self.pbufs[0].fill_(-1)
+            else:
+                for d, h in zip(self.pbufs, sl):
+                    d.copy_(h)
+                self.pair_batches += 1
         self.graph.replay()
         self.loss = self.graph.out
         self.counts["replays"] += 1
@@ -1145,9 +1375,15 @@ class Step:
         here.wait_stream(self.side)
 
     def _eager(self, b):
-        idx, dense, tgt, lab, mask, vecs, *w = self.feed(b)
-        z = self.model(idx, dense)
-        loss = loss_of(self.head, z, tgt, lab, mask, vecs, self.mix_weight, *w)
+        if self.tie_aware or self.pair:
+            loss, pl = self._loss(self.feed(b), self._slots(getattr(self, "k", None)))
+            if pl is not None:
+                self.pair_total += pl.detach().double()
+                self.pair_batches += 1
+        else:
+            idx, dense, tgt, lab, mask, vecs, *w = self.feed(b)
+            z = self.model(idx, dense)
+            loss = loss_of(self.head, z, tgt, lab, mask, vecs, self.mix_weight, *w)
         self.opt.zero_grad()
         loss.backward()
         self.opt.step()
@@ -1159,9 +1395,14 @@ class Step:
         """The step on the batch in the input buffers, as captured. The gradients are made by the
         captured backward in the graph's memory and rewritten (not added to) by every replay."""
         self.opt.zero_grad(set_to_none=True)
-        idx, dense, tgt, lab, mask, vecs, *w = self.feed.read(self.bufs)
-        z = self.model(idx, dense)
-        loss = loss_of(self.head, z, tgt, lab, mask, vecs, self.mix_weight, *w)
+        if self.tie_aware or self.pair:
+            loss, pl = self._loss(self.feed.read(self.bufs), self.pbufs if self.pair else None)
+            if pl is not None:
+                self.pair_total += pl.detach().double()
+        else:
+            idx, dense, tgt, lab, mask, vecs, *w = self.feed.read(self.bufs)
+            z = self.model(idx, dense)
+            loss = loss_of(self.head, z, tgt, lab, mask, vecs, self.mix_weight, *w)
         loss.backward()
         self.opt.step()
         self.total += loss.detach().double() * self.batch
@@ -1184,7 +1425,8 @@ class Step:
         return True
 
 
-def graph_trial(model, head, mix_weight, feed, batch, lr, graph_class=CudaGraph, steps=2 * WARMUP):
+def graph_trial(model, head, mix_weight, feed, batch, lr, graph_class=CudaGraph, steps=2 * WARMUP,
+                tie_aware=False, pair=None):
     """The CUDA-graph step tried before training, on two copies of the network (the network
     itself is not touched): ``steps`` full batches (rows 0, 1, ... cycling) through ``Step``
     (``WARMUP`` eager steps, a capture, replays) on one copy and all eager on the other, with the
@@ -1199,7 +1441,7 @@ def graph_trial(model, head, mix_weight, feed, batch, lr, graph_class=CudaGraph,
         for g in (False, True):
             m = copy.deepcopy(model)
             st = Step(m, adam(m.parameters(), lr, True), head, mix_weight, feed, batch, graphed=g,
-                      graph_class=graph_class)
+                      graph_class=graph_class, tie_aware=tie_aware, pair=pair)
             ls = []
             for b in rows:
                 st(b)
@@ -1311,7 +1553,7 @@ def weights_record(names, sizes, shas):
     return rec
 
 
-def load_part(path, threads, store_for=None, fraction=1.0):
+def load_part(path, threads, store_for=None, fraction=1.0, ties=False):
     """One training shard for the streamed data: checked (``check_shards``), converted and hashed,
     on ``threads`` threads. Converted into memory (``load_compact``: ``part["comp"]``), or, when
     ``store_for(shard)`` gives a ``DiskRows``, into a new file of it (``part["segment"]``; the rows
@@ -1325,7 +1567,7 @@ def load_part(path, threads, store_for=None, fraction=1.0):
             "sha256": sha256_file(path), "weight": w, "row_weights": rw, "row_weights_sha256": rsha}
     disk = store_for(sh) if store_for is not None else None
     if disk is None:
-        part["comp"] = load_compact([sh], threads=threads)
+        part["comp"] = load_compact([sh], threads=threads, ties=ties)
     else:
         part["segment"] = disk.build(sh, [(len(sh), w, rw)], threads=threads)
     return part
@@ -1338,12 +1580,15 @@ class Watcher:
     are loaded. ``take()`` hands over the loaded shards not yet taken (raising the loading's error,
     if any); ``all_in()``: every expected shard taken."""
 
-    def __init__(self, directory, expect, given=(), threads=1, poll=1.0, store_for=None, fraction=1.0):
+    def __init__(self, directory, expect, given=(), threads=1, poll=1.0, store_for=None, fraction=1.0,
+                 ties=False):
         if expect < 1:
             raise ValueError("--expect must be at least 1")
         self.dir, self.expect, self.threads, self.poll = directory, expect, threads, poll
         # ``--train-fraction``: each shard's first rows only (``load_part``).
         self.fraction = fraction
+        # ``--tie-aware``: the label column holds the tied outcomes (``compact``).
+        self.ties = ties
         # Where each shard's rows go (``load_part``): memory, or the training's rows on disk.
         self.store_for = store_for
         self.given = list(given)
@@ -1372,7 +1617,7 @@ class Watcher:
                     with self.cond:
                         if self.loaded >= self.expect:
                             raise ValueError(f"more training shards than --expect {self.expect}: {p}")
-                    part = load_part(p, self.threads, self.store_for, self.fraction)
+                    part = load_part(p, self.threads, self.store_for, self.fraction, self.ties)
                     part["ready_s"] = round(time.time() - self.t0, 3)
                     with self.cond:
                         self.ready.append(part)
@@ -1539,9 +1784,11 @@ def error_by_race_class(pred, target, classes):
     return out
 
 
-def evaluate(model, head, data, mix_weight, batch=8192, device=None):
+def evaluate(model, head, data, mix_weight, batch=8192, device=None, tie_aware=False):
     """(mean loss, money values [n, 4] in units of 2^-32, outcome accuracy) on ``data`` (CPU
-    tensors, moved to ``device`` a batch at a time)."""
+    tensors, moved to ``device`` a batch at a time). ``tie_aware``: the label column holds the
+    tied outcomes (``tensors(val, True)``), the loss is the tie-aware one and a hit is the most
+    likely outcome being one of them."""
     device = device or torch.device("cpu")
     model.eval()
     losses, vals, hits = [], [], 0
@@ -1550,13 +1797,19 @@ def evaluate(model, head, data, mix_weight, batch=8192, device=None):
         for i in range(0, n, batch):
             idx, dense, tgt, lab, mask, vecs = (x[i : i + batch].to(device) for x in data)
             z = model(idx, dense)
-            losses.append(float(loss_of(head, z, tgt, lab, mask, vecs, mix_weight)) * len(z))
+            if tie_aware:
+                losses.append(float(loss_of(head, z, tgt, lab, mask, vecs, mix_weight, tie_aware=True)) * len(z))
+            else:
+                losses.append(float(loss_of(head, z, tgt, lab, mask, vecs, mix_weight)) * len(z))
             if head == "money4":
                 vals.append(torch.softmax(z.double(), dim=1).cpu())
             else:
                 logp, _ = outcome_terms(z.double(), mask, vecs.double())
                 vals.append(torch.einsum("bv,bvt->bt", logp.exp(), vecs.double()).cpu())
-                hits += int((logp.argmax(dim=1) == lab).sum())
+                if tie_aware:
+                    hits += int(((lab >> logp.argmax(dim=1)) & 1).sum())
+                else:
+                    hits += int((logp.argmax(dim=1) == lab).sum())
     v = torch.cat(vals).numpy() * ONE
     return sum(losses) / n, v, hits / n
 
@@ -1808,6 +2061,16 @@ def _main(argv, stack):
     ap.add_argument("--shrink-perturb", type=float, default=None,
                     help="with --init: shrink and perturb, every weight lambda*w + N(0, sigma^2) (SIGMA_RULE)")
     ap.add_argument("--perturb-seed", type=int, default=None, help="the shrink-and-perturb noise's seed (default --seed)")
+    ap.add_argument("--pair-weight", type=float, default=0.0,
+                    help="weight of the sibling groups' pairwise ranking loss (pair_loss; the groups come from the "
+                         "training shards' NAME.npy.groups sidecars, search labels --source siblings); 0 (default): "
+                         "none, the training exactly as before")
+    ap.add_argument("--pair-scale", type=float, default=100.0,
+                    help="with --pair-weight: logits per unit of money chance in the pairwise loss (default 100: a "
+                         "gap of 1%% is a logit of 1)")
+    ap.add_argument("--tie-aware", action="store_true",
+                    help="outcome head: the target is the set of outcomes whose money vector equals the label's "
+                         "(-log of their summed probability) instead of the first of them; off by default")
     ap.add_argument("--check-init-only", action="store_true",
                     help="with --init and --init-int: only check the start (shape, head, the quantisation proof), "
                          "write OUT/init-check.json and stop; no data is read")
@@ -1832,6 +2095,14 @@ def _main(argv, stack):
         ap.error("--prefetch-threads and --prefetch-depth must be at least 1")
     if check_fraction(args.train_fraction):
         ap.error(check_fraction(args.train_fraction))
+    if not (math.isfinite(args.pair_weight) and args.pair_weight >= 0):
+        ap.error("--pair-weight must be 0 or more")
+    if not (math.isfinite(args.pair_scale) and args.pair_scale > 0):
+        ap.error("--pair-scale must be above 0")
+    if args.pair_weight > 0 and args.watch_dir is not None:
+        ap.error("--pair-weight takes its groups from --train shards, not streamed ones (--watch-dir)")
+    if args.tie_aware and args.head != "outcome":
+        ap.error("--tie-aware is for the outcome head")
     # Before anything else (no data loaded, no GPU probed, no output made): a layer wider than the
     # integer inference allows (formats.MAX_WIDTH, Rust's nn::MAX_WIDTH) would train for nothing.
     try:
@@ -1917,7 +2188,7 @@ def _main(argv, stack):
         (its load buffer and the columns' growth: twice its rows) does not fit beside them."""
         with disk["lock"]:
             if disk["store"] is None and args.feed in ("auto", "disk"):
-                specs, row = compact_specs(sh)
+                specs, row = compact_specs(sh, args.tie_aware)
                 if host_choice(2 * len(sh) * (row + 4)):
                     disk["store"] = DiskRows(rows_dir, specs)
             return disk["store"]
@@ -1943,7 +2214,7 @@ def _main(argv, stack):
     else:
         # Streamed shards: wait for the validation shard and a first training shard.
         watcher = Watcher(args.watch_dir, args.expect, args.train, load_threads, args.watch_poll, store_for,
-                          args.train_fraction)
+                          args.train_fraction, args.tie_aware)
         progress(step="wait", shards_in=0, shards=args.expect)
         while not os.path.exists(args.val):
             time.sleep(args.watch_poll)
@@ -2025,18 +2296,30 @@ def _main(argv, stack):
 
     comp = None
     if watcher is None:
-        specs, row = compact_specs(shards[0])
+        specs, row = compact_specs(shards[0], args.tie_aware)
         if host_choice(n * (row + (4 if weighted(sizes) else 0))):
             store = disk["store"] = DiskRows(rows_dir, specs)
             for sh, sz in zip(shards, sizes):
                 store.join([store.build(sh, [sz], threads=load_threads)])
         else:
-            comp = load_compact(shards, threads=load_threads)
+            comp = load_compact(shards, threads=load_threads, ties=args.tie_aware)
         del shards
         hashes = {"train": [f.result() for f in train_sha], "val": val_sha.result()}
         hashing.shutdown()
-    va = tensors(val)
+    va = tensors(val, args.tie_aware)
     val_classes = race_classes(val)
+    # The sibling groups (``--pair-weight``): which rows are in which group, from the training
+    # shards' sidecars; every epoch then orders the rows by ``PairIndex.epoch``.
+    pairs, pair_cfg, groups_rec = None, None, None
+    if args.pair_weight > 0:
+        pairs, groups_rec = load_pair_index(args.train, rows_in_files, [r for r, _, _ in sizes])
+        try:
+            pair_cfg = PairCfg(args.pair_weight, args.pair_scale, pairs.slots(args.batch))
+        except ValueError as e:
+            raise SystemExit(f"--pair-weight: {e}") from None
+        print(f"sibling groups: {len(pairs.starts)} groups, {pairs.rows_in_groups} rows (largest {pairs.max_size}); "
+              f"the first {pair_cfg.slots} rows of each batch of {args.batch} hold them; pairwise loss weight "
+              f"{args.pair_weight}, scale {args.pair_scale}", flush=True)
     feed = make_feed()
     stack.callback(lambda: feed is not None and feed.close())
     comp = None
@@ -2070,7 +2353,8 @@ def _main(argv, stack):
         elif n < args.batch:
             why = f"fewer training rows ({n}) than a batch ({args.batch})"
         else:
-            why, trial = graph_trial(model, args.head, args.mix_weight, feed, args.batch, args.lr, GRAPH_CLASS)
+            why, trial = graph_trial(model, args.head, args.mix_weight, feed, args.batch, args.lr, GRAPH_CLASS,
+                                     tie_aware=args.tie_aware, pair=pair_cfg)
             graphed = why is None
     opt = adam(model.parameters(), args.lr, graphed)
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, factor=0.3, patience=1)
@@ -2087,7 +2371,7 @@ def _main(argv, stack):
     # The first capture waits for the warm-up and the eager profile; replays are profiled from
     # the capture's third (the first replays also load the graph), among the full batches.
     step = Step(model, opt, args.head, args.mix_weight, feed, args.batch, graphed=graphed, not_before=prof.end,
-                graph_class=GRAPH_CLASS, on_fail=fell_back)
+                graph_class=GRAPH_CLASS, on_fail=fell_back, tie_aware=args.tie_aware, pair=pair_cfg)
     gprof = BatchProfile(nprof, n // args.batch, device, start=max(WARMUP, prof.end) + 2) if graphed else None
     step_facts = {"cuda_graph": args.cuda_graph, "mode": "cuda-graph" if graphed else "eager",
                   "reason": why, "trial": trial, "warmup": WARMUP,
@@ -2134,7 +2418,7 @@ def _main(argv, stack):
                 facts["feed"] = feed.facts
                 weighting = weights_record(names, sizes, rw_shas)
                 step = Step(model, opt, args.head, args.mix_weight, feed, args.batch, graphed=was_graphed,
-                            graph_class=GRAPH_CLASS, on_fail=fell_back)
+                            graph_class=GRAPH_CLASS, on_fail=fell_back, tie_aware=args.tie_aware)
                 step.reason = was_reason
                 on_this_set = 0
                 print(f"streamed: {len(stream['parts'])} of {args.expect} shards in, {n} rows, from epoch {epoch}",
@@ -2145,7 +2429,14 @@ def _main(argv, stack):
             break
         model.train()
         te = time.time()
-        order = feed.order(torch.from_numpy(rng.permutation(n)))
+        if pairs is None:
+            order = feed.order(torch.from_numpy(rng.permutation(n)))
+        else:
+            perm, plan = pairs.epoch(rng, args.batch)
+            step.set_plan(plan)
+            order = feed.order(torch.from_numpy(perm))
+            step.pair_total.zero_()
+            step.pair_batches = 0
         # The epoch's loss sum in float64 on the device (each term float(loss) * rows, exactly the
         # Python float sum), so the GPU is not stopped to read every batch's loss.
         step.total.zero_()
@@ -2154,7 +2445,10 @@ def _main(argv, stack):
                 prof.before(k)
                 if gprof:
                     gprof.before(k)
-            step(order[i : i + args.batch])
+            if pairs is None:
+                step(order[i : i + args.batch])
+            else:
+                step(order[i : i + args.batch], k)
             if epoch == 0:
                 prof.after(k)
                 if gprof:
@@ -2173,7 +2467,7 @@ def _main(argv, stack):
             for name, p in (("batch profile", prof.result), ("batch profile, replayed", gprof and gprof.result)):
                 if p:
                     print(f"{name}: {json.dumps({k: x for k, x in p.items() if not k.startswith('top')})}", flush=True)
-        vloss, vv, acc = evaluate(model, args.head, va, args.mix_weight, device=device)
+        vloss, vv, acc = evaluate(model, args.head, va, args.mix_weight, device=device, tie_aware=args.tie_aware)
         if full_from is not None:
             sched.step(vloss)
         sd = float(((vv - val["value"].astype(np.float64)) / ONE).std())
@@ -2183,6 +2477,13 @@ def _main(argv, stack):
                         "minutes": (time.time() - t0) / 60})
         if stream is not None:
             history[-1].update(shards=len(stream["parts"]), rows=n, all_in=full_from is not None)
+        if pairs is not None:
+            # The pairwise loss's mean over the epoch's batches with groups, and its share of the
+            # epoch's loss (train_loss counts it, times --pair-weight).
+            pmean = float(step.pair_total) / max(step.pair_batches, 1)
+            history[-1].update(train_pair_loss=pmean, pair_batches=step.pair_batches,
+                               train_pair_share=args.pair_weight * pmean * step.pair_batches * args.batch
+                               / max(total, 1e-12))
         print(json.dumps(history[-1]), flush=True)
         improved = full_from is not None and vloss < best[0]
         progress(step="train", epoch=epoch, epochs=args.epochs, batches_done=steps, batches=steps,
@@ -2214,7 +2515,7 @@ def _main(argv, stack):
         stream["partial_epochs"] = full_from
         stream["epochs_trained_on"] = {
             p["name"]: sum(1 for h in history if h["epoch"] >= p["first_epoch"]) for p in stream["parts"]}
-    vloss, pf, acc = evaluate(model, args.head, va, args.mix_weight, device=device)
+    vloss, pf, acc = evaluate(model, args.head, va, args.mix_weight, device=device, tie_aware=args.tie_aware)
     progress(step="quantise", best_epoch=best[2])
 
     layers = model.float_layers()
@@ -2234,6 +2535,13 @@ def _main(argv, stack):
     # Only below 1: every row trains the same network, which then stays the same file.
     if args.train_fraction < 1:
         meta["train_fraction"] = repr(args.train_fraction)
+    # Only when on: with neither, the network and its file are exactly the former ones.
+    if args.tie_aware:
+        meta["tie_aware"] = "1"
+    if pairs is not None:
+        meta["pair_weight"] = repr(args.pair_weight)
+        meta["pair_scale"] = repr(args.pair_scale)
+        meta["groups_sha256"] = json.dumps([None if r is None else r["sha256"] for r in groups_rec])
     # The network it continued (additive training): part of its identity.
     if init is not None:
         meta["init_float_sha256"] = init["record"]["float_sha256"]
@@ -2290,6 +2598,17 @@ def _main(argv, stack):
     }
     if stream is not None:
         report["stream"] = stream
+    if args.tie_aware:
+        report["tie_aware"] = {"what": "the outcome target is every possible outcome whose exact money vector equals "
+                                       "the label's (-log of their summed probability); the validation loss and "
+                                       "outcome_accuracy (the most likely outcome among them) likewise"}
+    if pairs is not None:
+        report["pairs"] = {"weight": args.pair_weight, "scale": args.pair_scale, "slots": pair_cfg.slots,
+                           "groups": int(len(pairs.starts)), "rows_in_groups": pairs.rows_in_groups,
+                           "largest_group": pairs.max_size, "sidecars": groups_rec,
+                           "what": "each full batch starts with whole sibling groups (PairIndex.epoch), the rest "
+                                   "ordinary rows; loss = the usual loss of every row + weight x the pairwise "
+                                   "ranking loss of the groups (pair_loss)"}
     if init is not None:
         report["init"] = dict(init["record"], evaluated_only=False)
     with open(os.path.join(args.out, "report.json"), "w") as f:

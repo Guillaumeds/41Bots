@@ -93,6 +93,22 @@
 //! (the equity table, as `search_measure`'s), and the scheduler's `threads`, `est_seconds`,
 //! `equity_input`.
 //!
+//! Sibling groups and the pairwise ranking loss (owner, 2026-10-19, "fix E": train on what a
+//! decision needs; `search labels --source siblings`, `search::oracle_labels::sibling_plan`):
+//! `labels_siblings` (rows, default 0: none), `labels_siblings_seed` (107), `siblings_positions`
+//! (the shares of decisions by the decider's position band, default the harvest's
+//! `harvest_positions`) and `siblings_cap` (8: the most groups a decision gives; a trick has at most
+//! eight choice points): groups of frontier positions that one choice point's cards lead to, each
+//! card followed along the search's own principal line (driven by `harvest_net`, required at cut 3
+//! or 2), every position labelled exactly; the shard (with its groups sidecar `NAME.npy.groups`)
+//! joins the training set after the race shard, and `upload_shards` stores the sidecar too (its
+//! `label_inputs` entry gives it as `groups`). The trainer's settings: `pair_weight` (0: none, the
+//! command as before) passes `--pair-weight` (and `pair_scale`, default 100, `--pair-scale`): the
+//! pairwise ranking loss over the groups of the training shards (`fortyone_nn.train`, refused
+//! without a sibling shard, with `label_parts` above 1 or with the audit loop: the trainer takes
+//! groups from whole shards only); `tie_aware` (false) passes `--tie-aware` (the partial-label loss
+//! over outcomes whose money vectors are equal).
+//!
 //! Training modes, reused labels and the leader focus (docs/m3-hybrid/audit-loop.md §10; owner,
 //! 2026-10-17): `train_mode` (`"scratch"`, the default: everything above, unchanged; or
 //! `"additive"`: the audit loop continues a stored network, `init_net` and `init_net_float`,
@@ -202,7 +218,7 @@ mod reuse;
 use audit::additive;
 
 /// The settings a `hybrid_rung` chunk takes; any other key is refused.
-pub(crate) const KEYS: [&str; 75] = [
+pub(crate) const KEYS: [&str; 82] = [
     "cut",
     "check",
     "audit_rounds",
@@ -246,6 +262,13 @@ pub(crate) const KEYS: [&str; 75] = [
     "race_strata",
     "race_positions",
     "race_other_cap",
+    "labels_siblings",
+    "labels_siblings_seed",
+    "siblings_positions",
+    "siblings_cap",
+    "pair_weight",
+    "pair_scale",
+    "tie_aware",
     "val_count",
     "val_seed",
     "golden_trick",
@@ -438,6 +461,18 @@ pub(crate) struct Params {
     /// The harvest's settings (`harvest_cap_per_decision`, `harvest_positions`) when its shard is
     /// reused, for the audit loop's harvests (else they come from the generated harvest set).
     pub reused_harvest_args: Option<Vec<String>>,
+    /// `pair_weight` (0: none) and `pair_scale` (100): the trainer's pairwise ranking loss over
+    /// the sibling groups (`--pair-weight`, `--pair-scale`, passed only when the weight is above 0).
+    pub pair_weight: f64,
+    pub pair_scale: f64,
+    /// `tie_aware` (false): the trainer's `--tie-aware`.
+    pub tie_aware: bool,
+}
+
+/// Whether a set of `search labels --source` comes by decision (a harvest or sibling groups): one
+/// shard, never made in parts.
+pub(crate) fn harvested(source: &str) -> bool {
+    source == "harvest" || source == "siblings"
 }
 
 /// One label shard to make: its set, and its part (`(k, of)`, 1-based) when the set is made in
@@ -515,6 +550,8 @@ impl Params {
             "train_mode": self.additive.as_ref().map_or(json!({ "train_mode": "scratch" }), additive::Additive::to_json),
             "label_inputs": self.label_inputs.iter().map(reuse::LabelInput::to_json).collect::<Vec<_>>(),
             "harvest_seat_weights": self.seat_weights,
+            "pair_weight": self.pair_weight, "pair_scale": self.pair_scale,
+            "tie_aware": self.tie_aware,
         })
     }
 
@@ -539,7 +576,7 @@ impl Params {
         let n = self.label_parts;
         let mut out = vec![one(&self.val)];
         for k in 1..=n {
-            for s in self.train.iter().filter(|s| s.source != "harvest") {
+            for s in self.train.iter().filter(|s| !harvested(s.source)) {
                 out.push(ShardJob {
                     set: LabelSet {
                         count: part_count(s.count, k, n),
@@ -550,7 +587,7 @@ impl Params {
                 });
             }
         }
-        out.extend(self.train.iter().filter(|s| s.source == "harvest").map(one));
+        out.extend(self.train.iter().filter(|s| harvested(s.source)).map(one));
         out
     }
 
@@ -703,16 +740,28 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         "labels_race_seed",
         (0, 105),
     )?;
+    let mut siblings = set(
+        "siblings",
+        "siblings",
+        "labels_siblings",
+        "labels_siblings_seed",
+        (0, 107),
+    )?;
     let harvest_net = input("harvest_net")?;
     // The audit loop's harvests (its audit shards and targeted harvests) are harvests too: at
     // trick 3, round 1's audit shard is driven by `harvest_net` (no network of the loop's own
     // exists yet), later rounds by the latest network. At trick 2 round 1's audit shard waits
     // for round 1's own network instead (`audit.rs`, "Trick 2"), so the loop needs none there.
     let audit_rounds = o.get("audit_rounds").and_then(Value::as_u64).unwrap_or(0);
-    if harvest_net.is_some() && harvest.count == 0 && race.count == 0 && audit_rounds == 0 {
+    if harvest_net.is_some()
+        && harvest.count == 0
+        && race.count == 0
+        && siblings.count == 0
+        && audit_rounds == 0
+    {
         return Err(
             "hybrid_rung: harvest_net drives the harvest's search: it needs labels_harvest, \
-             labels_race or audit_rounds above 0"
+             labels_race, labels_siblings or audit_rounds above 0"
                 .into(),
         );
     }
@@ -731,11 +780,14 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
     // before any network of the run exists, so without `harvest_net` every reached frontier
     // position would be solved exactly (thousands a decision, seconds each at trick 2). The
     // driver must be a network of the cut's own trick (`search labels` refuses another).
-    if (harvest.count > 0 || race.count > 0) && cut <= 3 && harvest_net.is_none() {
+    if (harvest.count > 0 || race.count > 0 || siblings.count > 0)
+        && cut <= 3
+        && harvest_net.is_none()
+    {
         return Err(format!(
-            "hybrid_rung: labels_harvest and labels_race at cut {cut} need harvest_net (an \
-             integer O_{cut}, trained for trick-{cut} positions): exact values at the frontier of \
-             trick {cut} for every reached position would not finish"
+            "hybrid_rung: labels_harvest, labels_race and labels_siblings at cut {cut} need \
+             harvest_net (an integer O_{cut}, trained for trick-{cut} positions): exact values at \
+             the frontier of trick {cut} for every reached position would not finish"
         ));
     }
     let golden_inputs = match (
@@ -838,6 +890,41 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
             other_cap,
         })
     };
+    // Sibling groups (`labels_siblings`): their settings are refused without them, not ignored.
+    if siblings.count == 0 {
+        if let Some(k) = ["labels_siblings_seed", "siblings_positions", "siblings_cap"]
+            .iter()
+            .find(|k| o.contains_key(**k))
+        {
+            return Err(format!(
+                "hybrid_rung: {k} is set but labels_siblings is 0: the sibling groups' settings \
+                 need labels_siblings above 0"
+            ));
+        }
+    } else {
+        let positions = s("siblings_positions", &shares)?;
+        parse_band_shares(&positions)
+            .map_err(|e| format!("hybrid_rung: siblings_positions: {e}"))
+            .and_then(|w| {
+                if w.iter().sum::<u64>() > 1 << 24 {
+                    Err(format!(
+                        "hybrid_rung: siblings_positions {positions:?}: use fewer decimals"
+                    ))
+                } else {
+                    Ok(())
+                }
+            })?;
+        let cap = u("siblings_cap", 8)?;
+        if !(1..=u64::from(u32::MAX)).contains(&cap) {
+            return Err("hybrid_rung: siblings_cap must be at least 1".into());
+        }
+        siblings.args = vec![
+            "--harvest-cap".into(),
+            cap.to_string(),
+            "--harvest-positions".into(),
+            positions,
+        ];
+    }
     let mut val = set("val", "random", "val_count", "val_seed", (100_000, 201))?;
     // Stored shards reused instead of generated (`label_inputs`): the sets they give are not
     // made, and their own settings are refused rather than ignored.
@@ -861,6 +948,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
                 harvest.count = 0;
             }
             "race" => race.count = 0,
+            "siblings" => siblings.count = 0,
             "val" => {
                 val.count = 0;
                 val.seed = x.seed;
@@ -868,7 +956,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
             _ => {}
         }
     }
-    let train: Vec<LabelSet> = [random, rules, harvest, race]
+    let train: Vec<LabelSet> = [random, rules, harvest, race, siblings]
         .into_iter()
         .filter(|s| s.count > 0)
         .collect();
@@ -876,8 +964,8 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
     let reused_val = label_inputs.iter().any(|x| x.set == "val");
     if train.is_empty() && reused_train == 0 {
         return Err(
-            "hybrid_rung: labels_random, labels_rules, labels_harvest and labels_race are all 0: \
-             no training labels"
+            "hybrid_rung: labels_random, labels_rules, labels_harvest, labels_race and \
+             labels_siblings are all 0: no training labels"
                 .into(),
         );
     }
@@ -910,7 +998,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
     // The seeds the shards are made with: a set's own, or with parts each part's.
     let mut effective: Vec<LabelSet> = Vec::new();
     for x in train.iter().chain(std::iter::once(&val)) {
-        if label_parts > 1 && x.source != "harvest" && x.name != "val" {
+        if label_parts > 1 && !harvested(x.source) && x.name != "val" {
             for k in 1..=label_parts {
                 let seed = part_seed(x.seed, k).ok_or_else(|| {
                     format!(
@@ -1041,6 +1129,42 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
                 .into(),
         );
     }
+    // The pairwise ranking loss over sibling groups: whole shards with groups (generated or
+    // reused) and one plain training (the trainer refuses streamed shards for it).
+    let pair_weight = f("pair_weight", 0.0)?;
+    let pair_scale = f("pair_scale", 100.0)?;
+    if pair_scale <= 0.0 {
+        return Err("hybrid_rung: pair_scale must be above 0".into());
+    }
+    if pair_weight == 0.0 && o.contains_key("pair_scale") {
+        return Err(
+            "hybrid_rung: pair_scale is set but pair_weight is 0: it goes with pair_weight".into(),
+        );
+    }
+    if pair_weight > 0.0 {
+        let groups = train.iter().any(|x| x.source == "siblings")
+            || label_inputs
+                .iter()
+                .any(|x| x.set == "siblings" || x.groups.is_some());
+        if !groups {
+            return Err(
+                "hybrid_rung: pair_weight needs sibling groups: labels_siblings above 0, or a \
+                 label_inputs entry of set siblings (or with groups)"
+                    .into(),
+            );
+        }
+        if label_parts > 1 || audit_rounds > 0 {
+            return Err(
+                "hybrid_rung: pair_weight is for one training on whole shards: not with \
+                 label_parts above 1 or audit_rounds"
+                    .into(),
+            );
+        }
+    }
+    let tie_aware = b("tie_aware")?;
+    if tie_aware && head != "outcome" {
+        return Err("hybrid_rung: tie_aware is for the outcome head".into());
+    }
     let verify_pct = f("verify_pct", 1.0)?;
     if verify_pct > 100.0 {
         return Err("hybrid_rung: verify_pct is a percentage (0 to 100)".into());
@@ -1113,6 +1237,9 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         label_inputs,
         seat_weights: additive::parse_seat_weights(o)?,
         reused_harvest_args,
+        pair_weight,
+        pair_scale,
+        tie_aware,
     })
 }
 
@@ -2179,7 +2306,7 @@ impl Rung<'_> {
             let net = self
                 .inputs
                 .get("harvest_net")
-                .filter(|_| s.source == "harvest");
+                .filter(|_| harvested(s.source));
             if let Some(net) = net {
                 c.arg("--harvest-net").arg(net);
             }
@@ -2220,6 +2347,10 @@ impl Rung<'_> {
             }
             if let Some(c) = side.get("rows_by_race_class") {
                 rec["rows_by_race_class"] = c.clone();
+            }
+            if let Some(g) = side.get("siblings") {
+                rec["siblings"] = json!({ "groups": g["groups"], "groups_by_size": g["groups_by_size"],
+                                          "groups_sha256": g["groups_sha256"] });
             }
             rec["label_tables"] = tt_rec;
             recs.push(rec);
@@ -2731,6 +2862,14 @@ impl Rung<'_> {
         if self.p.train_fraction < 1.0 {
             c.args(["--train-fraction", &self.p.train_fraction.to_string()]);
         }
+        // Only when set, likewise: the pairwise loss over the sibling groups, the tie-aware loss.
+        if self.p.pair_weight > 0.0 {
+            c.args(["--pair-weight", &self.p.pair_weight.to_string()])
+                .args(["--pair-scale", &self.p.pair_scale.to_string()]);
+        }
+        if self.p.tie_aware {
+            c.arg("--tie-aware");
+        }
         c
     }
 
@@ -3205,6 +3344,208 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// Sibling groups (`labels_siblings`) and the trainer's pairwise and tie-aware losses: the
+    /// set's arguments, its need of `harvest_net` at cut 3, settings refused without it, the
+    /// pairwise loss refused without groups or with streamed shards, and the trainer's command
+    /// carrying the flags only when set.
+    #[cfg(unix)]
+    #[test]
+    fn sibling_settings_and_the_trainers_flags() {
+        let net = format!("inputs/sha256/{}", "a".repeat(64));
+        let p = parse(&json!({ "cut": 4, "labels_random": 10, "labels_rules": 0,
+                               "labels_siblings": 30, "siblings_positions": "0.5,0.25,0.25" }))
+        .expect("siblings");
+        let sib = p.train.iter().find(|s| s.name == "siblings").expect("set");
+        assert_eq!((sib.source, sib.count, sib.seed), ("siblings", 30, 107));
+        assert_eq!(
+            sib.args,
+            ["--harvest-cap", "8", "--harvest-positions", "0.5,0.25,0.25"]
+        );
+        assert_eq!(
+            p.train.iter().map(|s| s.name).collect::<Vec<_>>(),
+            ["random", "siblings"]
+        );
+        // One shard, never in parts.
+        let parts = parse(&json!({ "cut": 4, "labels_random": 10, "labels_rules": 0,
+                                   "labels_siblings": 30, "label_parts": 2 }))
+        .expect("parts");
+        assert_eq!(
+            parts
+                .shards()
+                .iter()
+                .filter(|j| j.set.name == "siblings")
+                .map(|j| j.part)
+                .collect::<Vec<_>>(),
+            [None]
+        );
+        let e = parse(&json!({ "cut": 3, "labels_siblings": 30 })).expect_err("no driver");
+        assert!(e.contains("labels_siblings at cut 3 need"), "{e}");
+        parse(&json!({ "cut": 3, "labels_siblings": 30, "harvest_net": net })).expect("driven");
+        for k in ["labels_siblings_seed", "siblings_positions", "siblings_cap"] {
+            let mut o = json!({ "cut": 4 });
+            o[k] = json!(if k == "siblings_positions" {
+                json!("1,1,1")
+            } else {
+                json!(3)
+            });
+            let e = parse(&o).expect_err(k);
+            assert!(e.contains("labels_siblings is 0"), "{k}: {e}");
+        }
+        let e = parse(&json!({ "cut": 4, "pair_weight": 1 })).expect_err("no groups");
+        assert!(e.contains("pair_weight needs sibling groups"), "{e}");
+        let e =
+            parse(&json!({ "cut": 4, "labels_siblings": 30, "pair_weight": 1, "label_parts": 2 }))
+                .expect_err("streamed");
+        assert!(e.contains("not with label_parts"), "{e}");
+        let e = parse(&json!({ "cut": 4, "pair_scale": 50 })).expect_err("scale alone");
+        assert!(e.contains("pair_scale is set but pair_weight is 0"), "{e}");
+        let e =
+            parse(&json!({ "cut": 4, "tie_aware": true, "head": "money4" })).expect_err("money4");
+        assert!(e.contains("tie_aware is for the outcome head"), "{e}");
+        // A stored sibling shard counts as groups.
+        let key = |c: char| format!("inputs/sha256/{}", c.to_string().repeat(64));
+        let stored = parse(&json!({ "cut": 4, "pair_weight": 0.5, "labels_random": 0, "labels_rules": 0,
+            "label_inputs": [
+                { "set": "siblings", "seed": 351, "shard": key('b'), "sidecar": key('c'), "groups": key('d') },
+                { "set": "val", "seed": 401, "shard": key('e'), "sidecar": key('f') } ] }))
+        .expect("stored groups");
+        assert_eq!(
+            stored.label_inputs[0].groups.as_deref(),
+            Some(&"d".repeat(64)[..])
+        );
+        let e = parse(
+            &json!({ "cut": 4, "labels_random": 0, "labels_rules": 0, "label_inputs": [
+                { "set": "siblings", "seed": 351, "shard": key('b'), "sidecar": key('c') },
+                { "set": "val", "seed": 401, "shard": key('e'), "sidecar": key('f') } ] }),
+        )
+        .expect_err("no groups key");
+        assert!(e.contains("needs its groups"), "{e}");
+
+        let root = std::env::temp_dir().join(format!("hybrid-pair-cmd-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let tools = Tools {
+            search: root.join("search"),
+            uv: root.join("uv"),
+            python_dir: root.join("py"),
+            nvidia_smi: root.join("nvidia-smi"),
+            remote: None,
+        };
+        let args = |p: &Params| -> Vec<String> {
+            let mut ctx = Ctx::local("hybrid-test", &root, 4);
+            let r = test_rung(&mut ctx, p, &tools, &root);
+            let files = Feed::Files(vec![root.join("a.npy"), root.join("v.npy")]);
+            let c = r.train_cmd(&files, &root.join("net"), "cpu", 4, &root.join("prog"));
+            c.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let plain = args(&p);
+        assert!(
+            !plain
+                .iter()
+                .any(|a| a == "--pair-weight" || a == "--tie-aware" || a == "--pair-scale"),
+            "{plain:?}"
+        );
+        let pw = parse(&json!({ "cut": 4, "labels_random": 10, "labels_rules": 0,
+                                "labels_siblings": 30, "siblings_positions": "0.5,0.25,0.25",
+                                "pair_weight": 0.75, "tie_aware": true }))
+        .expect("pairs");
+        assert_eq!(
+            (pw.pair_weight, pw.pair_scale, pw.tie_aware),
+            (0.75, 100.0, true)
+        );
+        let with = args(&pw);
+        assert_eq!(
+            &with[with.len() - 5..],
+            [
+                "--pair-weight",
+                "0.75",
+                "--pair-scale",
+                "100",
+                "--tie-aware"
+            ]
+        );
+        assert_eq!(
+            &with[..with.len() - 5],
+            &plain[..],
+            "the flags are the only difference"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The sibling A/B (owner, 2026-10-19, fix E): A and B are the same run but for the run id,
+    /// the note and B's pairwise and tie-aware losses; both reuse the stored 40M trick-3 base,
+    /// make 6M sibling rows with the stored O_3 driving, store them, train O_3's shape from scratch
+    /// and check on the stored trick-2 golden set.
+    #[test]
+    fn the_sibling_ab_manifests() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/vast");
+        let read = |n: &str| -> Value {
+            let path = dir.join(format!("{n}.manifest.json"));
+            serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("json")
+        };
+        let (a, b) = (read("o3-sibrank-a"), read("o3-sibrank-b"));
+        let mut same = b.clone();
+        same["run_id"] = a["run_id"].clone();
+        same["note"] = a["note"].clone();
+        let params = same["streams"][0]["params"]
+            .as_object_mut()
+            .expect("params");
+        for k in ["pair_weight", "pair_scale", "tie_aware"] {
+            assert!(params.remove(k).is_some(), "{k}");
+        }
+        assert_eq!(same, a, "only the run id, the note and B's losses differ");
+        for (v, run, pair) in [(&a, "o3-sibrank-a-1", 0.0), (&b, "o3-sibrank-b-1", 1.0)] {
+            assert_eq!(v["run_id"], run);
+            let m = crate::sched::parse_v2(v).unwrap_or_else(|e| panic!("{run}: {e}"));
+            let p = parse(&m.streams[0].params).expect("settings");
+            assert_eq!((p.cut, p.check, p.upload_shards), (3, true, true));
+            assert_eq!((p.pair_weight, p.tie_aware), (pair, pair > 0.0));
+            assert_eq!(p.pair_scale, 100.0);
+            assert_eq!(
+                p.train
+                    .iter()
+                    .map(|s| (s.name, s.count, s.seed))
+                    .collect::<Vec<_>>(),
+                [("siblings", 6_000_000, 351)]
+            );
+            assert_eq!(
+                p.train[0].args,
+                ["--harvest-cap", "8", "--harvest-positions", "0.5,0.25,0.25"]
+            );
+            assert_eq!(
+                p.harvest_net.as_deref(),
+                Some("b89b26d6e2f0bd25dac7f57411a35e2531abd087e964d6bd4df54621319efcc5")
+            );
+            assert_eq!(
+                p.label_inputs
+                    .iter()
+                    .map(|x| (x.set, x.seed, x.rows, x.rowweights.is_some()))
+                    .collect::<Vec<_>>(),
+                [
+                    ("extra", 321, Some(25_600_000), false),
+                    ("extra", 322, Some(6_400_000), false),
+                    ("extra", 313, Some(8_000_000), true),
+                    ("val", 401, Some(100_000), false)
+                ]
+            );
+            assert_eq!(
+                (p.golden_trick, p.golden_count, p.golden_worlds),
+                (2, 2000, 320)
+            );
+            assert!(p.golden_inputs.is_some());
+            assert_eq!(
+                (p.widths_arg().as_str(), p.epochs, p.batch, p.train_seed),
+                ("2048,1024,256", 40, 1024, 1)
+            );
+            assert_eq!(p.device, Device::Cuda);
+            assert_eq!(
+                (&v["machine"]["min_ram_gb"], &v["machine"]["min_gpu_ram_gb"]),
+                (&json!(60), &json!(16))
+            );
+        }
+    }
+
     #[test]
     fn defaults_are_the_rung1_workflow() {
         let p = parse(&json!({})).expect("defaults");
@@ -3644,8 +3985,8 @@ mod tests {
         let key = format!("inputs/sha256/{}", "ab".repeat(32));
         bad(
             json!({ "harvest_net": key }),
-            "harvest_net drives the harvest's search: it needs labels_harvest, labels_race or \
-             audit_rounds above 0",
+            "harvest_net drives the harvest's search: it needs labels_harvest, labels_race, \
+             labels_siblings or audit_rounds above 0",
         );
         bad(
             json!({ "labels_harvest": 5, "harvest_net": "o3/int.safetensors" }),
@@ -5911,8 +6252,8 @@ fi
             };
             assert!(
                 e.contains(&format!(
-                    "labels_harvest and labels_race at cut {cut} need harvest_net (an integer \
-                     O_{cut}"
+                    "labels_harvest, labels_race and labels_siblings at cut {cut} need \
+                     harvest_net (an integer O_{cut}"
                 )),
                 "{e}"
             );

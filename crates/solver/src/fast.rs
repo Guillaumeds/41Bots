@@ -516,8 +516,9 @@ struct LeafCache {
 /// Hand-end memo entries (a power of two).
 const LEAF_SLOTS: usize = 1024;
 
-/// The most frontier positions one batch gathers ([`Search::gather`]).
-const GATHER_CAP: usize = 256;
+/// The most frontier positions one batch gathers ([`Search::gather`]; 2^16: an ensemble's
+/// deeper batches, `nn::ensemble`, fit whole; it never changes a value).
+const GATHER_CAP: usize = 1 << 16;
 
 impl Default for LeafCache {
     fn default() -> Self {

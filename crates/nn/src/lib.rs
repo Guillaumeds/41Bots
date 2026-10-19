@@ -20,6 +20,8 @@
 //! - [`ensemble`]: several networks as one evaluator, the integer mean of their money chances.
 //! - [`predicate`]: the audit loop's groups of positions, as conditions on the encoder's
 //!   features (docs/m3-hybrid/audit-loop.md §6), shared with the Python auditor.
+//! - [`groups`]: the sibling groups of a label shard (`NAME.npy.groups`), for the trainer's
+//!   pairwise ranking loss.
 //! - [`leafrisk`]: the leaf-risk predictor, integer regression trees that predict the oracle
 //!   network's squared error at a frontier position (which leaves the hybrid solves exactly).
 //! - [`synthetic`]: a synthetic leaf, network and features for tests and fixtures.
@@ -30,6 +32,7 @@
 pub mod encode;
 pub mod ensemble;
 pub mod fast;
+pub mod groups;
 pub mod kernel;
 pub mod leafrisk;
 pub mod mlp;

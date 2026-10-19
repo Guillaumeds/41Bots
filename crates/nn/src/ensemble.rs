@@ -12,8 +12,26 @@
 //! members' values, byte-identical on every machine, thread count and WASM, and an ensemble of one
 //! network is that network, byte for byte (the mean of one value is the value).
 //!
+//! **Speed** (2026-10-19): the members' weights together (about 70 MB for the four 2048-wide
+//! O_3s) do not fit a processor's last-level cache as one network's do (16 MB per core complex on
+//! an AMD EPYC 7B12), so every batch streams them from memory and the cost goes with the number
+//! of passes over the weights, not with the positions valued: the first rented run made one pass
+//! per member for every 13 positions or so (the solver's batches from 3 plays before the
+//! frontier) and ran about 100 times slower than one network. An ensemble of several networks
+//! therefore takes the solver's batches from as far back as they go ([`ENSEMBLE_PREFETCH`]: at
+//! trick 2 every frontier position below the decision's first play, which the search reaches
+//! almost all of anyway), values each such batch through every member in passes of up to
+//! `nn::kernel::MAX_BATCH` positions, and keeps the batch's means in a table of this thread's
+//! ([`Ensemble::prefetch`]) where the search's own requests find them. None of it changes a
+//! value: a mean is a pure function of the position, kept or recomputed. The mean is taken from
+//! per-team totals with no allocation ([`MoneyChance::mean_of_totals`]).
+//!
 //! The ensemble's name in values and reports is [`Ensemble::id`]: the member's SHA-256 for one
 //! network, else `ens<N>:` and the members' SHA-256s joined by `+` in the order given.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use equity::MoneyChance;
 use solver::MatchCtx;
@@ -21,10 +39,32 @@ use solver::frontier::{CanonPos, Frontier};
 
 use crate::oracle::Oracle;
 
+/// The batch depth an ensemble of several networks asks the solver for: 7 plays before the
+/// frontier, the deepest a solver gathers from (module notes).
+pub const ENSEMBLE_PREFETCH: u8 = 7;
+
+static NEXT_ENSEMBLE: AtomicU64 = AtomicU64::new(1);
+
+/// One thread's means of the positions of the latest batch an ensemble was handed
+/// ([`Ensemble::prefetch`]): which ensemble, the match context, and the values (looked up, never
+/// iterated, so the map's hashing cannot change anything).
+#[derive(Default)]
+struct Gathered {
+    ensemble: u64,
+    ctx: Option<MatchCtx>,
+    values: HashMap<CanonPos, MoneyChance>,
+}
+
+thread_local! {
+    static GATHERED: RefCell<Gathered> = RefCell::new(Gathered::default());
+}
+
 /// Several oracle networks of the same frontier trick, valued as their integer mean (module
 /// notes).
 pub struct Ensemble {
     members: Vec<Oracle>,
+    /// Identifies this ensemble's batch table ([`Gathered`]).
+    id: u64,
 }
 
 impl Ensemble {
@@ -42,7 +82,10 @@ impl Ensemble {
                 o.trick
             ));
         }
-        Ok(Ensemble { members })
+        Ok(Ensemble {
+            members,
+            id: NEXT_ENSEMBLE.fetch_add(1, Ordering::Relaxed),
+        })
     }
 
     /// The members, in the order given.
@@ -69,14 +112,37 @@ impl Ensemble {
         if self.members.len() == 1 {
             return self.members[0].eval(c, ctx);
         }
-        let vs: Vec<MoneyChance> = self.members.iter().map(|o| o.eval(c, ctx)).collect();
-        mean(&vs)
+        let kept = GATHERED.with(|g| {
+            let g = g.borrow();
+            if g.ensemble == self.id && g.ctx == Some(*ctx) {
+                g.values.get(c).copied()
+            } else {
+                None
+            }
+        });
+        if let Some(v) = kept {
+            return v;
+        }
+        let mut tot = [0u64; 4];
+        for o in &self.members {
+            let v = o.eval(c, ctx);
+            add(&mut tot, &v);
+        }
+        MoneyChance::mean_of_totals(tot, self.members.len() as u64)
     }
 }
 
-/// The integer mean of money chances: `u128` totals per team, index-ordered, rounded by largest
+/// Adds a money chance to per-team totals.
+fn add(tot: &mut [u64; 4], v: &MoneyChance) {
+    for (s, x) in tot.iter_mut().zip(v.0) {
+        *s += x;
+    }
+}
+
+/// The integer mean of money chances: totals per team, index-ordered, rounded by largest
 /// remainder (ties to the lower team) so the result sums to exactly 2^32 ([`MoneyChance::mix`]
-/// with weight 1 each). The mean of one value is that value.
+/// with weight 1 each, computed as [`MoneyChance::mean_of_totals`]: the same numbers). The mean
+/// of one value is that value.
 ///
 /// # Panics
 /// If `vs` is empty.
@@ -85,8 +151,11 @@ pub fn mean(vs: &[MoneyChance]) -> MoneyChance {
     if vs.len() == 1 {
         return vs[0];
     }
-    let terms: Vec<(u64, MoneyChance)> = vs.iter().map(|&v| (1, v)).collect();
-    MoneyChance::mix(&terms)
+    let mut tot = [0u64; 4];
+    for v in vs {
+        add(&mut tot, v);
+    }
+    MoneyChance::mean_of_totals(tot, vs.len() as u64)
 }
 
 impl Frontier for Ensemble {
@@ -106,28 +175,45 @@ impl Frontier for Ensemble {
         for (k, o) in self.members.iter().enumerate() {
             o.eval_batch(pos, ctx, &mut each[k * n..(k + 1) * n]);
         }
-        let mut vs = Vec::with_capacity(self.members.len());
         for (i, slot) in out.iter_mut().enumerate().take(n) {
-            vs.clear();
-            vs.extend((0..self.members.len()).map(|k| each[k * n + i]));
-            *slot = mean(&vs);
+            let mut tot = [0u64; 4];
+            for k in 0..self.members.len() {
+                add(&mut tot, &each[k * n + i]);
+            }
+            *slot = MoneyChance::mean_of_totals(tot, self.members.len() as u64);
         }
     }
 
-    /// The deepest of the members' batch depths (values never depend on it).
+    /// One network's own batch depth; for several, [`ENSEMBLE_PREFETCH`] (module notes; values
+    /// never depend on it).
     fn prefetch_depth(&self) -> u8 {
-        self.members
-            .iter()
-            .map(Frontier::prefetch_depth)
-            .max()
-            .unwrap_or(0)
+        if self.members.len() == 1 {
+            self.members[0].prefetch_depth()
+        } else {
+            ENSEMBLE_PREFETCH
+        }
     }
 
-    /// Every member values the positions ahead into its own memo, as one batch.
+    /// One network: its own batch. Several: every member values the positions ahead as batches
+    /// of up to `MAX_BATCH`, and their means replace this thread's table of the ensemble's latest
+    /// batch, where [`Ensemble::eval`] finds them (module notes).
     fn prefetch(&self, pos: &[CanonPos], ctx: &MatchCtx) {
-        for o in &self.members {
-            o.prefetch(pos, ctx);
+        if self.members.len() == 1 {
+            self.members[0].prefetch(pos, ctx);
+            return;
         }
+        if pos.is_empty() {
+            return;
+        }
+        let mut out = vec![MoneyChance::certain(0); pos.len()];
+        self.value_batch(pos, ctx, &mut out);
+        GATHERED.with(|g| {
+            let mut g = g.borrow_mut();
+            g.ensemble = self.id;
+            g.ctx = Some(*ctx);
+            g.values.clear();
+            g.values.extend(pos.iter().copied().zip(out));
+        });
     }
 }
 
@@ -153,6 +239,8 @@ mod tests {
         );
         // The same values in another order: the same mean (sums of whole numbers).
         assert_eq!(mean(&[c, a, b]), m);
+        // The same numbers as the weighted mix with weight 1 each.
+        assert_eq!(m, MoneyChance::mix(&[(1, a), (1, b), (1, c)]));
         // The mean of one value, and of identical values, is that value.
         assert_eq!(mean(&[a]), a);
         assert_eq!(mean(&[b, b, b, b]), b);
@@ -172,6 +260,8 @@ mod tests {
                 .collect();
             let m = mean(&vs);
             assert_eq!(m.0.iter().sum::<u64>(), ONE);
+            let terms: Vec<(u64, MoneyChance)> = vs.iter().map(|&v| (1, v)).collect();
+            assert_eq!(m, MoneyChance::mix(&terms));
         }
     }
 
@@ -226,5 +316,27 @@ mod tests {
             }
         }
         assert_eq!(one.prefetch_depth(), single.prefetch_depth());
+        // Several networks: a batch handed over first (the table of the latest batch) gives
+        // the same values, for the positions in it and for others; another context is not
+        // answered from it.
+        assert_eq!(mixed.prefetch_depth(), ENSEMBLE_PREFETCH);
+        let half = &cs[..cs.len() / 2];
+        mixed.prefetch(half, &ctx);
+        for c in &cs {
+            let ms: Vec<MoneyChance> = mixed
+                .members()
+                .iter()
+                .map(|o| o.eval_reference(c, &ctx))
+                .collect();
+            assert_eq!(mixed.value(c, &ctx), mean(&ms));
+        }
+        if let Some((c, x)) = pos.iter().find(|(_, x)| *x != ctx) {
+            let ms: Vec<MoneyChance> = mixed
+                .members()
+                .iter()
+                .map(|o| o.eval_reference(c, x))
+                .collect();
+            assert_eq!(mixed.value(c, x), mean(&ms));
+        }
     }
 }
