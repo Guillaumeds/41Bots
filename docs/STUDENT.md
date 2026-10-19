@@ -231,6 +231,8 @@ sources.
   the share of decisions where the student's choice has the teacher's best value (ties count).
   Reported overall, by trick, by place in the trick (1–8) and by match-state stratum S1–S4, with a
   bootstrap 95% upper bound over decisions (1,000 replicates, seed 1, as the hybrid check).
+- **Honest measures** (`--split-half`, `--top-k K`): the floor of the test set, the unbiased gap to
+  a 512-deal teacher and the loss of a top-K shortlist (§14).
 
 ## 8. Sizes, speed and cost
 
@@ -419,3 +421,112 @@ deals (`student encode --max-deals`, exact subsets), scored on the fixed 4,096-d
 At equal teacher cost, more positions at 64-128 deals beat 320 deals clearly; at equal positions more deals
 still help. Decision (2026-10-18): new student data at **64 deals** (extend close calls later by deal index);
 trick-1 data likewise at 64-128, confirmed on a first trick-1 batch the same way.
+
+## 14. The ruler: how far from 0.01%? (`student-check --split-half --top-k 2,3`, measured 2026-10-19)
+
+Today's measure (§7) compares the student's card with the teacher's best on the same 1,024 deals.
+The teacher's best is partly luck (the card that happened to look best on those deals), so the
+measure reads a little high: the "winner's curse". Two new switches on `search student-check`
+measure it honestly and say how far the student could get:
+
+- `--split-half`: each decision's deals are cut in two by a fixed rule: **even deal index = half A,
+  odd = half B** (512 each; `search::curves::split_halves`). A card is chosen on one half and scored
+  on the other, which never saw it, then the other way round; the tables give A→B, B→A and the
+  mean. Three numbers:
+  - **floor**: a teacher of 512 deals (the best card on A) scored on B against B's best. This is
+    what a near-perfect player reads on this test set at half width: the test set cannot show a
+    loss much below it.
+  - **student, split**: the student's (fixed) card against each half's best.
+  - **gap**: the A-best card less the student's card, scored on B (and the reverse). Nothing in it
+    is lucky, so it is the true distance between the student and a teacher of 512 deals. It can be
+    negative. Always gap = student split − floor.
+- `--top-k K`: the student shortlists its K best cards and the teacher picks among them (on all
+  deals; with `--split-half` also picked on one half and scored on the other). This is what a
+  "student shortlists, search decides" player would lose.
+
+Same groups and bootstrap as §7 (1,000 replicates, seed 1, the same resampled decisions in every
+table). "lower95/upper95" are the 5% and 95% points of the bootstrap, so the two together are a
+90% range. Without the switches the output is byte for byte as before; with them the full-deal
+student loss is repeated and equals §7's (0.0566% for the 1M 512-256 student). Whole numbers
+throughout (units of 2^-32, totals over the scoring half), % only when printed.
+
+Results on the fixed test set (4,096 trick-2 decisions, % of the deciding pair's money chance):
+
+| student | full loss | split-half student | floor | gap (90% range) | top-2 full | top-3 full | top-2 split | top-3 split |
+|---|---|---|---|---|---|---|---|---|
+| 1M, 512-256, 64 deals | 0.0566 | 0.0586 | 0.0080 | 0.0506 (0.0443–0.0575) | 0.0174 | 0.0050 | 0.0233 | 0.0122 |
+| 1M, 1024-512, all deals | 0.0560 | 0.0579 | 0.0080 | 0.0500 (0.0426–0.0581) | 0.0131 | 0.0030 | 0.0190 | 0.0104 |
+| 1M, 1024-512, 64 deals | 0.0575 | 0.0594 | 0.0080 | 0.0515 (0.0436–0.0602) | 0.0189 | 0.0040 | 0.0251 | 0.0115 |
+| 250k, 512-256, 320 deals | 0.0784 | 0.0803 | 0.0080 | 0.0723 (0.0629–0.0849) | 0.0219 | 0.0046 | 0.0280 | 0.0118 |
+
+1M, 512-256, 64 deals:
+
+| group | full loss | split student | floor | gap | gap 90% range | top-2 full | top-3 full | top-2 split | top-3 split |
+|---|---|---|---|---|---|---|---|---|---|
+| all | 0.0566 | 0.0586 | 0.0080 | 0.0506 | 0.0443–0.0575 | 0.0174 | 0.0050 | 0.0233 | 0.0122 |
+| P1 | 0.0838 | 0.0886 | 0.0177 | 0.0710 | 0.0520–0.0933 | 0.0392 | 0.0194 | 0.0517 | 0.0351 |
+| P2 | 0.0412 | 0.0426 | 0.0064 | 0.0362 | 0.0169–0.0586 | 0.0072 | 0.0002 | 0.0126 | 0.0064 |
+| P3 | 0.0385 | 0.0400 | 0.0060 | 0.0340 | 0.0203–0.0505 | 0.0166 | 0.0011 | 0.0213 | 0.0061 |
+| P4 | 0.0625 | 0.0644 | 0.0100 | 0.0544 | 0.0346–0.0766 | 0.0197 | 0.0073 | 0.0262 | 0.0163 |
+| P5 | 0.0879 | 0.0905 | 0.0104 | 0.0800 | 0.0590–0.1051 | 0.0276 | 0.0063 | 0.0345 | 0.0150 |
+| P6 | 0.0508 | 0.0528 | 0.0078 | 0.0450 | 0.0296–0.0615 | 0.0099 | 0.0016 | 0.0167 | 0.0090 |
+| P7 | 0.0499 | 0.0508 | 0.0035 | 0.0473 | 0.0327–0.0659 | 0.0061 | 0.0001 | 0.0088 | 0.0034 |
+| P8 | 0.0385 | 0.0390 | 0.0021 | 0.0369 | 0.0236–0.0511 | 0.0132 | 0.0040 | 0.0147 | 0.0060 |
+| S1 | 0.0325 | 0.0338 | 0.0046 | 0.0292 | 0.0223–0.0365 | 0.0095 | 0.0029 | 0.0132 | 0.0072 |
+| S2 | 0.0557 | 0.0572 | 0.0060 | 0.0512 | 0.0399–0.0636 | 0.0145 | 0.0044 | 0.0190 | 0.0099 |
+| S3 | 0.0495 | 0.0515 | 0.0074 | 0.0441 | 0.0319–0.0571 | 0.0161 | 0.0018 | 0.0213 | 0.0081 |
+| S4 | 0.0889 | 0.0919 | 0.0140 | 0.0780 | 0.0609–0.0964 | 0.0296 | 0.0109 | 0.0397 | 0.0233 |
+
+1M, 1024-512, all deals:
+
+| group | full loss | split student | floor | gap | gap 90% range | top-2 full | top-3 full | top-2 split | top-3 split |
+|---|---|---|---|---|---|---|---|---|---|
+| all | 0.0560 | 0.0579 | 0.0080 | 0.0500 | 0.0426–0.0581 | 0.0131 | 0.0030 | 0.0190 | 0.0104 |
+| P1 | 0.0800 | 0.0848 | 0.0177 | 0.0672 | 0.0500–0.0867 | 0.0230 | 0.0067 | 0.0360 | 0.0220 |
+| P2 | 0.0269 | 0.0282 | 0.0064 | 0.0218 | 0.0132–0.0310 | 0.0042 | 0.0001 | 0.0084 | 0.0064 |
+| P3 | 0.0423 | 0.0438 | 0.0060 | 0.0378 | 0.0220–0.0552 | 0.0130 | 0.0007 | 0.0172 | 0.0064 |
+| P4 | 0.0699 | 0.0719 | 0.0100 | 0.0619 | 0.0271–0.1156 | 0.0054 | 0.0010 | 0.0118 | 0.0105 |
+| P5 | 0.0637 | 0.0662 | 0.0104 | 0.0558 | 0.0422–0.0716 | 0.0172 | 0.0062 | 0.0260 | 0.0156 |
+| P6 | 0.0518 | 0.0538 | 0.0078 | 0.0460 | 0.0307–0.0612 | 0.0107 | 0.0048 | 0.0167 | 0.0118 |
+| P7 | 0.0406 | 0.0415 | 0.0035 | 0.0380 | 0.0245–0.0529 | 0.0102 | 0.0031 | 0.0130 | 0.0064 |
+| P8 | 0.0728 | 0.0733 | 0.0021 | 0.0712 | 0.0459–0.0997 | 0.0214 | 0.0017 | 0.0228 | 0.0036 |
+| S1 | 0.0375 | 0.0388 | 0.0046 | 0.0342 | 0.0265–0.0422 | 0.0080 | 0.0008 | 0.0115 | 0.0051 |
+| S2 | 0.0462 | 0.0476 | 0.0060 | 0.0416 | 0.0321–0.0511 | 0.0160 | 0.0054 | 0.0207 | 0.0109 |
+| S3 | 0.0447 | 0.0467 | 0.0074 | 0.0393 | 0.0300–0.0497 | 0.0103 | 0.0034 | 0.0160 | 0.0100 |
+| S4 | 0.0956 | 0.0987 | 0.0140 | 0.0847 | 0.0586–0.1128 | 0.0183 | 0.0026 | 0.0278 | 0.0154 |
+
+250k, 512-256, 320 deals:
+
+| group | full loss | split student | floor | gap | gap 90% range | top-2 full | top-3 full | top-2 split | top-3 split |
+|---|---|---|---|---|---|---|---|---|---|
+| all | 0.0784 | 0.0803 | 0.0080 | 0.0723 | 0.0629–0.0849 | 0.0219 | 0.0046 | 0.0280 | 0.0118 |
+| P1 | 0.0894 | 0.0942 | 0.0177 | 0.0766 | 0.0569–0.0971 | 0.0311 | 0.0142 | 0.0441 | 0.0302 |
+| P2 | 0.0849 | 0.0862 | 0.0064 | 0.0798 | 0.0305–0.1524 | 0.0594 | 0.0046 | 0.0641 | 0.0106 |
+| P3 | 0.0623 | 0.0638 | 0.0060 | 0.0578 | 0.0385–0.0793 | 0.0202 | 0.0033 | 0.0256 | 0.0089 |
+| P4 | 0.0648 | 0.0667 | 0.0100 | 0.0567 | 0.0381–0.0787 | 0.0132 | 0.0017 | 0.0205 | 0.0105 |
+| P5 | 0.1101 | 0.1126 | 0.0104 | 0.1022 | 0.0775–0.1279 | 0.0252 | 0.0073 | 0.0334 | 0.0163 |
+| P6 | 0.0994 | 0.1015 | 0.0078 | 0.0937 | 0.0589–0.1363 | 0.0049 | 0.0013 | 0.0113 | 0.0083 |
+| P7 | 0.0523 | 0.0533 | 0.0035 | 0.0497 | 0.0332–0.0680 | 0.0096 | 0.0040 | 0.0125 | 0.0073 |
+| P8 | 0.0638 | 0.0643 | 0.0021 | 0.0622 | 0.0388–0.0907 | 0.0114 | 0.0001 | 0.0129 | 0.0021 |
+| S1 | 0.0529 | 0.0542 | 0.0046 | 0.0496 | 0.0387–0.0623 | 0.0135 | 0.0024 | 0.0169 | 0.0065 |
+| S2 | 0.0600 | 0.0615 | 0.0060 | 0.0555 | 0.0420–0.0672 | 0.0182 | 0.0068 | 0.0230 | 0.0124 |
+| S3 | 0.0578 | 0.0598 | 0.0074 | 0.0525 | 0.0400–0.0680 | 0.0126 | 0.0030 | 0.0180 | 0.0093 |
+| S4 | 0.1427 | 0.1458 | 0.0140 | 0.1318 | 0.0973–0.1736 | 0.0432 | 0.0061 | 0.0542 | 0.0190 |
+
+**How to read it:**
+
+1. **The winner's curse is small.** The full-deal loss (0.0566%) and the honest gap to a 512-deal
+   teacher (0.0506%) differ by less than the floor: almost all of today's number is real loss, not
+   teacher noise. The 1024-512 networks are not measurably better than the 512-256 one (their
+   gaps overlap); the 250k student is clearly worse (0.072%).
+2. **The test set's own floor is about 0.008%** at 512 deals a half (0.018% for leaders, 0.014% in
+   the race for the money S4, 0.002–0.004% for the last places). A player at 0.01% is therefore
+   only just measurable with this test set; showing a difference of 0.01% between two players
+   needs the gap measure (paired, unbiased) rather than the raw loss.
+3. **The right card is almost always in the student's top 3.** If a search chose among the
+   student's top 3 cards, the loss would be about 0.003–0.005% on all deals and 0.010–0.012% split
+   (where the floor alone is 0.008%): about 0.01%, the target, with the search looking at three
+   cards instead of every legal one. Top 2 gives 0.013–0.019% on all deals (0.019–0.025% split).
+   The student alone is about five times further away.
+4. **Where the loss is:** the leader (place 1), place 5 and stratum S4 (a pair close to the money),
+   as before; the leader also has the highest floor (its choices are the closest calls).

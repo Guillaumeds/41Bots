@@ -135,16 +135,46 @@ pub struct DecisionCurve {
 
 /// The candidate the PIMC bot picks from per-candidate totals over `n` worlds.
 fn choose(totals: &[[u64; 4]], n: u64, team: u8) -> usize {
-    let mut best = 0;
+    choose_among(totals, n, team, 0..totals.len())
+}
+
+/// [`choose`] restricted to the candidates `among` (in the order given; ties to the first of
+/// them): the largest rounded mean over `n` worlds for `team`. The split-half measures' teacher
+/// picks with it, among all candidates or among a player's top K.
+///
+/// # Panics
+/// If `among` is empty.
+pub fn choose_among(
+    totals: &[[u64; 4]],
+    n: u64,
+    team: u8,
+    among: impl IntoIterator<Item = usize>,
+) -> usize {
+    let mut best = None;
     let mut best_v = 0;
-    for (j, t) in totals.iter().enumerate() {
-        let v = MoneyChance::mean_of_totals(*t, n).get(team);
-        if j == 0 || v > best_v {
-            best = j;
+    for j in among {
+        let v = MoneyChance::mean_of_totals(totals[j], n).get(team);
+        if best.is_none() || v > best_v {
+            best = Some(j);
             best_v = v;
         }
     }
-    best
+    best.expect("at least one candidate")
+}
+
+/// Per candidate, the four teams' totals over the worlds `idx` of `rows` (`rows[world][cand]`),
+/// added in the order of `idx`.
+pub fn totals_over(rows: &[Vec<[u64; 4]>], idx: &[usize]) -> Vec<[u64; 4]> {
+    let c = rows.first().map_or(0, Vec::len);
+    let mut t = vec![[0u64; 4]; c];
+    for &w in idx {
+        for (tot, v) in t.iter_mut().zip(&rows[w]) {
+            for x in 0..4 {
+                tot[x] += v[x];
+            }
+        }
+    }
+    t
 }
 
 /// One sweep over a permutation of worlds `perm` (indices into `rows`): the choice from each
@@ -208,10 +238,7 @@ pub fn decision_curve(
     // The M-world means and each candidate's loss under them (as `measure::score`).
     let ident: Vec<usize> = (0..m).collect();
     let (prefix_choices, full, _) = pass(rows, &ident, grid, m, team);
-    let c = rows[0].len();
-    let totals: Vec<[u64; 4]> = (0..c)
-        .map(|j| core::array::from_fn(|x| rows.iter().map(|w| w[j][x]).sum()))
-        .collect();
+    let totals = totals_over(rows, &ident);
     let vals: Vec<u64> = totals
         .iter()
         .map(|t| MoneyChance::mean_of_totals(*t, m as u64).get(team))
@@ -1271,6 +1298,109 @@ pub fn score_groups(
     }
 }
 
+// ---------------------------------------------------------------- split-half measures of a fixed player
+
+/// The split-half rule of `search student-check --split-half` (docs/STUDENT.md §14): a decision's
+/// deals with an **even deal index** form half A, those with an odd index half B (positions into
+/// `deals`, in deal order). Fixed and seed-free: deal `w`'s values depend only on the decision and
+/// `w` (docs/STUDENT.md §3), so the parity of `w` is as good as a random split and the same on
+/// every machine.
+pub fn split_halves(deals: &[u32]) -> (Vec<usize>, Vec<usize>) {
+    (0..deals.len()).partition(|&i| deals[i].is_multiple_of(2))
+}
+
+/// The candidate a teacher picks among a player's top `k` (`ranking[..k]`, the player's order,
+/// best first): the largest rounded mean over `n` worlds, ties to the lowest candidate index (the
+/// teacher's own rule). `k` at least the candidate count is the teacher's own choice.
+pub fn top_k_choice(totals: &[[u64; 4]], n: u64, team: u8, ranking: &[usize], k: usize) -> usize {
+    let mut among: Vec<usize> = ranking[..k.min(ranking.len())].to_vec();
+    among.sort_unstable();
+    choose_among(totals, n, team, among)
+}
+
+/// One decision's split-half numbers (docs/STUDENT.md §14). Each pair is `[A→B, B→A]`: chosen on
+/// half A and scored on half B, then the reverse. Every number is a difference of the deciding
+/// pair's **totals** over the scoring half (units of 2^-32 × [`SplitHalf::half`] deals), exact
+/// integers as the cross-fitted curve (`cv`) scores them; divide by `half · 2^32` for money chance.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SplitHalf {
+    /// Deals in each half.
+    pub half: u64,
+    /// The noisy oracle's loss: the scoring half's best less the choice of the other half's best
+    /// (the floor a teacher of `half` deals reaches on this test set).
+    pub floor: [i128; 2],
+    /// The player's loss on each half: that half's best less the player's (fixed) choice.
+    pub player: [i128; 2],
+    /// The other half's best less the player's choice, on the scoring half: unbiased for the gap
+    /// between a teacher of `half` deals and the player (it can be negative). `player − floor`.
+    pub gap: [i128; 2],
+    /// Per `ks[i]`: the scoring half's best less the teacher's pick among the player's top K,
+    /// picked on the other half.
+    pub top_k: Vec<[i128; 2]>,
+}
+
+/// [`SplitHalf`] of one decision: `rows[deal][cand]` (real pair order), `deals` their indices,
+/// `team` the deciding pair, `ranking` the player's candidates best first (`ranking[0]` its
+/// choice), `ks` the top-K sizes. Refused when the halves differ in size.
+pub fn split_half(
+    rows: &[Vec<[u64; 4]>],
+    deals: &[u32],
+    team: u8,
+    ranking: &[usize],
+    ks: &[usize],
+) -> Result<SplitHalf, String> {
+    let (a, b) = split_halves(deals);
+    if a.len() != b.len() || a.is_empty() {
+        return Err(format!(
+            "split-half: {} even and {} odd deal indices (equal halves needed)",
+            a.len(),
+            b.len()
+        ));
+    }
+    let h = a.len() as u64;
+    let all = 0..rows[0].len();
+    let ta = totals_over(rows, &a);
+    let tb = totals_over(rows, &b);
+    let t = usize::from(team);
+    let best_a = choose_among(&ta, h, team, all.clone());
+    let best_b = choose_among(&tb, h, team, all);
+    let sa = |j: usize| i128::from(ta[j][t]);
+    let sb = |j: usize| i128::from(tb[j][t]);
+    let s = ranking[0];
+    Ok(SplitHalf {
+        half: h,
+        floor: [sb(best_b) - sb(best_a), sa(best_a) - sa(best_b)],
+        player: [sb(best_b) - sb(s), sa(best_a) - sa(s)],
+        gap: [sb(best_a) - sb(s), sa(best_b) - sa(s)],
+        top_k: ks
+            .iter()
+            .map(|&k| {
+                let on_a = top_k_choice(&ta, h, team, ranking, k);
+                let on_b = top_k_choice(&tb, h, team, ranking, k);
+                [sb(best_b) - sb(on_a), sa(best_a) - sa(on_b)]
+            })
+            .collect(),
+    })
+}
+
+/// The loss, under the means of all deals, of the teacher's pick among the player's top `k`
+/// (`means` per candidate, as `student-check` judges: its best mean less the pick's).
+pub fn top_k_loss(means: &[MoneyChance], team: u8, ranking: &[usize], k: usize) -> u64 {
+    let pick = |among: &mut dyn Iterator<Item = usize>| {
+        let mut best: Option<usize> = None;
+        for j in among {
+            if best.is_none_or(|b| means[j].get(team) > means[b].get(team)) {
+                best = Some(j);
+            }
+        }
+        best.expect("at least one candidate")
+    };
+    let mut top: Vec<usize> = ranking[..k.min(ranking.len())].to_vec();
+    top.sort_unstable();
+    let best = pick(&mut (0..means.len()));
+    means[best].get(team) - means[pick(&mut top.into_iter())].get(team)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1619,5 +1749,88 @@ mod tests {
         assert_eq!(ms.kind, "rollout");
         let pos_total: usize = ms.groups[1..9].iter().map(|g| g.decisions).sum();
         assert_eq!(pos_total, 48);
+    }
+
+    /// Four deals (indices 10..13: A = 10, 12; B = 11, 13), three candidates, team 0 in units of
+    /// 2^-32 / 1000 to keep the sums readable.
+    fn split_rows() -> (Vec<Vec<[u64; 4]>>, Vec<u32>) {
+        let u = ONE / 1000;
+        let rows = vec![
+            vec![mc0(500 * u), mc0(520 * u), mc0(400 * u)], // deal 10 (A)
+            vec![mc0(500 * u), mc0(440 * u), mc0(410 * u)], // deal 11 (B)
+            vec![mc0(500 * u), mc0(500 * u), mc0(420 * u)], // deal 12 (A)
+            vec![mc0(500 * u), mc0(470 * u), mc0(430 * u)], // deal 13 (B)
+        ];
+        (rows, vec![10, 11, 12, 13])
+    }
+
+    #[test]
+    fn split_halves_go_by_deal_index_parity() {
+        assert_eq!(split_halves(&[10, 11, 12, 13]), (vec![0, 2], vec![1, 3]));
+        assert_eq!(split_halves(&[3, 4, 5, 6, 7]), (vec![1, 3], vec![0, 2, 4]));
+        let (rows, _) = split_rows();
+        assert!(split_half(&rows[..3], &[10, 11, 12], 0, &[0, 1, 2], &[]).is_err());
+    }
+
+    #[test]
+    fn split_half_measures_by_hand() {
+        let (rows, deals) = split_rows();
+        let t = |x: i128| x * i128::from(ONE / 1000);
+        // Half A: candidate 1 best (1020 against 1000 and 820). Half B: candidate 0 (1000
+        // against 910 and 840). The student plays candidate 2, then 0, then 1.
+        let sh = split_half(&rows, &deals, 0, &[2, 0, 1], &[1, 2, 3]).unwrap();
+        assert_eq!(sh.half, 2);
+        assert_eq!(sh.floor, [t(1000 - 910), t(1020 - 1000)]);
+        assert_eq!(sh.player, [t(1000 - 840), t(1020 - 820)]);
+        assert_eq!(sh.gap, [t(910 - 840), t(1000 - 820)]);
+        // The gap is the player's loss less the floor, both ways.
+        for i in 0..2 {
+            assert_eq!(sh.gap[i], sh.player[i] - sh.floor[i]);
+        }
+        // Top 1 is the student; top 2 is {0, 2}: candidate 0 on A and on B; top 3 the teacher.
+        assert_eq!(sh.top_k[0], sh.player);
+        assert_eq!(sh.top_k[1], [0, t(1020 - 1000)]);
+        assert_eq!(sh.top_k[2], sh.floor);
+    }
+
+    #[test]
+    fn a_player_equal_to_the_a_oracle_has_no_gap() {
+        let (rows, deals) = split_rows();
+        // Candidate 1 is half A's best: scored on B, the player and the oracle are one choice.
+        let sh = split_half(&rows, &deals, 0, &[1, 0, 2], &[]).unwrap();
+        assert_eq!(sh.gap[0], 0);
+        assert_eq!(sh.player[0], sh.floor[0]);
+        // Candidate 0 is half B's best: the same the other way.
+        let sh = split_half(&rows, &deals, 0, &[0, 1, 2], &[]).unwrap();
+        assert_eq!(sh.gap[1], 0);
+        // A gap can be negative: the student beats the A-oracle on B.
+        assert!(sh.gap[0] < 0);
+    }
+
+    #[test]
+    fn top_k_of_every_candidate_is_the_teachers_own_choice() {
+        let (rows, _) = split_rows();
+        let idx: Vec<usize> = (0..rows.len()).collect();
+        let means: Vec<MoneyChance> = totals_over(&rows, &idx)
+            .into_iter()
+            .map(|t| MoneyChance::mean_of_totals(t, rows.len() as u64))
+            .collect();
+        for ranking in [[0, 1, 2], [2, 1, 0], [1, 2, 0]] {
+            assert_eq!(top_k_loss(&means, 0, &ranking, 3), 0);
+            assert_eq!(top_k_loss(&means, 0, &ranking, 9), 0);
+            // K = 1 is the player's own loss.
+            let best = means.iter().map(|m| m.get(0)).max().unwrap();
+            assert_eq!(
+                top_k_loss(&means, 0, &ranking, 1),
+                best - means[ranking[0]].get(0)
+            );
+        }
+        // Means 500, 482.5, 415: the top two {2, 1} lose to candidate 0 by 17.5 thousandths.
+        let l = top_k_loss(&means, 0, &[2, 1, 0], 2);
+        assert_eq!(l, means[0].get(0) - means[1].get(0));
+        assert!(l > 0);
+        // Ties go to the lowest index whatever the player's order.
+        let tied = [MoneyChance(mc0(ONE / 2)), MoneyChance(mc0(ONE / 2))];
+        assert_eq!(top_k_choice(&[tied[0].0, tied[1].0], 1, 0, &[1, 0], 2), 0);
     }
 }

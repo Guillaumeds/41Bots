@@ -47,7 +47,7 @@
 //!                  [--seat-weights 2,1,1]
 //! search student-check --net STUDENT.safetensors --teacher SHARD.npy [--teacher …] --equity TABLE
 //!                  [--allow-stamp KEY …] [--boot 1000] [--boot-seed 1] [--json OUT]
-//!                  [--baseline rules] [--baseline random]
+//!                  [--baseline rules] [--baseline random] [--split-half] [--top-k 2,3]
 //! search hybrid-check --trick T --cut K --net WEIGHTS --equity TABLE
 //!                  [--decisions FILE | --count N] [--seed 1] [--start-hands 20000]
 //!                  [--first I] [--last J] [--ids …] [--to 320] [--label 1]
@@ -85,6 +85,12 @@
 //! `--baseline random` for a random legal card (`student::check::judge_random`: a seeded pick per
 //! decision, `--boot-seed`, with the exact expected loss of a random pick printed beside it); the
 //! JSON's `baselines` lists each one asked for (`baseline` stays the rules bot's).
+//! `--split-half` and `--top-k K` add the measures of docs/STUDENT.md §14 after everything else
+//! (`search::curves::split_half`, `top_k_loss`): the noisy oracle's floor, the student's loss on
+//! each half and the unbiased gap (deals split by deal-index parity, chosen on one half, scored on
+//! the other, both ways), and the loss when the teacher picks among the student's top K (all
+//! deals, and split-half with `--split-half`); the JSON gains `top_k` and `split_half`. Without
+//! them the output is as before.
 //! `labels` writes training labels for the oracle network O_K (docs/M3-HYBRID-SPEC.md §5,
 //! `search::oracle_labels`): a label shard (`nn::shard`, `.npy` records: encoded features, the exact
 //! value as four u64, the source tag, the trick) and a JSON sidecar `FILE.npy.json` with the
@@ -1702,7 +1708,64 @@ fn student_check(a: &Args) -> Result<(), String> {
         }
     }
     let t0 = Instant::now();
-    let judged = student::check::judge(&net, &mut shards, &table)?;
+    // The extra measures (docs/STUDENT.md §14): `--split-half` and `--top-k K` (repeated or
+    // `2,3`), computed in the same pass over the decisions.
+    let split = a.has("--split-half");
+    let mut ks: Vec<usize> = Vec::new();
+    for v in a.all("--top-k") {
+        for k in v.split(',') {
+            let k: usize = k
+                .parse()
+                .ok()
+                .filter(|&k| k >= 1)
+                .ok_or_else(|| format!("--top-k {v}: whole numbers of at least 1"))?;
+            ks.push(k);
+        }
+    }
+    let mut judged = Vec::new();
+    let mut extra = Extra::default();
+    let mut half: Option<u64> = None;
+    student::check::judge_each(&net, &mut shards, &table, |m, student, j| {
+        judged.push(j);
+        if !split && ks.is_empty() {
+            return Ok(());
+        }
+        let team = engine::team_of(m.head.pos.seat);
+        let ranking = student::check::rank(student, team);
+        let key = |v: Vec<i128>| student::check::Scored {
+            trick: j.trick,
+            place: j.place,
+            stratum: j.stratum,
+            v,
+        };
+        let means = m.means();
+        extra.full_loss.push(key(vec![i128::from(j.loss)]));
+        for (i, &k) in ks.iter().enumerate() {
+            let l = search::curves::top_k_loss(&means, team, &ranking, k);
+            extra.top_k_full.resize_with(ks.len(), Vec::new);
+            extra.top_k_full[i].push(key(vec![i128::from(l)]));
+        }
+        if split {
+            let rows: Vec<Vec<[u64; 4]>> = m
+                .values
+                .iter()
+                .map(|r| r.iter().map(|v| v.0).collect())
+                .collect();
+            let sh = search::curves::split_half(&rows, &m.deals, team, &ranking, &ks)?;
+            if *half.get_or_insert(sh.half) != sh.half {
+                return Err("split-half: the decisions' halves differ in size".into());
+            }
+            let both = |x: [i128; 2]| vec![x[0], x[1], x[0] + x[1]];
+            extra.floor.push(key(both(sh.floor)));
+            extra.player.push(key(both(sh.player)));
+            extra.gap.push(key(both(sh.gap)));
+            extra.top_k_split.resize_with(ks.len(), Vec::new);
+            for (i, x) in sh.top_k.into_iter().enumerate() {
+                extra.top_k_split[i].push(key(both(x)));
+            }
+        }
+        Ok(())
+    })?;
     let rows = student::check::report(&judged, a.num("--boot", 1000)?, a.num("--boot-seed", 1)?);
     print!("{}", student::check::print(&rows));
     println!(
@@ -1742,10 +1805,16 @@ fn student_check(a: &Args) -> Result<(), String> {
             x => return Err(format!("--baseline {x}: rules or random")),
         }
     }
+    let extra_json = extra.print(
+        split.then_some(half.unwrap_or(0)),
+        &ks,
+        a.num("--boot", 1000)?,
+        a.num("--boot-seed", 1)?,
+    );
     // `baseline`: the rules bot's (as before); `baselines`: every one asked for, in order.
     let baseline = baselines.iter().find(|b| b["bot"] == "rules-v1").cloned();
     if let Some(out) = a.get("--json") {
-        let v = serde_json::json!({
+        let mut v = serde_json::json!({
             "baseline": baseline,
             "baselines": baselines,
             "net": net_path,
@@ -1761,9 +1830,103 @@ fn student_check(a: &Args) -> Result<(), String> {
                 .map(|d| serde_json::json!([d.trick, d.place, d.stratum, d.n_cands, d.best, d.chosen, d.loss]))
                 .collect::<Vec<_>>(),
         });
+        // The extra measures' keys appear only when asked for (the rest stays as before).
+        if let serde_json::Value::Object(o) = extra_json {
+            for (k, x) in o {
+                v[k] = x;
+            }
+        }
         write_json(out, &v)?;
     }
     Ok(())
+}
+
+/// `student-check`'s extra measures (docs/STUDENT.md §14), per decision, whole numbers.
+#[derive(Default)]
+struct Extra {
+    /// The student's loss on all deals (the plain measure, for the identity check).
+    full_loss: Vec<student::check::Scored>,
+    /// Per K: the loss of the teacher's pick among the student's top K, all deals.
+    top_k_full: Vec<Vec<student::check::Scored>>,
+    /// `[A→B, B→A, sum]` of the noisy oracle's loss (the floor).
+    floor: Vec<student::check::Scored>,
+    /// `[A→B, B→A, sum]` of the student's loss on each half.
+    player: Vec<student::check::Scored>,
+    /// `[A→B, B→A, sum]` of the other half's best less the student's choice (the honest gap).
+    gap: Vec<student::check::Scored>,
+    /// Per K: `[A→B, B→A, sum]` of the loss of the top-K pick made on the other half.
+    top_k_split: Vec<Vec<student::check::Scored>>,
+}
+
+impl Extra {
+    /// Print the extra tables (after everything `student-check` printed before) and return them
+    /// as JSON keys (`top_k`, `split_half`): an empty object when none was asked for.
+    fn print(&self, half: Option<u64>, ks: &[usize], boots: u64, seed: u64) -> serde_json::Value {
+        use student::check::{print_measure, report_measure};
+        let mut out = serde_json::Map::new();
+        if !ks.is_empty() {
+            let cols = [("loss", 1u128)];
+            let rows = report_measure(&self.full_loss, &cols, boots, seed);
+            println!("student on all deals (the plain measure again, bounds of the loss):");
+            print!("{}", print_measure(&rows, &["loss"]));
+            let mut tk = Vec::new();
+            for (i, &k) in ks.iter().enumerate() {
+                let rows = report_measure(&self.top_k_full[i], &cols, boots, seed);
+                println!(
+                    "top-{k}: the teacher picks among the student's top {k} candidates, all deals:"
+                );
+                print!("{}", print_measure(&rows, &["loss"]));
+                tk.push(serde_json::json!({ "k": k, "rows": rows }));
+            }
+            out.insert("top_k".into(), serde_json::json!(tk));
+        }
+        if let Some(h) = half {
+            let h = u128::from(h);
+            let cols = [("a_to_b", h), ("b_to_a", h), ("mean", 2 * h)];
+            let names = ["a_to_b", "b_to_a", "mean"];
+            let mut sh = serde_json::Map::new();
+            sh.insert(
+                "rule".into(),
+                "half A = even deal index, half B = odd; chosen on one half, scored on the other"
+                    .into(),
+            );
+            sh.insert("half_deals".into(), serde_json::json!(h as u64));
+            for (key, title, ds) in [
+                (
+                    "floor",
+                    "the noisy oracle: the other half's best, scored on this half's best (the floor)",
+                    &self.floor,
+                ),
+                (
+                    "student",
+                    "the student's loss on each half (its choice fixed)",
+                    &self.player,
+                ),
+                (
+                    "gap",
+                    "the other half's best less the student's choice (unbiased; can be negative)",
+                    &self.gap,
+                ),
+            ] {
+                let rows = report_measure(ds, &cols, boots, seed);
+                println!("split-half ({h} deals a half), {title}:");
+                print!("{}", print_measure(&rows, &names));
+                sh.insert(key.into(), serde_json::json!(rows));
+            }
+            let mut tk = Vec::new();
+            for (i, &k) in ks.iter().enumerate() {
+                let rows = report_measure(&self.top_k_split[i], &cols, boots, seed);
+                println!(
+                    "split-half ({h} deals a half), top-{k}: picked among the student's top {k} on one half, scored on the other:"
+                );
+                print!("{}", print_measure(&rows, &names));
+                tk.push(serde_json::json!({ "k": k, "rows": rows }));
+            }
+            sh.insert("top_k".into(), serde_json::json!(tk));
+            out.insert("split_half".into(), serde_json::Value::Object(sh));
+        }
+        serde_json::Value::Object(out)
+    }
 }
 
 /// `search robber-burn`: the cost of searching another seat's rob burn inside the exact solve.

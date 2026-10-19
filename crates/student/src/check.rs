@@ -11,7 +11,7 @@ use equity::{MoneyChance, ONE};
 use serde_json::{Value, json};
 use solver::Leaf;
 
-use crate::data::{Shards, Uniform, feature_row};
+use crate::data::{Merged, Shards, Uniform, feature_row};
 use crate::net::{StudentNet, choose};
 
 /// One decision's outcome.
@@ -42,6 +42,21 @@ pub fn judge(
     leaf: &dyn Leaf,
 ) -> Result<Vec<Judged>, String> {
     let mut out = Vec::with_capacity(shards.groups.len());
+    judge_each(net, shards, leaf, |_, _, j| {
+        out.push(j);
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+/// [`judge`], handing each decision to `visit` in order: the merged decision (every deal's
+/// values), the student's values per candidate (real pair order) and its [`Judged`].
+pub fn judge_each(
+    net: &StudentNet,
+    shards: &mut Shards,
+    leaf: &dyn Leaf,
+    mut visit: impl FnMut(&Merged, &[MoneyChance], Judged) -> Result<(), String>,
+) -> Result<(), String> {
     for g in 0..shards.groups.len() {
         let m = shards.merged(g)?;
         let row = feature_row(&m, leaf, &Uniform)?;
@@ -58,7 +73,7 @@ pub fn judge(
             .zip(&teacher)
             .map(|(s, t)| own(s).abs_diff(own(t)))
             .sum();
-        out.push(Judged {
+        let j = Judged {
             trick: m.head.trick,
             place: m.head.place,
             stratum: m.head.stratum,
@@ -67,9 +82,18 @@ pub fn judge(
             chosen: chosen as u8,
             loss: own(&teacher[best]) - own(&teacher[chosen]),
             abs_err,
-        });
+        };
+        visit(&m, &student, j)?;
     }
-    Ok(out)
+    Ok(())
+}
+
+/// A player's candidates best first by its values for `team`, ties to the lower index:
+/// `rank(v, team)[0] == choose(v, team)`.
+pub fn rank(values: &[MoneyChance], team: u8) -> Vec<usize> {
+    let mut r: Vec<usize> = (0..values.len()).collect();
+    r.sort_by_key(|&i| core::cmp::Reverse(values[i].get(team)));
+    r
 }
 
 /// Judge the rules bot (`rules-v1`, `bots::decide`) the same way: a baseline for the student's
@@ -263,6 +287,118 @@ pub fn print(rows: &[Value]) -> String {
     s
 }
 
+/// One decision's whole-number scores for an extra measure (`student-check --split-half`,
+/// `--top-k`, docs/STUDENT.md §14): one value per column, signed, each in units of 2^-32 times
+/// its column's divisor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Scored {
+    /// Trick.
+    pub trick: u8,
+    /// Place in the trick (0 = leader).
+    pub place: u8,
+    /// Stratum (1–4).
+    pub stratum: u8,
+    /// One value per column.
+    pub v: Vec<i128>,
+}
+
+/// The groups of [`report`] (all, by trick, by place, by stratum) with their bootstrap tags.
+fn groups_of<T>(ds: &[T], key: impl Fn(&T) -> (u8, u8, u8)) -> Vec<(String, u64, Vec<&T>)> {
+    let mut out = vec![("all".to_string(), 0, ds.iter().collect())];
+    let mut add = |name: String, tag: u64, f: &dyn Fn(&T) -> bool| {
+        let sel: Vec<&T> = ds.iter().filter(|d| f(d)).collect();
+        if !sel.is_empty() {
+            out.push((name, tag, sel));
+        }
+    };
+    for t in 1..=5u8 {
+        add(format!("trick {t}"), 10 + u64::from(t), &|d| key(d).0 == t);
+    }
+    for p in 0..8u8 {
+        add(format!("place {}", p + 1), 20 + u64::from(p), &|d| {
+            key(d).1 == p
+        });
+    }
+    for s in 1..=4u8 {
+        add(format!("stratum S{s}"), 30 + u64::from(s), &|d| {
+            key(d).2 == s
+        });
+    }
+    out
+}
+
+/// A measure's report: per group (as [`report`]), each column's mean in % of money chance (`cols`
+/// gives each column's name and divisor) and the bootstrap bounds of the **last** column's mean:
+/// the 5% and 95% points of the same replicates [`summarise`] draws (the same seed, tags and
+/// picks, so the decisions resampled are the same in every measure and the upper bound of a plain
+/// loss equals `upper95_pct` of [`report`]). Whole-number sums; floats only in the rows.
+pub fn report_measure(
+    ds: &[Scored],
+    cols: &[(&str, u128)],
+    boots: u64,
+    boot_seed: u64,
+) -> Vec<Value> {
+    let last = cols.len() - 1;
+    groups_of(ds, |d| (d.trick, d.place, d.stratum))
+        .into_iter()
+        .map(|(name, tag, sel)| {
+            let n = sel.len() as u64;
+            // In the order `summarise` divides, so a plain loss prints exactly as `report`'s.
+            let pct =
+                |sum: i128, den: u128| 100.0 * (sum as f64 / n as f64 / den as f64 / ONE as f64);
+            let mut rng = Rng::derive(boot_seed, &[0x5C4E, tag]);
+            let mut reps: Vec<i128> = (0..boots)
+                .map(|_| (0..n).map(|_| sel[rng.bounded(n) as usize].v[last]).sum())
+                .collect();
+            reps.sort_unstable();
+            let total = |c: usize| sel.iter().map(|d| d.v[c]).sum::<i128>();
+            let (lo, up) = if boots == 0 {
+                (total(last), total(last))
+            } else {
+                (
+                    reps[(boots * 5 / 100) as usize],
+                    reps[((boots * 95).div_ceil(100) as usize).min(reps.len()) - 1],
+                )
+            };
+            let mut r = json!({ "group": name, "n": n });
+            for (c, (col, den)) in cols.iter().enumerate() {
+                r[format!("{col}_pct")] = json!(pct(total(c), *den));
+            }
+            r["lower95_pct"] = json!(pct(lo, cols[last].1));
+            r["upper95_pct"] = json!(pct(up, cols[last].1));
+            r
+        })
+        .collect()
+}
+
+/// [`report_measure`]'s rows as text: the columns' means, then the last column's bounds.
+pub fn print_measure(rows: &[Value], cols: &[&str]) -> String {
+    let mut s = format!("{:<12} {:>7}", "group", "n");
+    for c in cols {
+        s.push_str(&format!(" {:>10}", format!("{c} %")));
+    }
+    s.push_str(&format!(" {:>10} {:>10}\n", "lower95 %", "upper95 %"));
+    for r in rows {
+        s.push_str(&format!(
+            "{:<12} {:>7}",
+            r["group"].as_str().unwrap_or(""),
+            r["n"]
+        ));
+        for c in cols {
+            s.push_str(&format!(
+                " {:>10.5}",
+                r[format!("{c}_pct")].as_f64().unwrap_or(0.0)
+            ));
+        }
+        s.push_str(&format!(
+            " {:>10.5} {:>10.5}\n",
+            r["lower95_pct"].as_f64().unwrap_or(0.0),
+            r["upper95_pct"].as_f64().unwrap_or(0.0)
+        ));
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,5 +431,54 @@ mod tests {
         assert!(!print(&r).is_empty());
         // The same input, the same report.
         assert_eq!(report(&ds, 100, 1), r);
+    }
+
+    #[test]
+    fn rank_is_best_first_ties_to_the_lower_index() {
+        let v = |x: u64| MoneyChance([x, ONE - x, 0, 0]);
+        let vals = [v(10), v(30), v(30), v(20)];
+        assert_eq!(rank(&vals, 0), vec![1, 2, 3, 0]);
+        assert_eq!(rank(&vals, 0)[0], choose(&vals, 0));
+        assert_eq!(rank(&vals, 1), vec![0, 3, 1, 2]);
+    }
+
+    #[test]
+    fn a_measure_report_reproduces_the_plain_one() {
+        let ds = [d(0, 0), d(0, 1), d(ONE / 100, 0), d(ONE / 50, 2), d(3, 5)];
+        let plain = report(&ds, 200, 7);
+        let sc: Vec<Scored> = ds
+            .iter()
+            .map(|j| Scored {
+                trick: j.trick,
+                place: j.place,
+                stratum: j.stratum,
+                v: vec![i128::from(j.loss)],
+            })
+            .collect();
+        let m = report_measure(&sc, &[("loss", 1)], 200, 7);
+        assert_eq!(m.len(), plain.len());
+        for (a, b) in m.iter().zip(&plain) {
+            assert_eq!(a["group"], b["group"]);
+            assert_eq!(a["loss_pct"], b["mean_loss_pct"]);
+            assert_eq!(a["upper95_pct"], b["upper95_pct"]);
+            assert!(a["lower95_pct"].as_f64() <= a["loss_pct"].as_f64());
+        }
+        // Signed columns with divisors: [x, y, x + y] over 2 is the mean of x and y.
+        let sc: Vec<Scored> = [(-4i128, 2i128), (6, 0)]
+            .iter()
+            .map(|&(x, y)| Scored {
+                trick: 2,
+                place: 0,
+                stratum: 1,
+                v: vec![x, y, x + y],
+            })
+            .collect();
+        let r = report_measure(&sc, &[("a", 1), ("b", 1), ("mean", 2)], 50, 1);
+        let pct = |x: f64| 100.0 * x / ONE as f64;
+        assert_eq!(r[0]["a_pct"].as_f64(), Some(pct(1.0)));
+        assert_eq!(r[0]["b_pct"].as_f64(), Some(pct(1.0)));
+        assert_eq!(r[0]["mean_pct"].as_f64(), Some(pct(1.0)));
+        assert!(r[0]["lower95_pct"].as_f64().unwrap() < 0.0);
+        assert!(!print_measure(&r, &["a", "b", "mean"]).is_empty());
     }
 }
