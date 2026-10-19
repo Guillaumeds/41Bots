@@ -183,6 +183,7 @@ use crate::spike::build_table_from;
 use crate::{Ctx, sibling};
 
 mod audit;
+mod hlabels;
 mod reuse;
 
 use audit::additive;
@@ -403,6 +404,8 @@ pub(crate) struct Params {
     /// The harvest's settings (`harvest_cap_per_decision`, `harvest_positions`) when its shard is
     /// reused, for the audit loop's harvests (else they come from the generated harvest set).
     pub reused_harvest_args: Option<Vec<String>>,
+    /// `label_source` `"hybrid"`'s settings ([`hlabels`]); `None`: exact labels, as before.
+    pub hybrid_labels: Option<hlabels::HybridLabels>,
 }
 
 /// One label shard to make: its set, and its part (`(k, of)`, 1-based) when the set is made in
@@ -477,6 +480,7 @@ impl Params {
             "train_mode": self.additive.as_ref().map_or(json!({ "train_mode": "scratch" }), additive::Additive::to_json),
             "label_inputs": self.label_inputs.iter().map(reuse::LabelInput::to_json).collect::<Vec<_>>(),
             "harvest_seat_weights": self.seat_weights,
+            "label_source": hlabels::to_json(self.hybrid_labels.as_ref()),
         })
     }
 
@@ -533,14 +537,19 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         Value::Object(o) => o,
         _ => return Err("hybrid_rung: the settings must be an object".into()),
     };
-    let known =
-        |k: &str| KEYS.contains(&k) || additive::KEYS.contains(&k) || reuse::KEYS.contains(&k);
+    let known = |k: &str| {
+        KEYS.contains(&k)
+            || additive::KEYS.contains(&k)
+            || reuse::KEYS.contains(&k)
+            || hlabels::KEYS.contains(&k)
+    };
     if let Some(k) = o.keys().find(|k| !known(k.as_str())) {
         return Err(format!(
-            "hybrid_rung: unknown setting {k:?} (settings: {}, {}, {})",
+            "hybrid_rung: unknown setting {k:?} (settings: {}, {}, {}, {})",
             KEYS.join(", "),
             additive::KEYS.join(", "),
-            reuse::KEYS.join(", ")
+            reuse::KEYS.join(", "),
+            hlabels::KEYS.join(", ")
         ));
     }
     let u = |k: &str, d: u64| -> Result<u64, String> {
@@ -836,6 +845,16 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         .collect();
     let reused_train = label_inputs.iter().filter(|x| x.set != "val").count();
     let reused_val = label_inputs.iter().any(|x| x.set == "val");
+    // Hybrid training labels (`label_source`): only for shards this run makes for training.
+    let hybrid_labels = hlabels::parse(o, cut)?;
+    if hybrid_labels.is_some() && train.is_empty() && audit_rounds == 0 {
+        return Err(
+            "hybrid_rung: label_source \"hybrid\" labels the training shards this run makes, and \
+             it makes none (every training set comes from label_inputs and there is no audit \
+             loop): remove it, or mark the stored shards' label_inputs entries"
+                .into(),
+        );
+    }
     if train.is_empty() && reused_train == 0 {
         return Err(
             "hybrid_rung: labels_random, labels_rules, labels_harvest and labels_race are all 0: \
@@ -1041,6 +1060,17 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         label_inputs,
         seat_weights: additive::parse_seat_weights(o)?,
         reused_harvest_args,
+        hybrid_labels,
+    })
+}
+
+/// The trick an integer network file was trained for (its `trick` metadata).
+fn net_trick(p: &Path) -> Result<u64, String> {
+    fs::read(p).map_err(|e| e.to_string()).and_then(|b| {
+        let f = nn::safetensors::read(&b)?;
+        f.meta("trick")?
+            .parse::<u64>()
+            .map_err(|_| "its trick is not a number".to_string())
     })
 }
 
@@ -1485,6 +1515,7 @@ pub(crate) fn chunk_with(
         additive: None,
         pending_shards: Vec::new(),
         shared: Vec::new(),
+        label_kinds: Vec::new(),
     };
     r.rec.insert("params".into(), params.to_json());
     r.rec.insert("table".into(), table_rec);
@@ -1591,6 +1622,7 @@ pub(crate) fn chunk_with(
         "gpu": r.rec.get("device").and_then(|d| d.get("gpu_name")).cloned(),
         "net_int_sha256": r.rec.get("net").and_then(|n| n.get("int_sha256")).cloned(),
         "net_int_key": r.rec.get("net").and_then(|n| n.get("int_key")).cloned(),
+        "label_sources": r.label_sources(),
         "steps": r.steps,
         "warnings": r.warnings,
     }))
@@ -1637,6 +1669,9 @@ struct Rung<'a> {
     pending_shards: Vec<PathBuf>,
     /// Label shards shared so far (`upload_shards`), as each was made ([`Rung::share_shard`]).
     shared: Vec<SharedShard>,
+    /// Every label shard of the run (made or reused) with its set and label source, in order
+    /// ([`Rung::note_labels`]; `rung.json`'s `label_sources`).
+    label_kinds: Vec<Value>,
 }
 
 /// A label shard shared for later runs: its `shards.json` entry, its `manifest_inputs` pair,
@@ -1735,6 +1770,10 @@ impl Rung<'_> {
     }
 
     fn save(&mut self) -> Result<(), String> {
+        if !self.label_kinds.is_empty() {
+            self.rec
+                .insert("label_sources".into(), self.label_sources());
+        }
         self.rec.insert("steps".into(), json!(self.steps));
         self.rec.insert("warnings".into(), json!(self.warnings));
         write_json(
@@ -1757,6 +1796,10 @@ impl Rung<'_> {
         let mut want: Vec<(String, String)> = Vec::new();
         if let Some(h) = &self.p.harvest_net {
             want.push(("harvest_net".into(), h.clone()));
+        }
+        // Hybrid labels' network (`label_net`, the integer O_{cut+1}).
+        if let Some(h) = &self.p.hybrid_labels {
+            want.push(("label_net".into(), h.net.clone()));
         }
         if let Some((d, w)) = &self.p.golden_inputs {
             want.push(("golden_decisions".into(), d.clone()));
@@ -1788,7 +1831,7 @@ impl Rung<'_> {
         let progress = self.progress("inputs", json!({ "inputs": want.len() }));
         self.ctx.set_phase("chunk", progress);
         let remote = self.tools.remote.clone().ok_or(
-            "hybrid_rung: stored inputs (harvest_net, golden_decisions_input, \
+            "hybrid_rung: stored inputs (harvest_net, label_net, golden_decisions_input, \
              golden_worlds_input, audit_predicates_input, t1_decisions_input, t1_saved_inputs) \
              come from the remote store (R2, or RUNNER_REMOTE_DIR), and there is none",
         )?;
@@ -1819,14 +1862,7 @@ impl Rung<'_> {
         // and it would do so only when its first harvest starts, hours into a trick-2 run.
         if let Some(h) = self.inputs.get("harvest_net") {
             let cut = self.p.cut;
-            let trick = fs::read(h)
-                .map_err(|e| e.to_string())
-                .and_then(|b| {
-                    let f = nn::safetensors::read(&b)?;
-                    f.meta("trick")?
-                        .parse::<u64>()
-                        .map_err(|_| "its trick is not a number".to_string())
-                })
+            let trick = net_trick(h)
                 .map_err(|e| format!("hybrid_rung: harvest_net is not an integer network ({e})"))?;
             if trick != cut {
                 return Err(format!(
@@ -1836,6 +1872,24 @@ impl Rung<'_> {
                 ));
             }
             if let Some(x) = recs.get_mut("harvest_net") {
+                x["trick"] = json!(trick);
+            }
+        }
+        // Hybrid labels at cut `k` need O_{k+1}: `search labels --label-net` refuses another,
+        // but only when the first shard starts.
+        if let Some(h) = self.inputs.get("label_net") {
+            let next = self.p.cut + 1;
+            let trick = net_trick(h)
+                .map_err(|e| format!("hybrid_rung: label_net is not an integer network ({e})"))?;
+            if trick != next {
+                return Err(format!(
+                    "hybrid_rung: label_net is a trick-{trick} network (O_{trick}), but hybrid \
+                     labels at cut {} value the start of trick {next}: they need an O_{next} \
+                     (`search labels --label-net` refuses another)",
+                    self.p.cut
+                ));
+            }
+            if let Some(x) = recs.get_mut("label_net") {
                 x["trick"] = json!(trick);
             }
         }
@@ -2115,6 +2169,8 @@ impl Rung<'_> {
             if let (Some(w), "harvest") = (&self.p.seat_weights, s.source) {
                 c.args(["--seat-weights", w]);
             }
+            // Hybrid labels (`label_source`): training shards only, never the validation shard.
+            c.args(self.label_args(s.name));
             let base = self.progress(&step, json!({ "rows_total": s.count }));
             self.ctx.set_phase("chunk", base.clone());
             let log_path = self.ctx.logs.join(&log);
@@ -2148,6 +2204,10 @@ impl Rung<'_> {
             }
             if let Some(c) = side.get("rows_by_race_class") {
                 rec["rows_by_race_class"] = c.clone();
+            }
+            let labels = self.note_labels(&file, s.name, &side)?;
+            if let (Some(o), Value::Object(l)) = (rec.as_object_mut(), labels) {
+                o.extend(l);
             }
             rec["label_tables"] = tt_rec;
             recs.push(rec);
@@ -3169,6 +3229,49 @@ mod tests {
         }
     }
 
+    /// `label_source` (hybrid training labels, [`hlabels`]): exact by default and as before;
+    /// hybrid with its network; refused where it would label nothing, and a validation shard
+    /// reused as hybrid is refused.
+    #[test]
+    fn hybrid_label_settings() {
+        let key = |c: char| format!("inputs/sha256/{}", c.to_string().repeat(64));
+        let base = json!({ "cut": 2, "check": false, "labels_random": 10, "labels_rules": 0,
+                           "val_count": 5 });
+        assert_eq!(parse(&base).expect("exact").hybrid_labels, None);
+        assert_eq!(
+            parse(&base).expect("exact").to_json()["label_source"],
+            json!({ "label_source": "exact" })
+        );
+        let mut h = base.clone();
+        h["label_source"] = json!("hybrid");
+        h["label_net"] = json!(key('a'));
+        let p = parse(&h).expect("hybrid");
+        assert_eq!(
+            p.hybrid_labels,
+            Some(hlabels::HybridLabels {
+                net: "a".repeat(64),
+                exact_ppm: 0
+            })
+        );
+        assert_eq!(p.to_json()["label_source"]["label_net"], key('a'));
+        // Every training set reused and no audit loop: nothing to label with it.
+        let reused = json!({ "cut": 2, "check": false, "label_source": "hybrid",
+            "label_net": key('a'),
+            "label_inputs": [
+                { "set": "random", "seed": 511, "shard": key('b'), "sidecar": key('c') },
+                { "set": "val", "seed": 601, "shard": key('d'), "sidecar": key('e') } ] });
+        let e = parse(&reused).expect_err("nothing to label");
+        assert!(e.contains("makes none"), "{e}");
+        let mut v = reused.clone();
+        v["label_inputs"][1]["label_source"] = json!("hybrid");
+        v["labels_rules"] = json!(10);
+        let e = parse(&v).expect_err("a hybrid validation shard");
+        assert!(e.contains("validation shard is always exact"), "{e}");
+        let mut x = base.clone();
+        x["label_net"] = json!(key('a'));
+        assert!(parse(&x).is_err(), "label_net without hybrid");
+    }
+
     #[test]
     fn settings_are_read() {
         let p = parse(&json!({
@@ -3922,6 +4025,7 @@ mod tests {
             additive: None,
             pending_shards: Vec::new(),
             shared: Vec::new(),
+            label_kinds: Vec::new(),
         }
     }
 
@@ -4137,7 +4241,10 @@ echo "search $*" >> '{calls}'
 out=$(arg --out "$@")
 case $1 in
   labels) echo "labels: 3 of 7 rows, 1 s" >&2; echo npy > "$out"
-          echo '{{"shard_sha256": "{sha}", "count": 7}}' > "$out.json";;
+          case "$*" in
+            *--label-net*) echo '{{"shard_sha256": "{sha}", "count": 7, "label_source": "hybrid", "label_net_sha256": "{sha}", "rows_hybrid": 7, "rows_exact": 0}}' > "$out.json";;
+            *) echo '{{"shard_sha256": "{sha}", "count": 7}}' > "$out.json";;
+          esac;;
   decisions) echo '{{"id": 0}}' > "$out";;
   worlds) echo '{{"id": 0, "method": "exact"}}' > "$out"
           echo '{{"worlds_done": 1, "worlds_total": 1}}' > "$(arg --progress "$@")";;
@@ -5202,6 +5309,94 @@ esac
             trick,
             &BTreeMap::new(),
         )
+    }
+
+    /// Hybrid labels (`label_source`, [`hlabels`]): `label_net` is fetched and must be an
+    /// O_{cut+1}; `search labels --label-net` (and `--exact-share`) goes to the training shards
+    /// only, never to the validation shard; `rung.json` and the result list the shards by label
+    /// source.
+    #[cfg(unix)]
+    #[test]
+    fn hybrid_labels_go_to_the_training_shards_only() {
+        let f = fakes("hlabels");
+        let remote: Arc<dyn Remote> = Arc::new(crate::remote::DirRemote {
+            root: f.base.join("remote"),
+        });
+        let store = |name: &str, bytes: &[u8]| {
+            let p = f.base.join(name);
+            fs::write(&p, bytes).expect("write");
+            put_input(&*remote, &p, None).expect("stored").0
+        };
+        let net3 = store("o3.safetensors", &tiny_net(3));
+        let net4 = store("o4.safetensors", &tiny_net(4));
+        let settings = |label_net: &str| {
+            json!({
+                "cut": 3, "check": false, "labels_random": 7, "labels_rules": 0,
+                "labels_harvest": 9, "harvest_net": format!("inputs/sha256/{net3}"),
+                "val_count": 3, "widths": "16,8", "epochs": 1,
+                "label_source": "hybrid", "label_net": format!("inputs/sha256/{label_net}"),
+                "hybrid_exact_share": 0.05,
+            })
+        };
+        let tools = Tools {
+            search: f.search.clone(),
+            uv: f.uv.clone(),
+            python_dir: f.py.clone(),
+            nvidia_smi: f.base.join("no-such-nvidia-smi"),
+            remote: Some(Arc::clone(&remote)),
+        };
+        let run = |root: &str, params: &Params| {
+            fs::write(&f.calls, "").expect("truncate");
+            let mut ctx = Ctx::local("hybrid-test", &f.base.join(root), 4);
+            chunk_with(&mut ctx, params, &tools, &f.table, json!({}))
+        };
+        let params = parse(&settings(&net4)).expect("params");
+        let r = run("ok", &params).expect("the chunk runs");
+        let log = fs::read_to_string(&f.calls).expect("calls");
+        let root = f.base.join("ok");
+        let inputs = std::path::absolute(root.join("hybrid-work").join("inputs")).expect("abs");
+        let line = |p: &str| {
+            log.lines()
+                .find(|l| l.starts_with(p))
+                .unwrap_or_else(|| panic!("no call {p:?} in\n{log}"))
+        };
+        let hybrid = format!(
+            "--label-net {} --exact-share 0.050000",
+            inputs.join(&net4).display()
+        );
+        for train in [
+            "search labels --trick 3 --count 7 --seed 101 --source random",
+            "search labels --trick 3 --count 9 --seed 103 --source harvest",
+        ] {
+            assert!(line(train).contains(&hybrid), "{}", line(train));
+        }
+        let val = line("search labels --trick 3 --count 3 --seed 201");
+        assert!(!val.contains("--label-net"), "{val}");
+        let rung = read_json(&root.join("out").join("hybrid").join("rung.json")).expect("rung");
+        assert_eq!(rung["inputs"]["label_net"]["trick"], 4);
+        assert_eq!(rung["params"]["label_source"]["label_source"], "hybrid");
+        let sources = &rung["label_sources"];
+        assert_eq!(
+            sources["hybrid"],
+            json!(["t3-random-s101.npy", "t3-harvest-s103.npy"])
+        );
+        assert_eq!(sources["exact"], json!(["t3-val-s201.npy"]));
+        assert_eq!(r["label_sources"], *sources);
+        let recs = rung["labels"].as_array().expect("labels");
+        assert_eq!(recs[0]["label_source"], "hybrid");
+        assert_eq!(recs[0]["rows_hybrid"], 7);
+        assert_eq!(recs[2]["label_source"], "exact");
+
+        // A label_net of the cut's own trick (not the next) is refused before anything runs.
+        let params = parse(&settings(&net3)).expect("params");
+        let e = run("wrong", &params).expect_err("refused");
+        assert!(e.contains("label_net is a trick-3 network"), "{e}");
+        assert!(
+            !fs::read_to_string(&f.calls)
+                .expect("calls")
+                .contains("search labels"),
+            "nothing is labelled"
+        );
     }
 
     #[cfg(unix)]
@@ -6772,6 +6967,89 @@ esac
     /// `search hybrid-check --trick 1 --cut 2 --saved …` with the slices (the verification
     /// sample in round 1 only); no golden set and no mini golden set is made; the reports say
     /// plainly how thin the trick-1 evidence is (32 decisions in the file, 8 with saved worlds).
+    /// The trick-2 loop with hybrid training labels (`label_source`, [`hlabels`]): the base
+    /// training shard and the targeted harvest get `--label-net` (the stored O_3), the validation
+    /// shard and every audit shard never do; `rung.json`, the result and the audit summary list
+    /// the shards by label source.
+    #[cfg(unix)]
+    #[test]
+    fn audit_loop_at_trick_2_with_hybrid_labels() {
+        let f = fakes("audit2hybrid");
+        fs::write(f.base.join("audit-1.json"), GROUP_ONE).expect("write");
+        let tools = audit_tools(&f, false, None);
+        let remote = tools.remote.clone().expect("a remote store");
+        let store = |name: &str, bytes: &[u8]| {
+            let p = f.base.join(name);
+            fs::write(&p, bytes).expect("write");
+            put_input(&*remote, &p, None).expect("stored").0
+        };
+        let dec = store("decisions-t1.jsonl", b"{\"id\":0,\"trick\":1}\n");
+        let tables = store("tables.ckpt", b"{\"id\":0,\"w\":3}\n");
+        let o3 = store("o3.safetensors", &tiny_net(3));
+        let params = parse(&json!({
+            "cut": 2, "labels_random": 7, "labels_rules": 0, "val_count": 3,
+            "widths": "16,8", "epochs": 1, "audit_rounds": 2, "audit_rows": 50,
+            "audit_target_rows": 1000,
+            "label_source": "hybrid", "label_net": format!("inputs/sha256/{o3}"),
+            "t1_decisions_input": format!("inputs/sha256/{dec}"),
+            "t1_saved_inputs": [ { "run": "m3-t1-tables-1", "input": format!("sha256:{tables}") } ] }))
+        .expect("params");
+        let root = f.base.join("run");
+        let mut ctx = Ctx::local("hybrid-test", &root, 16);
+        let r = chunk_steps(&mut ctx, &params, &tools, &f.table, json!({})).expect("the loop runs");
+        let log = fs::read_to_string(&f.calls).expect("calls");
+        let inputs = std::path::absolute(root.join("hybrid-work/inputs")).expect("abs");
+        let hybrid = format!("--label-net {}", inputs.join(&o3).display());
+        let labels: Vec<&str> = log
+            .lines()
+            .filter(|l| l.starts_with("search labels"))
+            .collect();
+        let with = |p: &str| -> Vec<&str> {
+            labels
+                .iter()
+                .filter(|l| l.starts_with(p))
+                .copied()
+                .collect()
+        };
+        let base = with("search labels --trick 2 --count 7 --seed 101");
+        let val = with("search labels --trick 2 --count 3 --seed 201");
+        let audits = with("search labels --trick 2 --count 50");
+        let target = with("search labels --trick 2 --count 1000");
+        assert_eq!(
+            (base.len(), val.len(), audits.len(), target.len()),
+            (1, 1, 2, 1),
+            "{log}"
+        );
+        assert!(base[0].ends_with(&hybrid), "{}", base[0]);
+        assert!(target[0].ends_with(&hybrid), "{}", target[0]);
+        for l in val.iter().chain(&audits) {
+            assert!(!l.contains("--label-net"), "{l}");
+        }
+        let rung = read_json(&root.join("out/hybrid/rung.json")).expect("rung.json");
+        let sources = &rung["label_sources"];
+        assert_eq!(
+            sources["hybrid"],
+            json!(["t2-random-s101.npy", "t2-target-r1-s30151.npy"])
+        );
+        assert_eq!(
+            sources["exact"],
+            json!([
+                "t2-val-s201.npy",
+                "t2-audit-r1-s30101.npy",
+                "t2-audit-r2-s30102.npy"
+            ])
+        );
+        assert_eq!(r["label_sources"], *sources);
+        let summary =
+            fs::read_to_string(root.join("out/hybrid/audit/audit-summary.txt")).expect("summary");
+        assert!(
+            summary.contains("labels: hybrid training labels (H_3 with the network inputs/sha256/")
+                && summary.contains("hybrid t2-random-s101.npy, t2-target-r1-s30151.npy; exact"),
+            "{summary}"
+        );
+        let _ = fs::remove_dir_all(&f.base);
+    }
+
     #[cfg(unix)]
     #[test]
     fn audit_loop_at_trick_2() {

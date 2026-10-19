@@ -27,10 +27,17 @@
 //! the order given, then the generated ones; the validation shard is the reused one when given.
 //! Not with `label_parts` above 1.
 //!
+//! **Label source** (`hlabels`): an entry may say `"label_source": "hybrid"` for a stored shard
+//! of hybrid labels (default `"exact"`); the sidecar's `label_source` (none: exact) must be the
+//! entry's, so a hybrid shard is never taken for an exact one or the other way round. A
+//! validation entry is always exact (`"hybrid"` there is refused). `rung.json` lists every
+//! reused shard's label source with the run's own (`label_sources`).
+//!
 //! **Checked before use** (step "label inputs", at the start of the labels step): each file's
 //! SHA-256 is its key (`remote::fetch_input`); the sidecar records that SHA-256 for the shard
 //! (`shard_sha256`), the format `41bots-label-shard-v1`, this binary's encoder and feature count,
-//! the rung's trick (`cut`) and its outcomes, this binary's values version, the entry's seed, a
+//! the rung's trick (`cut`) and its outcomes, the entry's label source and this binary's values
+//! version (for hybrid labels `"<version>+O<cut+1>:<label_net_sha256>"`), the entry's seed, a
 //! source that fits the set, and the rows the shard's header holds (and the entry's `rows`, when
 //! given); the row weights, when given, are one per row. Anything else stops the chunk before any
 //! training.
@@ -55,7 +62,7 @@ pub(crate) const KEYS: [&str; 1] = ["label_inputs"];
 const SETS: [&str; 6] = ["random", "rules", "harvest", "race", "val", "extra"];
 
 /// The keys of an entry.
-const ENTRY_KEYS: [&str; 7] = [
+const ENTRY_KEYS: [&str; 8] = [
     "set",
     "seed",
     "rows",
@@ -63,6 +70,7 @@ const ENTRY_KEYS: [&str; 7] = [
     "sidecar",
     "weight",
     "rowweights",
+    "label_source",
 ];
 
 /// One stored shard to reuse.
@@ -77,6 +85,8 @@ pub(crate) struct LabelInput {
     pub rowweights: Option<String>,
     /// The shard's loss weight (1: no weight file).
     pub weight: f64,
+    /// `label_source`: `"exact"` (the default) or `"hybrid"` (`hlabels`).
+    pub label_source: &'static str,
 }
 
 impl LabelInput {
@@ -97,6 +107,9 @@ impl LabelInput {
         }
         if let Some(w) = &self.rowweights {
             v["rowweights"] = json!(input_key(w));
+        }
+        if self.label_source != "exact" {
+            v["label_source"] = json!(self.label_source);
         }
         v
     }
@@ -204,6 +217,23 @@ pub(crate) fn parse(o: &Map<String, Value>, label_parts: u64) -> Result<Vec<Labe
                  loss is the plain mean)"
             ));
         }
+        let label_source = match e.get("label_source") {
+            None | Some(Value::Null) => "exact",
+            Some(Value::String(s)) if s == "exact" => "exact",
+            Some(Value::String(s)) if s == "hybrid" => "hybrid",
+            Some(v) => {
+                return Err(format!(
+                    "hybrid_rung: label_inputs entry {n}: label_source {v}: \"exact\" (the \
+                     default) or \"hybrid\""
+                ));
+            }
+        };
+        if set == "val" && label_source != "exact" {
+            return Err(format!(
+                "hybrid_rung: label_inputs entry {n}: the validation shard is always exact \
+                 labels (label_source \"hybrid\" is for training shards only)"
+            ));
+        }
         if set == "val" && out.iter().any(|x| x.set == "val") {
             return Err("hybrid_rung: label_inputs: two validation shards".into());
         }
@@ -225,6 +255,7 @@ pub(crate) fn parse(o: &Map<String, Value>, label_parts: u64) -> Result<Vec<Labe
             sidecar,
             rowweights,
             weight,
+            label_source,
         });
     }
     Ok(out)
@@ -264,7 +295,18 @@ pub(crate) fn check_sidecar(
     want("n_features", json!(nn::encode::N_FEATURES))?;
     want("trick", json!(cut))?;
     want("outcomes", json!(nn::outcome::vocab(cut as u8)))?;
-    want("values_version", json!(search::measure::VALUES_VERSION))?;
+    let source = super::hlabels::sidecar_source(side);
+    if source != x.label_source {
+        return Err(format!(
+            "its sidecar says {source} labels, the entry {} (label_source): sources are never \
+             mixed in silence",
+            x.label_source
+        ));
+    }
+    want(
+        "values_version",
+        super::hlabels::want_values_version(side, source, cut)?,
+    )?;
     want("seed", json!(x.seed))?;
     if let Some(s) = x.source() {
         want("source", json!(s))?;
@@ -358,6 +400,10 @@ impl Rung<'_> {
                                   "bytes": fs::metadata(&path).map_or(0, |m| m.len()),
                                   "shard_sha256": x.shard, "reused": x.to_json(),
                                   "fetched": fetched, "seconds": secs(t1) });
+            let labels = self.note_labels(&file, x.set, &side)?;
+            if let (Some(o), Value::Object(l)) = (rec.as_object_mut(), labels) {
+                o.extend(l);
+            }
             if let Some(c) = side.get("rows_by_race_class") {
                 rec["rows_by_race_class"] = c.clone();
             }
@@ -428,6 +474,10 @@ impl Rung<'_> {
         let side = read_json(&with(".json")).unwrap_or(Value::Null);
         let mut e = json!({ "set": rec["name"], "seed": rec["seed"], "shard": input_key(sha),
                             "sidecar": sidecar });
+        // A hybrid shard's entry says so (`check_sidecar` requires it on reuse).
+        if super::hlabels::sidecar_source(&side) != "exact" {
+            e["label_source"] = json!(super::hlabels::sidecar_source(&side));
+        }
         if let Some(r) = side["rows"].as_u64().or_else(|| side["count"].as_u64()) {
             e["rows"] = json!(r);
         }
@@ -529,6 +579,19 @@ mod tests {
         );
         assert_eq!(v[2].to_json()["rowweights"], key('0'));
         assert_eq!(v[0].to_json()["shard"], key('a'));
+        assert_eq!(v[0].label_source, "exact");
+        assert!(v[0].to_json().get("label_source").is_none());
+        let h = parse(
+            &o(json!({ "label_inputs": [
+                { "set": "random", "seed": 321, "shard": key('a'), "sidecar": key('b'),
+                  "label_source": "hybrid" },
+                { "set": "val", "seed": 401, "shard": key('c'), "sidecar": key('d'),
+                  "label_source": "exact" } ] })),
+            1,
+        )
+        .expect("entries");
+        assert_eq!((h[0].label_source, h[1].label_source), ("hybrid", "exact"));
+        assert_eq!(h[0].to_json()["label_source"], "hybrid");
         let one = |e: Value| parse(&o(json!({ "label_inputs": [e] })), 1);
         for (e, want) in [
             (
@@ -572,6 +635,16 @@ mod tests {
                 "unknown key",
             ),
             (json!("x"), "not an object"),
+            (
+                json!({ "set": "val", "seed": 3, "shard": key('a'), "sidecar": key('b'),
+                        "label_source": "hybrid" }),
+                "validation shard is always exact",
+            ),
+            (
+                json!({ "set": "random", "seed": 3, "shard": key('a'), "sidecar": key('b'),
+                        "label_source": "silver" }),
+                "label_source",
+            ),
         ] {
             let err = one(e.clone()).expect_err("refused");
             assert!(err.contains(want), "{e}: {err}");
@@ -616,6 +689,7 @@ mod tests {
             sidecar: "b".repeat(64),
             rowweights: None,
             weight: 1.0,
+            label_source: "exact",
         };
         let good = json!({ "shard_sha256": "a".repeat(64), "format": "41bots-label-shard-v1",
                            "encoder": nn::encode::ENCODER, "n_features": nn::encode::N_FEATURES,
@@ -661,6 +735,45 @@ mod tests {
         );
         for set in ["random", "rules", "harvest", "race", "val"] {
             assert_eq!(generating_keys(set).len(), 2);
+        }
+        // Label sources (hybrid labels, `hlabels`): the sidecar's must be the entry's.
+        let sha = "e".repeat(64);
+        let mut hyb = good.clone();
+        hyb["label_source"] = json!("hybrid");
+        hyb["label_net_sha256"] = json!(sha);
+        hyb["values_version"] = json!(format!("{}+O4:{sha}", search::measure::VALUES_VERSION));
+        let e = check_sidecar(&x, &hyb, 3, 7).expect_err("an exact entry, a hybrid sidecar");
+        assert!(
+            e.contains("sidecar says hybrid labels, the entry exact"),
+            "{e}"
+        );
+        let xh = LabelInput {
+            label_source: "hybrid",
+            ..x.clone()
+        };
+        assert_eq!(check_sidecar(&xh, &hyb, 3, 7), Ok(()));
+        let e = check_sidecar(&xh, &good, 3, 7).expect_err("a hybrid entry, an exact sidecar");
+        assert!(
+            e.contains("sidecar says exact labels, the entry hybrid"),
+            "{e}"
+        );
+        // An explicit "exact" in the sidecar is the same as none.
+        let mut ex = good.clone();
+        ex["label_source"] = json!("exact");
+        assert_eq!(check_sidecar(&x, &ex, 3, 7), Ok(()));
+        // The hybrid values version names the sidecar's own network and the trick after the cut.
+        for (k, v) in [
+            ("values_version", json!(search::measure::VALUES_VERSION)),
+            (
+                "values_version",
+                json!(format!("{}+O3:{sha}", search::measure::VALUES_VERSION)),
+            ),
+            ("label_net_sha256", json!("f".repeat(64))),
+            ("label_net_sha256", json!("short")),
+        ] {
+            let mut s = hyb.clone();
+            s[k] = v.clone();
+            assert!(check_sidecar(&xh, &s, 3, 7).is_err(), "{k} {v}");
         }
         assert!(generating_keys("extra").is_empty());
     }

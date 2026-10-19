@@ -79,6 +79,20 @@ impl Outcomes {
             .find(|&o| self.mask >> o & 1 == 1 && self.vecs[o] == *v)
             .map(|o| o as u8)
     }
+
+    /// The label of a value that need not be an outcome's (a hybrid label, the mixture of the
+    /// network's endings at the start of a later trick): the first possible outcome (in
+    /// vocabulary order) whose money vector is nearest `v` by the sum of the four teams'
+    /// absolute differences, in units of 2^-32. For a value some possible outcome has exactly,
+    /// that outcome at distance 0: [`Outcomes::label`]'s.
+    pub fn nearest(&self, v: &MoneyChance) -> u8 {
+        let dist =
+            |m: &MoneyChance| -> u64 { m.0.iter().zip(v.0).map(|(a, b)| a.abs_diff(b)).sum() };
+        (0..self.n)
+            .filter(|&o| self.mask >> o & 1 == 1)
+            .min_by_key(|&o| (dist(&self.vecs[o]), o))
+            .expect("every position has a possible outcome") as u8
+    }
 }
 
 /// The outcomes of a canonical position with its match context, in the encoder's rotated team

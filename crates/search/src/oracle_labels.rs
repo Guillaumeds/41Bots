@@ -82,7 +82,7 @@ use serde::Serialize;
 use solver::frontier::{CanonPos, Frontier};
 use solver::{
     FastOptions, FrontierCut, MatchCtx, Position, SolveFamily, SolveMem, canonical, from_match,
-    solve_fast_with,
+    solve_fast_cut, solve_fast_with,
 };
 
 use crate::measure::{DecisionSpec, build_decision};
@@ -172,6 +172,11 @@ pub struct RowInfo {
     pub nodes: u64,
     /// The position's race class (`nn::outcome::race_class`, from the row: [`Row::race_class`]).
     pub class: u8,
+    /// Valued by the hybrid ([`Labeller::Hybrid`]) instead of exactly; `nodes` are then the
+    /// hybrid search's.
+    pub hybrid: bool,
+    /// Frontier (network) evaluations of a hybrid label's search (0 for an exact label).
+    pub evals: u64,
 }
 
 /// Rows' facts totalled (the sidecar's counts); the totals do not depend on the order rows are
@@ -192,6 +197,10 @@ pub struct RowCounts {
     pub nodes: u64,
     /// Rows by race class 0–4 (`nn::outcome::race_class`).
     pub by_class: [u64; N_RACE_CLASSES],
+    /// Rows valued by the hybrid ([`Labeller::Hybrid`]; 0 with exact labels).
+    pub hybrid: u64,
+    /// Frontier (network) evaluations of the hybrid labels' searches.
+    pub evals: u64,
 }
 
 impl RowCounts {
@@ -204,6 +213,8 @@ impl RowCounts {
         self.retries += u64::from(i.retries);
         self.nodes += i.nodes;
         self.by_class[usize::from(i.class)] += 1;
+        self.hybrid += u64::from(i.hybrid);
+        self.evals += i.evals;
     }
 
     /// Add another total.
@@ -223,6 +234,8 @@ impl RowCounts {
         for (a, b) in self.by_class.iter_mut().zip(o.by_class) {
             *a += b;
         }
+        self.hybrid += o.hybrid;
+        self.evals += o.evals;
     }
 }
 
@@ -339,24 +352,200 @@ pub(crate) fn exact_value(
     (sol.value.expect("no time cap"), sol.stats.nodes)
 }
 
-/// The label row of a position at the start of trick `pos.hand.tricks_done + 1` with exact value
-/// `v`: the encoding of its canonical form, the value in the encoder's rotated team order, and
-/// the outcome head's label, mask and vectors (the same for every source).
+/// Seed label of the exact anchor's draw ([`HybridLabels::exact_ppm`]).
+pub const ANCHOR: u64 = 0xA2C4;
+
+/// How a label's value is made (docs/m3-hybrid/audit-loop.md §12, "Trick-k labels from the
+/// trick-(k+1) network"). Only training shards are ever labelled by the hybrid; the validation
+/// shard, the audit shards and every golden set stay exact (the runner refuses otherwise).
+#[derive(Clone, Copy, Default)]
+pub enum Labeller<'a> {
+    /// The exact value (`solver::solve_fast_with` to the end of the hand): every label before
+    /// 2026-10-19, byte for byte.
+    #[default]
+    Exact,
+    /// The hybrid H_{k+1} of a position at the start of trick `k` ([`hybrid_value`]).
+    Hybrid(HybridLabels<'a>),
+}
+
+/// The hybrid labels' settings ([`Labeller::Hybrid`]).
+#[derive(Clone, Copy)]
+pub struct HybridLabels<'a> {
+    /// The network at the start of the next trick (normally the integer O_{k+1}, `nn::Oracle`);
+    /// the caller checks that it was trained for that trick (`search labels --label-net` does).
+    pub net: &'a dyn Frontier,
+    /// The exact anchor: rows labelled exactly instead, in parts per million (0: none). Row
+    /// `a`, place `b` of a shard with seed `s` and source tag `t` at trick `k` is exact when
+    /// `Rng::derive(s, [ANCHOR, t, k, a, b]).bounded(10⁶) < exact_ppm` ([`anchored`]): `a` is the
+    /// row index and `b` 0 for random-play and rules-v1 rows, `a` the decision and `b` the
+    /// position's place in the decision's sample for harvested rows (whose row index depends on
+    /// the decisions before). A pure function of the row's key, for any thread count and
+    /// schedule.
+    pub exact_ppm: u32,
+}
+
+impl Labeller<'_> {
+    /// Whether the row with key (`a`, `b`) of a shard (seed, source tag, trick) is labelled
+    /// exactly ([`HybridLabels::exact_ppm`]); always with [`Labeller::Exact`].
+    pub fn exact_row(&self, seed: u64, source: u8, trick: u8, a: u64, b: u64) -> bool {
+        match self {
+            Labeller::Exact => true,
+            Labeller::Hybrid(h) => anchored(h.exact_ppm, seed, source, trick, a, b),
+        }
+    }
+
+    /// The name a sidecar records (`label_source`).
+    pub fn name(&self) -> &'static str {
+        match self {
+            Labeller::Exact => "exact",
+            Labeller::Hybrid(_) => "hybrid",
+        }
+    }
+}
+
+/// The exact anchor's draw ([`HybridLabels::exact_ppm`]).
+pub fn anchored(ppm: u32, seed: u64, source: u8, trick: u8, a: u64, b: u64) -> bool {
+    ppm >= 1_000_000
+        || (ppm > 0
+            && Rng::derive(seed, &[ANCHOR, u64::from(source), u64::from(trick), a, b])
+                .bounded(1_000_000)
+                < u64::from(ppm))
+}
+
+/// The share of `--exact-share` (a decimal fraction from 0 to 1, at most six decimals) in parts
+/// per million, parsed from its digits (no float rounding).
+pub fn parse_exact_share(s: &str) -> Result<u32, String> {
+    let t = s.trim();
+    let bad = || format!("{s:?}: a share from 0 to 1 with at most six decimals, e.g. 0.1");
+    let (int, frac) = t.split_once('.').unwrap_or((t, ""));
+    if int.is_empty() && frac.is_empty()
+        || frac.len() > 6
+        || !int.bytes().all(|b| b.is_ascii_digit())
+        || !frac.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err(bad());
+    }
+    let i: u64 = if int.is_empty() {
+        0
+    } else {
+        int.parse().map_err(|_| bad())?
+    };
+    let f: u64 = format!("{frac:0<6}").parse().map_err(|_| bad())?;
+    let ppm = i
+        .checked_mul(1_000_000)
+        .and_then(|x| x.checked_add(f))
+        .ok_or_else(bad)?;
+    if ppm > 1_000_000 {
+        return Err(bad());
+    }
+    Ok(ppm as u32)
+}
+
+/// The solver table (megabytes) of a hybrid label's search (one trick to the frontier: small,
+/// and it never changes a value).
+pub const HYBRID_TT_MB: usize = 8;
+
+/// The hybrid value H_{k+1} of a position at the start of trick `k`: the exact solver
+/// (`solver::solve_fast_cut`, the same max^n, tie rule and leaf rule at the end of the hand or
+/// the game) through trick `k`, `net`'s value of every position reached at the start of trick
+/// `k + 1` (its canonical form, as everywhere the hybrid runs: `search hybrid-check`, `search
+/// worlds --method hybrid`, the student's teacher), and the solver nodes and frontier
+/// evaluations it took.
+pub fn hybrid_value(
+    pos: &Position,
+    ctx: MatchCtx,
+    leaf: &SharedLeaf,
+    net: &dyn Frontier,
+    mem: &mut SolveMem,
+) -> (MoneyChance, u64, u64) {
+    let cut = FrontierCut::new(pos.hand.tricks_done + 2, net);
+    let sol = solve_fast_cut(
+        pos,
+        ctx,
+        &DynLeaf(leaf),
+        label_opts(HYBRID_TT_MB),
+        Some(cut),
+        mem,
+        None,
+    );
+    (
+        sol.value.expect("no time cap"),
+        sol.stats.nodes,
+        sol.stats.frontier,
+    )
+}
+
+/// A position's label value as `labeller` makes it for the row with key (`a`, `b`) of a shard
+/// (seed, source tag): the exact value (`exact`, the search's own when it has one, else solved
+/// now with `opts`), or the hybrid's. Returns the value and the row's facts (nodes, `hybrid`,
+/// `evals`).
+#[allow(clippy::too_many_arguments)]
+fn label_value(
+    labeller: Labeller<'_>,
+    key: (u64, u8, u64, u64),
+    pos: &Position,
+    ctx: MatchCtx,
+    exact: Option<(MoneyChance, u64)>,
+    leaf: &SharedLeaf,
+    opts: FastOptions,
+    mem: &mut SolveMem,
+) -> (MoneyChance, RowInfo) {
+    let (seed, source, a, b) = key;
+    let trick = pos.hand.tricks_done + 1;
+    match labeller {
+        Labeller::Hybrid(h) if !labeller.exact_row(seed, source, trick, a, b) => {
+            let (v, nodes, evals) = hybrid_value(pos, ctx, leaf, h.net, mem);
+            let info = RowInfo {
+                nodes,
+                hybrid: true,
+                evals,
+                ..RowInfo::default()
+            };
+            (v, info)
+        }
+        _ => {
+            let (v, nodes) = exact.unwrap_or_else(|| exact_value(pos, ctx, leaf, opts, mem));
+            let info = RowInfo {
+                nodes,
+                ..RowInfo::default()
+            };
+            (v, info)
+        }
+    }
+}
+
+/// The label row of a position at the start of trick `pos.hand.tricks_done + 1` with value `v`:
+/// the encoding of its canonical form, the value in the encoder's rotated team order, and the
+/// outcome head's label, mask and vectors (the same for every source). For an exact value the
+/// label is the first possible outcome with exactly that vector.
+///
+/// With `hybrid`, the row of a hybrid value: the same encoding, value,
+/// mask and outcome vectors, and as the outcome label the first possible outcome whose money
+/// vector is nearest the value ([`nn::outcome::Outcomes::nearest`]: an exact value's own outcome,
+/// at distance 0, so the exact rule's label whenever one has the value). A hybrid value is in
+/// general a mixture of endings (the network's at the start of the next trick), so no outcome
+/// need have it exactly; the trainer reads the row unchanged (its mixture term fits the value).
 ///
 /// # Panics
-/// If no possible outcome has the exact value (the outcome vocabulary would be incomplete).
-fn labelled_row(
+/// If no possible outcome has an exact value (the outcome vocabulary would be incomplete).
+fn labelled_row_by(
     pos: &Position,
     ctx: &MatchCtx,
     v: MoneyChance,
     source: u8,
     leaf: &SharedLeaf,
+    hybrid: bool,
 ) -> Row {
     let c = canonical(pos);
     let (features, r) = encode(&c, ctx, leaf);
     let value = v.rotate(r % 4);
     let o = outcomes(&c, ctx, leaf);
-    let label = o.label(&value).unwrap_or_else(|| {
+    let label = if hybrid {
+        Some(o.nearest(&value))
+    } else {
+        o.label(&value)
+    };
+    let label = label.unwrap_or_else(|| {
         panic!(
             "no possible outcome has the exact value (the outcome vocabulary is incomplete): \
              {pos:?}"
@@ -373,21 +562,25 @@ fn labelled_row(
     }
 }
 
-/// Row `i` of a job, labelled (its exact solve with a table of `tt_mb` megabytes), and its facts.
+/// Row `i` of a job, labelled as `labeller` says (an exact solve with a table of `tt_mb`
+/// megabytes, or the hybrid), and its facts.
+#[allow(clippy::too_many_arguments)]
 fn make_row(
     job: &LabelJob,
     i: u64,
     starts: &[Vec<HandStartState>; 4],
     source: &dyn WorldSource,
     leaf: &SharedLeaf,
+    labeller: Labeller<'_>,
     tt_mb: usize,
     mem: &mut SolveMem,
 ) -> (Row, RowInfo) {
     let opts = label_opts(tt_mb);
     let (pos, ctx, mut info) = row_position(job, i, starts, source);
-    let (v, nodes) = exact_value(&pos, ctx, leaf, opts, mem);
-    info.nodes = nodes;
-    let row = labelled_row(&pos, &ctx, v, job.source.tag(), leaf);
+    let key = (job.seed, job.source.tag(), i, 0);
+    let (v, l) = label_value(labeller, key, &pos, ctx, None, leaf, opts, mem);
+    (info.nodes, info.hybrid, info.evals) = (l.nodes, l.hybrid, l.evals);
+    let row = labelled_row_by(&pos, &ctx, v, job.source.tag(), leaf, l.hybrid);
     info.class = row.race_class();
     (row, info)
 }
@@ -416,6 +609,20 @@ pub fn label_rows(
     leaf: &SharedLeaf,
     progress: Option<&AtomicUsize>,
 ) -> Vec<(Row, RowInfo)> {
+    label_rows_by(job, starts, leaf, Labeller::Exact, progress)
+}
+
+/// [`label_rows`] labelled as `labeller` says.
+///
+/// # Panics
+/// As [`label_rows`].
+pub fn label_rows_by(
+    job: &LabelJob,
+    starts: &[Vec<HandStartState>; 4],
+    leaf: &SharedLeaf,
+    labeller: Labeller<'_>,
+    progress: Option<&AtomicUsize>,
+) -> Vec<(Row, RowInfo)> {
     check_label_job(job);
     let source = BeliefSource::new();
     let mut rows = Vec::with_capacity(job.count as usize);
@@ -425,7 +632,16 @@ pub fn label_rows(
         label_window(job.trick, 1, job.threads),
         SolveMem::new,
         |mem, i| {
-            let r = make_row(job, i, starts, &source, leaf, tt_mb_for(job.trick), mem);
+            let r = make_row(
+                job,
+                i,
+                starts,
+                &source,
+                leaf,
+                labeller,
+                tt_mb_for(job.trick),
+                mem,
+            );
             if let Some(p) = progress {
                 p.fetch_add(1, Ordering::Relaxed);
             }
@@ -673,6 +889,34 @@ pub fn write_label_shard_with<W: Write + Send>(
     chunk_rows: u64,
     out: &mut W,
 ) -> Result<ShardSummary, String> {
+    write_label_shard_by(
+        job,
+        exec,
+        starts,
+        leaf,
+        Labeller::Exact,
+        progress,
+        chunk_rows,
+        out,
+    )
+}
+
+/// [`write_label_shard_with`] labelled as `labeller` says: the bytes of [`label_rows_by`], for
+/// any thread count and chunk size.
+///
+/// # Panics
+/// As [`label_rows`].
+#[allow(clippy::too_many_arguments)]
+pub fn write_label_shard_by<W: Write + Send>(
+    job: &LabelJob,
+    exec: LabelExec,
+    starts: &[Vec<HandStartState>; 4],
+    leaf: &SharedLeaf,
+    labeller: Labeller<'_>,
+    progress: Option<&AtomicUsize>,
+    chunk_rows: u64,
+    out: &mut W,
+) -> Result<ShardSummary, String> {
     check_label_job(job);
     let source = BeliefSource::new();
     stream_label_rows(
@@ -680,7 +924,7 @@ pub fn write_label_shard_with<W: Write + Send>(
         job.count,
         job.threads,
         chunk_rows,
-        |mem, i| make_row(job, i, starts, &source, leaf, exec.tt_mb, mem),
+        |mem, i| make_row(job, i, starts, &source, leaf, labeller, exec.tt_mb, mem),
         progress,
         out,
     )
@@ -1368,6 +1612,11 @@ pub struct LabelItem {
     pub family: Option<SolveFamily>,
     /// Their rows' shared facts.
     base: RowInfo,
+    /// Their decision's index `j` and the first position's place in its sample (the rows' keys
+    /// for the exact anchor, [`HybridLabels::exact_ppm`]).
+    key: (u64, u64),
+    /// The run's seed (the exact anchor's draw).
+    seed: u64,
 }
 
 /// Harvest decision `j` ([`harvest_root`]) searched and sampled: the hybrid's search from it for
@@ -1541,10 +1790,22 @@ pub fn harvest_plan(
 /// The rows of a unit of label work, in order: each position's exact value (the search's with
 /// [`Driver::Exact`], else solved now on `mem` with a table of `tt_mb`, the unit's solves sharing
 /// one table by its decision's family, the first from empty tables), encoded with its outcomes
-/// ([`labelled_row`]). A pure function of the item; `mem` never changes a value or a count.
+/// ([`labelled_row_by`]). A pure function of the item; `mem` never changes a value or a count.
 pub fn label_item(
     item: &LabelItem,
     leaf: &SharedLeaf,
+    tt_mb: usize,
+    mem: &mut SolveMem,
+) -> Vec<(Row, RowInfo)> {
+    label_item_by(item, leaf, Labeller::Exact, tt_mb, mem)
+}
+
+/// [`label_item`] labelled as `labeller` says: a hybrid row's value is [`hybrid_value`]'s (an
+/// exact value the search found is not used for it), an anchor row's the exact one.
+pub fn label_item_by(
+    item: &LabelItem,
+    leaf: &SharedLeaf,
+    labeller: Labeller<'_>,
     tt_mb: usize,
     mem: &mut SolveMem,
 ) -> Vec<(Row, RowInfo)> {
@@ -1553,20 +1814,22 @@ pub fn label_item(
         Some(f) => mem.share(f),
         None => mem.unshare(),
     }
+    let (j, first) = item.key;
     item.sample
         .iter()
-        .map(|s| {
-            let (value, nodes) = match s.exact {
-                Some(x) => x,
-                None => exact_value(&s.pos, s.ctx, leaf, opts, mem),
-            };
-            let row = labelled_row(&s.pos, &s.ctx, value, SOURCE_HARVEST, leaf);
+        .enumerate()
+        .map(|(p, s)| {
+            let key = (item.seed, SOURCE_HARVEST, j, first + p as u64);
+            let (value, l) = label_value(labeller, key, &s.pos, s.ctx, s.exact, leaf, opts, mem);
+            let row = labelled_row_by(&s.pos, &s.ctx, value, SOURCE_HARVEST, leaf, l.hybrid);
             let class = row.race_class();
             (
                 row,
                 RowInfo {
-                    nodes,
+                    nodes: l.nodes,
                     class,
+                    hybrid: l.hybrid,
+                    evals: l.evals,
                     ..item.base
                 },
             )
@@ -1576,16 +1839,20 @@ pub fn label_item(
 
 /// The units of label work of a decision's first `keep` sampled positions, each with its
 /// weight (its rows): `group` positions a unit ([`label_group_for`]).
-fn label_items(plan: &DecisionPlan, keep: usize, group: usize) -> Vec<(LabelItem, u64)> {
+fn label_items(plan: &DecisionPlan, keep: usize, group: usize, seed: u64) -> Vec<(LabelItem, u64)> {
     let base = plan.row_base();
+    let g = group.max(1);
     plan.sample[..keep]
-        .chunks(group.max(1))
-        .map(|c| {
+        .chunks(g)
+        .enumerate()
+        .map(|(n, c)| {
             (
                 LabelItem {
                     sample: c.to_vec(),
                     family: plan.family,
                     base,
+                    key: (plan.info.id, (n * g) as u64),
+                    seed,
                 },
                 c.len() as u64,
             )
@@ -1614,6 +1881,7 @@ pub fn harvest_decision(
         leaf,
         source,
         driver,
+        Labeller::Exact,
         tt_mb_for(job.trick),
         mem,
     )
@@ -1628,6 +1896,7 @@ fn harvest_decision_with(
     leaf: &SharedLeaf,
     source: &dyn WorldSource,
     driver: Driver<'_>,
+    labeller: Labeller<'_>,
     tt_mb: usize,
     mem: &mut SolveMem,
 ) -> DecisionHarvest {
@@ -1648,8 +1917,10 @@ fn harvest_decision_with(
         sample: plan.sample.clone(),
         family: plan.family,
         base: plan.row_base(),
+        key: (plan.info.id, 0),
+        seed: job.seed,
     };
-    let rows = label_item(&item, leaf, tt_mb, &mut label_mem);
+    let rows = label_item_by(&item, leaf, labeller, tt_mb, &mut label_mem);
     DecisionHarvest {
         positions: plan.sample.iter().map(|s| (s.pos, s.ctx)).collect(),
         info: plan.info,
@@ -1717,6 +1988,7 @@ fn run_harvest<T: Send>(
     starts: &[Vec<HandStartState>; 4],
     leaf: &SharedLeaf,
     driver: Driver<'_>,
+    labeller: Labeller<'_>,
     progress: Option<&AtomicUsize>,
     finish: impl Fn(Vec<(Row, RowInfo)>) -> T + Sync,
     mut decision: impl FnMut(&HarvestDecision, &[u32], &[Vec<u32>]),
@@ -1764,11 +2036,11 @@ fn run_harvest<T: Send>(
                     info.rows = k as u32;
                     decision(&info, &plan.reached_groups, &groups_of(&plan.row_groups, k));
                     search_time += plan.search_time;
-                    Ok((label_items(&plan, k, exec.group), go))
+                    Ok((label_items(&plan, k, exec.group, job.seed), go))
                 },
                 |(_, label_mem), item| {
                     let t = Instant::now();
-                    let r = label_item(&item, leaf, exec.tt_mb, label_mem);
+                    let r = label_item_by(&item, leaf, labeller, exec.tt_mb, label_mem);
                     if let Some(p) = progress {
                         p.fetch_add(r.len(), Ordering::Relaxed);
                     }
@@ -1788,7 +2060,7 @@ fn run_harvest<T: Send>(
                 SolveMem::new,
                 |mem, j| {
                     let out = harvest_decision_with(
-                        job, j, starts, leaf, &source, driver, exec.tt_mb, mem,
+                        job, j, starts, leaf, &source, driver, labeller, exec.tt_mb, mem,
                     );
                     if let Some(p) = progress {
                         p.fetch_add(out.rows.len(), Ordering::Relaxed);
@@ -1854,6 +2126,23 @@ pub fn harvest_rows_with(
     driver: Driver<'_>,
     progress: Option<&AtomicUsize>,
 ) -> (Vec<(Row, RowInfo)>, Vec<HarvestDecision>) {
+    harvest_rows_by(job, exec, starts, leaf, driver, Labeller::Exact, progress)
+}
+
+/// [`harvest_rows_with`] labelled as `labeller` says (the same positions and decisions; only
+/// the labels' values, and with them the outcome labels, differ).
+///
+/// # Panics
+/// As [`harvest_rows`].
+pub fn harvest_rows_by(
+    job: &HarvestJob,
+    exec: LabelExec,
+    starts: &[Vec<HandStartState>; 4],
+    leaf: &SharedLeaf,
+    driver: Driver<'_>,
+    labeller: Labeller<'_>,
+    progress: Option<&AtomicUsize>,
+) -> (Vec<(Row, RowInfo)>, Vec<HarvestDecision>) {
     let mut out = Vec::with_capacity(job.count as usize);
     let mut decisions = Vec::new();
     run_harvest(
@@ -1863,6 +2152,7 @@ pub fn harvest_rows_with(
         starts,
         leaf,
         driver,
+        labeller,
         progress,
         |r| r,
         |d, _, _| decisions.push(d.clone()),
@@ -1954,6 +2244,36 @@ pub fn write_harvest_shard_with<W: Write + Send>(
     progress: Option<&AtomicUsize>,
     out: &mut W,
 ) -> Result<ShardSummary, String> {
+    write_harvest_shard_by(
+        job,
+        exec,
+        max_decisions,
+        starts,
+        leaf,
+        driver,
+        Labeller::Exact,
+        progress,
+        out,
+    )
+}
+
+/// [`write_harvest_shard_with`] labelled as `labeller` says: the bytes of [`harvest_rows_by`]
+/// (cut as `max_decisions` says), for any schedule, table size and thread count.
+///
+/// # Panics
+/// As [`write_harvest_shard_upto`].
+#[allow(clippy::too_many_arguments)]
+pub fn write_harvest_shard_by<W: Write + Send>(
+    job: &HarvestJob,
+    exec: LabelExec,
+    max_decisions: Option<u64>,
+    starts: &[Vec<HandStartState>; 4],
+    leaf: &SharedLeaf,
+    driver: Driver<'_>,
+    labeller: Labeller<'_>,
+    progress: Option<&AtomicUsize>,
+    out: &mut W,
+) -> Result<ShardSummary, String> {
     check_harvest_job(job);
     assert!(max_decisions != Some(0), "a bound of at least one decision");
     let v = nn::outcome::vocab(job.trick);
@@ -1970,6 +2290,7 @@ pub fn write_harvest_shard_with<W: Write + Send>(
             starts,
             leaf,
             driver,
+            labeller,
             progress,
             |rows| {
                 let mut bytes = Vec::with_capacity(rows.len() * rb);
@@ -3614,4 +3935,369 @@ mod tests {
         assert!(out == want);
         assert_eq!(sum.counts, counts_of(&rows));
     }
+
+    // ------------------------------------------------------------ hybrid labels
+
+    /// The hybrid value of `pos` computed independently: the naive solver (`solver::solve_cut`,
+    /// no transposition table, no equivalence merging) with the network at the next trick.
+    fn naive_hybrid(pos: &Position, ctx: MatchCtx, net: &dyn Frontier) -> MoneyChance {
+        let cut = FrontierCut::new(pos.hand.tricks_done + 2, net);
+        solver::solve_cut(
+            pos,
+            ctx,
+            &SyntheticLeaf,
+            solver::Options::default(),
+            Some(cut),
+        )
+        .value
+        .expect("no time cap")
+    }
+
+    /// Hybrid labels (`Labeller::Hybrid`): the same positions as the exact labels of the same
+    /// job (encodings, source, trick, mask and outcome vectors), each valued by H_{k+1} as the
+    /// naive solver computes it independently (rotated as encoded), the outcome label the
+    /// nearest possible outcome; byte-identical for any thread count and chunk size; and the
+    /// rows' facts say hybrid with the network's evaluations.
+    #[test]
+    fn hybrid_labels_are_h_next_on_the_exact_rows_positions() {
+        let starts = collect_starts(400, 9);
+        let l = leaf();
+        for (trick, source, count) in [
+            (4, Source::Random, 24),
+            (3, Source::Rules, 12),
+            (2, Source::Random, 4),
+        ] {
+            let net = random_oracle(trick + 1, 41 + u64::from(trick));
+            let hy = Labeller::Hybrid(HybridLabels {
+                net: &net,
+                exact_ppm: 0,
+            });
+            let job = |threads| LabelJob {
+                trick,
+                count,
+                seed: 7,
+                source,
+                threads,
+            };
+            let rows = label_rows_by(&job(1), &starts, &*l, hy, None);
+            for (i, (row, info)) in rows.iter().enumerate() {
+                let (pos, ctx, base) =
+                    row_position(&job(1), i as u64, &starts, &BeliefSource::new());
+                let h = naive_hybrid(&pos, ctx, &net);
+                let c = canonical(&pos);
+                let r = nn::encode::rotation(&c);
+                assert_eq!(row.value, h.rotate(r % 4), "trick {trick} row {i}");
+                assert_eq!(row.value.0.iter().sum::<u64>(), 1 << 32);
+                let o = outcomes(&c, &ctx, &*l);
+                assert_eq!(row.label, o.nearest(&row.value));
+                assert_eq!((row.mask, &row.outcomes), (o.mask, &o.vecs));
+                assert_eq!(row.mask >> row.label & 1, 1);
+                assert!(info.hybrid, "{info:?}");
+                assert_eq!((info.stratum, info.position), (base.stratum, base.position));
+                assert_eq!(info.class, row.race_class());
+            }
+            let streamed = |threads, chunk| {
+                let mut out = Vec::new();
+                let exec = LabelExec::for_trick(trick);
+                let sum = write_label_shard_by(
+                    &job(threads),
+                    exec,
+                    &starts,
+                    &*l,
+                    hy,
+                    None,
+                    chunk,
+                    &mut out,
+                )
+                .expect("written");
+                (out, sum)
+            };
+            let want = nn::shard::to_npy(
+                &rows.iter().map(|r| r.0.clone()).collect::<Vec<_>>(),
+                nn::outcome::vocab(trick),
+            );
+            let (a, sa) = streamed(1, 1);
+            let (b, sb) = streamed(3, 5);
+            assert!(a == want && b == want, "trick {trick}");
+            assert_eq!(sa.counts.hybrid, count);
+            assert!(sa.counts.evals > 0, "the network values the frontier");
+            assert_eq!(identity(&sa), identity(&sb));
+            // The positions are the exact labels' (at trick 2 their exact solves are seconds
+            // each: the positions are compared, not solved).
+            if trick >= 3 {
+                let exact = label_rows(&job(1), &starts, &*l, None);
+                for ((e, _), (h, _)) in exact.iter().zip(&rows) {
+                    assert_eq!(
+                        (&e.features, e.source, e.trick, e.mask, &e.outcomes),
+                        (&h.features, h.source, h.trick, h.mask, &h.outcomes)
+                    );
+                }
+                assert!(
+                    exact.iter().zip(&rows).any(|(e, h)| e.0.value != h.0.value),
+                    "a random network is not the exact solver"
+                );
+            }
+        }
+    }
+
+    /// The nearest outcome is the exact rule's label for every exact value, so an exact row's
+    /// label never depends on which rule made it.
+    #[test]
+    fn the_nearest_outcome_of_an_exact_value_is_its_label() {
+        let starts = collect_starts(400, 9);
+        let l = leaf();
+        let rows = label_rows(
+            &LabelJob {
+                trick: 4,
+                count: 40,
+                seed: 19,
+                source: Source::Random,
+                threads: 2,
+            },
+            &starts,
+            &*l,
+            None,
+        );
+        for (row, _) in &rows {
+            let o = nn::outcome::Outcomes {
+                n: row.outcomes.len(),
+                mask: row.mask,
+                vecs: row.outcomes.clone(),
+            };
+            assert_eq!(o.nearest(&row.value), row.label);
+            assert_eq!(o.label(&row.value), Some(row.label));
+        }
+    }
+
+    /// The exact anchor: a share of the rows labelled exactly, drawn by each row's key. All of
+    /// them (10⁶ per million) is the exact shard byte for byte; a half gives exact rows exactly
+    /// where `anchored` says (the exact shard's rows there, the hybrid shard's elsewhere).
+    #[test]
+    fn the_exact_anchor_is_drawn_by_the_rows_key() {
+        let starts = collect_starts(400, 9);
+        let l = leaf();
+        let net = random_oracle(4, 43);
+        let job = LabelJob {
+            trick: 3,
+            count: 16,
+            seed: 23,
+            source: Source::Random,
+            threads: 2,
+        };
+        let by = |ppm| {
+            label_rows_by(
+                &job,
+                &starts,
+                &*l,
+                Labeller::Hybrid(HybridLabels {
+                    net: &net,
+                    exact_ppm: ppm,
+                }),
+                None,
+            )
+        };
+        let exact = label_rows(&job, &starts, &*l, None);
+        let hybrid = by(0);
+        let rows_of = |r: &[(Row, RowInfo)]| r.iter().map(|x| x.0.clone()).collect::<Vec<_>>();
+        assert_eq!(rows_of(&by(1_000_000)), rows_of(&exact));
+        let half = by(500_000);
+        let mut n_exact = 0;
+        for (i, (row, info)) in half.iter().enumerate() {
+            let a = anchored(500_000, 23, SOURCE_RANDOM, 3, i as u64, 0);
+            assert_eq!(info.hybrid, !a);
+            let want = if a { &exact[i].0 } else { &hybrid[i].0 };
+            assert_eq!(row, want, "row {i}");
+            n_exact += usize::from(a);
+        }
+        assert!(
+            n_exact > 0 && n_exact < half.len(),
+            "{n_exact} of {}",
+            half.len()
+        );
+        assert!(!anchored(0, 23, SOURCE_RANDOM, 3, 0, 0));
+        assert!(anchored(1_000_000, 23, SOURCE_RANDOM, 3, 0, 0));
+        assert_eq!(parse_exact_share("0.1"), Ok(100_000));
+        assert_eq!(parse_exact_share("1"), Ok(1_000_000));
+        assert_eq!(parse_exact_share(".25"), Ok(250_000));
+        assert_eq!(parse_exact_share("0.000001"), Ok(1));
+        for bad in ["", ".", "1.5", "0.1234567", "-0.1", "x", "2"] {
+            assert!(parse_exact_share(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// Hybrid labels on a harvest: the same decisions and positions as the exact harvest (each
+    /// row's encoding, mask and outcomes), each valued by H_{k+1} (the naive solver's, rotated as
+    /// encoded), whatever the search's own exact values; the exact anchor by (decision, place);
+    /// and the shard byte-identical over schedules and thread counts.
+    #[test]
+    fn hybrid_labels_on_a_harvest() {
+        let starts = collect_starts(400, 9);
+        let l = leaf();
+        let net5 = random_oracle(5, 47);
+        let shares = parse_band_shares("0.4,0.4,0.2").expect("shares");
+        let job = |threads| HarvestJob {
+            count: 30,
+            threads,
+            ..harvest_job(4, vec![3], shares, 4)
+        };
+        let hy = |ppm| {
+            Labeller::Hybrid(HybridLabels {
+                net: &net5,
+                exact_ppm: ppm,
+            })
+        };
+        let exec = LabelExec::for_trick(4);
+        let (exact, de) = harvest_rows(&job(1), &starts, &*l, Driver::Exact, None);
+        let (rows, dh) = harvest_rows_by(&job(1), exec, &starts, &*l, Driver::Exact, hy(0), None);
+        assert_eq!(
+            serde_json::to_string(&de).expect("json"),
+            serde_json::to_string(&dh).expect("json")
+        );
+        assert_eq!(rows.len(), exact.len());
+        let mut keys = Vec::new();
+        for d in &dh {
+            for p in 0..u64::from(d.rows) {
+                keys.push((d.id, p));
+            }
+        }
+        for ((e, _), (h, info)) in exact.iter().zip(&rows) {
+            assert_eq!(
+                (&e.features, e.source, e.mask, &e.outcomes),
+                (&h.features, h.source, h.mask, &h.outcomes)
+            );
+            assert!(info.hybrid);
+        }
+        // Each row's value is H_5 of its position: the harvest's own positions, re-reached.
+        let mut mem = SolveMem::new();
+        let source = BeliefSource::new();
+        let mut i = 0;
+        for d in &dh {
+            let out = harvest_decision(
+                &job(1),
+                d.id,
+                &starts,
+                &*l,
+                &source,
+                Driver::Exact,
+                &mut mem,
+            );
+            for (pos, ctx) in out.positions.iter().take(d.rows as usize) {
+                let h = naive_hybrid(pos, *ctx, &net5);
+                let r = nn::encode::rotation(&canonical(pos));
+                assert_eq!(rows[i].0.value, h.rotate(r % 4), "row {i}");
+                i += 1;
+            }
+        }
+        assert_eq!(i, rows.len());
+        // The anchor: by (decision, place in its sample).
+        let (half, _) = harvest_rows_by(
+            &job(1),
+            exec,
+            &starts,
+            &*l,
+            Driver::Exact,
+            hy(500_000),
+            None,
+        );
+        for (k, ((row, info), &(j, p))) in half.iter().zip(&keys).enumerate() {
+            let a = anchored(500_000, 7, SOURCE_HARVEST, 4, j, p);
+            assert_eq!(info.hybrid, !a);
+            assert_eq!(row, if a { &exact[k].0 } else { &rows[k].0 }, "row {k}");
+        }
+        // Byte-identical over schedules and threads.
+        let shard = |threads, schedule| {
+            let mut out = Vec::new();
+            let e = LabelExec { schedule, ..exec };
+            let sum = write_harvest_shard_by(
+                &job(threads),
+                e,
+                None,
+                &starts,
+                &*l,
+                Driver::Exact,
+                hy(500_000),
+                None,
+                &mut out,
+            )
+            .expect("written");
+            (out, sum)
+        };
+        let (a, sa) = shard(1, HarvestSchedule::PerDecision);
+        let (b, sb) = shard(3, HarvestSchedule::Pooled);
+        let want = nn::shard::to_npy(
+            &half.iter().map(|r| r.0.clone()).collect::<Vec<_>>(),
+            nn::outcome::vocab(4),
+        );
+        assert!(a == want && b == want);
+        let (mut ia, mut ib) = (identity(&sa), identity(&sb));
+        ia.4.evals = 0;
+        ib.4.evals = 0;
+        assert_eq!(ia, ib);
+        assert_eq!(
+            sa.counts.hybrid,
+            half.iter().filter(|r| r.1.hybrid).count() as u64
+        );
+    }
+
+    /// Exact labels are byte-identical to those of the code before hybrid labels (2026-10-19,
+    /// commit b40222c): the SHA-256 of a random-play shard, a rules-v1 shard and a harvested
+    /// shard made by the old code (the same job, the synthetic leaf), here through the default
+    /// labeller and through `Labeller::Exact` given explicitly.
+    #[test]
+    fn exact_labels_are_byte_identical_to_before() {
+        let starts = collect_starts(400, 9);
+        let l = leaf();
+        let plain = |trick, source, count| {
+            let job = LabelJob {
+                trick,
+                count,
+                seed: 29,
+                source,
+                threads: 2,
+            };
+            let mut a = Vec::new();
+            let sa = write_label_shard(&job, &starts, &*l, None, 3, &mut a).expect("written");
+            let mut b = Vec::new();
+            let sb = write_label_shard_by(
+                &job,
+                LabelExec::for_trick(trick),
+                &starts,
+                &*l,
+                Labeller::Exact,
+                None,
+                3,
+                &mut b,
+            )
+            .expect("written");
+            assert!(a == b);
+            assert_eq!(identity(&sa), identity(&sb));
+            assert_eq!(sa.counts.hybrid, 0);
+            sa.sha256
+        };
+        let harvest = {
+            let job = HarvestJob {
+                count: 40,
+                threads: 2,
+                ..harvest_job(4, vec![3], parse_band_shares("0.4,0.4,0.2").expect("s"), 4)
+            };
+            let mut a = Vec::new();
+            write_harvest_shard(&job, &starts, &*l, Driver::Exact, None, &mut a)
+                .expect("written")
+                .sha256
+        };
+        let got = [
+            plain(4, Source::Random, 40),
+            plain(3, Source::Rules, 16),
+            harvest,
+        ];
+        assert_eq!(got, GOLDEN_EXACT_SHARDS, "{got:?}");
+    }
+
+    /// The SHA-256 of [`exact_labels_are_byte_identical_to_before`]'s shards, made by the code
+    /// of commit b40222c (before hybrid labels).
+    const GOLDEN_EXACT_SHARDS: [&str; 3] = [
+        "31cf6a5ceb558872be506ff8283830dc92bc08648e340fdc3a6c7ea29699dac6",
+        "bdb81dd4c9799f6a493f7ef17fccbeed5bdf192b438e7235eb91f946babf58e6",
+        "969fc5c5ad1a00eeec11f795262d94754ac0462395a70483ecef54657728f660",
+    ];
 }

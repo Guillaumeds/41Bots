@@ -45,6 +45,7 @@
 //!                  [--harvest-keep PRED.json [--keep-cap 256]] [--max-decisions N]
 //!                  [--harvest-schedule pooled|decision]
 //!                  [--seat-weights 2,1,1]
+//!                  [--label-net WEIGHTS [--exact-share 0.1]]
 //! search student-check --net STUDENT.safetensors --teacher SHARD.npy [--teacher …] --equity TABLE
 //!                  [--allow-stamp KEY …] [--boot 1000] [--boot-seed 1] [--json OUT]
 //!                  [--baseline rules] [--baseline random] [--split-half] [--top-k 2,3]
@@ -150,6 +151,19 @@
 //! waits on one decision's labels; `decision` (before 2026-10-17, for comparisons) labels each
 //! decision's positions on the thread that searched it. Only the label solves' node counts at
 //! trick 2 (`solver_nodes`) depend on it. The sidecar's `harvest.label_solves` records it.
+//! `--label-net WEIGHTS` (an integer O_{K+1}, any source; docs/m3-hybrid/audit-loop.md §12)
+//! labels each row with the hybrid H_{K+1} instead of its exact value
+//! (`search::oracle_labels::hybrid_value`: the exact solver through trick K, the network at the
+//! start of trick K+1, as `hybrid-check` and `worlds --method hybrid` run it; the same fixed-point
+//! value, tie rule and row format, the outcome label the possible outcome nearest the value);
+//! `--exact-share X` (0 to 1, six decimals; default 0) labels that share of the rows exactly all
+//! the same, drawn by each row's key (`oracle_labels::anchored`). The sidecar then says
+//! `label_source` `hybrid`, the network's SHA-256 (`label_net_sha256`), `values_version`
+//! `"<exact version>+O<K+1>:<sha256>"` (an exact shard keeps the plain number, so a reader of
+//! exact labels refuses hybrid ones), and the rows by label (`rows_hybrid`, `rows_exact`).
+//! Without it every row is exact, byte for byte as before, and the sidecar says
+//! `label_source` `exact`. The runner never asks for hybrid labels on a validation, audit or
+//! golden set.
 //! `hybrid-check` measures the hybrid H_K (exact to the start of trick K, the oracle network
 //! there) against exact search on the same worlds (docs/M3-HYBRID-SPEC.md §3, `search::hybrid`):
 //! decision loss with its bootstrap 95% upper bound, value error and agreement, overall, per
@@ -2047,10 +2061,11 @@ fn binary_sha256() -> String {
 fn labels_cmd(a: &Args) -> Result<(), String> {
     use search::oracle_labels::{
         Driver, GOLDEN_SEED, HARVEST_CAP, HARVEST_SHARES, HARVEST_STRATA, HARVEST_TT_MB,
-        HarvestJob, HarvestSchedule, KEEP_CAP, LabelExec, LabelJob, PredKeep, RACE_CAP, RaceKeep,
-        Source, chunk_rows_for, default_max_decisions, parse_band_shares, parse_race_classes,
-        parse_seat_weights, parse_strata, position_schedule, reheader_shard, seat_row_weights,
-        tt_mb_for, write_harvest_shard_with, write_label_shard_with,
+        HarvestJob, HarvestSchedule, HybridLabels, KEEP_CAP, LabelExec, LabelJob, Labeller,
+        PredKeep, RACE_CAP, RaceKeep, Source, chunk_rows_for, default_max_decisions,
+        parse_band_shares, parse_exact_share, parse_race_classes, parse_seat_weights, parse_strata,
+        position_schedule, reheader_shard, seat_row_weights, tt_mb_for, write_harvest_shard_by,
+        write_label_shard_by,
     };
     let trick = a.num("--trick", 4)? as u8;
     if !(2..=5).contains(&trick) {
@@ -2257,6 +2272,44 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         None => None,
     };
     let driver = net.as_ref().map_or(Driver::Exact, |(o, _)| Driver::Net(o));
+    // Hybrid labels (`--label-net`): the network at the start of the next trick.
+    let label_net = match a.get("--label-net") {
+        Some(p) => {
+            let o = nn::Oracle::load(Path::new(p), leaf.clone())?;
+            if trick >= 5 || o.trick != trick + 1 {
+                return Err(format!(
+                    "--label-net {p} was trained for trick {} positions: hybrid labels at the \
+                     start of trick {trick} need the network of trick {} (O_{})",
+                    o.trick,
+                    trick + 1,
+                    trick + 1
+                ));
+            }
+            eprintln!(
+                "labels: hybrid labels: exact search through trick {trick}, the network {p} \
+                 (sha256 {}, {} head, widths {:?}) at the start of trick {}",
+                o.sha256,
+                o.head.name(),
+                o.net().widths(),
+                trick + 1
+            );
+            Some((o, p.to_string()))
+        }
+        None => None,
+    };
+    let exact_ppm = match a.get("--exact-share") {
+        None => 0,
+        Some(_) if label_net.is_none() => {
+            return Err(
+                "--exact-share is the exact anchor of hybrid labels: give --label-net".into(),
+            );
+        }
+        Some(x) => parse_exact_share(x).map_err(|e| format!("--exact-share {e}"))?,
+    };
+    let labeller = match &label_net {
+        Some((o, _)) => Labeller::Hybrid(HybridLabels { net: o, exact_ppm }),
+        None => Labeller::Exact,
+    };
     // How the run is carried out (never changes a row): the exact label solves' table
     // (`--tt-mb`, the runner lowers it to fit the machine's memory) and how a harvest's work is
     // shared out over the threads (`--harvest-schedule`: `pooled`, the default, or `decision`,
@@ -2315,21 +2368,23 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
             .open(&part)
             .map_err(|e| format!("{}: {e}", part.display()))?;
         let mut summary = match &harvest {
-            Some((h, _, _, _, max)) => write_harvest_shard_with(
+            Some((h, _, _, _, max)) => write_harvest_shard_by(
                 h,
                 exec,
                 *max,
                 &starts,
                 &*leaf,
                 driver,
+                labeller,
                 Some(done),
                 &mut file,
             ),
-            None => write_label_shard_with(
+            None => write_label_shard_by(
                 &job,
                 exec,
                 &starts,
                 &*leaf,
+                labeller,
                 Some(done),
                 chunk_rows,
                 &mut file,
@@ -2401,6 +2456,41 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
     });
     if job.source != Source::Rules {
         side["rows_by_position"] = serde_json::json!(&by_position[1..]);
+    }
+    // How the labels were made (docs/m3-hybrid/audit-loop.md §12): every exact shard says so,
+    // a hybrid one names its network, its values version and its rows by label.
+    side["label_source"] = serde_json::json!(labeller.name());
+    if let Some((o, p)) = &label_net {
+        side["values_version"] = serde_json::json!(format!(
+            "{}+O{}:{}",
+            search::measure::VALUES_VERSION,
+            trick + 1,
+            o.sha256
+        ));
+        side["label_net_sha256"] = serde_json::json!(o.sha256);
+        side["label_net"] = serde_json::json!({
+            "path": p, "trick": o.trick, "head": o.head.name(), "widths": o.net().widths(),
+        });
+        side["tie_rule"] = serde_json::json!(
+            "first strictly best card in increasing card index (solver default), through trick \
+             K; the network's value at the start of trick K+1"
+        );
+        side["exact_share_ppm"] = serde_json::json!(exact_ppm);
+        side["rows_hybrid"] = serde_json::json!(c.hybrid);
+        side["rows_exact"] = serde_json::json!(n_rows - c.hybrid);
+        side["frontier_evals"] = serde_json::json!(c.evals);
+        side["hybrid_label_tt_mb"] = serde_json::json!(search::oracle_labels::HYBRID_TT_MB);
+        side["outcome_label"] = serde_json::json!(
+            "the first possible outcome whose money vector is nearest the value (sum of absolute \
+             differences); an exact value's own outcome"
+        );
+        eprintln!(
+            "labels: hybrid labels: {} rows by the hybrid ({} frontier evaluations), {} exact \
+             (anchor share {exact_ppm} per million)",
+            c.hybrid,
+            c.evals,
+            n_rows - c.hybrid
+        );
     }
     if exec.tt_mb != tt_mb_for(trick) {
         // A table other than the trick's (`--tt-mb`): the solves' node counts are on it.

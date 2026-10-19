@@ -1851,6 +1851,7 @@ impl Rung<'_> {
         let summary = st.lines.join("\n")
             + if st.lines.is_empty() { "" } else { "\n" }
             + &note
+            + &self.label_line()
             + &format!(
                 "stop: {stop}\nfinal network: {}\n",
                 best.as_ref()
@@ -1929,6 +1930,7 @@ impl Rung<'_> {
                        "flat_at_pct": match level { _ if at2 => None, 2 => st.s.push_standard, 1 => Some(st.s.standard), _ => None },
                        "flat_at": match level { 0 => None, _ if at2 => Some("the position level (trick 2)"), _ => Some("the decision level") },
                        "rough_test": best_rough.as_ref().map(rough_line) },
+            "label_sources": self.label_sources(),
             "steps": self.steps,
             "warnings": self.warnings,
         }))
@@ -2282,6 +2284,8 @@ impl Rung<'_> {
         )?;
         let side = read_json(&PathBuf::from(format!("{}.json", path.display())))
             .ok_or_else(|| format!("hybrid_rung: {} wrote no sidecar", path.display()))?;
+        // Always exact labels (`hlabels`: the audit is a standard).
+        self.note_labels(&file, "audit", &side)?;
         let rdir = st.dir.join(format!("round-{r}"));
         write_json(&rdir.join(format!("{file}.json")), &side)?;
         let mut facts = json!({ "file": file, "rows": st.s.rows, "seed": seed, "threads": threads,
@@ -3352,6 +3356,8 @@ impl Rung<'_> {
         if let Some(w) = &self.p.seat_weights {
             c.args(["--seat-weights", w]);
         }
+        // Hybrid labels (`label_source`): a targeted shard is training data.
+        c.args(self.label_args("extra"));
         self.audit_step(
             &format!("targeted harvest (round {r})"),
             c,
@@ -3372,6 +3378,7 @@ impl Rung<'_> {
                 .join(format!("{file}.json")),
             &side,
         )?;
+        let labels = self.note_labels(&file, "extra", &side)?;
         // At trick 2 (only) shared with `upload_shards`: hours of exact labels there.
         let key = if self.p.upload_shards && st.s.rough.is_some() {
             self.share_file(st, &path)
@@ -3395,6 +3402,7 @@ impl Rung<'_> {
                    "groups": side["harvest"]["keep"]["groups"].clone(),
                    "rows_in_any_group": side["harvest"]["keep"]["rows_in_any_group"].clone(),
                    "driver": driver.as_ref().map_or("exact".to_string(), |d| d.display().to_string()),
+                   "labels": labels,
                    "joined": if watch.is_some() { "the next round's training, while it runs (watched directory)" } else { "the next round's training" } }))
     }
 
