@@ -1,21 +1,22 @@
 {
   "format": 2,
-  "run_id": "m3-hybrid-t3-additive-mech-2",
+  "run_id": "m3-hybrid-t3-additive-mech-3",
   "run_seed": 1,
   "threads": null,
   "benchmark_seconds": 0,
   "upload_every_s": 300,
   "heartbeat_every_s": 30,
-  "note": "Mechanism test of the trick-3 additive audit loop (owner 2026-10-19: task 9, push O_3 lower): the real manifest's settings at small sizes, 2 rounds, to prove the additive path end to end (step-0 proof of the starting network, adoption rule, float/int sharing, shards.json) before the real run.",
+  "note": "Mechanism test of the trick-3 additive audit loop (owner 2026-10-19: task 9, push O_3 lower): the real manifest's settings at small sizes, 2 rounds, to prove the additive path end to end (step-0 proof of the starting network, adoption rule, float/int sharing, shards.json) before the real run. 2026-10-19: rerun with the disk-reading trainer (rows on disk when RAM is short, identical networks) on cheap 64 GB machines; RTX 50-series allowed.",
   "machine": {
     "gpus": 1,
     "min_gpu_ram_gb": 16,
     "min_compute_cap": 600,
     "min_cores": 190,
-    "min_ram_gb": 192,
+    "min_ram_gb": 64,
     "disk_gb": 250,
     "min_inet_down": 100,
-    "max_dph": 1.7
+    "max_dph": 1.7,
+    "blackwell": true
   },
   "streams": [
     {

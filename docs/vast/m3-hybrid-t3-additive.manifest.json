@@ -1,21 +1,22 @@
 {
   "format": 2,
-  "run_id": "m3-hybrid-t3-additive-1",
+  "run_id": "m3-hybrid-t3-additive-2",
   "run_seed": 1,
   "threads": null,
   "benchmark_seconds": 0,
   "upload_every_s": 300,
   "heartbeat_every_s": 30,
-  "note": "Trick-3 audit loop in additive mode (owner, 2026-10-17; docs/m3-hybrid/audit-loop.md §10): round 1 is the adopted O_3 (round 2 of m3-hybrid-t3-loop-1, 2048-1024-256) taken as it is and measured; each later round continues the best network so far for 8 epochs at a learning rate of 0.0003 on the base shards and every targeted shard so far, and is kept unless it is worse on the golden set: a pass the best had and loses (overall, a seat band, a team's bias), a band or bias the best already fails getting worse by more than the noise, or the overall bound worse by more than the noise (adopt_tolerance 0.002 percentage points: about the round-to-round moves of the overnight loops' golden bounds while the networks did not really change). Before launching, store O_3's float weights (the file is in last night's partial upload, runs/m3-hybrid-t3-loop-1/partial/rung/000000/out/hybrid/audit/round-2/net/float.safetensors, SHA-256 b5679677...): launch.py put-input FILE; the launcher refuses the run until init_net_float is there. The base labels were not stored last night (upload_shards was false), so they are made again from the same seeds and harvest network (byte-identical), and stored this time (upload_shards) for later runs' label_inputs. The stored 2,000-decision trick-2 golden set of m3-hybrid-t3-loop-1. Leader focus: harvested rows from seats 1-2 decisions weigh 2 (harvest_seat_weights), the band O_3 fails. About 6 rounds, cap about $15.",
+  "note": "Trick-3 audit loop in additive mode (owner, 2026-10-17; docs/m3-hybrid/audit-loop.md \u00a710): round 1 is the adopted O_3 (round 2 of m3-hybrid-t3-loop-1, 2048-1024-256) taken as it is and measured; each later round continues the best network so far for 8 epochs at a learning rate of 0.0003 on the base shards and every targeted shard so far, and is kept unless it is worse on the golden set: a pass the best had and loses (overall, a seat band, a team's bias), a band or bias the best already fails getting worse by more than the noise, or the overall bound worse by more than the noise (adopt_tolerance 0.002 percentage points: about the round-to-round moves of the overnight loops' golden bounds while the networks did not really change). Before launching, store O_3's float weights (the file is in last night's partial upload, runs/m3-hybrid-t3-loop-1/partial/rung/000000/out/hybrid/audit/round-2/net/float.safetensors, SHA-256 b5679677...): launch.py put-input FILE; the launcher refuses the run until init_net_float is there. The base labels were not stored last night (upload_shards was false), so they are made again from the same seeds and harvest network (byte-identical), and stored this time (upload_shards) for later runs' label_inputs. The stored 2,000-decision trick-2 golden set of m3-hybrid-t3-loop-1. Leader focus: harvested rows from seats 1-2 decisions weigh 2 (harvest_seat_weights), the band O_3 fails. About 6 rounds, cap about $15. 2026-10-19: rerun with the disk-reading trainer (rows on disk when RAM is short, identical networks) on cheap 64 GB machines; RTX 50-series allowed.",
   "machine": {
     "gpus": 1,
     "min_gpu_ram_gb": 16,
     "min_compute_cap": 600,
     "min_cores": 190,
-    "min_ram_gb": 192,
+    "min_ram_gb": 64,
     "disk_gb": 250,
     "min_inet_down": 100,
-    "max_dph": 1.7
+    "max_dph": 1.7,
+    "blackwell": true
   },
   "streams": [
     {
