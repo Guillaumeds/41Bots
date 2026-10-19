@@ -416,7 +416,7 @@ fn stream_group<const R: usize>(rows: [&[u64]; R], xs: [i64; R], out: &mut [i64]
 }
 
 /// The most positions one batched call takes ([`mac_pairs_batch_at`]).
-pub const MAX_BATCH: usize = 64;
+pub const MAX_BATCH: usize = 256;
 
 /// One position of a batch: its non-zero inputs (indices strictly ascending, as [`compact`]
 /// gives them) and their values.

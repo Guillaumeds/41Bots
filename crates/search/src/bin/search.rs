@@ -68,9 +68,21 @@
 //! search hybrid-check … --net A,B,… (or --net A --net B …: an ensemble, golden-set form only)
 //! search hybrid-check … --truth net --noise-sd-by-class P0,P1,P2,P3,P4 [--noise-seed 1]
 //!                  [--noise-calibrate N [--noise-calibrate-worlds 8] [--noise-calibrate-rounds 4]]
+//! search hybrid-check … --exact-leaves none|all|race:4|race:2,4|race:1-4[+band:LO-HI]
+//!                  [--exact-leaf-tt-mb (64 at --cut 3)]
 //! search hybrid-paired --a A.json --b B.json [--a-name A] [--b-name B] [--boot 1000]
 //!                  [--boot-seed 1] [--json OUT]
 //! ```
+//! **Exact leaves** (`search::exact_leaves`, docs/m3-hybrid/rung2.md "Exact leaves (G)"):
+//! `--exact-leaves` solves the hybrid's frontier positions the policy picks exactly (the labels'
+//! exact solver and tie rule) instead of valuing them with the network: `race:LIST` every leaf of
+//! those race classes, `band:LO-HI` every leaf the network gives the decider's team LO% to HI%,
+//! `all` every leaf, joined by `+`; `none` (the default) is the hybrid as before, byte for byte.
+//! The report adds, per race class, the distinct leaves a world and the share solved exactly, the
+//! leaf solves' nodes and thread time a world, and the hybrid's thread time a world with and
+//! without them (JSON `exact_leaves`); `values.hybrid` ends `+exact:<policy>`. Golden-set form
+//! only (not `--saved`, `--explain` or `--truth net`). `hybrid-paired` also prints both checks'
+//! thread time a world.
 //! **Ensembles** (`nn::ensemble`): `--net` takes several networks of the cut's trick, comma-separated
 //! or repeated; the leaf value is the integer mean of their money chances (u128 totals per team,
 //! largest-remainder rounding to exactly 2^32, ties to the lower team), each member valuing its
@@ -2901,6 +2913,34 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
         }
         None
     };
+    // Exact leaves (`search::exact_leaves`): the frontier positions the policy picks are solved
+    // exactly instead of being valued by the network; `none` (the default) is the hybrid as
+    // before, byte for byte.
+    let exact_leaves = match a.get("--exact-leaves") {
+        None => {
+            if a.has("--exact-leaf-tt-mb") {
+                return Err("--exact-leaf-tt-mb is for --exact-leaves".into());
+            }
+            None
+        }
+        Some(text) => search::exact_leaves::LeafPolicy::parse(
+            text,
+            a.num(
+                "--exact-leaf-tt-mb",
+                search::oracle_labels::tt_mb_for(cut) as u64,
+            )? as usize,
+        )?,
+    };
+    if exact_leaves.is_some() {
+        for k in ["--saved", "--explain", "--truth"] {
+            if a.has(k) {
+                return Err(format!(
+                    "--exact-leaves is for the golden-set form of the check against exact or \
+                     silver values, not {k}"
+                ));
+            }
+        }
+    }
     // The silver reference's network and fingerprint (its records must carry exactly this).
     let reference = if silver {
         if a.has("--saved") || a.has("--explain") {
@@ -2967,6 +3007,7 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
         exact_solve_threads: a.num("--verify-solve-threads", 1)?.max(1) as usize,
         exact_tt_mb: a.num("--verify-tt-mb", tt_mb as u64)? as usize,
         noise: noise.clone(),
+        exact_leaves: exact_leaves.clone(),
     };
     let src = world_source(a)?;
     let ctx = Ctx {
@@ -3123,6 +3164,14 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             a.all("--worlds").join(", "),
             job.verify_pct
         )
+    };
+    let net_desc = match &exact_leaves {
+        None => net_desc,
+        Some(p) => format!(
+            "{net_desc}, exact leaves {} (leaf tables {} MB)",
+            p.describe(),
+            p.tt_mb
+        ),
     };
     eprintln!(
         "hybrid-check: {} decisions at trick {trick}, frontier at trick {cut}, {net_desc}, {} worlds each (seed {seed}, label {}, {} source), {} threads; against {ref_name}; {ref_values} values {exact_from}",
@@ -3356,6 +3405,11 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
         print_score_groups(st, rg, race_share_text, min_group, &std_txt);
     }
     let time = check_time(&run, job.threads, wall);
+    let leaves_json = job
+        .exact_leaves
+        .as_ref()
+        .zip(run.exact_leaves.as_ref())
+        .map(|(p, st)| print_exact_leaves(p, st, &time));
     if silver {
         // The reference's solves are the silver hybrid's, not exact ones.
         print_time_as(&time, "reference (silver)", "by the reference");
@@ -3403,6 +3457,15 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
         }
     );
     if let Some(out) = a.get("--json") {
+        // The hybrid's values: the network's, with the exact leaves' policy when there is one.
+        let hybrid_values = format!(
+            "{}+O{cut}:{}{}",
+            search::measure::VALUES_VERSION,
+            ensemble.id(),
+            job.exact_leaves
+                .as_ref()
+                .map_or(String::new(), |p| format!("+exact:{}", p.describe()))
+        );
         let group_rows = |g: &[(String, search::hybrid::Summary)]| {
             g.iter()
                 .map(|(n, s)| {
@@ -3466,11 +3529,11 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
                 }),
                 None => serde_json::json!({
                     "exact": search::measure::VALUES_VERSION,
-                    "hybrid": format!("{}+O{cut}:{}", search::measure::VALUES_VERSION, ensemble.id()),
+                    "hybrid": hybrid_values,
                 }),
                 Some((_, _, fp)) => serde_json::json!({
                     "reference": fp.values(),
-                    "hybrid": format!("{}+O{cut}:{}", search::measure::VALUES_VERSION, ensemble.id()),
+                    "hybrid": hybrid_values,
                 }),
             },
             "equity_sha256": table_sha,
@@ -3523,6 +3586,9 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
         }
         if let Some(nr) = &noise_report {
             v["noise"] = serde_json::json!(nr);
+        }
+        if let Some(l) = &leaves_json {
+            v["exact_leaves"] = l.clone();
         }
         if !calibration.is_empty() {
             v["noise_calibration"] = serde_json::json!({
@@ -3607,6 +3673,34 @@ fn hybrid_paired(a: &Args) -> Result<(), String> {
         "(loss: mean decision loss; own bias: the decider's own team's mean value error; B - A \
          below 0 means B loses less, or undervalues its own team less when A's bias is negative)"
     );
+    // The hybrid's thread time per world of each (reports only), and the exact leaves' share.
+    let hms = |v: &serde_json::Value| v["time"]["hybrid_ms_per_world"].as_f64();
+    let time = match (hms(&va), hms(&vb)) {
+        (Some(x), Some(y)) => {
+            let leaves = |v: &serde_json::Value| {
+                v["exact_leaves"]["policy"].as_str().map_or(
+                    "no exact leaves".to_string(),
+                    |p| {
+                        format!(
+                            "exact leaves {p}: {:.2}% of the leaves, {:.3} ms a world in leaf solves",
+                            100.0 * v["exact_leaves"]["share_exact"].as_f64().unwrap_or(0.0),
+                            v["exact_leaves"]["leaf_ms_per_world"].as_f64().unwrap_or(0.0)
+                        )
+                    },
+                )
+            };
+            println!(
+                "time: A {x:.3} thread-ms a world ({}), B {y:.3} ({}); B / A {:.2}",
+                leaves(&va),
+                leaves(&vb),
+                y / x.max(1e-9)
+            );
+            serde_json::json!({ "a_hybrid_ms_per_world": x, "b_hybrid_ms_per_world": y,
+                                "a_exact_leaves": va["exact_leaves"]["policy"],
+                                "b_exact_leaves": vb["exact_leaves"]["policy"] })
+        }
+        _ => serde_json::Value::Null,
+    };
     if let Some(out) = a.get("--json") {
         write_json(
             out,
@@ -3618,10 +3712,77 @@ fn hybrid_paired(a: &Args) -> Result<(), String> {
                 "boot": { "replicates": boots, "seed": boot_seed,
                           "what": "decisions resampled with replacement within each group, the same for both players; the interval is the 2.5th to 97.5th percentile of B - A" },
                 "measures": ms,
+                "time": time,
             }),
         )?;
     }
     Ok(())
+}
+
+/// The exact leaves' report (`search::exact_leaves`): per race class, the distinct frontier
+/// positions the hybrid's searches reached (summed over worlds) and the share solved exactly;
+/// the leaf solves' nodes and thread time per world, and the hybrid's thread time per world with
+/// them and without them (the rest: the search and the network). Returns the JSON record.
+fn print_exact_leaves(
+    p: &search::exact_leaves::LeafPolicy,
+    st: &search::exact_leaves::LeafStats,
+    t: &CheckTime,
+) -> serde_json::Value {
+    let k = search::exact_leaves::CLASSES;
+    let share = |e: u64, d: u64| e as f64 / d.max(1) as f64;
+    let (d_all, e_all): (u64, u64) = (st.distinct.iter().sum(), st.exact.iter().sum());
+    let hybrid_ms = t.hybrid_us as f64 / 1000.0 / t.worlds;
+    let leaf_ms = st.us as f64 / 1000.0 / t.worlds;
+    println!(
+        "exact leaves {} (leaf tables {} MB): race class, distinct leaves a world, solved exactly a world, share",
+        p.describe(),
+        p.tt_mb
+    );
+    let mut classes = Vec::new();
+    for c in 0..k {
+        println!(
+            "  class {c} {:<60} {:>10.2} {:>10.2} {:>7.2}%",
+            search::hybrid_explain::RACE_CLASSES[c],
+            st.distinct[c] as f64 / t.worlds,
+            st.exact[c] as f64 / t.worlds,
+            100.0 * share(st.exact[c], st.distinct[c])
+        );
+        classes.push(serde_json::json!({
+            "class": c, "name": search::hybrid_explain::RACE_CLASSES[c],
+            "distinct": st.distinct[c], "exact": st.exact[c],
+            "share_exact": share(st.exact[c], st.distinct[c]),
+        }));
+    }
+    println!(
+        "  {:<68} {:>10.2} {:>10.2} {:>7.2}%",
+        "all",
+        d_all as f64 / t.worlds,
+        e_all as f64 / t.worlds,
+        100.0 * share(e_all, d_all)
+    );
+    println!(
+        "  leaf solves: {:.0} nodes and {:.3} ms a world ({:.3} ms a solve); hybrid {:.3} thread-ms a world with them, {:.3} without them (search and network)",
+        st.nodes as f64 / t.worlds,
+        leaf_ms,
+        st.us as f64 / 1000.0 / e_all.max(1) as f64,
+        hybrid_ms,
+        hybrid_ms - leaf_ms
+    );
+    serde_json::json!({
+        "what": "the frontier positions the policy picks are solved exactly (search::exact_leaves, the labels' exact solver and tie rule) instead of being valued by the network; counts are distinct canonical leaves per world's search, summed over worlds; times are thread time (reports only)",
+        "policy": p.describe(),
+        "leaf_tt_mb": p.tt_mb,
+        "classes": classes,
+        "distinct": d_all,
+        "exact": e_all,
+        "share_exact": share(e_all, d_all),
+        "leaf_nodes": st.nodes,
+        "leaf_nodes_per_world": st.nodes as f64 / t.worlds,
+        "leaf_ms_per_world": leaf_ms,
+        "leaf_ms_per_solve": st.us as f64 / 1000.0 / e_all.max(1) as f64,
+        "hybrid_ms_per_world": hybrid_ms,
+        "hybrid_ms_per_world_without_leaf_solves": hybrid_ms - leaf_ms,
+    })
 }
 
 /// The curse test's noise per race class: asked for and realised (`search::curse`).

@@ -22,6 +22,8 @@
 //!   same worlds; decision loss with a bootstrap bound, value error, agreement.
 //! - [`curse`]: the optimizer's-curse test of the hybrid check: the network as the truth and
 //!   seeded zero-mean noise at each leaf of the player's search.
+//! - [`exact_leaves`]: exact solves instead of the network at the hybrid's least reliable
+//!   frontier positions (a leaf policy: race classes, a band of the network's value).
 //! - [`hybrid_explain`]: why the hybrid and exact search choose differently on a decision
 //!   (`hybrid-check --explain`): per world, the frontier positions each search copied up to each
 //!   candidate, the network's error there and its outcome probabilities.
@@ -41,6 +43,7 @@ pub mod bot;
 pub mod curse;
 pub mod curves;
 pub mod eta;
+pub mod exact_leaves;
 pub mod hybrid;
 pub mod hybrid_explain;
 pub mod measure;

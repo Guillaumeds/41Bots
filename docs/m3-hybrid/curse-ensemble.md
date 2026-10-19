@@ -67,3 +67,20 @@ Network keys (`inputs/sha256/<sha>`, all confirmed stored): f5766aa98a1d769e3112
 a099061b6aedc09d660aa006820c6d9f450dd93a301cfbee06a2e3582193c594, bfd1bec2c6473ed15bb7136f1af5857e35a4346c9ac6d714acce09f5a0d1f2ec,
 a97ac1771b984c52c851501f56edf7bbf8332b57fe9e9c99c8e2392f33566283; also stored, not in the ensemble: loop-1 round 1
 b34e12b51099c065e44ceefa5eb64aa4c725f70027b2d699a2c05adfc953f279 (the weakest, 0.0088%).
+
+## Speed of an ensemble (fix of 2026-10-19, after the first rented run)
+
+On the rented AMD EPYC 7B12 (two 64-core chips, 245 threads, 128 GB, $0.30/h) the single check took 271 s, but the
+4-network ensemble ran at about 9 worlds a second, about 100 times slower per world than one network, where this
+build VM (a Xeon with 260 MB of last-level cache) showed the ensemble costing about the sum of its members. The
+cause: the members' weights together (about 70 MB) do not fit the EPYC's last-level cache (16 MB per group of four
+cores), while one 2048-1024-256 network's (about 9 MB) does; so every batch of positions streamed the weights from
+memory, and the solver's batches were small (about 13 positions a pass, from 3 plays before the frontier). The fix
+makes far fewer passes over the weights, with the same positions valued and the same values: an ensemble of
+several networks takes the solver's batches from 7 plays before the frontier (at trick 2 every frontier position
+below the decision's first play; the search reaches almost all of them anyway), values them through each member
+in passes of up to 256 positions (`nn::kernel::MAX_BATCH`, was 64), and keeps the batch's means in a per-thread
+table the search's requests read; the solver's gather cap is 65,536 positions (was 256). On 16 golden decisions x
+32 worlds the 4-network ensemble's passes over the weights fell from 108,708 to 7,384 (15 times fewer), the
+network evaluations from 1,430,124 to 1,431,056 (+0.07%), and every value and table stayed byte-identical. One
+network is unchanged.
