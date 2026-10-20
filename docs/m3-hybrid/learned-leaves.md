@@ -219,3 +219,90 @@ threads about 2.1 M thread-seconds: about 2.4 hours on 245 threads, 4.6 on 128 (
 decisions; 864 s on the audit machine) and O_3 on its rows (145 s there), under an hour of a
 190-thread machine. No runner kind does "harvest, then `leafrisk prepare` and `calibrate`" yet;
 that is the next build if the rented check adopts the learned policy.
+
+## Result on the rented golden check (runs `o3-learnedleaf-1` and `-2`, 2026-10-19): adopted
+
+Run 1 was stopped at its second check (its machine gave 122 usable threads, too slow for the $2 cap);
+its baseline reproduced `o3-exactleaf-1`'s byte for byte, so run 2 (AMD EPYC 7B12, 245 threads,
+$0.30/h, about $0.65) dropped the race:1-4 check and reads it from `o3-exactleaf-1`. The adopted O_3
+f5766a on the stored 2,000 trick-2 golden decisions x 320 exact worlds; decision loss mean / 95%
+upper bound:
+
+| exact leaves | thread-ms a world | leaves solved | all | seat 1 | largest \|bias\| | verdict |
+|---|---|---|---|---|---|---|
+| none | 252 | 0% | 0.0056% / 0.0068% | 0.0154% / 0.0201% | 0.0239% | FAIL |
+| race:1-4 (G v1) | 1,692 | 56.8% | 0.0014% / 0.0018% | 0.0040% / 0.0058% | 0.0041% | PASS |
+| **learned t=277338260 (G v2)** | **1,550** | **40.2%** | **0.0005% / 0.0008%** | **0.0015% / 0.0022%** | **0.0019%** | **PASS** |
+| learned t=1057825477 | 1,083 | 20.0% | 0.0023% / 0.0030% | 0.0071% / 0.0101% | 0.0082% | FAIL (seat 1) |
+
+**Adopted (owner, 2026-10-19): `learned:<leafrisk-o3-v1>:t=277338260` is H_3's exact-leaf rule** for
+trick-2 decisions (the trick-2 teacher) and for hybrid trick-2 labels. Every seat, score group and
+race group passes; the leader's under-valued own team (the optimizer's-curse pattern) is gone. Files:
+R2 `runs/o3-learnedleaf-2/out/checks/`; table also in `rung2.md`.
+
+**What the threshold is.** The model scores every frontier position (its predicted squared error of
+O_3 there); a position is solved exactly when its score is at least `t`. The share solved (40% here)
+is a result of `t`, not a quota. `t=277338260` was chosen to cost what race:1-4 costs; the half-cost
+`t` fails at seat 1, so do not lower the cost for decisions without a new golden check.
+
+**Cost on rented threads, measured 2026-10-20 (AMD EPYC 7B12, every thread busy):** an exact
+trick-2 label (to the end of the hand) about 11.3 thread-seconds; a G v2 hybrid trick-2 label (exact
+through trick 2, O_3 + the learned exact leaves at trick 3) about 9.3 thread-seconds; the build VM
+measured 3.65 s and 2.0 s for the same. Rented threads ran 3-4.6 times slower than the 4-vCPU build VM
+under full load; price everything from rented measurements. **At trick 2 a G v2 label is only about
+1.2 times cheaper than an exact one**, because an exact trick-2 solve is mostly the sum of its ~400
+trick-3 leaf solves and G v2 still solves 40% of them; so for O_2's *training labels* exact labels
+are the better buy (zero label error), and G v2 pays where exact is unaffordable (trick-2 decisions'
+search; trick 1).
+
+## O_2 G v2: learned deferral at cut 2 (built 2026-10-20; predictor run `o2-leafrisk-1`)
+
+**The same idea one trick earlier.** For trick-1 decisions the search is H_2: exact through trick 1,
+O_2 at the start of trick 2. A leaf-risk model trained on **O_2's own errors** scores every trick-2
+frontier position the search reaches; positions at or above its threshold get an **expert** instead of
+O_2's value. The expert is `exact` (the default: an exact solve of that trick-2 position to the end
+of the hand) or `h3:<O_3>[:<exact-leaves spec>]` (the deeper hybrid with its own G v2). Exact is
+the analogue of O_3's G v2 and is cheap here: inside one trick-1 world the deferred trick-2 positions
+share one solver table, and the build-VM toy check measured **55 ms an exact leaf solve** (469
+distinct trick-2 leaves a world at seat 4; deferring 18% of them cost 4.8 s a world against 10.8 s
+for the H_3 silver reference). Deferring every leaf exactly is an exact trick-1 solve.
+
+**What exists (all merged on `m3-hybrid`, tested):**
+- `search labels --trick 2 --source harvest --harvest-net <O_2>`: trick-1 decisions searched by H_2,
+  at most `--harvest-cap` of the trick-2 frontier positions each search reaches kept per decision,
+  each labelled exactly: the rows O_2 really meets.
+- `python/nn/fortyone_nn/leafrisk.py prepare|train|calibrate` (unchanged from v1; the model records
+  the network's trick and SHA-256, so Rust refuses it at another trick or with another network).
+- `search hybrid-check --trick 1 --cut 2 --net <O_2> --exact-leaves learned:MODEL.json:t=T
+  --defer-expert exact|h3:<O_3>[:SPEC]` (and `--reference silver --reference-net <O_3>
+  [--reference-exact-leaves …]` for the trick-1 silver reference); `search teacher --trick 1|2
+  --exact-leaves … --defer-expert …` and the runner's `student_teacher` settings `exact_leaves` /
+  `defer_expert` for the teachers.
+- Runner kind `leafrisk` (`crates/runner/src/leafrisk.rs`): harvest the three splits, then prepare,
+  train and calibrate on the CPU; model and shards stored at `inputs/sha256/`.
+
+**Checked end to end on the build VM (toy sizes, 2026-10-20):** harvest 120/80 rows (about 2
+thread-seconds a row here), prepare, train (12 trees), calibrate (the model says trick 2 and O_2
+505a0c7c), then `hybrid-check --trick 1 --cut 2 … --exact-leaves learned:model.json:t=2782043523
+--defer-expert exact --reference silver --reference-net o3` on trick-1 decisions 14-15 x 2 worlds:
+it ran (the toy model's numbers mean nothing).
+
+**Run `o2-leafrisk-1` (launched 2026-10-20 03:52 UTC, manifest `docs/vast/o2-leafrisk.manifest.json`
+at a891bf9; AMD EPYC 7B12, 245 threads, $0.30/h, cap $2.5):** provisional O_2 505a0c7c; splits
+train 300,000 (seed 79001), cal 150,000 (79002), test 50,000 (79003); 150 trees as v1; Learn-then-Test
+targets 2.0 … 0.5% SD, delta 0.05. Estimated 5 hours, about $1.5. Outputs: `out/leafrisk/model.json`,
+`calibration.json`; shards at `inputs/sha256/` (keys in the run's result). If the machine is stopped
+in the Python phase (its idle watchdog at 85% CPU for 300 s), the stored shards are enough: run
+prepare / train / calibrate on the build VM (18 minutes for v1's 400k rows), exactly as in
+"What was trained here" above with `--net o2.safetensors` and `--trick 2` shards.
+
+**Next: the trick-1 decision test of O_2 G v2** (the analogue of the 2,000-decision check, about
+$3-5): there is no exact trick-1 golden set, so the reference is the silver set (H_3 at every
+trick-2 leaf, `docs/m3-hybrid/silver.md`; manifest `docs/vast/o2-silver.manifest.json`: 400
+decisions x 80 worlds, stored for reuse, then the check of plain O_2). Add checks of
+`--exact-leaves learned:<model>:t=<from calibration.json> --defer-expert exact` at two thresholds
+(about 1/4 and 1/10 of full deferral's cost) and compare each with plain H_2, paired
+(`search hybrid-paired`), overall, by seat and by score/race group. Pick the cheapest threshold that
+passes 0.01% at every seat against the silver set; note the silver's own error (O_3's) is in every
+number (`silver.md` §2), and an exact anchor on leader decisions (`m3-hybrid-t1-anchor`) measures it.
+Exact deferral of all leaves is itself exact and can serve as that anchor at seats 3-8 cheaply.

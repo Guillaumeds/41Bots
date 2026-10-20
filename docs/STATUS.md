@@ -2,6 +2,113 @@
 
 **Current checkpoint: M3 (in progress)** (PLAN §13, as revised on 2026-10-13): PIMC bots, the exact early-trick yardstick and its N-curves, the trick-1 runs on rented machines, the gate against rules-v1. M0 (engine, reference, RNG, CI), M1 (equity table, arena, launcher) and M2 (solver spike) are done; see the dated entries below.
 
+## START HERE: state and next steps (2026-10-20, written for the next session or model)
+
+Read this section, then `docs/m3-hybrid/learned-leaves.md` (G v2 and O_2 G v2), `docs/STUDENT.md`
+§11-14 and `docs/m3-hybrid/silver.md`. The dated sections further down are history. The working plan
+log of 2026-10-16 to 2026-10-20 is `docs/plan-log-2026-10.md`. Branch: everything is on `m3-hybrid`.
+
+### The goal and the chain (owner)
+One objective: the chance of the money. Target: about 0.01% decision loss even at the hardest trick-1
+situations, with every layer below it. The chain, top down:
+1. **Trick 3-5 decisions:** exact search (cheap). Done.
+2. **O_3** (trick-3 network) + **G v2** (a learned predictor of O_3's error picks the trick-3 positions to
+   solve exactly): trick-2 decisions at 0.0008% (seat 1 0.0022%) on the exact golden set. Done, adopted.
+3. **O_2** (trick-2 network, used by trick-1 search): provisional only. **Now: O_2 G v2** (the same
+   method one trick earlier, below).
+4. **Teachers** (slow, offline): trick 2 = PIMC over 64+ deals with H_3 + G v2; trick 1 = PIMC over 64
+   deals (128+ on close calls) with H_2 + O_2 (+ O_2 G v2).
+5. **Students** (fast networks for the app): learn from the teachers; in the app they shortlist their
+   top 3 cards and a small search picks among them.
+The owner wants the teachers and their deal counts decided last; first O_2 G v2 and its score.
+
+### Stored networks, models and data (R2 `inputs/sha256/<hex>`)
+| what | key | notes |
+|---|---|---|
+| O_3 adopted (2048-1024-256) | f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad | trained on 40M trick-3 positions |
+| O_3 leaf-risk model (G v2) | 20c41678c64681855003e5b8660e0a2e1fb9e8d552f7d898dd956055c767a9d5 | `data/leafrisk/leafrisk-o3-v1.json`; threshold t=277338260 adopted |
+| O_2 provisional (2048-1024-256) | 505a0c7c65147ffa9565e06059f47664ea9f1bfdf0c5ea2f8d392b0e6e1337b0 | 1.5M exact labels; position error SD 3.6% (O_3: 1.85%) |
+| trick-2 golden set: decisions / worlds | 635e9aef196c816380f3f15c05ede90b38b875fa4817061a57e6d39550065ab0 / 6ddc59b191e1fd534f260f9dfe103f742d6026768ca74acdbbb4fd430eb8265e | 2,000 decisions x 320 exact worlds, seed 1 |
+| exact trick-2 labels, random 1.2M (s511) | shard fb51c217b5406e4b4ba1454f14b8884bced45cff51a0e29bcca7f4440f6f0931, sidecar bc4165ed9408f83ff342ab6fa157992c5910654513e417a9271a700fbbb77117 | O_2's training data |
+| exact trick-2 labels, rules-v1 0.3M (s512) | shard 2160fefc6fcfd07822292f330f140a0618d25e0b89fb4ff8ed13d62e4559f1bd, sidecar d052d1a172fcf1b09d6e1cd4e95e1a2814b60e197864e1d5b18e7ab692f265f2 | |
+| exact trick-2 validation 50k (s601) | shard 38de48356209cbec0f9ce41ceba28e6d5df52428abc0c866d443f9eb57964327, sidecar b39dbd6bf8f00a9b71fa800ccdaf9dd7de0ef25bc5dd3fa7b8b9e718fe895df8 | |
+| exact trick-2 validation 20k (s602) | shard 855ba467ee6bd7521a442cf668980af8cefacf00701939237895d7c749dfdeea, sidecar 6e346cbf05b9f2cc0d4368e224e4dd81a11a7c2aaab1fd5af0c52a8ad177c86d | made 2026-10-20 |
+| exact trick-2 validation 5k (s603) | shard 46ba92fcdf8e… (see `runs/o2-gv2-labels-3/partial/.../shards.json`) | made 2026-10-20 |
+| trick-2 student (512-256, 1M lessons, plain H_3 teacher) | 954223e2f56ecade906ba28ad2ea07ff70fee70b841e0743d4c911217afb6ce6 | see below |
+| equity table v0 | sha256 64740dab7845f0502c93ce195d721e1ffb8aa6ab141739ef43f754690de16808 | rebuilt by every run from `table: {hands: 1000000, seed: 1}` |
+
+### Measured today
+- **Trick-2 student against the exact golden set** (`search student-check --golden-decisions …
+  --golden-worlds … --split-half --top-k 2,3`, free on the VM): alone 0.073% (95% upper 0.088%), seat 1
+  0.18%; **top-3 shortlist with a perfect final pick 0.0073% (upper 0.013%)**, seat 1 0.0148%
+  (upper 0.024%). The student as a shortlister is already near 0.01%; its own fit, not its teacher,
+  is the limit.
+- **Rented speeds (AMD EPYC 7B12, all threads busy):** exact trick-2 label 11.3 thread-s, G v2 trick-2
+  label 9.3 thread-s, harvested exact trick-2 row (H_2-driven) about 2 thread-s on the VM. Rented threads
+  are 3-4.6x slower than the build VM: price from rented measurements only.
+
+### Running now
+- `o2-leafrisk-1` (O_2's predictor: 500k harvested exact trick-2 rows, then train and calibrate;
+  cap $2.5; started 03:52 UTC). When DONE: fetch `runs/o2-leafrisk-1/out/leafrisk/` (model.json,
+  calibration.json), store the model (`python/launcher/launch.py put-input`), read the risk table
+  (how concentrated O_2's error is, error left at each share solved).
+
+### Next steps, in order (each costs money: check the vast balance with the owner first)
+1. **O_2 G v2 trick-1 test** (`learned-leaves.md`, "Next: the trick-1 decision test"): the silver set
+   (`docs/vast/o2-silver.manifest.json`, 400 x 80, about $3-5; never launched yet) plus checks of
+   H_2 with `--exact-leaves learned:<O_2 model>:t=<T> --defer-expert exact` at two thresholds, paired
+   against plain H_2. Pick the cheapest threshold that passes 0.01% at every seat against the silver.
+   Two rented runs, no new code: (a) the silver set with `search_measure` (`o2-silver.manifest.json`;
+   it stores the decisions and the silver worlds at `inputs/sha256/`, listed in its `result.json`
+   `shared.reuse_params`); (b) a `hybrid_checks` chunk (`crates/runner/src/checks.rs`, model
+   `docs/vast/o3-learnedleaf.manifest.json`) with `trick: 1`, `cut: 2`, `decisions_input` /
+   `worlds_input` = the stored silver files, `reference: {cut: 3, net_input: "o3"}`, and checks
+   `none` (net o2), `learned` (net o2, `exact_leaves: "learned:<o2 model input>:t=<T1>"`,
+   `defer_expert: "exact"`), a second threshold, plus `paired` comparisons against `none`. Add the new
+   manifest to the resolve test before launching.
+2. **Then decide O_2's own improvement:** more exact labels (11.3 thread-s each rented, about $3.8 per
+   million) and retrain, using the stored 1.5M + new; a label-type test was designed
+   (`docs/vast/o2-labeltest.manifest.json`: plain-hybrid vs exact at 600k, same exact validation) but
+   stopped before a result.
+3. **Teachers, then students** (`STUDENT.md`): trick-2 teacher with G v2 (`search teacher --trick 2
+   --exact-leaves learned:… `, runner `student_teacher` param `exact_leaves`; about 99 thread-s a
+   decision at 64 deals, so 1M lessons is about $34: relabel only what the student needs); trick-1
+   teacher with the final O_2 (+ deferral if the test says so), measured about 70 thread-s a decision
+   at 64 deals plain; trick-1 test set and student.
+4. **App:** WASM module with the students, phone timing, duplicate tournament against today's bots.
+
+### How to run things (GitHub Actions, no vast key on the VM)
+- **Launch:** workflow `vast-run.yml` on `m3-hybrid` with inputs: `manifest` (the JSON inline, one
+  line), `min_cores`, `min_ram_gb`, `disk_gb`, `cpu_only` ("true" for CPU jobs), `gpus`, `min_gpu_ram_gb`,
+  `max_dollars` (the cap; the launcher stops and destroys at it), `any_host` ("true"), optionally
+  `offer_id` (an owner-found offer: the `Type #` number) or `cpu_match` (e.g. "7B12"), `low_cpu_pct`
+  ("1" for jobs with GPU-training or other single-thread phases, else the idle watchdog kills them),
+  `bin_sha` (a commit with released binaries: **6c7acf50709117d224dda5363d516f9b367cc399** is the
+  latest; dispatch `release-binaries.yml` on `m3-hybrid` for a newer commit and wait for
+  `bin/<sha>/manifest.json` in R2), `image` **ghcr.io/guillaumeds/41bots-base:20261017-bc692e446939**,
+  `dry_run` **"false"** (the default is true!). A Blackwell GPU (RTX 50xx) needs `"blackwell": true` in
+  the manifest's `machine`.
+- **Watch:** `python/launcher/launch.py` helpers (`latest_heartbeat(run)`, `r2_list`, `r2_get`) with
+  `R2_S3_ENDPOINT=$R2_ENDPOINT`; heartbeats every 30 s carry the step, rows done and dollars.
+- **Stop:** cancel the workflow run (it asks the run to stop, waits up to 5 minutes for uploads, then
+  destroys the machine) or `vast-stop.yml` (run_id, instance_id); `vast-status.yml` lists every
+  instance on the account. Confirm nothing is left billing.
+- **Test a manifest before launching:** add it to `v2::tests::manifests_resolve_into_settings_their_chunks_accept`
+  (`crates/runner/src/v2.rs`; kinds hybrid_rung, student_teacher, hybrid_checks, leafrisk) and run
+  `cargo test --release -p runner manifests_resolve`.
+- **Pitfalls met:** `hybrid_rung` with `check: false` refuses `tt_mb`; `label_inputs` cannot be combined
+  with `label_parts` above 1; vast offer numbers change after a machine is released (use `cpu_match`);
+  a label part is stored only when complete (size parts to about an hour); the vast balance hitting zero
+  stops every machine at once.
+
+### 2026-10-20 runs that were stopped (no results beyond the stored validation shards)
+`o2-gv2-labels-2` (Thailand) and `-3` (Greece): O_2 on 10M G v2 labels, stopped by the owner after
+about an hour (no part finished; G v2 labels proved barely cheaper than exact at trick 2). `o2-labeltest-1`,
+`o2-silver-1` (never rented), `student-t2-gv2-1/-2` (the first failed on a runner bug, fixed in
+6c7acf5; the second was stopped by the idle watchdog during setup). Their manifests are in `docs/vast/`
+and are valid; reuse them deliberately, not by default.
+
+
 ## Done
 - Research, design, tech stack and run-operations plan approved (`docs/PLAN.md`).
 - Authoritative rules and house rules recorded (`docs/RULES.md`).
