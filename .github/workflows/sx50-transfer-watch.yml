@@ -1,0 +1,49 @@
+name: sx50_2 transfer rental watch
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0,5,10,15,20 * * *'
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: sx50-2-transfer-rental
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    env:
+      VAST_API_KEY: ${{ secrets.VAST_API_KEY }}
+      R2_ACCESS_KEY_ID: ${{ vars.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+      R2_S3_ENDPOINT: ${{ vars.R2_S3_ENDPOINT }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: silver-shared
+      - name: Install Vast CLI
+        run: pip install --quiet 'vastai==1.8.3'
+      - name: Watch and rent, without starting the workload
+        id: rental
+        run: |
+          set -euo pipefail
+          python3 python/launcher/sx50_transfer_watch.py | tee "$RUNNER_TEMP/sx50-rental.log"
+          if grep -q '^ACQUIRED ' "$RUNNER_TEMP/sx50-rental.log"; then
+            echo 'acquired=true' >> "$GITHUB_OUTPUT"
+            grep '^ACQUIRED ' "$RUNNER_TEMP/sx50-rental.log" | tail -1 | sed 's/^ACQUIRED /instance=/' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Notify owner of transfer-ready rental
+        if: steps.rental.outputs.acquired == 'true'
+        env:
+          INSTANCE: ${{ steps.rental.outputs.instance }}
+        run: |
+          set -euo pipefail
+          printf 'Replacement rented, but no workload has been moved yet. Source Vast instance 56879188 and silver-3 MUST remain running.\n\nDestination: %s\n\nCheck R2 and both live jobs before transferring sx50_2; do not use vast-stop or vast-run on the shared source. Start the destination only after a verified saved-world resume, then stop only the sx50_2 service on the source; never stop the source instance or silver-3.\n' "$INSTANCE" > "$RUNNER_TEMP/transfer-notice.txt"
+          gh issue create --repo "$GITHUB_REPOSITORY" --title 'sx50_2: rental ready for protected transfer' --body-file "$RUNNER_TEMP/transfer-notice.txt"
