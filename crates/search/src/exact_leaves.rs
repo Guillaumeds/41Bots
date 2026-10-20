@@ -37,6 +37,19 @@
 //! as the network's frontier values are memoised), so the value depends only on the canonical
 //! form and the context, as the solvers require (`solver::frontier`).
 //!
+//! **Who values a picked leaf** ([`Expert`], `--defer-expert`): the exact solver (`exact`, the
+//! default, everything above), or **a deeper hybrid** (`hK:NET[:SPEC]`, K the policy's frontier
+//! trick plus one): H_K of the leaf, exact search through the leaf's own trick and the network
+//! `NET` (an O_K; several comma-separated make an ensemble) at the start of trick K, with that
+//! search's own exact leaves `SPEC` (any policy above, normally a learned one for O_K), the very
+//! value `crate::oracle_labels::hybrid_value` gives a hybrid label. This is a **two-level
+//! deferral** ("learned deferral at cut 2", docs/m3-hybrid/learned-leaves.md): for trick-1
+//! decisions H_2 asks O_2 at the start of trick 2, and where O_2's leaf-risk model says O_2 is
+//! least reliable it defers to H_3 with learned exact leaves (about 1.5 thread-seconds a trick-2
+//! world against about 3.6 for an exact trick-2 solve). Deferring every leaf (`all`) is H_K
+//! with its exact leaves `SPEC` byte for byte (tested); a band term in `SPEC` reads the money
+//! chance of the team to lead the leaf (the expert's own decider).
+//!
 //! **Determinism.** The policy reads only whole numbers (the race class from the outcome mask,
 //! the network's integer money chance, the learned model's integer score); each world's search is sequential, its leaf solves too,
 //! and the leaf solves of one world share a table (`solver::SolveFamily`: the values of solves
@@ -76,6 +89,194 @@ pub struct LeafPolicy {
     pub learned: Option<Learned>,
     /// Transposition-table megabytes of each leaf solve (never changes a value).
     pub tt_mb: usize,
+    /// Who values the leaves picked ([`Expert`]): the exact solver (the default) or a deeper
+    /// hybrid.
+    pub expert: Expert,
+}
+
+/// Who values a leaf the policy picks (module notes, `--defer-expert`).
+#[derive(Clone, Default)]
+pub enum Expert {
+    /// The exact solver (`crate::oracle_labels::exact_value`).
+    #[default]
+    Exact,
+    /// A deeper hybrid ([`Deeper`]).
+    Deeper(Arc<Deeper>),
+}
+
+/// The deeper hybrid expert H_`cut` (module notes): exact search through the leaf's trick, the
+/// network `net` at the start of trick `cut`, with its own exact leaves `leaves`.
+pub struct Deeper {
+    /// The expert's network (an O_`cut`, or an ensemble of them).
+    pub net: nn::Ensemble,
+    /// The trick at whose start the expert's network values positions (the policy's frontier
+    /// trick plus one).
+    pub cut: u8,
+    /// The network's name (`nn::Ensemble::id`: its SHA-256 for one network).
+    pub net_id: String,
+    /// The expert's own exact leaves (`None`: none).
+    pub leaves: Option<LeafPolicy>,
+}
+
+impl std::fmt::Debug for Expert {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.describe())
+    }
+}
+
+impl PartialEq for Expert {
+    fn eq(&self, o: &Expert) -> bool {
+        match (self, o) {
+            (Expert::Exact, Expert::Exact) => true,
+            (Expert::Deeper(a), Expert::Deeper(b)) => {
+                a.cut == b.cut && a.net_id == b.net_id && a.leaves == b.leaves
+            }
+            _ => false,
+        }
+    }
+}
+impl Eq for Expert {}
+
+/// An expert's text checked without reading a file (the runner, before the inputs are fetched):
+/// `exact`, or `hK:NET[,NET…][:SPEC]` as (K, the networks, the expert's exact-leaves text).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExpertText<'a> {
+    /// `exact`.
+    Exact,
+    /// `hK:NETS[:SPEC]`.
+    Deeper {
+        /// K.
+        cut: u8,
+        /// The networks (paths or manifest input names).
+        nets: Vec<&'a str>,
+        /// The expert's own exact leaves as written (`None`: none).
+        spec: Option<&'a str>,
+    },
+}
+
+/// The words an exact-leaves policy text starts with ([`LeafPolicy::parse`]).
+const SPEC_STARTS: [&str; 5] = ["none", "all", "race:", "band:", "learned:"];
+
+/// Reads an expert's text (module notes; [`ExpertText`]), checking its form and its other terms
+/// ([`check_spec`]) but no file. The networks end at the first `:` followed by a policy's first
+/// word (so a path may hold `:`, as `C:/x`).
+pub fn expert_parts(text: &str) -> Result<ExpertText<'_>, String> {
+    let t = text.trim();
+    let err = |m: &str| format!("--defer-expert {text:?}: {m}");
+    if t == "exact" {
+        return Ok(ExpertText::Exact);
+    }
+    let usage = "exact, or hK:NET[:SPEC] (a deeper hybrid: H_K with network NET, an O_K, and \
+                 its own exact leaves SPEC, e.g. h3:o3.safetensors:learned:m.json:t=5)";
+    let rest = t.strip_prefix('h').ok_or_else(|| err(usage))?;
+    let (k, rest) = rest.split_once(':').ok_or_else(|| err(usage))?;
+    let cut = k
+        .parse::<u8>()
+        .ok()
+        .filter(|k| (3..=engine::game::TRICKS_PER_HAND).contains(k))
+        .ok_or_else(|| err("K must be 3..=5 (the expert's frontier trick)"))?;
+    let split = rest
+        .char_indices()
+        .filter(|&(_, c)| c == ':')
+        .map(|(i, _)| i)
+        .find(|&i| SPEC_STARTS.iter().any(|w| rest[i + 1..].starts_with(w)));
+    let (nets, spec) = match split {
+        Some(i) => (&rest[..i], Some(rest[i + 1..].trim())),
+        None => (rest, None),
+    };
+    let nets: Vec<&str> = nets
+        .split(',')
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .collect();
+    if nets.is_empty() {
+        return Err(err("no network"));
+    }
+    if let Some(sp) = spec {
+        check_spec(sp).map_err(|e| err(&e))?;
+    }
+    Ok(ExpertText::Deeper { cut, nets, spec })
+}
+
+impl Expert {
+    /// The expert of `--defer-expert TEXT` for a policy whose leaves lie at the start of trick
+    /// `cut` ([`expert_parts`]): a deeper hybrid's networks are loaded (each must be an O_K, K =
+    /// `cut + 1`) and its exact leaves parsed (`tt_mb` each leaf solve's table) and checked
+    /// against them ([`LeafPolicy::check_for`]).
+    pub fn parse(
+        text: &str,
+        cut: u8,
+        leaf: &Arc<SharedLeaf>,
+        tt_mb: usize,
+    ) -> Result<Expert, String> {
+        let err = |m: String| format!("--defer-expert {text:?}: {m}");
+        match expert_parts(text)? {
+            ExpertText::Exact => Ok(Expert::Exact),
+            ExpertText::Deeper {
+                cut: k,
+                nets,
+                spec,
+            } => {
+                if k != cut + 1 {
+                    return Err(err(format!(
+                        "the leaves lie at the start of trick {cut}: the deeper hybrid's \
+                         frontier must be trick {} (h{})",
+                        cut + 1,
+                        cut + 1
+                    )));
+                }
+                let mut members = Vec::new();
+                for p in nets {
+                    let o = nn::Oracle::load(Path::new(p), leaf.clone()).map_err(err)?;
+                    if o.trick != k {
+                        return Err(err(format!(
+                            "{p} was trained for trick {} positions, not trick {k}",
+                            o.trick
+                        )));
+                    }
+                    members.push(o);
+                }
+                let net = nn::Ensemble::new(members).map_err(err)?;
+                let net_id = net.id();
+                let leaves = match spec {
+                    Some(sp) => LeafPolicy::parse(sp, tt_mb).map_err(err)?,
+                    None => None,
+                };
+                if let Some(p) = &leaves {
+                    p.check_for(k).map_err(err)?;
+                    if let Some(m) = p.net_mismatch(&net_id) {
+                        return Err(err(m));
+                    }
+                }
+                Ok(Expert::Deeper(Arc::new(Deeper {
+                    net,
+                    cut: k,
+                    net_id,
+                    leaves,
+                })))
+            }
+        }
+    }
+
+    /// Normal form: `exact`, or `hK:<first 12 hex of the network's id>` and, with exact leaves,
+    /// `(<their normal form>)`.
+    pub fn describe(&self) -> String {
+        match self {
+            Expert::Exact => "exact".into(),
+            Expert::Deeper(d) => {
+                let mut s = format!("h{}:{}", d.cut, short(&d.net_id));
+                if let Some(p) = &d.leaves {
+                    s.push_str(&format!("({})", p.describe()));
+                }
+                s
+            }
+        }
+    }
+}
+
+/// The first 12 characters of a name (a SHA-256's short form).
+fn short(id: &str) -> &str {
+    &id[..id.len().min(12)]
 }
 
 /// The learned term of a policy (docs/m3-hybrid/rung2.md "Learned exact leaves"): the leaf-risk
@@ -219,6 +420,7 @@ impl LeafPolicy {
             band_text: None,
             learned: None,
             tt_mb: tt_mb.max(1),
+            expert: Expert::Exact,
         };
         for term in t.split('+').map(str::trim) {
             if term.starts_with("learned:") {
@@ -302,6 +504,7 @@ impl LeafPolicy {
             band_text: None,
             learned: None,
             tt_mb: tt_mb.max(1),
+            expert: Expert::Exact,
         }
     }
 
@@ -314,6 +517,7 @@ impl LeafPolicy {
             band_text: None,
             learned: None,
             tt_mb: tt_mb.max(1),
+            expert: Expert::Exact,
         }
     }
 
@@ -329,12 +533,22 @@ impl LeafPolicy {
                 budget: None,
             }),
             tt_mb: tt_mb.max(1),
+            expert: Expert::Exact,
         }
     }
 
     /// The policy in its normal form (`all`, `race:2,4`, `race:4+band:40-60`, …): the same for
     /// every way of writing the same policy, for reports and the values' fingerprint.
     pub fn describe(&self) -> String {
+        let base = self.describe_terms();
+        match &self.expert {
+            Expert::Exact => base,
+            e => format!("{base}+defer:{}", e.describe()),
+        }
+    }
+
+    /// [`LeafPolicy::describe`] without the expert.
+    fn describe_terms(&self) -> String {
         if self.classes == ALL_CLASSES {
             return "all".into();
         }
@@ -357,6 +571,71 @@ impl LeafPolicy {
         } else {
             terms.join("+")
         }
+    }
+
+    /// With the deeper expert `expert` for the picked leaves (module notes).
+    pub fn with_expert(mut self, expert: Expert) -> LeafPolicy {
+        self.expert = expert;
+        self
+    }
+
+    /// Checks that this policy fits a hybrid whose frontier is at the start of trick `cut`: a
+    /// learned term's model must be one made for trick-`cut` leaves, and a deeper expert must
+    /// look at trick `cut + 1` (refused otherwise).
+    pub fn check_for(&self, cut: u8) -> Result<(), String> {
+        if let Some(l) = &self.learned
+            && l.model.trick != cut
+        {
+            return Err(format!(
+                "the leaf-risk model {} was made for trick-{} leaves; this hybrid's leaves are \
+                 at the start of trick {cut}",
+                short(&l.model.sha256),
+                l.model.trick
+            ));
+        }
+        if let Expert::Deeper(d) = &self.expert
+            && d.cut != cut + 1
+        {
+            return Err(format!(
+                "the deeper expert H_{} must look one trick past this hybrid's frontier \
+                 (trick {cut})",
+                d.cut
+            ));
+        }
+        Ok(())
+    }
+
+    /// When a learned term's model predicts the errors of another network than `net_id`
+    /// (`nn::Ensemble::id`), what to say (`None`: it is this network's, the model names none, or
+    /// there is no learned term).
+    pub fn net_mismatch(&self, net_id: &str) -> Option<String> {
+        let l = self.learned.as_ref()?;
+        (!l.model.net_sha256.is_empty() && l.model.net_sha256 != net_id).then(|| {
+            format!(
+                "the leaf-risk model {} predicts the errors of network {}, not of {}",
+                short(&l.model.sha256),
+                short(&l.model.net_sha256),
+                short(net_id)
+            )
+        })
+    }
+
+    /// The SHA-256s that decide this policy's values beyond its normal form, for a values
+    /// version: `+leafrisk:<model>` for a learned term, then for a deeper expert
+    /// `+defer:O<K>:<its network's id>` and its own exact leaves' (`+exact:<policy>` and their
+    /// learned model's).
+    pub fn values_suffix(&self) -> String {
+        let mut v = String::new();
+        if let Some(l) = &self.learned {
+            v.push_str(&format!("+leafrisk:{}", l.model.sha256));
+        }
+        if let Expert::Deeper(d) = &self.expert {
+            v.push_str(&format!("+defer:O{}:{}", d.cut, d.net_id));
+            if let Some(p) = &d.leaves {
+                v.push_str(&format!("+exact:{}{}", p.describe(), p.values_suffix()));
+            }
+        }
+        v
     }
 
     /// Whether race class `c` is solved exactly whatever the network says.
@@ -382,6 +661,22 @@ pub struct LeafStats {
     pub scored: u64,
     /// Time of the learned term's scoring (µs; a report only).
     pub score_us: u64,
+    /// A deeper expert ([`Expert::Deeper`]): its network evaluations (its own search's frontier
+    /// requests) over the leaves it valued (`nodes` then holds its searches' and its own leaf
+    /// solves' solver nodes).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub expert_evals: u64,
+    /// A deeper expert: the distinct frontier positions its searches reached (summed over its
+    /// searches).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub expert_leaves: u64,
+    /// A deeper expert: of those, the ones its own exact leaves solved exactly.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub expert_exact: u64,
+}
+
+fn is_zero(x: &u64) -> bool {
+    *x == 0
 }
 
 impl LeafStats {
@@ -395,6 +690,15 @@ impl LeafStats {
         self.us += o.us;
         self.scored += o.scored;
         self.score_us += o.score_us;
+        self.expert_evals += o.expert_evals;
+        self.expert_leaves += o.expert_leaves;
+        self.expert_exact += o.expert_exact;
+    }
+
+    /// A deeper expert's counts (what is the same on every machine and thread count): its
+    /// network evaluations, distinct leaves and exact ones.
+    pub fn expert_counts(&self) -> (u64, u64, u64) {
+        (self.expert_evals, self.expert_leaves, self.expert_exact)
     }
 
     /// The counts without the time (what is the same on every machine and thread count).
@@ -404,10 +708,14 @@ impl LeafStats {
 }
 
 thread_local! {
-    /// Each thread's memory for leaf solves, kept from world to world (`SolveMem`: reuse never
-    /// changes a value), apart from the memory of the hybrid's own search.
-    static LEAF_MEM: RefCell<Option<SolveMem>> = const { RefCell::new(None) };
+    /// Each thread's memories for leaf solves, kept from world to world (`SolveMem`: reuse never
+    /// changes a value), apart from the memory of the hybrid's own search: a stack, one taken by
+    /// each live [`ExactLeaves`] (a deeper expert's search has its own inside the outer one's).
+    static LEAF_MEM: RefCell<Vec<SolveMem>> = const { RefCell::new(Vec::new()) };
 }
+
+/// The most leaf memories a thread keeps between searches.
+const LEAF_MEM_KEEP: usize = 4;
 
 struct LeafState {
     mem: Option<SolveMem>,
@@ -439,7 +747,9 @@ impl<'a> ExactLeaves<'a> {
         team: u8,
         family: Option<SolveFamily>,
     ) -> Self {
-        let mut mem = LEAF_MEM.with(|m| m.borrow_mut().take()).unwrap_or_default();
+        let mut mem = LEAF_MEM
+            .with(|m| m.borrow_mut().pop())
+            .unwrap_or_default();
         match family {
             Some(f) => mem.share(f),
             None => mem.unshare(),
@@ -489,7 +799,12 @@ impl Drop for ExactLeaves<'_> {
         let st = self.state.get_mut().unwrap_or_else(|e| e.into_inner());
         if let Some(mut mem) = st.mem.take() {
             mem.unshare();
-            LEAF_MEM.with(|m| *m.borrow_mut() = Some(mem));
+            LEAF_MEM.with(|m| {
+                let mut m = m.borrow_mut();
+                if m.len() < LEAF_MEM_KEEP {
+                    m.push(mem);
+                }
+            });
         }
     }
 }
@@ -532,14 +847,61 @@ impl Frontier for ExactLeaves<'_> {
             net = Some(v);
         }
         let k = usize::from(class);
+        if exact && let Expert::Deeper(d) = &self.policy.expert {
+            // A deeper expert's search is long: it runs without the lock, so the parallel
+            // solver's other threads keep searching meanwhile, on this thread's own leaf memory.
+            // Its value depends only on the canonical form (as every frontier value must), so
+            // two threads valuing the same leaf at once get the same value; the first kept
+            // counts.
+            assert_eq!(
+                pos.hand.tricks_done + 2,
+                d.cut,
+                "a deeper expert looks one trick past the leaf"
+            );
+            drop(guard);
+            let mut mem = LEAF_MEM
+                .with(|m| m.borrow_mut().pop())
+                .unwrap_or_default();
+            mem.unshare();
+            let t = Instant::now();
+            let (v, nodes, evals, lc) = crate::oracle_labels::hybrid_value(
+                pos,
+                *ctx,
+                self.leaf,
+                &d.net,
+                d.leaves.as_ref(),
+                &mut mem,
+            );
+            let us = t.elapsed().as_micros() as u64;
+            LEAF_MEM.with(|m| {
+                let mut m = m.borrow_mut();
+                if m.len() < LEAF_MEM_KEEP {
+                    m.push(mem);
+                }
+            });
+            let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let st = &mut *guard;
+            if let Some(&(_, _, v0, _)) = st.memo.get(canon) {
+                return v0;
+            }
+            st.stats.distinct[k] += 1;
+            st.stats.nodes += nodes + lc.nodes;
+            st.stats.expert_evals += evals;
+            st.stats.expert_leaves += lc.distinct;
+            st.stats.expert_exact += lc.exact;
+            st.stats.us += us;
+            st.stats.exact[k] += 1;
+            st.memo.insert(*canon, (*pos, *ctx, v, true));
+            return v;
+        }
         st.stats.distinct[k] += 1;
         let v = if exact {
             let mem = st.mem.get_or_insert_with(SolveMem::new);
             let t = Instant::now();
             let (v, nodes) =
                 crate::oracle_labels::exact_value(pos, *ctx, self.leaf, self.opts, mem);
-            st.stats.us += t.elapsed().as_micros() as u64;
             st.stats.nodes += nodes;
+            st.stats.us += t.elapsed().as_micros() as u64;
             st.stats.exact[k] += 1;
             v
         } else {

@@ -125,15 +125,31 @@ pub enum Teacher<'a> {
         cut: u8,
         /// The network file's SHA-256.
         sha256: &'a str,
+        /// Exact leaves (`crate::exact_leaves`; `None`: none): in each deal the frontier
+        /// positions this policy picks are valued by its expert (the exact solver, or a deeper
+        /// hybrid: learned deferral, docs/m3-hybrid/learned-leaves.md).
+        leaves: Option<&'a crate::exact_leaves::LeafPolicy>,
     },
 }
 
 impl Teacher<'_> {
-    /// The teacher's stamp: `exact`, or `hybrid:<sha256>:cut<k>`.
+    /// The teacher's stamp: `exact`, or `hybrid:<sha256>:cut<k>`, with exact leaves
+    /// `…+exact:<policy><its SHA-256s>` (`LeafPolicy::describe`, `LeafPolicy::values_suffix`).
     pub fn stamp(&self) -> String {
         match self {
             Teacher::Exact => "exact".into(),
-            Teacher::Hybrid { cut, sha256, .. } => format!("hybrid:{sha256}:cut{cut}"),
+            Teacher::Hybrid {
+                cut,
+                sha256,
+                leaves,
+                ..
+            } => {
+                let mut s = format!("hybrid:{sha256}:cut{cut}");
+                if let Some(p) = leaves {
+                    s.push_str(&format!("+exact:{}{}", p.describe(), p.values_suffix()));
+                }
+                s
+            }
         }
     }
 }
@@ -222,14 +238,32 @@ pub fn deal_values(
 ) -> (Vec<Vec<MoneyChance>>, Option<u128>) {
     let worlds = ctx.source.prepare(view, ctx.rules);
     let count = worlds.count();
-    let cut = match teacher {
-        Teacher::Exact => None,
-        Teacher::Hybrid { net, cut, .. } => Some(FrontierCut::new(cut, net)),
-    };
     let rows = (from..from + n)
         .map(|w| {
             let m = world_match(view, &*worlds, u64::from(w), dseed, ctx.rules);
             let mut run = WorldSolve::default();
+            // Exact leaves: one wrapper per deal around the network.
+            let x = match teacher {
+                Teacher::Hybrid {
+                    net,
+                    leaves: Some(policy),
+                    ..
+                } => Some(crate::exact_leaves::ExactLeaves::new(
+                    net,
+                    ctx.leaf,
+                    policy,
+                    engine::team_of(view.seat),
+                    solver::SolveFamily::of_match(&m),
+                )),
+                _ => None,
+            };
+            let cut = match teacher {
+                Teacher::Exact => None,
+                Teacher::Hybrid { net, cut, .. } => Some(match &x {
+                    Some(x) => FrontierCut::new(cut, x),
+                    None => FrontierCut::new(cut, net),
+                }),
+            };
             exact_world(&m, cands, ctx, cfg, None, mem, &mut run, cut)
                 .expect("nothing stops a solve here")
         })
@@ -339,6 +373,14 @@ pub fn check_job(job: &TeacherJob, teacher: &Teacher, test_role: bool) -> Result
             "a trick-{} decision needs a network at the start of a later trick, not {cut}",
             job.trick
         ));
+    }
+    if let Teacher::Hybrid {
+        cut,
+        leaves: Some(p),
+        ..
+    } = teacher
+    {
+        p.check_for(*cut)?;
     }
     Ok(())
 }
@@ -549,6 +591,7 @@ mod tests {
             net: &o,
             cut: 3,
             sha256: &o.sha256,
+            leaves: None,
         };
         let j = job(2, 3, 4, SOURCE_MIXED, 1);
         let mut more = j;
@@ -599,6 +642,7 @@ mod tests {
             net: &o,
             cut: 2,
             sha256: &o.sha256,
+            leaves: None,
         };
         let mut keys = Vec::new();
         for threads in [1, 3] {
@@ -651,6 +695,7 @@ mod tests {
             net: &o,
             cut: 3,
             sha256: "x",
+            leaves: None,
         };
         let mut j = job(2, 1, 1, SOURCE_RULES, 1);
         assert!(check_job(&j, &h, false).is_ok());
@@ -680,6 +725,7 @@ mod tests {
             net: &o,
             cut: 3,
             sha256: &o.sha256,
+            leaves: None,
         };
         let mut a = job(2, 6, 2, SOURCE_RULES, 2);
         let mut b = a;
@@ -813,6 +859,7 @@ mod tests {
             net: &o,
             cut: 3,
             sha256: &o.sha256,
+            leaves: None,
         };
         let wide = job(2, 6, 5, SOURCE_MIXED, 2);
         let mut narrow = wide;

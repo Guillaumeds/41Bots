@@ -569,9 +569,11 @@ pub fn world_row_counted(
     par: Option<&ParProgress>,
     mem: &mut SolveMem,
     cut: Option<FrontierCut>,
+    leaves: Option<&crate::exact_leaves::LeafPolicy>,
 ) -> (Vec<MoneyChance>, WorldCost) {
     if method != Method::ExactPimc {
         assert!(cut.is_none(), "a frontier is for exact PIMC worlds only");
+        assert!(leaves.is_none(), "exact leaves are for a frontier");
         return (
             world_row(view, worlds, cands, method, w, dseed, ctx, cfg, par, mem),
             WorldCost::default(),
@@ -582,7 +584,21 @@ pub fn world_row_counted(
         None => exact_world_row(view, worlds, cands, w, dseed, ctx, cfg, par, mem, &mut run),
         Some(cut) => {
             let m = world_match(view, worlds, w, dseed, ctx.rules);
-            exact_world(&m, cands, ctx, cfg, par, mem, &mut run, Some(cut))
+            // Exact leaves: one wrapper per world, around the frontier's evaluator.
+            let x = leaves.map(|policy| {
+                crate::exact_leaves::ExactLeaves::new(
+                    cut.eval(),
+                    ctx.leaf,
+                    policy,
+                    engine::team_of(view.seat),
+                    solver::SolveFamily::of_match(&m),
+                )
+            });
+            let c = match &x {
+                Some(x) => FrontierCut::new(cut.trick(), x),
+                None => cut,
+            };
+            exact_world(&m, cands, ctx, cfg, par, mem, &mut run, Some(c))
         }
     }
     .expect("nothing stops a solve here");

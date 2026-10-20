@@ -118,6 +118,34 @@ class Trees(unittest.TestCase):
                     self.assertTrue(t["l"][i] > i and t["r"][i] > i)
 
 
+class Trick(unittest.TestCase):
+    """The model records the network's frontier trick (O_2's model is for trick-2 leaves, which
+    Rust refuses at any other trick); rows prepared before the trick was recorded are O_3's."""
+
+    def test_trick_from_the_network(self):
+        self.assertEqual(lr.net_trick({"trick": "2"}), 2)
+        with self.assertRaises(ValueError):
+            lr.net_trick({})
+        self.assertEqual(lr.rows_trick({}), 3)
+        self.assertEqual(lr.rows_trick({"net_trick": np.array(2)}), 2)
+
+    def test_train_writes_the_trick_and_refuses_mixed_tricks(self):
+        import tempfile
+
+        d, _ = synthetic(800, 4)
+        extra = {"race": d["extras"][:, 0].astype(np.int8), "oent": np.zeros(800, np.float32),
+                 "otop": np.zeros(800, np.float32), "net_sha256": np.array("ab")}
+        with tempfile.TemporaryDirectory() as t:
+            a, b, out = Path(t) / "a.npz", Path(t) / "b.npz", Path(t) / "m.json"
+            np.savez(a, **d, **extra, net_trick=np.array(2))
+            lr.main(["train", "--data", str(a), "--out", str(out), "--trees", "2", "--min-leaf", "50"])
+            m = json.loads(out.read_text())
+            self.assertEqual((m["trick"], m["net_sha256"]), (2, "ab"))
+            np.savez(b, **d, **extra)
+            with self.assertRaises(SystemExit):
+                lr.main(["train", "--data", str(a), "--data", str(b), "--out", str(out)])
+
+
 class Thresholds(unittest.TestCase):
     # Four decisions of one position each; losses 0.1 .. 0.4 at scores 1 .. 4.
     score = np.array([1, 2, 3, 4], dtype=np.int64)

@@ -269,9 +269,12 @@ fn worker_inner(spec_path: &Path) -> Result<(), String> {
             if kind == "hybrid_t1check" {
                 p = crate::t1check::resolve(&p, &inputs)?;
             }
-            // `hybrid_checks` too (`checks.rs`).
+            // `hybrid_checks` too (`checks.rs`), and `leafrisk`'s network (`leafrisk.rs`).
             if kind == "hybrid_checks" {
                 p = crate::checks::resolve(&p, &inputs)?;
+            }
+            if kind == "leafrisk" {
+                p = crate::leafrisk::resolve(&p, &inputs)?;
             }
             // A `search_measure` chunk's silver reference, check network and stored worlds
             // (`measure.rs`, "A silver reference") are inputs too.
@@ -286,6 +289,7 @@ fn worker_inner(spec_path: &Path) -> Result<(), String> {
                 "hybrid_rung",
                 "hybrid_t1check",
                 "hybrid_checks",
+                "leafrisk",
             ]
             .contains(&kind.as_str())
                 && let Ok(path) = equity()

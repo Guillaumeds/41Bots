@@ -44,6 +44,18 @@
 //!   `:budget=S`) names its leaf-risk model (`nn::leafrisk`) as a manifest input, whose path
 //!   replaces the name in the command (rung2.md "Learned exact leaves"; manifest
 //!   docs/vast/o3-learnedleaf.manifest.json).
+//! - `defer_expert` (optional; with `exact_leaves`): who values the picked leaves (`search
+//!   hybrid-check --defer-expert`, `search::exact_leaves::Expert`): `exact` (the default) or a
+//!   deeper hybrid `hK:NET[,NET…][:SPEC]` (K = `cut + 1`), its networks and its own exact
+//!   leaves' learned model named as manifest inputs (learned deferral at cut 2,
+//!   docs/m3-hybrid/learned-leaves.md; manifest docs/vast/t1-defer2-check.manifest.json).
+//!
+//! A `reference` object `{ "cut": R, "net_input": NAME, "exact_leaves": SPEC, "defer_expert":
+//! E }` (optional; R after `cut`) makes the checks against exact values checks against a silver
+//! reference (`search hybrid-check --reference silver --reference-net … --reference-cut R
+//! [--reference-exact-leaves SPEC] [--reference-defer-expert E]`, docs/m3-hybrid/silver.md):
+//! `worlds_input` is then that reference's stored worlds (its records' fingerprint must name the
+//! same network and exact leaves), and the verification sample is recomputed with it.
 //!
 //! with `--race-groups` when `race_groups` (true), into `out/hybrid/checks/<name>.json` and the
 //! printed tables in `<name>.txt`. Then each `paired` entry is `search hybrid-paired --a
@@ -69,7 +81,7 @@ use crate::{Ctx, sibling};
 
 /// The settings a `hybrid_checks` chunk takes (after `v2.rs` added the inputs' paths); any other
 /// key is refused.
-pub(crate) const KEYS: [&str; 19] = [
+pub(crate) const KEYS: [&str; 20] = [
     "trick",
     "cut",
     "worlds",
@@ -89,13 +101,14 @@ pub(crate) const KEYS: [&str; 19] = [
     "threads",
     "est_seconds",
     "chunk_sizes",
+    "reference",
 ];
 
 /// Keys `v2.rs` adds: the local paths of the named inputs.
 const RESOLVED: [&str; 4] = ["decisions", "worlds_path", "net_paths", "model_paths"];
 
 /// Keys of a check.
-const CHECK_KEYS: [&str; 8] = [
+const CHECK_KEYS: [&str; 9] = [
     "name",
     "nets",
     "truth",
@@ -104,6 +117,7 @@ const CHECK_KEYS: [&str; 8] = [
     "noise_calibrate",
     "noise_calibrate_worlds",
     "exact_leaves",
+    "defer_expert",
 ];
 
 /// One check.
@@ -123,8 +137,112 @@ pub(crate) struct Check {
     /// in its normal form (as written when it has a learned term, whose model is an input
     /// name); `None`: none (the hybrid as before).
     pub exact_leaves: Option<String>,
-    /// Input names of the leaf-risk models of a learned term (`learned:NAME:t=T`).
+    /// Input names of the leaf-risk models of a learned term (`learned:NAME:t=T`), the
+    /// expert's own included.
     pub models: Vec<String>,
+    /// The picked leaves' expert as written (`None`: exact): `hK:NETS[:SPEC]` with input names.
+    pub defer_expert: Option<String>,
+    /// Input names of the expert's networks.
+    pub expert_nets: Vec<String>,
+}
+
+/// A silver reference of a `hybrid_checks` chunk (module notes).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RefSpec {
+    pub cut: u64,
+    pub net_input: String,
+    /// Its exact leaves as written (learned models by input name; `None`: none).
+    pub exact_leaves: Option<String>,
+    /// Their expert as written (`None`: exact).
+    pub defer_expert: Option<String>,
+    /// Input names of its leaf-risk models and its expert's networks.
+    pub models: Vec<String>,
+    pub expert_nets: Vec<String>,
+}
+
+/// Exact leaves and their expert as a manifest writes them (`what` names the place for
+/// messages): checked without their files, `exact_leaves` in its normal form unless it has a
+/// learned term (then as written, its model an input name). Returns (the exact leaves, the
+/// expert, the input names of the leaf-risk models, those of the expert's networks).
+#[allow(clippy::type_complexity)]
+pub(crate) fn leaf_settings(
+    exact_leaves: Option<&str>,
+    defer_expert: Option<&str>,
+    what: &str,
+) -> Result<(Option<String>, Option<String>, Vec<String>, Vec<String>), String> {
+    let err = |e: String| format!("{what}: {e}");
+    let mut models = Vec::new();
+    let leaves = match exact_leaves {
+        None => None,
+        Some(text) if text.contains("learned:") => {
+            models = search::exact_leaves::check_spec(text).map_err(err)?;
+            Some(text.trim().to_string())
+        }
+        Some(text) => search::exact_leaves::LeafPolicy::parse(text, 1)
+            .map_err(err)?
+            .map(|p| p.describe()),
+    };
+    let mut nets = Vec::new();
+    let expert = match defer_expert {
+        None => None,
+        Some(_) if leaves.is_none() => {
+            return Err(err(
+                "defer_expert defers the leaves exact_leaves picks: none are picked".into(),
+            ));
+        }
+        Some(text) => match search::exact_leaves::expert_parts(text).map_err(err)? {
+            search::exact_leaves::ExpertText::Exact => None,
+            search::exact_leaves::ExpertText::Deeper { nets: n, spec, .. } => {
+                nets = n.iter().map(|x| x.to_string()).collect();
+                if let Some(sp) = spec {
+                    for m in search::exact_leaves::check_spec(sp).map_err(err)? {
+                        if !models.contains(&m) {
+                            models.push(m);
+                        }
+                    }
+                }
+                Some(text.trim().to_string())
+            }
+        },
+    };
+    Ok((leaves, expert, models, nets))
+}
+
+/// Exact leaves as written with each learned model's input name turned into its path (`path`).
+pub(crate) fn leaves_with_paths(
+    text: &str,
+    models: &[String],
+    path: &dyn Fn(&str) -> Result<String, String>,
+) -> Result<String, String> {
+    let mut t = text.to_string();
+    for m in models {
+        if t.contains(&format!("learned:{m}:")) {
+            t = t.replace(&format!("learned:{m}:"), &format!("learned:{}:", path(m)?));
+        }
+    }
+    Ok(t)
+}
+
+/// An expert as written (`hK:NETS[:SPEC]`) with its networks' and its leaf-risk models' input
+/// names turned into paths (`net_path`, `model_path`).
+pub(crate) fn expert_with_paths(
+    text: &str,
+    net_path: &dyn Fn(&str) -> Result<String, String>,
+    model_path: &dyn Fn(&str) -> Result<String, String>,
+) -> Result<String, String> {
+    match search::exact_leaves::expert_parts(text)? {
+        search::exact_leaves::ExpertText::Exact => Ok("exact".into()),
+        search::exact_leaves::ExpertText::Deeper { cut, nets, spec } => {
+            let nets: Vec<String> = nets.iter().map(|n| net_path(n)).collect::<Result<_, _>>()?;
+            let mut t = format!("h{cut}:{}", nets.join(","));
+            if let Some(sp) = spec {
+                let models = search::exact_leaves::check_spec(sp)?;
+                t.push(':');
+                t.push_str(&leaves_with_paths(sp, &models, model_path)?);
+            }
+            Ok(t)
+        }
+    }
 }
 
 /// The checked settings.
@@ -145,6 +263,8 @@ pub(crate) struct Params {
     pub checks: Vec<Check>,
     /// (name, check a, check b).
     pub paired: Vec<(String, String, String)>,
+    /// A silver reference for the checks against exact values (module notes).
+    pub reference: Option<RefSpec>,
 }
 
 fn name_ok(s: &str) -> bool {
@@ -282,35 +402,17 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
                 ));
             }
         }
-        let mut models = Vec::new();
-        let exact_leaves = match s(c, "exact_leaves")? {
-            None => None,
-            Some(text) if text.contains("learned:") => {
-                // A learned term names a manifest input (the leaf-risk model): checked here
-                // without it, kept as written, its name turned into a path when the command is
-                // made.
-                models = search::exact_leaves::check_spec(&text)
-                    .map_err(|e| format!("hybrid_checks: check `{name}`: {e}"))?;
-                if truth_net {
-                    return Err(format!(
-                        "hybrid_checks: check `{name}`: exact_leaves is for checks against \
-                         exact values, not truth net"
-                    ));
-                }
-                Some(text.trim().to_string())
-            }
-            Some(text) => {
-                let p = search::exact_leaves::LeafPolicy::parse(&text, 1)
-                    .map_err(|e| format!("hybrid_checks: check `{name}`: {e}"))?;
-                if p.is_some() && truth_net {
-                    return Err(format!(
-                        "hybrid_checks: check `{name}`: exact_leaves is for checks against \
-                         exact values, not truth net"
-                    ));
-                }
-                p.map(|p| p.describe())
-            }
-        };
+        let (exact_leaves, defer_expert, models, expert_nets) = leaf_settings(
+            s(c, "exact_leaves")?.as_deref(),
+            s(c, "defer_expert")?.as_deref(),
+            &format!("hybrid_checks: check `{name}`"),
+        )?;
+        if exact_leaves.is_some() && truth_net {
+            return Err(format!(
+                "hybrid_checks: check `{name}`: exact_leaves is for checks against exact \
+                 values, not truth net"
+            ));
+        }
         checks.push(Check {
             name,
             nets,
@@ -321,6 +423,8 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
             noise_calibrate_worlds: n(c, "noise_calibrate_worlds", 8)?.max(1),
             exact_leaves,
             models,
+            defer_expert,
+            expert_nets,
         });
     }
     let mut paired = Vec::new();
@@ -363,7 +467,45 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
     {
         return Err("hybrid_checks: paired must be a list".into());
     }
+    let reference = match p.get("reference") {
+        None | Some(Value::Null) => None,
+        Some(r) => {
+            for k in r.as_object().ok_or("hybrid_checks: reference must be an object")?.keys() {
+                if !["cut", "net_input", "exact_leaves", "defer_expert"].contains(&k.as_str()) {
+                    return Err(format!("hybrid_checks: reference: unknown key `{k}`"));
+                }
+            }
+            let rc = n(r, "cut", cut + 1)?;
+            if rc <= cut || rc > 5 {
+                return Err(format!(
+                    "hybrid_checks: reference cut {rc} must be after the checks' cut {cut} (at \
+                     most 5)"
+                ));
+            }
+            let net_input =
+                s(r, "net_input")?.ok_or("hybrid_checks: reference needs net_input")?;
+            let (exact_leaves, defer_expert, models, expert_nets) = leaf_settings(
+                s(r, "exact_leaves")?.as_deref(),
+                s(r, "defer_expert")?.as_deref(),
+                "hybrid_checks: reference",
+            )?;
+            if worlds_input.is_none() {
+                return Err("hybrid_checks: a silver reference needs worlds_input (its \
+                            stored worlds)"
+                    .into());
+            }
+            Some(RefSpec {
+                cut: rc,
+                net_input,
+                exact_leaves,
+                defer_expert,
+                models,
+                expert_nets,
+            })
+        }
+    };
     Ok(Params {
+        reference,
         trick,
         cut,
         worlds,
@@ -386,12 +528,20 @@ pub(crate) fn input_names(p: &Value) -> Result<Vec<String>, String> {
     let q = parse(p)?;
     let mut v = vec![q.decisions_input];
     v.extend(q.worlds_input);
-    for c in q.checks {
-        for n in c.nets {
-            if !v.contains(&n) {
-                v.push(n);
-            }
+    let mut add = |n: &String| {
+        if !v.contains(n) {
+            v.push(n.clone());
         }
+    };
+    for c in &q.checks {
+        c.nets.iter().for_each(&mut add);
+        c.expert_nets.iter().for_each(&mut add);
+        c.models.iter().for_each(&mut add);
+    }
+    if let Some(r) = &q.reference {
+        add(&r.net_input);
+        r.expert_nets.iter().for_each(&mut add);
+        r.models.iter().for_each(&mut add);
     }
     Ok(v)
 }
@@ -413,18 +563,24 @@ pub(crate) fn resolve(p: &Value, inputs: &BTreeMap<String, String>) -> Result<Va
         out["worlds_path"] = json!(path(w)?);
     }
     let mut nets = serde_json::Map::new();
-    for c in &q.checks {
-        for n in &c.nets {
-            nets.insert(n.clone(), json!(path(n)?));
-        }
-    }
-    out["net_paths"] = Value::Object(nets);
     let mut models = serde_json::Map::new();
     for c in &q.checks {
+        for n in c.nets.iter().chain(&c.expert_nets) {
+            nets.insert(n.clone(), json!(path(n)?));
+        }
         for n in &c.models {
             models.insert(n.clone(), json!(path(n)?));
         }
     }
+    if let Some(r) = &q.reference {
+        for n in std::iter::once(&r.net_input).chain(&r.expert_nets) {
+            nets.insert(n.clone(), json!(path(n)?));
+        }
+        for n in &r.models {
+            models.insert(n.clone(), json!(path(n)?));
+        }
+    }
+    out["net_paths"] = Value::Object(nets);
     out["model_paths"] = Value::Object(models);
     Ok(out)
 }
@@ -463,17 +619,16 @@ pub(crate) fn check_command(
             format!("hybrid_checks: no local path for leaf-risk model `{m}` (inputs not resolved)")
         })
         };
+    let net_path = |n: &str| -> Result<String, String> {
+        p["net_paths"][n].as_str().map(str::to_string).ok_or_else(|| {
+            format!("hybrid_checks: no local path for network `{n}` (inputs not resolved)")
+        })
+    };
+    let model_path = |m: &str| p_models(p_in, m);
     let nets: Vec<String> = c
         .nets
         .iter()
-        .map(|n| {
-            p["net_paths"][n.as_str()]
-                .as_str()
-                .map(str::to_string)
-                .ok_or_else(|| {
-                    format!("hybrid_checks: no local path for network `{n}` (inputs not resolved)")
-                })
-        })
+        .map(|n| net_path(n))
         .collect::<Result<_, _>>()?;
     let mut cmd = Command::new(search);
     cmd.args([
@@ -513,6 +668,24 @@ pub(crate) fn check_command(
                 "0".to_string()
             },
         ]);
+        if let Some(rf) = &q.reference {
+            cmd.args(["--reference", "silver"])
+                .args(["--reference-net", &net_path(&rf.net_input)?])
+                .args(["--reference-cut", &rf.cut.to_string()]);
+            if let Some(l) = &rf.exact_leaves {
+                cmd.args([
+                    "--reference-exact-leaves",
+                    &leaves_with_paths(l, &rf.models, &model_path)?,
+                ])
+                .args(["--reference-exact-leaf-tt-mb", &r.tt_mb.to_string()]);
+            }
+            if let Some(e) = &rf.defer_expert {
+                cmd.args([
+                    "--reference-defer-expert",
+                    &expert_with_paths(e, &net_path, &model_path)?,
+                ]);
+            }
+        }
     }
     cmd.args(["--threads", &r.threads.to_string()])
         .args(["--tt-mb", &r.tt_mb.to_string()])
@@ -522,14 +695,18 @@ pub(crate) fn check_command(
     if q.race_groups {
         cmd.arg("--race-groups");
     }
-    if let Some(p) = &c.exact_leaves {
-        let mut p = p.clone();
-        for m in &c.models {
-            let path = p_models(p_in, m)?;
-            p = p.replace(&format!("learned:{m}:"), &format!("learned:{path}:"));
-        }
-        cmd.args(["--exact-leaves", &p])
-            .args(["--exact-leaf-tt-mb", &r.tt_mb.to_string()]);
+    if let Some(l) = &c.exact_leaves {
+        cmd.args([
+            "--exact-leaves",
+            &leaves_with_paths(l, &c.models, &model_path)?,
+        ])
+        .args(["--exact-leaf-tt-mb", &r.tt_mb.to_string()]);
+    }
+    if let Some(e) = &c.defer_expert {
+        cmd.args([
+            "--defer-expert",
+            &expert_with_paths(e, &net_path, &model_path)?,
+        ]);
     }
     cmd.arg("--json")
         .arg(r.out.join(format!("{}.json", c.name)))
@@ -605,7 +782,9 @@ pub(crate) fn chunk_with(
     let t0 = Instant::now();
     let threads = ctx.threads.max(1);
     // A check with exact leaves holds a second table per thread, for the leaf solves.
-    let per_thread = if q.checks.iter().any(|c| c.exact_leaves.is_some()) {
+    let per_thread = if q.checks.iter().any(|c| c.exact_leaves.is_some())
+        || q.reference.as_ref().is_some_and(|r| r.exact_leaves.is_some())
+    {
         2
     } else {
         1
@@ -658,7 +837,16 @@ pub(crate) fn chunk_with(
             .ok_or_else(|| format!("hybrid_checks: hybrid-check wrote no {}.json", c.name))?;
         let mut s = summary(&hc);
         s["name"] = json!(c.name);
-        s["truth"] = json!(if c.truth_net { "net" } else { "exact" });
+        s["truth"] = json!(if c.truth_net {
+            "net"
+        } else if q.reference.is_some() {
+            "silver"
+        } else {
+            "exact"
+        });
+        if let Some(e) = &c.defer_expert {
+            s["defer_expert"] = json!(e);
+        }
         s["nets"] = json!(c.nets);
         s["seconds"] = json!((t.elapsed().as_secs_f64() * 10.0).round() / 10.0);
         checks.push(s);

@@ -239,6 +239,7 @@ mod stale {
             to,
             table: TABLE.to_string(),
             frontier: None,
+            exact_leaves: None,
         }
     }
 

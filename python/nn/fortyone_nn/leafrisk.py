@@ -1,6 +1,9 @@
 """The leaf-risk predictor and its threshold (docs/m3-hybrid/rung2.md "Learned exact leaves"):
 which trick-3 frontier positions the hybrid H_3 solves exactly instead of taking the oracle
-network O_3's value, learned from data instead of chosen by hand.
+network O_3's value, learned from data instead of chosen by hand. The same for any frontier
+trick: with O_2 and a trick-2 harvest it chooses the trick-2 leaves H_2 hands to a deeper
+expert (learned deferral at cut 2, docs/m3-hybrid/learned-leaves.md); the model records the
+network's trick (``net_trick``), and Rust refuses it at another trick.
 
     uv run python -m fortyone_nn.leafrisk prepare --net O3.safetensors --shard H.npy --out H.npz
     uv run python -m fortyone_nn.leafrisk train --data TRAIN.npz [--data ...] --out MODEL.json
@@ -228,9 +231,25 @@ def prepare(net_path, shard_path, out, chunk=4096, log=print):
     d = {k: np.concatenate(v) for k, v in parts.items()}
     d["unit"] = decision_runs(d["active"])
     d["net_sha256"] = np.array(sha256_file(net_path))
+    d["net_trick"] = np.array(net_trick(meta))
     d["shard_sha256"] = np.array(sha256_file(shard_path))
     np.savez_compressed(out, **d)
     return d
+
+
+def net_trick(meta):
+    """The frontier trick a network was trained for (its metadata's ``trick``); the model it
+    teaches predicts errors at that trick's start (O_3: trick-3 leaves, O_2: trick-2 leaves)."""
+    t = meta.get("trick")
+    if t is None:
+        raise ValueError("the network records no frontier trick")
+    return int(t)
+
+
+def rows_trick(d):
+    """The frontier trick of prepared rows (``net_trick``; 3 for files prepared before it was
+    recorded, which were all O_3's)."""
+    return int(d["net_trick"]) if "net_trick" in d else 3
 
 
 def load_rows(paths):
@@ -244,6 +263,7 @@ def load_rows(paths):
         base += int(d["unit"].max()) + 1
     out["unit"] = np.concatenate(units)
     out["net_sha256"] = {str(d["net_sha256"]) for d in ds}
+    out["net_trick"] = {rows_trick(d) for d in ds}
     return out
 
 
@@ -664,12 +684,12 @@ def main(argv=None):
         prepare(a.net, a.shard, a.out)
     elif a.cmd == "train":
         d = load_rows(a.data)
-        if len(d["net_sha256"]) != 1:
+        if len(d["net_sha256"]) != 1 or len(d["net_trick"]) != 1:
             raise SystemExit("the rows come from different networks")
         m = fit(d, trees=a.trees, depth=a.depth, rate=a.rate, min_leaf=a.min_leaf, subsample=a.subsample,
                 seed=a.seed, holdout=a.holdout)
         m["net_sha256"] = next(iter(d["net_sha256"]))
-        m["trick"] = 3
+        m["trick"] = next(iter(d["net_trick"]))
         m["budget"] = None
         with open(a.out, "w") as f:
             json.dump(m, f)

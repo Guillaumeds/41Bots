@@ -521,17 +521,40 @@ pub struct FrontierFp {
     pub net_sha256: String,
     /// The encoder the network reads (`nn::encode::ENCODER`).
     pub encoder: String,
+    /// The hybrid's exact leaves (`crate::exact_leaves`), when it has them: the policy's normal
+    /// form and the SHA-256s that decide it (`LeafPolicy::describe` then
+    /// `LeafPolicy::values_suffix`; [`FrontierFp::leaves_text`]). Absent otherwise, so records
+    /// without exact leaves keep their bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_leaves: Option<String>,
 }
 
 impl FrontierFp {
     /// "H_3 (net f5766aa98a1d)": for messages.
     pub fn describe(&self) -> String {
-        format!("H_{} (net {})", self.cut, short_sha(&self.net_sha256))
+        match &self.exact_leaves {
+            None => format!("H_{} (net {})", self.cut, short_sha(&self.net_sha256)),
+            Some(p) => format!(
+                "H_{} (net {}, exact leaves {p})",
+                self.cut,
+                short_sha(&self.net_sha256)
+            ),
+        }
     }
 
-    /// The values version of a hybrid record (as `hybrid-check` writes it: `2+O3:<sha256>`).
+    /// The values version of a hybrid record (as `hybrid-check` writes it: `2+O3:<sha256>`, and
+    /// `…+exact:<policy>` with exact leaves).
     pub fn values(&self) -> String {
-        format!("{VALUES_VERSION}+O{}:{}", self.cut, self.net_sha256)
+        let mut v = format!("{VALUES_VERSION}+O{}:{}", self.cut, self.net_sha256);
+        if let Some(p) = &self.exact_leaves {
+            v.push_str(&format!("+exact:{p}"));
+        }
+        v
+    }
+
+    /// The [`FrontierFp::exact_leaves`] text of a policy.
+    pub fn leaves_text(p: &crate::exact_leaves::LeafPolicy) -> String {
+        format!("{}{}", p.describe(), p.values_suffix())
     }
 }
 
@@ -609,6 +632,11 @@ pub struct WorldsJob {
     /// fingerprint. The network itself is handed to the run beside the job
     /// ([`worlds_file_net`], [`run_worlds`]), and must be the one named here.
     pub frontier: Option<FrontierFp>,
+    /// A hybrid run's exact leaves (`crate::exact_leaves`; `None`: none): each world's search
+    /// values the frontier positions this policy picks by its expert (a silver reference "H_3
+    /// with learned exact leaves"). Named in the frontier's fingerprint
+    /// ([`FrontierFp::exact_leaves`], checked to agree).
+    pub exact_leaves: Option<crate::exact_leaves::LeafPolicy>,
 }
 
 impl WorldsJob {
@@ -898,6 +926,9 @@ fn check_frontier<'n>(
     job: &WorldsJob,
     net: Option<&'n dyn Frontier>,
 ) -> Result<Option<FrontierCut<'n>>, String> {
+    if job.frontier.is_none() && job.exact_leaves.is_some() {
+        return Err("exact leaves are for a hybrid worlds run (a frontier)".into());
+    }
     match (&job.frontier, net) {
         (None, None) => Ok(None),
         (Some(f), Some(n)) => {
@@ -916,6 +947,18 @@ fn check_frontier<'n>(
                      (at or after the frontier's trick the solve would be exact)",
                     d.id, d.trick, f.cut, f.cut
                 ));
+            }
+            let text = job.exact_leaves.as_ref().map(FrontierFp::leaves_text);
+            if f.exact_leaves != text {
+                return Err(format!(
+                    "the hybrid worlds run's exact leaves ({}) are not the ones its frontier \
+                     names ({})",
+                    text.as_deref().unwrap_or("none"),
+                    f.exact_leaves.as_deref().unwrap_or("none")
+                ));
+            }
+            if let Some(p) = &job.exact_leaves {
+                p.check_for(f.cut)?;
             }
             Ok(Some(FrontierCut::new(f.cut, n)))
         }
@@ -1250,6 +1293,7 @@ fn batch_path(
                 par,
                 &mut mem,
                 b.cut,
+                b.job.exact_leaves.as_ref(),
             );
             let wall = t0.elapsed();
             eta.end(slot, class, prior, world_threads, wall.as_secs_f64());
@@ -1346,6 +1390,7 @@ fn planned_path(
             None,
             mem,
             b.cut,
+            b.job.exact_leaves.as_ref(),
         );
         eta.end(slot, class, prior, plan.threads, t0.elapsed().as_secs_f64());
         (v.into_iter().map(|x| x.0).collect::<Vec<[u64; 4]>>(), cost)
@@ -1495,6 +1540,7 @@ pub fn world_rows(
         to,
         table: table.to_string(),
         frontier: None,
+        exact_leaves: None,
     };
     let mut out = None;
     world_rows_batch(std::slice::from_ref(d), &job, ctx, cfg, None, |r, _| {
@@ -2716,6 +2762,7 @@ mod tests {
                 to: 5,
                 table: TABLE.to_string(),
                 frontier: None,
+                exact_leaves: None,
             };
             let mut files = Vec::new();
             for threads in [1, 3, 8] {
@@ -2818,6 +2865,7 @@ mod tests {
             to: 3,
             table: TABLE.to_string(),
             frontier: None,
+            exact_leaves: None,
         };
         let base = tmp("plan-base");
         clean(&base);
@@ -2943,6 +2991,7 @@ mod tests {
                 to: nw,
                 table: TABLE.to_string(),
                 frontier: None,
+                exact_leaves: None,
             };
             let base = tmp(&format!("pw{c}-base"));
             clean(&base);
@@ -3040,6 +3089,7 @@ mod tests {
             to: nw,
             table: TABLE.to_string(),
             frontier: None,
+            exact_leaves: None,
         };
         let cfg = SearchConfig::default();
         let knobs = CkptKnobs {
@@ -3145,6 +3195,7 @@ mod tests {
             to,
             table: TABLE.to_string(),
             frontier: None,
+            exact_leaves: None,
         };
         let long = tmp("ext-long");
         clean(&long);
@@ -3577,6 +3628,7 @@ mod tests {
             cut: o.trick,
             net_sha256: o.sha256.clone(),
             encoder: nn::encode::ENCODER.to_string(),
+            exact_leaves: None,
         }
     }
 
@@ -3611,6 +3663,7 @@ mod tests {
             to,
             table: TABLE.to_string(),
             frontier: Some(frontier_of(o)),
+            exact_leaves: None,
         }
     }
 
@@ -3831,6 +3884,7 @@ mod tests {
         let (o3, o3b) = (oracle(3, 11), oracle(3, 12));
         let exact = WorldsJob {
             frontier: None,
+            exact_leaves: None,
             ..silver_job(&o3, 2)
         };
         let silver = silver_job(&o3, 2);

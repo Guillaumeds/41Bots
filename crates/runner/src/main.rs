@@ -54,6 +54,7 @@ use serde_json::{Value, json};
 mod bundle;
 mod checks;
 mod hybrid;
+mod leafrisk;
 mod machine;
 mod measure;
 mod mem;
@@ -1749,6 +1750,7 @@ fn run_kind(ctx: &mut Ctx, kind: &str, params: &Value) -> Result<Value, String> 
         "hybrid_rung" => hybrid::chunk(ctx, params)?,
         "hybrid_t1check" => t1check::chunk(ctx, params)?,
         "hybrid_checks" => checks::chunk(ctx, params)?,
+        "leafrisk" => leafrisk::chunk(ctx, params)?,
         "arena_block" => {
             return Err("arena_block chunks need the arena binary (not built yet)".into());
         }

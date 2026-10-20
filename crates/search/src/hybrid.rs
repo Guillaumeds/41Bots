@@ -240,6 +240,11 @@ pub struct Reference<'a> {
     pub cut: u8,
     /// Its network.
     pub net: &'a dyn Frontier,
+    /// Its exact leaves (`crate::exact_leaves`; `None`: none): each world's reference search
+    /// values the frontier positions this policy picks by its expert, as the hybrid's own
+    /// search does with [`CheckJob::exact_leaves`] (a reference "H_3 with learned exact leaves",
+    /// docs/m3-hybrid/learned-leaves.md "Learned deferral at cut 2").
+    pub leaves: Option<&'a crate::exact_leaves::LeafPolicy>,
 }
 
 /// A frontier evaluator that values every position exactly as `inner` does and records the
@@ -857,9 +862,22 @@ pub fn check_worlds_ref(
         let mut run = WorldSolve::default();
         let t = Instant::now();
         // The decision's reference: exact, or the silver reference's hybrid.
-        let ref_cut = reference
-            .filter(|_| plan[tasks[i].0].silver)
-            .map(|r| FrontierCut::new(r.cut, r.net));
+        let r = reference.filter(|_| plan[tasks[i].0].silver);
+        let ref_leaves = r.and_then(|r| {
+            r.leaves.map(|policy| {
+                crate::exact_leaves::ExactLeaves::new(
+                    r.net,
+                    ctx.leaf,
+                    policy,
+                    engine::team_of(plan[tasks[i].0].d.seat),
+                    solver::SolveFamily::of_match(&m),
+                )
+            })
+        });
+        let ref_cut = r.map(|r| match &ref_leaves {
+            Some(x) => FrontierCut::new(r.cut, x),
+            None => FrontierCut::new(r.cut, r.net),
+        });
         let e = exact_world(
             &m,
             &preps[tasks[i].0].cands,
@@ -1811,6 +1829,7 @@ mod tests {
             cut: o.trick,
             net_sha256: o.sha256.clone(),
             encoder: nn::encode::ENCODER.to_string(),
+            exact_leaves: None,
         }
     }
 
@@ -1851,6 +1870,7 @@ mod tests {
             to,
             table: "t".into(),
             frontier: Some(fp(o)),
+            exact_leaves: None,
         };
         let cfg = SearchConfig {
             tt_mb: 4,
@@ -1956,6 +1976,7 @@ mod tests {
             Reference {
                 cut: 3,
                 net: &o3 as &dyn Frontier,
+                leaves: None,
             },
             &f3,
         ));
@@ -2100,6 +2121,7 @@ mod tests {
             Reference {
                 cut: 4,
                 net: &o4 as &dyn Frontier,
+                leaves: None,
             },
             &f4,
         ));
@@ -2148,6 +2170,7 @@ mod tests {
             Reference {
                 cut: 4,
                 net: &o4b as &dyn Frontier,
+                leaves: None,
             },
             &f4b,
         ));
@@ -2161,6 +2184,7 @@ mod tests {
             Reference {
                 cut: 3,
                 net: &o3b as &dyn Frontier,
+                leaves: None,
             },
             &f3b,
         ));
@@ -2241,6 +2265,7 @@ mod tests {
                 Reference {
                     cut: 4,
                     net: &o4 as &dyn Frontier,
+                    leaves: None,
                 },
                 &f4,
             ))
@@ -2597,6 +2622,18 @@ mod tests {
         lo: i64,
         hi: i64,
     ) -> Arc<nn::leafrisk::RiskModel> {
+        risk_model_at(4, "synthetic", feature, threshold, lo, hi)
+    }
+
+    /// [`risk_model`] for trick-`trick` leaves of network `net`.
+    fn risk_model_at(
+        trick: u8,
+        net: &str,
+        feature: usize,
+        threshold: i64,
+        lo: i64,
+        hi: i64,
+    ) -> Arc<nn::leafrisk::RiskModel> {
         let tree = if lo == hi {
             serde_json::json!({"f": [-1], "t": [0], "l": [0], "r": [0], "v": [lo]})
         } else {
@@ -2606,7 +2643,7 @@ mod tests {
         let v = serde_json::json!({
             "format": nn::leafrisk::FORMAT, "encoder": nn::encode::ENCODER,
             "n_inputs": nn::leafrisk::N_INPUTS, "extras": nn::leafrisk::EXTRA_NAMES,
-            "net_sha256": "synthetic", "trick": 4, "base": 0, "trees": [tree],
+            "net_sha256": net, "trick": trick, "base": 0, "trees": [tree],
             "budget": {"quantiles": [hi, lo]},
         });
         Arc::new(nn::leafrisk::RiskModel::parse(v.to_string().as_bytes()).expect("a valid model"))
@@ -2719,5 +2756,307 @@ mod tests {
             }
         }
         assert!(seen.0 > 0 && seen.1 > 0, "{seen:?}");
+    }
+
+    // ------------------------------------------------------------ learned deferral
+
+    use crate::exact_leaves::{Deeper, Expert};
+
+    /// The deeper expert H_`cut` with network `o` (an ensemble of one) and its own leaves.
+    fn deeper(cut: u8, o: nn::Oracle, leaves: Option<LeafPolicy>) -> Expert {
+        let net = nn::Ensemble::new(vec![o]).expect("one network");
+        let net_id = net.id();
+        Expert::Deeper(Arc::new(Deeper {
+            net,
+            cut,
+            net_id,
+            leaves,
+        }))
+    }
+
+    /// Learned deferral (two levels): H_4 on trick-3 decisions whose picked trick-4 leaves are
+    /// valued by H_5 with its own exact leaves. Deferring every leaf is H_5 with those exact
+    /// leaves, byte for byte (the check's values, choices and errors, also as a silver reference
+    /// with the same leaves and as worlds of the worlds runner); deferring none (a policy that
+    /// picks nothing, or `t=inf`) is H_4 as today, byte for byte; a learned split defers exactly
+    /// the leaves it scores at or above its threshold, each holding the deeper hybrid's value of
+    /// its position; everything is the same on 1 and 3 threads.
+    #[test]
+    fn learned_deferral_all_none_and_split() {
+        let ds = curse_setup();
+        let l = syn_leaf();
+        let src = BeliefSource::new();
+        let ctx = Ctx {
+            leaf: &*l,
+            source: &src,
+            rules: engine::game::Rules::HOUSE,
+        };
+        let none = BTreeMap::new();
+        let (o4, o5) = (oracle(4, 61), oracle(5, 63));
+        let run4 = |job: &CheckJob| run_check(&ds, &none, job, &ctx, &o4).expect("runs");
+        let base = run4(&leaf_job(2, None));
+        // The expert's own leaves: a learned split at trick 5 (some leaves, not all).
+        let m5 = risk_model_at(5, &o5.sha256, nn::encode::N_FEATURES + 9, 0, 5, 50);
+        let inner = LeafPolicy::learned(m5.clone(), Some(50), 4);
+        let expert = || deeper(5, oracle(5, 63), Some(inner.clone()));
+        // Every leaf deferred: H_5 with the inner leaves.
+        let all = LeafPolicy::all(4).with_expert(expert());
+        assert!(all.check_for(4).is_ok());
+        assert!(all.check_for(3).is_err(), "the expert looks one trick past");
+        let d1 = run4(&leaf_job(1, Some(all.clone())));
+        let d3 = run4(&leaf_job(3, Some(all.clone())));
+        assert_eq!(key(&d1), key(&d3));
+        assert_eq!(world_values(&d1), world_values(&d3));
+        let (s1, s3) = (
+            d1.exact_leaves.clone().expect("counted"),
+            d3.exact_leaves.clone().expect("counted"),
+        );
+        assert_eq!(s1.counts(), s3.counts());
+        assert_eq!(s1.expert_counts(), s3.expert_counts());
+        assert_eq!(s1.exact, s1.distinct);
+        assert!(
+            s1.expert_evals > 0 && s1.expert_exact > 0 && s1.expert_exact < s1.expert_leaves,
+            "{s1:?}"
+        );
+        let h5 = run_check(
+            &ds,
+            &none,
+            &CheckJob {
+                verify_pct: 0.0,
+                exact_leaves: Some(inner.clone()),
+                ..check_job(5, 2, 3)
+            },
+            &ctx,
+            &o5,
+        )
+        .expect("runs");
+        assert_eq!(world_values(&d1), world_values(&h5), "defer all = H_5 + leaves");
+        assert_eq!(key(&d1), key(&h5));
+        assert_ne!(world_values(&d1), world_values(&base));
+        // The same as a silver reference with those leaves, recomputed by the check: the
+        // reference's values are the deferred hybrid's, so H_4 + defer-all has no loss and no
+        // error against it.
+        let mut f5 = fp(&o5);
+        f5.exact_leaves = Some(FrontierFp::leaves_text(&inner));
+        let reference = Some((
+            Reference {
+                cut: 5,
+                net: &o5 as &dyn Frontier,
+                leaves: Some(&inner),
+            },
+            &f5,
+        ));
+        let ag = run_check_ref(
+            &ds,
+            &none,
+            &leaf_job(3, Some(all.clone())),
+            &ctx,
+            &o4,
+            None,
+            reference,
+            false,
+            None,
+        )
+        .expect("runs");
+        for d in &ag.decisions {
+            assert!(d.silver && d.loss == 0 && d.errors.iter().all(|&e| e == 0));
+            for w in &d.world_checks {
+                assert_eq!(w.exact, w.hybrid);
+            }
+        }
+        // ... and as worlds of the worlds runner (a stored silver set with exact leaves).
+        let wjob = WorldsJob {
+            method: Method::ExactPimc,
+            label: 1,
+            seed: 7,
+            from: 0,
+            to: 3,
+            table: "t".into(),
+            frontier: Some(f5.clone()),
+            exact_leaves: Some(inner.clone()),
+        };
+        // One world a thread, and each world split over two threads (the parallel solver; a
+        // deeper expert runs outside the leaves' lock).
+        let wjob_deferred = WorldsJob {
+            frontier: Some({
+                let mut f = fp(&o4);
+                f.exact_leaves = Some(FrontierFp::leaves_text(&all));
+                f
+            }),
+            exact_leaves: Some(all.clone()),
+            ..wjob.clone()
+        };
+        for (threads, solve_threads, job, net) in [
+            (1, 1, &wjob, &o5),
+            (3, 1, &wjob, &o5),
+            (2, 2, &wjob, &o5),
+            (3, 1, &wjob_deferred, &o4),
+            (2, 2, &wjob_deferred, &o4),
+        ] {
+            let cfg = SearchConfig {
+                threads,
+                solve_threads,
+                tt_mb: 4,
+                ..SearchConfig::default()
+            };
+            let rows = world_rows_net(&ds, job, &ctx, &cfg, Some(net)).expect("valued");
+            let got: Vec<Vec<MoneyChance>> = rows
+                .iter()
+                .flat_map(|r| {
+                    r.rows
+                        .iter()
+                        .map(|w| w.iter().map(|&x| MoneyChance(x)).collect::<Vec<_>>())
+                })
+                .collect();
+            assert_eq!(got, world_values(&h5), "{threads} x {solve_threads} threads");
+        }
+        // A worlds job whose frontier does not name its leaves is refused.
+        let cfg = SearchConfig {
+            tt_mb: 4,
+            ..SearchConfig::default()
+        };
+        let bad = WorldsJob {
+            frontier: Some(fp(&o5)),
+            ..wjob.clone()
+        };
+        assert!(world_rows_net(&ds, &bad, &ctx, &cfg, Some(&o5)).is_err());
+        // Deferring none: byte for byte today's H_4.
+        for p in [
+            LeafPolicy::race(0, 4).with_expert(expert()),
+            LeafPolicy::learned(risk_model(nn::encode::N_FEATURES + 9, 0, 5, 50), None, 4)
+                .with_expert(expert()),
+        ] {
+            let r = run4(&leaf_job(3, Some(p)));
+            assert_eq!(key(&r), key(&base));
+            assert_eq!(world_values(&r), world_values(&base));
+            let st = r.exact_leaves.clone().expect("counted");
+            assert_eq!((st.exact, st.expert_counts()), ([0; 5], (0, 0, 0)));
+        }
+        // A learned split: exactly the leaves scored at or above the threshold go to the expert,
+        // each with the deeper hybrid's value of its position; thread-independent.
+        let m4 = risk_model(nn::encode::N_FEATURES + 9, 0, 5, 50);
+        let split = LeafPolicy::learned(m4.clone(), Some(50), 4).with_expert(expert());
+        assert!(split.describe().contains("+defer:h5:"), "{}", split.describe());
+        let r1 = run4(&leaf_job(1, Some(split.clone())));
+        let r3 = run4(&leaf_job(3, Some(split.clone())));
+        assert_eq!(key(&r1), key(&r3));
+        assert_eq!(world_values(&r1), world_values(&r3));
+        let st = r1.exact_leaves.clone().expect("counted");
+        assert_eq!(
+            st.expert_counts(),
+            r3.exact_leaves.clone().expect("counted").expert_counts()
+        );
+        let picked: u64 = st.exact.iter().sum();
+        assert!(picked > 0 && picked < st.distinct.iter().sum::<u64>());
+        let cfg = SearchConfig {
+            tt_mb: 4,
+            ..SearchConfig::default()
+        };
+        let mut seen = (0, 0);
+        for (d, w) in ds.iter().flat_map(|d| (0..3).map(move |w| (d, w))) {
+            let (_, view, legal) = d.replay();
+            let (_, cands) = candidates(&view, &legal);
+            let worlds = src.prepare(&view, ctx.rules);
+            let m0 = world_match(&view, &*worlds, w, measure_seed(7, 1, d.id), ctx.rules);
+            let x = ExactLeaves::new(
+                &o4,
+                &*l,
+                &split,
+                engine::team_of(d.seat),
+                solver::SolveFamily::of_match(&m0),
+            );
+            let mut run = WorldSolve::default();
+            exact_world(
+                &m0,
+                &cands,
+                &ctx,
+                &cfg,
+                None,
+                &mut SolveMem::new(),
+                &mut run,
+                Some(FrontierCut::new(4, &x)),
+            )
+            .expect("solves");
+            for (pos, mctx, canon, v, deferred) in x.leaves() {
+                let nv = o4.value(&canon, &mctx);
+                assert_eq!(deferred, m4.score(&canon, &mctx, &*l, &nv) >= 50);
+                if deferred {
+                    let (h, _, _, _) = crate::oracle_labels::hybrid_value(
+                        &pos,
+                        mctx,
+                        &*l,
+                        &o5,
+                        Some(&inner),
+                        &mut SolveMem::new(),
+                    );
+                    assert_eq!(v, h, "a deferred leaf holds the deeper hybrid's value");
+                    seen.0 += 1;
+                } else {
+                    assert_eq!(v, nv);
+                    seen.1 += 1;
+                }
+            }
+        }
+        assert!(seen.0 > 0 && seen.1 > 0, "{seen:?}");
+    }
+
+    /// The same at trick 1 (the case the method is for): H_2 deferring every trick-2 leaf to H_3
+    /// with learned exact leaves is H_3 with those leaves, byte for byte, on 1 and 2 threads;
+    /// a model made for another trick's leaves is refused, as is an expert at the wrong trick.
+    #[test]
+    fn learned_deferral_at_cut_2_is_h3_with_its_leaves() {
+        let ds = decisions_at(1, &[28, 29]);
+        let l = syn_leaf();
+        let src = BeliefSource::new();
+        let ctx = Ctx {
+            leaf: &*l,
+            source: &src,
+            rules: engine::game::Rules::HOUSE,
+        };
+        let none = BTreeMap::new();
+        let (o2, o3) = (oracle(2, 21), oracle(3, 22));
+        // The expert's leaves: a learned split (the L1 distance to the farthest possible outcome
+        // above 3.2 x 2^32 scored 50, else 5: a few of the trick-3 leaves, solved exactly).
+        let m3 = risk_model_at(3, &o3.sha256, nn::encode::N_FEATURES + 9, 3200000000, 5, 50);
+        let inner = LeafPolicy::learned(m3.clone(), Some(50), 4);
+        let all = LeafPolicy::all(4).with_expert(deeper(3, oracle(3, 22), Some(inner.clone())));
+        let mut f3 = fp(&o3);
+        f3.exact_leaves = Some(FrontierFp::leaves_text(&inner));
+        let reference = Some((
+            Reference {
+                cut: 3,
+                net: &o3 as &dyn Frontier,
+                leaves: Some(&inner),
+            },
+            &f3,
+        ));
+        // H_2 deferring every leaf against H_3 with the same leaves (recomputed directly by the
+        // check): the same values in every world, on 1 and 2 threads.
+        let mut runs = Vec::new();
+        for threads in [1, 2] {
+            let job = CheckJob {
+                verify_pct: 0.0,
+                exact_leaves: Some(all.clone()),
+                ..check_job(2, threads, 2)
+            };
+            let r = run_check_ref(&ds, &none, &job, &ctx, &o2, None, reference, false, None)
+                .expect("runs");
+            for d in &r.decisions {
+                assert!(d.silver && d.loss == 0 && d.errors.iter().all(|&e| e == 0));
+                for w in &d.world_checks {
+                    assert_eq!(w.exact, w.hybrid, "decision {} world {}", d.id, w.w);
+                }
+            }
+            let st = r.exact_leaves.clone().expect("counted");
+            assert_eq!(st.exact, st.distinct);
+            assert!(st.expert_exact > 0 && st.expert_exact < st.expert_leaves, "{st:?}");
+            runs.push((world_values(&r), st.counts(), st.expert_counts()));
+        }
+        assert_eq!(runs[0], runs[1]);
+        // Refusals: a trick-3 model at cut 2; an H_4 expert at cut 2.
+        assert!(LeafPolicy::learned(m3, Some(1), 4).check_for(2).is_err());
+        assert!(inner.check_for(3).is_ok());
+        let wrong = LeafPolicy::all(4).with_expert(deeper(4, oracle(4, 23), None));
+        assert!(wrong.check_for(2).is_err());
     }
 }

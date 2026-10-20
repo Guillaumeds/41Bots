@@ -745,6 +745,47 @@ fn write_progress(
     }
 }
 
+/// The exact-leaves policy of `--{p}exact-leaves SPEC` (`search::exact_leaves`), with each leaf
+/// solve's table `--{p}exact-leaf-tt-mb MB` (default by the trick) and the expert of the picked
+/// leaves `--{p}defer-expert exact|hK:NET[:SPEC]` (default exact), for a hybrid whose frontier
+/// is at the start of trick `cut` (`p` is `""` or `"reference-"`). `None` without the flag or
+/// with `none`. Refused: the table or the expert without leaves, a learned model made for
+/// another trick's leaves, a deeper expert that does not look at trick `cut + 1` or whose own
+/// learned model is not its network's.
+fn leaf_policy_arg(
+    a: &Args,
+    p: &str,
+    cut: u8,
+    leaf: &Arc<SharedLeaf>,
+) -> Result<Option<search::exact_leaves::LeafPolicy>, String> {
+    let (k_el, k_tt, k_de) = (
+        format!("--{p}exact-leaves"),
+        format!("--{p}exact-leaf-tt-mb"),
+        format!("--{p}defer-expert"),
+    );
+    let Some(text) = a.get(&k_el) else {
+        for k in [&k_tt, &k_de] {
+            if a.has(k) {
+                return Err(format!("{k} is for {k_el}"));
+            }
+        }
+        return Ok(None);
+    };
+    let tt = a.num(&k_tt, search::oracle_labels::tt_mb_for(cut) as u64)? as usize;
+    let Some(mut pol) = search::exact_leaves::LeafPolicy::parse(text, tt)? else {
+        if a.has(&k_de) {
+            return Err(format!("{k_de} defers the leaves {k_el} picks: none are picked"));
+        }
+        return Ok(None);
+    };
+    if let Some(e) = a.get(&k_de) {
+        let tt_e = search::oracle_labels::tt_mb_for(cut + 1);
+        pol = pol.with_expert(search::exact_leaves::Expert::parse(e, cut, leaf, tt_e)?);
+    }
+    pol.check_for(cut).map_err(|e| format!("{k_el}: {e}"))?;
+    Ok(Some(pol))
+}
+
 fn worlds(a: &Args) -> Result<(), String> {
     let ds: Vec<DecisionSpec> = read_lines(a.req("--decisions")?)?;
     let hybrid = a.req("--method")? == search::measure::HYBRID;
@@ -781,10 +822,30 @@ fn worlds(a: &Args) -> Result<(), String> {
     } else {
         None
     };
+    // Exact leaves of a hybrid run (a silver reference "H_3 with learned exact leaves").
+    let leaves = match &oracle {
+        Some(o) => leaf_policy_arg(a, "", o.trick, &leaf)?,
+        None => {
+            for k in ["--exact-leaves", "--exact-leaf-tt-mb", "--defer-expert"] {
+                if a.has(k) {
+                    return Err(format!("{k} is for --method hybrid (a silver reference)"));
+                }
+            }
+            None
+        }
+    };
+    if let (Some(p), Some(o)) = (&leaves, &oracle)
+        && let Some(m) = p.net_mismatch(&o.sha256)
+    {
+        return Err(format!("--exact-leaves: {m}"));
+    }
     let frontier = oracle.as_ref().map(|o| search::measure::FrontierFp {
         cut: o.trick,
         net_sha256: o.sha256.clone(),
         encoder: nn::encode::ENCODER.to_string(),
+        exact_leaves: leaves
+            .as_ref()
+            .map(search::measure::FrontierFp::leaves_text),
     });
     let src = world_source(a)?;
     let ctx = Ctx {
@@ -811,6 +872,7 @@ fn worlds(a: &Args) -> Result<(), String> {
         to,
         table: table_sha,
         frontier,
+        exact_leaves: leaves,
     };
     let (first, last) = (a.num("--first", 0)?, a.num("--last", u64::MAX)?);
     let ids = a.get("--ids").map(parse_ids).transpose()?;
@@ -1672,12 +1734,31 @@ fn student_teacher(a: &Args) -> Result<(), String> {
     } else {
         Some(nn::Oracle::load(Path::new(net_arg), leaf.clone())?)
     };
+    // Exact leaves of a hybrid teacher (`--exact-leaves`, `--defer-expert`: as `hybrid-check`'s;
+    // the stamp names them).
+    let leaves = match &oracle {
+        Some(o) => leaf_policy_arg(a, "", o.trick, &leaf)?,
+        None => {
+            for k in ["--exact-leaves", "--exact-leaf-tt-mb", "--defer-expert"] {
+                if a.has(k) {
+                    return Err(format!("{k} is for a hybrid teacher (--net WEIGHTS)"));
+                }
+            }
+            None
+        }
+    };
+    if let (Some(p), Some(o)) = (&leaves, &oracle)
+        && let Some(m) = p.net_mismatch(&o.sha256)
+    {
+        return Err(format!("--exact-leaves: {m}"));
+    }
     let teacher = match &oracle {
         None => Teacher::Exact,
         Some(o) => Teacher::Hybrid {
             net: o,
             cut: o.trick,
             sha256: &o.sha256,
+            leaves: leaves.as_ref(),
         },
     };
     search::student_teacher::check_job(&job, &teacher, role == "test")?;
@@ -2409,26 +2490,26 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
             search::exact_leaves::LeafPolicy::parse(text, leaf_tt)?
         }
     };
-    if let (Some(p), Some((o, _))) = (&exact_leaves, &label_net)
-        && let Some(l) = &p.learned
-    {
-        if l.model.trick != trick + 1 {
-            return Err(format!(
-                "--exact-leaves: the leaf-risk model {} was made for trick-{} leaves; hybrid \
-                 labels at trick {trick} have their leaves at the start of trick {}",
-                &l.model.sha256[..12],
-                l.model.trick,
-                trick + 1
-            ));
+    // The picked leaves' expert (`--defer-expert`, as `hybrid-check`'s): exact (the default) or
+    // the deeper hybrid H_{trick+2} with its own exact leaves (learned deferral).
+    let exact_leaves = match (exact_leaves, a.get("--defer-expert")) {
+        (p, None) => p,
+        (None, Some(_)) => {
+            return Err("--defer-expert defers the leaves --exact-leaves picks: give them".into());
         }
-        if !l.model.net_sha256.is_empty() && l.model.net_sha256 != o.sha256 {
-            return Err(format!(
-                "--exact-leaves: the leaf-risk model {} predicts the errors of network {}, not \
-                 of --label-net (sha256 {})",
-                &l.model.sha256[..12],
-                l.model.net_sha256,
-                o.sha256
-            ));
+        (Some(p), Some(e)) => Some(p.with_expert(search::exact_leaves::Expert::parse(
+            e,
+            trick + 1,
+            &leaf,
+            tt_mb_for(trick + 2),
+        )?)),
+    };
+    if let (Some(p), Some((o, _))) = (&exact_leaves, &label_net) {
+        p.check_for(trick + 1).map_err(|e| {
+            format!("--exact-leaves: {e} (hybrid labels at trick {trick} have their leaves there)")
+        })?;
+        if let Some(m) = p.net_mismatch(&o.sha256) {
+            return Err(format!("--exact-leaves: {m} (--label-net)"));
         }
     }
     if let Some(p) = &exact_leaves {
@@ -3107,21 +3188,15 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
     // Exact leaves (`search::exact_leaves`): the frontier positions the policy picks are solved
     // exactly instead of being valued by the network; `none` (the default) is the hybrid as
     // before, byte for byte.
-    let exact_leaves = match a.get("--exact-leaves") {
-        None => {
-            if a.has("--exact-leaf-tt-mb") {
-                return Err("--exact-leaf-tt-mb is for --exact-leaves".into());
-            }
-            None
-        }
-        Some(text) => search::exact_leaves::LeafPolicy::parse(
-            text,
-            a.num(
-                "--exact-leaf-tt-mb",
-                search::oracle_labels::tt_mb_for(cut) as u64,
-            )? as usize,
-        )?,
-    };
+    // A learned term's model must be one made for this cut's leaves; `--defer-expert` hands the
+    // picked leaves to a deeper hybrid instead of the exact solver (learned deferral).
+    let exact_leaves = leaf_policy_arg(a, "", cut, &leaf)?;
+    if let Some(m) = exact_leaves
+        .as_ref()
+        .and_then(|p| p.net_mismatch(&ensemble.id()))
+    {
+        eprintln!("warning: --exact-leaves: {m}");
+    }
     if exact_leaves.is_some() {
         for k in ["--saved", "--explain", "--truth"] {
             if a.has(k) {
@@ -3156,13 +3231,28 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
                  H_{cut} (--reference-cut after --cut)"
             ));
         }
+        // The reference's own exact leaves (a silver reference "H_3 with learned exact leaves").
+        let rl = leaf_policy_arg(a, "reference-", rc, &leaf)?;
+        if let Some(m) = rl.as_ref().and_then(|l| l.net_mismatch(&o.sha256)) {
+            return Err(format!("--reference-exact-leaves: {m}"));
+        }
         let fp = FrontierFp {
             cut: rc,
             net_sha256: o.sha256.clone(),
             encoder: nn::encode::ENCODER.to_string(),
+            exact_leaves: rl.as_ref().map(FrontierFp::leaves_text),
         };
-        Some((o, p.to_string(), fp))
+        Some((o, p.to_string(), fp, rl))
     } else {
+        for k in [
+            "--reference-exact-leaves",
+            "--reference-exact-leaf-tt-mb",
+            "--reference-defer-expert",
+        ] {
+            if a.has(k) {
+                return Err(format!("{k} is for --reference silver"));
+            }
+        }
         None
     };
     let mut ds: Vec<DecisionSpec> = match a.get("--decisions") {
@@ -3320,6 +3410,7 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
         cut,
         net_sha256: ensemble.id(),
         encoder: nn::encode::ENCODER.to_string(),
+        exact_leaves: None,
     };
     let n_exact_stored = stored.values().filter(|r| r.method == "exact").count();
     let ref_name = match &reference {
@@ -3330,11 +3421,14 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             noise.as_ref().map_or(0, |n| n.seed)
         ),
         None => "exact".to_string(),
-        Some((o, _, fp)) => format!(
-            "silver (H_{}, net {} {:?}){}",
+        Some((o, _, fp, _)) => format!(
+            "silver (H_{}, net {} {:?}{}){}",
             fp.cut,
             &fp.net_sha256[..12],
             o.net().widths(),
+            fp.exact_leaves
+                .as_ref()
+                .map_or(String::new(), |l| format!(", exact leaves {l}")),
             if n_exact_stored > 0 {
                 format!(", exact for the {n_exact_stored} decisions stored exact")
             } else {
@@ -3400,6 +3494,7 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
                     Reference {
                         cut,
                         net: &ensemble as &dyn solver::frontier::Frontier,
+                        leaves: None,
                     },
                     &truth_fp,
                 )),
@@ -3487,10 +3582,11 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
             &ensemble,
             slice_preds.as_ref().map(|(p, _)| p),
             match &reference {
-                Some((o, _, fp)) => Some((
+                Some((o, _, fp, rl)) => Some((
                     Reference {
                         cut: fp.cut,
                         net: o as &dyn solver::frontier::Frontier,
+                        leaves: rl.as_ref(),
                     },
                     fp,
                 )),
@@ -3499,6 +3595,7 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
                     Reference {
                         cut,
                         net: &ensemble as &dyn solver::frontier::Frontier,
+                        leaves: None,
                     },
                     &truth_fp,
                 )),
@@ -3685,8 +3782,9 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
                     "net": ensemble.id(),
                 }),
                 None => serde_json::json!({ "kind": "exact" }),
-                Some((o, p, fp)) => serde_json::json!({
+                Some((o, p, fp, _)) => serde_json::json!({
                     "kind": "silver",
+                    "exact_leaves": fp.exact_leaves,
                     "what": "a silver reference (docs/m3-hybrid/silver.md): the deeper hybrid \
                              H_cut, exact search to the start of trick `cut` and the network \
                              there; the `exact_*` fields of a decision hold its reference's \
@@ -3722,7 +3820,7 @@ fn hybrid_check(a: &Args) -> Result<(), String> {
                     "exact": search::measure::VALUES_VERSION,
                     "hybrid": hybrid_values,
                 }),
-                Some((_, _, fp)) => serde_json::json!({
+                Some((_, _, fp, _)) => serde_json::json!({
                     "reference": fp.values(),
                     "hybrid": hybrid_values,
                 }),

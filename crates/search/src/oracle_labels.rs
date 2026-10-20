@@ -541,7 +541,9 @@ pub fn parse_exact_share(s: &str) -> Result<u32, String> {
 /// the network of the trick after `trick` by its SHA-256, and with exact leaves the policy's
 /// normal form (`LeafPolicy::describe`) and a learned term's full model SHA-256, so labels made
 /// with another network, policy or model never pass for these:
-/// `"<exact>+O<trick+1>:<net>"`, `…+exact:<policy>`, `…+exact:<policy>+leafrisk:<model>`.
+/// `"<exact>+O<trick+1>:<net>"`, `…+exact:<policy>`, `…+exact:<policy>+leafrisk:<model>`, and
+/// with a deeper expert (`crate::exact_leaves::Expert`) `…+defer:O<K>:<its network>` and its own
+/// exact leaves' `+exact:<policy>[+leafrisk:<model>]`.
 pub fn hybrid_values_version(
     trick: u8,
     net_sha256: &str,
@@ -553,10 +555,7 @@ pub fn hybrid_values_version(
         trick + 1
     );
     if let Some(p) = exact_leaves {
-        v.push_str(&format!("+exact:{}", p.describe()));
-        if let Some(l) = &p.learned {
-            v.push_str(&format!("+leafrisk:{}", l.model.sha256));
-        }
+        v.push_str(&format!("+exact:{}{}", p.describe(), p.values_suffix()));
     }
     v
 }

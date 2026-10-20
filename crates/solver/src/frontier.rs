@@ -301,6 +301,11 @@ impl<'a> FrontierCut<'a> {
         self.trick
     }
 
+    /// The frontier's evaluator.
+    pub fn eval(&self) -> &'a dyn Frontier {
+        self.eval
+    }
+
     /// Is `p` on the frontier (the start of the frontier's trick)? Never when a partnership is
     /// turned ([`Position::turned`]): the networks have never seen such a hand (owner,
     /// 2026-10-17, docs/APP-ENGINE-CONTRACT.md §7), so every solve with a frontier searches a

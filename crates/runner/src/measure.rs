@@ -74,6 +74,12 @@
 //!            "boot": 1000, "race_groups": true },
 //! "worlds_input": "silver-t1", "share": true
 //! ```
+//! - `reference` may add `exact_leaves` and `defer_expert` (as a `hybrid_checks` check's: learned
+//!   models and an expert's networks are manifest inputs by name): the reference's own exact
+//!   leaves (`search worlds --exact-leaves … [--defer-expert …]`, a silver reference "H_3 with
+//!   learned exact leaves", docs/m3-hybrid/learned-leaves.md), its file
+//!   `silver-t<trick>-c<cut>x-n<to>.jsonl`, the fingerprint naming them; a check then passes
+//!   them on as `--reference-exact-leaves` / `--reference-defer-expert`.
 //! - `reference`: the worlds step is `search worlds --method hybrid --cut 3 --net <o3>` into
 //!   `silver-t<trick>-c<cut>-n<to>.jsonl` (the same decisions, worlds, checkpoint and resume, world
 //!   by world, as the exact step; the records say `hybrid` with the network's SHA-256, never
@@ -343,6 +349,8 @@ pub(crate) struct CheckSpec {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Silver {
     pub reference: Option<NetRef>,
+    /// The reference's exact leaves (module notes; `None`: none).
+    pub ref_leaves: Option<RefLeaves>,
     /// The checks, in order (`check`: one object, or a list of them with distinct cuts).
     pub checks: Vec<CheckSpec>,
     /// A stored worlds file to start from: its input name, and its local path once resolved.
@@ -351,8 +359,27 @@ pub(crate) struct Silver {
     pub share: bool,
 }
 
-/// The keys of `reference` and of `check` (any other is refused).
-const REFERENCE_KEYS: [&str; 3] = ["cut", "net_input", "net"];
+/// A silver reference's exact leaves as the manifest writes them (`crate::checks::leaf_settings`):
+/// the policy, its expert, and the input names of the leaf-risk models and the expert's networks.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RefLeaves {
+    pub leaves: String,
+    pub expert: Option<String>,
+    pub models: Vec<String>,
+    pub nets: Vec<String>,
+}
+
+/// The keys of `reference` and of `check` (any other is refused; `model_paths` and
+/// `expert_net_paths` are added when the inputs are resolved).
+const REFERENCE_KEYS: [&str; 7] = [
+    "cut",
+    "net_input",
+    "net",
+    "exact_leaves",
+    "defer_expert",
+    "model_paths",
+    "expert_net_paths",
+];
 const CHECK_KEYS: [&str; 9] = [
     "cut",
     "net_input",
@@ -405,6 +432,27 @@ pub(crate) fn parse_silver(p: &Value) -> Result<Silver, String> {
     let reference = match p.get("reference") {
         None | Some(Value::Null) => None,
         Some(v) => Some(net_ref(v, "reference", &REFERENCE_KEYS)?),
+    };
+    let ref_leaves = match p.get("reference") {
+        Some(v) if reference.is_some() => {
+            let st = |k: &str| match v.get(k) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::String(x)) => Ok(Some(x.clone())),
+                Some(_) => Err(format!("search_measure: reference.{k} must be a string")),
+            };
+            let (leaves, expert, models, nets) = crate::checks::leaf_settings(
+                st("exact_leaves")?.as_deref(),
+                st("defer_expert")?.as_deref(),
+                "search_measure: reference",
+            )?;
+            leaves.map(|leaves| RefLeaves {
+                leaves,
+                expert,
+                models,
+                nets,
+            })
+        }
+        _ => None,
     };
     if let Some(r) = &reference {
         if r.cut <= trick {
@@ -512,6 +560,7 @@ pub(crate) fn parse_silver(p: &Value) -> Result<Silver, String> {
     };
     Ok(Silver {
         reference,
+        ref_leaves,
         checks,
         worlds_input,
         worlds_path,
@@ -522,12 +571,21 @@ pub(crate) fn parse_silver(p: &Value) -> Result<Silver, String> {
 /// The manifest inputs a chunk's silver settings name (for the manifest check, `sched.rs`).
 pub(crate) fn input_names(p: &Value) -> Result<Vec<String>, String> {
     let q = parse_silver(p)?;
-    Ok(q.reference
+    let mut v: Vec<String> = q
+        .reference
         .iter()
         .chain(q.checks.iter().map(|c| &c.net))
         .filter_map(|r| r.input.clone())
         .chain(q.worlds_input)
-        .collect())
+        .collect();
+    if let Some(l) = &q.ref_leaves {
+        for n in l.nets.iter().chain(&l.models) {
+            if !v.contains(n) {
+                v.push(n.clone());
+            }
+        }
+    }
+    Ok(v)
 }
 
 /// Adds the local path of each named input (`reference.net`, `check.net`, `worlds`) from the
@@ -546,6 +604,18 @@ pub(crate) fn resolve(
     let mut out = p.clone();
     if let Some(i) = q.reference.as_ref().and_then(|r| r.input.as_deref()) {
         out["reference"]["net"] = json!(path(i)?);
+    }
+    if let Some(l) = &q.ref_leaves {
+        let mut m = serde_json::Map::new();
+        for n in &l.models {
+            m.insert(n.clone(), json!(path(n)?));
+        }
+        out["reference"]["model_paths"] = Value::Object(m);
+        let mut e = serde_json::Map::new();
+        for n in &l.nets {
+            e.insert(n.clone(), json!(path(n)?));
+        }
+        out["reference"]["expert_net_paths"] = Value::Object(e);
     }
     match out.get_mut("check") {
         Some(Value::Array(a)) => {
@@ -631,6 +701,35 @@ pub(crate) fn chunk_with(
             Some((r.cut, path, sha))
         }
     };
+    // The reference's exact leaves as `search` arguments (without the `--` / `--reference-`
+    // prefix), its inputs' names turned into paths.
+    let leaf_args: Vec<(String, String)> = match &silver.ref_leaves {
+        None => Vec::new(),
+        Some(l) => {
+            let rp = &p["reference"];
+            let model = |m: &str| -> Result<String, String> {
+                rp["model_paths"][m].as_str().map(str::to_string).ok_or_else(|| {
+                    format!("search_measure: reference: leaf-risk model `{m}` is not resolved")
+                })
+            };
+            let net = |m: &str| -> Result<String, String> {
+                rp["expert_net_paths"][m].as_str().map(str::to_string).ok_or_else(|| {
+                    format!("search_measure: reference: expert network `{m}` is not resolved")
+                })
+            };
+            let mut a = vec![(
+                "exact-leaves".to_string(),
+                crate::checks::leaves_with_paths(&l.leaves, &l.models, &model)?,
+            )];
+            if let Some(e) = &l.expert {
+                a.push((
+                    "defer-expert".to_string(),
+                    crate::checks::expert_with_paths(e, &net, &model)?,
+                ));
+            }
+            a
+        }
+    };
     let mut fingerprint = json!({
         "method": if reference.is_some() { "hybrid" } else { "exact" },
         "label": 1, "seed": seed, "trick": trick, "count": count,
@@ -640,6 +739,10 @@ pub(crate) fn chunk_with(
     });
     if let Some((cut, _, sha)) = &reference {
         fingerprint["frontier"] = json!({ "cut": cut, "net_sha256": sha });
+        if let Some(l) = &silver.ref_leaves {
+            fingerprint["frontier"]["exact_leaves"] = json!(l.leaves);
+            fingerprint["frontier"]["defer_expert"] = json!(l.expert);
+        }
     }
     check_fingerprint(&out.join("fingerprint.json"), &fingerprint)?;
     let sched_json = match p.get("schedule") {
@@ -653,13 +756,17 @@ pub(crate) fn chunk_with(
             solve_threads,
         } => {
             // One table per worker of `search worlds`, kept between its worlds.
+            // Exact leaves hold a second table per worker, for the leaf solves.
+            let per = if silver.ref_leaves.is_some() { 2 } else { 1 };
             let tables = if solve_threads > 1 {
                 Tables::Shared {
-                    count: workers,
+                    count: per * workers,
                     solve_threads,
                 }
             } else {
-                Tables::Own { count: workers }
+                Tables::Own {
+                    count: per * workers,
+                }
             };
             let tt = mem::plan_here(
                 Requested::from_param(p, "tt_mb")?,
@@ -720,6 +827,12 @@ pub(crate) fn chunk_with(
         // A silver reference: the hybrid with its network (the step's own method only).
         if let (Some((cut, path, _)), "hybrid") = (&reference, method) {
             c.args(["--cut", &cut.to_string(), "--net", path]);
+            for (k, v) in &leaf_args {
+                c.arg(format!("--{k}")).arg(v);
+            }
+            if !leaf_args.is_empty() {
+                c.args(["--exact-leaf-tt-mb", &tt.tt_mb.to_string()]);
+            }
         }
         if let Some(b) = budget_mb {
             c.args(["--schedule", "auto", "--tt-budget-mb", &b.to_string()]);
@@ -740,7 +853,13 @@ pub(crate) fn chunk_with(
     // reference.
     let (method, kind) = match &reference {
         None => ("exact", format!("exact-t{trick}")),
-        Some((cut, _, _)) => ("hybrid", format!("silver-t{trick}-c{cut}")),
+        Some((cut, _, _)) => (
+            "hybrid",
+            format!(
+                "silver-t{trick}-c{cut}{}",
+                if silver.ref_leaves.is_some() { "x" } else { "" }
+            ),
+        ),
     };
     let base_name = if from == 0 {
         format!("{kind}-n{to}.jsonl")
@@ -788,6 +907,10 @@ pub(crate) fn chunk_with(
             "what": "a silver reference (docs/m3-hybrid/silver.md): every world valued by the \
                      hybrid H_cut with this network, never exact values",
         });
+        if let Some(l) = &silver.ref_leaves {
+            base["reference"]["exact_leaves"] = json!(l.leaves);
+            base["reference"]["defer_expert"] = json!(l.expert);
+        }
     }
     if !stored_in.is_null() {
         base["worlds_input"] = stored_in;
@@ -883,6 +1006,7 @@ pub(crate) fn chunk_with(
             &CheckRun {
                 spec: cs,
                 reference: reference.as_ref().map(|(c, p, _)| (*c, p.as_str())),
+                ref_leaves: &leaf_args,
                 trick,
                 seed,
                 to,
@@ -965,6 +1089,8 @@ struct CheckRun<'a> {
     spec: &'a CheckSpec,
     /// The silver reference's cut and network file (`None`: the worlds are exact).
     reference: Option<(u64, &'a str)>,
+    /// The reference's exact leaves (`exact-leaves`, `defer-expert` with their values).
+    ref_leaves: &'a [(String, String)],
     trick: u64,
     seed: u64,
     to: u64,
@@ -1023,6 +1149,9 @@ fn check_command(
         c.args(["--reference", "silver", "--reference-cut", &cut.to_string()])
             .arg("--reference-net")
             .arg(path);
+        for (k, v) in r.ref_leaves {
+            c.arg(format!("--reference-{k}")).arg(v);
+        }
     }
     if cs.race_groups {
         c.arg("--race-groups");
