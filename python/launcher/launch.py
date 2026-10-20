@@ -424,7 +424,7 @@ def parse_gpu_names(text: str) -> list[str]:
 MACHINE_KEYS = ("gpus", "min_gpu_ram_gb", "min_compute_cap", "min_cores", "min_ram_gb", "disk_gb", "min_inet_down",
                 "min_inet_up",
                 "max_dph", "wait_for_offer_min", "offer_poll_s", "price_steps", "tries_per_step", "gpu_names", "blackwell",
-                "allow_shared")
+                "allow_shared", "resume_existing")
 
 
 def apply_machine(a, manifest: dict) -> None:
@@ -460,8 +460,10 @@ def apply_machine(a, manifest: dict) -> None:
         sys.exit(f"launch: machine.blackwell must be true or false (got {m['blackwell']!r})")
     if "allow_shared" in m and not isinstance(m["allow_shared"], bool):
         sys.exit(f"launch: machine.allow_shared must be true or false (got {m['allow_shared']!r})")
+    if "resume_existing" in m and not isinstance(m["resume_existing"], bool):
+        sys.exit(f"launch: machine.resume_existing must be true or false (got {m['resume_existing']!r})")
     for k, v in m.items():
-        if k in ("price_steps", "gpu_names", "blackwell", "allow_shared"):
+        if k in ("price_steps", "gpu_names", "blackwell", "allow_shared", "resume_existing"):
             continue
         if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
             sys.exit(f"launch: machine.{k} must be a number, 0 or more (got {v!r})")
@@ -495,6 +497,7 @@ def apply_machine(a, manifest: dict) -> None:
         a.gpu_names = list(names)
     a.allow_blackwell = allow_blackwell(a) or m.get("blackwell") is True
     a.allow_shared = bool(getattr(a, "allow_shared", False)) or m.get("allow_shared") is True
+    a.resume_existing = bool(getattr(a, "resume_existing", False)) or m.get("resume_existing") is True
     if gpu_job(a) and a.cpu_only:
         log(f"the run needs {a.gpus} GPU(s): the GPU filters apply (--cpu-only is ignored)")
         a.cpu_only = False
@@ -1856,7 +1859,10 @@ def cmd_run(a) -> int:
             sys.exit(f"launch: manifest bin_sha {manifest['bin_sha']} differs from --bin-sha {a.bin_sha}")
         manifest["bin_sha"] = a.bin_sha
     if r2_list(f"runs/{run_id}/"):
-        sys.exit(f"launch: runs/{run_id}/ already exists in R2; choose a new run_id")
+        if not (resumable and getattr(a, "resume_existing", False)):
+            sys.exit(f"launch: runs/{run_id}/ already exists in R2; choose a new run_id")
+        if not a.dry_run:
+            clear_for_resume(run_id)
     if not r2_get(f"bin/{a.bin_sha}/manifest.json"):
         sys.exit(f"launch: no release binaries at bin/{a.bin_sha}/ (run release-binaries.yml first)")
     wanted = {**manifest_inputs(manifest), **(param_inputs(manifest) if resumable else {})}
@@ -2310,6 +2316,18 @@ def operator_stopped(run_id: str) -> bool:
     except RuntimeError as e:
         log(f"::warning::could not read runs/{run_id}/{NO_REPLACE} ({e}); treating the run as stopped by an operator")
         return True
+
+
+def clear_for_resume(run_id: str) -> None:
+    """machine.resume_existing: a relaunch of a run id that already has files in R2. Removes what would end the
+    new run at once (its DONE/FAILED/STOP markers, the report and the old heartbeats); the manifest, done-list and
+    live files stay, so a search_measure chunk restores its checkpoint and continues (v2.rs `spawn`)."""
+    log(f"::warning::run {run_id} already exists in R2 and the manifest opted in (machine.resume_existing): "
+        f"clearing its end markers and old heartbeats, then resuming from its stored files")
+    for k in ("DONE", "FAILED", "STOP", "report.json"):
+        if r2_exists(f"runs/{run_id}/{k}"):
+            r2_delete(f"runs/{run_id}/{k}")
+    _aws("s3", "rm", f"s3://{os.environ['R2_BUCKET']}/runs/{run_id}/heartbeat/", "--recursive", "--only-show-errors", check=False)
 
 
 def clear_stop(run_id: str) -> None:
