@@ -1,0 +1,68 @@
+{
+  "format": 2,
+  "run_id": "o2-leafrisk-1",
+  "run_seed": 1,
+  "threads": null,
+  "benchmark_seconds": 0,
+  "upload_every_s": 300,
+  "heartbeat_every_s": 30,
+  "note": "The O_2 leaf-risk model (learned deferral at cut 2, docs/m3-hybrid/learned-leaves.md 'Learned deferral at cut 2'): which trick-2 frontier positions H_2 hands to the deeper expert (H_3 with learned exact leaves) instead of taking O_2's value. Rows: three network-driven trick-2 harvests (search labels --trick 2 --source harvest --harvest-net <O_2>: trick-1 decisions searched by H_2, at most 32 of the trick-2 frontier positions each search reaches kept per decision, each labelled exactly), never O_2's training data (O_2 trained on random-play s511 and rules-v1 s512 shards fb51c217... and 2160fefc..., validation s601): train 400,000 rows (seed 79001), cal 200,000 (seed 79002), test 100,000 (seed 79003); then on the CPU: prepare (O_2's integer value of each row), train (150 trees, as v1), calibrate (Learn then Test, delta 0.05, the budget table written into the model, which records trick 2 and O_2's SHA-256: Rust refuses it at any other trick or with another network). Provisional O_2 505a0c7c... (rung3.md); a newer O_2 needs its own model. Cost: an exact trick-2 label about 1.4-3.5 thread-seconds on the build VM, 1.0-2.4 times that on rented threads: 700,000 rows about 1.0-5.9 M thread-seconds, 1.1-6.7 hours on 245 threads ($0.35-2.00 at $0.30/h), plus about an hour of Python. Not launched.",
+  "machine": {
+    "min_cores": 190,
+    "min_ram_gb": 64,
+    "disk_gb": 60,
+    "min_inet_down": 100,
+    "max_dph": 1.7
+  },
+  "inputs": {
+    "o2": "sha256:505a0c7c65147ffa9565e06059f47664ea9f1bfdf0c5ea2f8d392b0e6e1337b0"
+  },
+  "streams": [
+    {
+      "name": "leafrisk",
+      "priority": 1,
+      "kind": "leafrisk",
+      "chunks": 1,
+      "params": {
+        "threads": "all",
+        "trick": 2,
+        "net_input": "o2",
+        "splits": [
+          {
+            "name": "train",
+            "count": 400000,
+            "seed": 79001
+          },
+          {
+            "name": "cal",
+            "count": 200000,
+            "seed": 79002
+          },
+          {
+            "name": "test",
+            "count": 100000,
+            "seed": 79003
+          }
+        ],
+        "harvest_cap": 32,
+        "harvest_positions": "0.4,0.3,0.3",
+        "start_hands": 20000,
+        "train": {
+          "trees": 150,
+          "depth": 6,
+          "rate": 0.05,
+          "min_leaf": 400,
+          "subsample": 0.5,
+          "seed": 1,
+          "holdout": 0.1
+        },
+        "targets": "2.0,1.8,1.6,1.4,1.2,1.0,0.9,0.8,0.7,0.6,0.5",
+        "delta": 0.05,
+        "table": {
+          "hands": 1000000,
+          "seed": 1
+        }
+      }
+    }
+  ]
+}
