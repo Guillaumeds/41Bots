@@ -76,6 +76,10 @@ pub(crate) const KEYS: [&str; 19] = [
     "defer_expert",
 ];
 
+/// The keys [`resolve`] adds (local paths of the named inputs) before the chunk reads its
+/// settings again.
+const RESOLVED: [&str; 3] = ["net", "exact_leaves_path", "defer_expert_path"];
+
 /// The checked settings.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Params {
@@ -111,7 +115,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         .as_object()
         .ok_or("student_teacher: params must be an object")?;
     for k in o.keys() {
-        if !KEYS.contains(&k.as_str()) && k != "net" {
+        if !KEYS.contains(&k.as_str()) && !RESOLVED.contains(&k.as_str()) {
             return Err(format!("student_teacher: unknown setting `{k}`"));
         }
     }

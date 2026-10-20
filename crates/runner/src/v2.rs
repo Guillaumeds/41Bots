@@ -205,15 +205,7 @@ fn worker_inner(spec_path: &Path) -> Result<(), String> {
         "student_teacher" => {
             // The network's path joins the settings; the chunk's index is its part of the stream
             // (the generator's own seed is in the settings: a part is the same shard on any run).
-            let mut p = crate::student::resolve(&params, &inputs)?;
-            if let Ok(path) = equity()
-                && let Some(o) = p.as_object_mut()
-            {
-                let t = o.entry("table").or_insert_with(|| json!({}));
-                if let Some(t) = t.as_object_mut() {
-                    t.entry("path").or_insert(json!(path));
-                }
-            }
+            let p = chunk_params(&kind, &params, seed, &inputs)?;
             crate::student::chunk(&mut ctx, &p, index)?
         }
         "student_train" => {
@@ -247,59 +239,8 @@ fn worker_inner(spec_path: &Path) -> Result<(), String> {
             json!({ "kind": kind, "seed": seed })
         }
         _ => {
-            // Existing kinds. Where `seed` is the chunk's own randomness the chunk seed replaces
-            // it; the whole-machine measurements keep their fixed measurement seeds.
-            let mut p = params.clone();
-            if SEEDED_KINDS.contains(&kind.as_str())
-                && let Some(o) = p.as_object_mut()
-            {
-                o.insert("seed".into(), json!(seed));
-            }
-            // `search_measure` may take its decision-id list as a manifest input.
-            if kind == "search_measure"
-                && let Some(name) = params.get("ids_input").and_then(Value::as_str)
-                && let Some(o) = p.as_object_mut()
-            {
-                let path = inputs
-                    .get(name)
-                    .ok_or_else(|| format!("search_measure needs input `{name}` (ids_input)"))?;
-                o.insert("ids".into(), json!(path));
-            }
-            // `hybrid_t1check` names its files among the inputs: their paths join its params.
-            if kind == "hybrid_t1check" {
-                p = crate::t1check::resolve(&p, &inputs)?;
-            }
-            // `hybrid_checks` too (`checks.rs`), and `leafrisk`'s network (`leafrisk.rs`).
-            if kind == "hybrid_checks" {
-                p = crate::checks::resolve(&p, &inputs)?;
-            }
-            if kind == "leafrisk" {
-                p = crate::leafrisk::resolve(&p, &inputs)?;
-            }
-            // A `search_measure` chunk's silver reference, check network and stored worlds
-            // (`measure.rs`, "A silver reference") are inputs too.
-            if kind == "search_measure" {
-                p = crate::measure::resolve(&p, &inputs)?;
-            }
-            // A prebuilt equity table among the inputs (`params.equity_input`, default
-            // `equity`) replaces building it; its hash is still checked against the record.
-            if [
-                "search_measure",
-                "t1bench",
-                "hybrid_rung",
-                "hybrid_t1check",
-                "hybrid_checks",
-                "leafrisk",
-            ]
-            .contains(&kind.as_str())
-                && let Ok(path) = equity()
-                && let Some(o) = p.as_object_mut()
-            {
-                let t = o.entry("table").or_insert_with(|| json!({}));
-                if let Some(t) = t.as_object_mut() {
-                    t.entry("path").or_insert(json!(path));
-                }
-            }
+            // Existing kinds: their settings with the inputs' paths ([`chunk_params`]).
+            let p = chunk_params(&kind, &params, seed, &inputs)?;
             let mut r = run_kind(&mut ctx, &kind, &p)?;
             if let Some(o) = r.as_object_mut() {
                 o.insert("kind".into(), json!(kind));
@@ -309,6 +250,95 @@ fn worker_inner(spec_path: &Path) -> Result<(), String> {
     };
     let text = serde_json::to_string_pretty(&result).map_err(|e| e.to_string())? + "\n";
     fs::write(out.join("result.json"), text).map_err(|e| e.to_string())
+}
+
+/// The settings a chunk of kind `kind` runs with: the manifest's (as the scheduler passed them)
+/// with the chunk seed where it is the chunk's own randomness and the local paths of the inputs
+/// they name (`inputs`: name → path) added, as each kind's own `resolve` does. The chunk then
+/// reads these settings itself, so every key added here must be one it accepts (tested end to
+/// end on the committed manifests).
+pub(crate) fn chunk_params(
+    kind: &str,
+    params: &Value,
+    seed: u64,
+    inputs: &BTreeMap<String, String>,
+) -> Result<Value, String> {
+    let equity = || {
+        let name = params
+            .get("equity_input")
+            .and_then(Value::as_str)
+            .unwrap_or("equity");
+        inputs
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("kind {kind} needs input `{name}` in the manifest"))
+    };
+    let with_table = |p: &mut Value| {
+        if let Ok(path) = equity()
+            && let Some(o) = p.as_object_mut()
+        {
+            let t = o.entry("table").or_insert_with(|| json!({}));
+            if let Some(t) = t.as_object_mut() {
+                t.entry("path").or_insert(json!(path));
+            }
+        }
+    };
+    if kind == "student_teacher" {
+        // The network's path joins the settings; the chunk's index is its part of the stream
+        // (the generator's own seed is in the settings: a part is the same shard on any run).
+        let mut p = crate::student::resolve(params, inputs)?;
+        with_table(&mut p);
+        return Ok(p);
+    }
+    // Existing kinds. Where `seed` is the chunk's own randomness the chunk seed replaces
+    // it; the whole-machine measurements keep their fixed measurement seeds.
+    let mut p = params.clone();
+    if SEEDED_KINDS.contains(&kind)
+        && let Some(o) = p.as_object_mut()
+    {
+        o.insert("seed".into(), json!(seed));
+    }
+    // `search_measure` may take its decision-id list as a manifest input.
+    if kind == "search_measure"
+        && let Some(name) = params.get("ids_input").and_then(Value::as_str)
+        && let Some(o) = p.as_object_mut()
+    {
+        let path = inputs
+            .get(name)
+            .ok_or_else(|| format!("search_measure needs input `{name}` (ids_input)"))?;
+        o.insert("ids".into(), json!(path));
+    }
+    // `hybrid_t1check` names its files among the inputs: their paths join its params.
+    if kind == "hybrid_t1check" {
+        p = crate::t1check::resolve(&p, inputs)?;
+    }
+    // `hybrid_checks` too (`checks.rs`), and `leafrisk`'s network (`leafrisk.rs`).
+    if kind == "hybrid_checks" {
+        p = crate::checks::resolve(&p, inputs)?;
+    }
+    if kind == "leafrisk" {
+        p = crate::leafrisk::resolve(&p, inputs)?;
+    }
+    // A `search_measure` chunk's silver reference, check network and stored worlds
+    // (`measure.rs`, "A silver reference") are inputs too.
+    if kind == "search_measure" {
+        p = crate::measure::resolve(&p, inputs)?;
+    }
+    // A prebuilt equity table among the inputs (`params.equity_input`, default
+    // `equity`) replaces building it; its hash is still checked against the record.
+    if [
+        "search_measure",
+        "t1bench",
+        "hybrid_rung",
+        "hybrid_t1check",
+        "hybrid_checks",
+        "leafrisk",
+    ]
+    .contains(&kind)
+    {
+        with_table(&mut p);
+    }
+    Ok(p)
 }
 
 /// Existing kinds whose `seed` parameter is the chunk's own randomness, so the chunk seed
@@ -1527,6 +1557,86 @@ fn stop_child(c: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The committed manifests as a rented run takes them: the scheduler's reading (`parse_v2`,
+    /// which turns stored keys into input names), each stream's settings with the inputs' local
+    /// paths added as the worker adds them ([`chunk_params`]), then the chunk's own reading of
+    /// those settings and, for the student's teacher, its `search` command. A key added by the
+    /// resolution that a chunk refused stopped student-t2-gv2-1 in 5 s (2026-10-20).
+    #[test]
+    fn manifests_resolve_into_settings_their_chunks_accept() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/vast");
+        for (file, kinds) in [
+            ("student-t2-gv2.manifest.json", 3),
+            ("student-t2-base.manifest.json", 3),
+            ("m3-hybrid-t2-hlabels.manifest.json", 1),
+            ("o3-learnedleaf.manifest.json", 1),
+            ("o2-leafrisk.manifest.json", 1),
+        ] {
+            let v: Value = serde_json::from_str(&fs::read_to_string(root.join(file)).expect(file))
+                .expect(file);
+            let m = crate::sched::parse_v2(&v).unwrap_or_else(|e| panic!("{file}: {e}"));
+            let inputs: BTreeMap<String, String> = m
+                .inputs
+                .iter()
+                .map(|(n, _)| (n.clone(), format!("/in/{n}")))
+                .chain([("equity".to_string(), "/in/equity".to_string())])
+                .collect();
+            let mut seen = 0;
+            for st in &m.streams {
+                let p = chunk_params(&st.kind, &st.params, 7, &inputs)
+                    .unwrap_or_else(|e| panic!("{file}/{}: {e}", st.name));
+                let what = format!("{file}/{}", st.name);
+                match st.kind.as_str() {
+                    "student_teacher" => {
+                        let q = crate::student::parse(&p).unwrap_or_else(|e| panic!("{what}: {e}"));
+                        let leaves = p.get("exact_leaves_path").and_then(Value::as_str);
+                        assert_eq!(leaves.is_some(), q.exact_leaves.is_some(), "{what}");
+                        if let Some(l) = leaves {
+                            assert!(l.starts_with("learned:/in/"), "{what}: {l}");
+                        }
+                        let c = crate::student::command(
+                            Path::new("search"),
+                            &q,
+                            0,
+                            p["net"].as_str().expect("net"),
+                            leaves.map(|l| (l, p.get("defer_expert_path").and_then(Value::as_str))),
+                            Path::new("/in/equity"),
+                            Path::new("o.npy"),
+                            4,
+                            Path::new("p.json"),
+                        );
+                        let args: Vec<String> = c
+                            .get_args()
+                            .map(|a| a.to_string_lossy().into_owned())
+                            .collect();
+                        assert_eq!(
+                            args.iter().any(|a| a == "--exact-leaves"),
+                            leaves.is_some(),
+                            "{what}"
+                        );
+                        assert!(!args.iter().any(|a| a.contains("inputs/sha256/")), "{what}");
+                    }
+                    "hybrid_rung" => {
+                        let q = crate::hybrid::parse(&p).unwrap_or_else(|e| panic!("{what}: {e}"));
+                        if file.contains("hlabels") {
+                            let h = q.hybrid_labels.as_ref().expect("hybrid labels");
+                            assert!(h.leafrisk.is_some(), "{what}: a learned model to fetch");
+                        }
+                    }
+                    "hybrid_checks" => {
+                        crate::checks::parse(&p).unwrap_or_else(|e| panic!("{what}: {e}"));
+                    }
+                    "leafrisk" => {
+                        crate::leafrisk::parse(&p).unwrap_or_else(|e| panic!("{what}: {e}"));
+                    }
+                    k => panic!("{what}: kind {k} not covered"),
+                }
+                seen += 1;
+            }
+            assert_eq!(seen, kinds, "{file}");
+        }
+    }
 
     #[test]
     fn failed_result_upload_is_a_clear_heartbeat_warning() {
