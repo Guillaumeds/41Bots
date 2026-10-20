@@ -4276,7 +4276,8 @@ mod tests {
 
     /// The committed hybrid-labels manifest (docs/vast/m3-hybrid-t2-hlabels.manifest.json): the
     /// trick-2 loop of m3-hybrid-t2-loop-2 with hybrid training labels from the adopted O_3, an
-    /// exact share of 0.1 and exact leaves; everything else as that loop's.
+    /// exact share of 0.1 and the adopted learned exact-leaf rule (`o3-learnedleaf-2`, rung2.md);
+    /// everything else as that loop's.
     #[test]
     fn committed_hlabels_manifest_parses() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/vast");
@@ -4294,7 +4295,12 @@ mod tests {
             "f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad"
         );
         assert_eq!(h.exact_ppm, 100_000);
-        assert_eq!(h.exact_leaves.as_deref(), Some("race:1,2,3,4"));
+        assert_eq!(
+            h.exact_leaves.as_deref(),
+            Some(
+                "learned:inputs/sha256/20c41678c64681855003e5b8660e0a2e1fb9e8d552f7d898dd956055c767a9d5:t=277338260"
+            )
+        );
         // The rest is the loop's own.
         let base = read("m3-hybrid-t2-loop2.manifest.json");
         let mut ours = v["streams"][0]["params"].clone();
