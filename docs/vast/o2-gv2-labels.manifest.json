@@ -1,0 +1,56 @@
+{
+ "format": 2,
+ "run_id": "o2-gv2-labels-1",
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "Owner 2026-10-20: O_2 on G v2 labels. Trick-2 start positions (random play 2.6M, rules-v1 0.6M, new seeds) labelled by H_3 with the adopted learned exact leaves (O_3 f5766a, leafrisk-o3-v1 t=277338260; rung2.md), 5% of rows exact as an anchor; 20k exact validation; made in 10 parts each, every part stored as soon as it is made (upload_shards), so a dollar cap keeps everything finished; then a first O_2 trained on them on the machine's GPU (2048-1024-256, outcome head). No golden set, no audit loop (check false); O_2 is tested afterwards.",
+ "machine": {
+  "gpus": 1,
+  "min_cores": 190,
+  "min_ram_gb": 60,
+  "disk_gb": 80
+ },
+ "inputs": {
+  "o3": "sha256:f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
+  "leafrisk_o3": "sha256:20c41678c64681855003e5b8660e0a2e1fb9e8d552f7d898dd956055c767a9d5"
+ },
+ "streams": [
+  {
+   "name": "rung",
+   "priority": 1,
+   "kind": "hybrid_rung",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "cut": 2,
+    "check": false,
+    "labels_random": 2600000,
+    "labels_random_seed": 531,
+    "labels_rules": 600000,
+    "labels_rules_seed": 532,
+    "val_count": 20000,
+    "val_seed": 602,
+    "label_parts": 10,
+    "upload_shards": true,
+    "label_source": "hybrid",
+    "label_net": "inputs/sha256/f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
+    "label_exact_leaves": "learned:inputs/sha256/20c41678c64681855003e5b8660e0a2e1fb9e8d552f7d898dd956055c767a9d5:t=277338260",
+    "hybrid_exact_share": 0.05,
+    "widths": "2048,1024,256",
+    "head": "outcome",
+    "epochs": 40,
+    "patience": 6,
+    "batch": 1024,
+    "lr": 0.001,
+    "train_seed": 1,
+    "max_minutes": 0,
+    "device": "cuda",
+    "overlap": false,
+    "table": {"hands": 1000000, "seed": 1}
+   }
+  }
+ ]
+}
