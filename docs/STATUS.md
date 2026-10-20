@@ -93,6 +93,16 @@ The owner wants the teachers and their deal counts decided last; first O_2 G v2 
 - **Stop:** cancel the workflow run (it asks the run to stop, waits up to 5 minutes for uploads, then
   destroys the machine) or `vast-stop.yml` (run_id, instance_id); `vast-status.yml` lists every
   instance on the account. Confirm nothing is left billing.
+- **From a laptop (no R2 or vast keys there):** everything goes through GitHub Actions with the `gh` CLI:
+  `gh workflow run vast-run.yml --ref m3-hybrid -f manifest="$(jq -c . docs/vast/NAME.manifest.json)"
+  -f min_cores=190 -f min_ram_gb=64 -f disk_gb=60 -f cpu_only=true -f max_dollars=3 -f any_host=true
+  -f bin_sha=6c7acf50709117d224dda5363d516f9b367cc399 -f image=ghcr.io/guillaumeds/41bots-base:20261017-bc692e446939
+  -f dry_run=false` (GPU jobs: `-f cpu_only=false -f gpus=1 -f min_gpu_ram_gb=8 -f low_cpu_pct=1`);
+  `gh run list --workflow vast-run.yml`, `gh run view <id> --log` (the launcher's log shows the machine,
+  price and progress lines), `gh run cancel <id>` (stop and destroy); `gh workflow run vast-status.yml`
+  (every instance on the account); `gh workflow run r2-fetch.yml -f run_id=<run>` then
+  `gh run download <id>` for a run's files (results bundles `out/*.tar.zst`, unpack with Python 3.14
+  `compression.zstd`); `gh workflow run release-binaries.yml --ref m3-hybrid` for new binaries.
 - **Test a manifest before launching:** add it to `v2::tests::manifests_resolve_into_settings_their_chunks_accept`
   (`crates/runner/src/v2.rs`; kinds hybrid_rung, student_teacher, hybrid_checks, leafrisk) and run
   `cargo test --release -p runner manifests_resolve`.
