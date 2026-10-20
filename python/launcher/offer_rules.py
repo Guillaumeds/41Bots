@@ -105,12 +105,14 @@ def cpu_failures(o: dict) -> list[str]:
     return []
 
 
-def check_failures(o: dict, floor: float = MIN_RELIABILITY, verified_only: bool = False) -> list[str]:
+def check_failures(o: dict, floor: float = MIN_RELIABILITY, verified_only: bool = False,
+                   allow_shared: bool = False) -> list[str]:
     """Why an offer fails the launcher's safety checks (what the search query filters on, applied
     to one offer's record): reliability at least `floor` (0.90), the whole machine (no sharing),
     on-demand and rentable; with `verified_only` also a verified host (owner, 2026-10-16: unverified
-    and deverified hosts are otherwise accepted). Empty when it passes. These are the checks a
-    named offer (--offer-id) gets."""
+    and deverified hosts are otherwise accepted). `allow_shared` (owner opt-in, 2026-10-20, a named
+    offer only) lets a partial machine through: its speed is then not a clean measurement. Empty when
+    it passes. These are the checks a named offer (--offer-id) gets."""
     failed = []
     if verified_only and not is_verified(o):
         failed.append(f"host not verified ({o.get('verification') or o.get('verified')}), and --verified-only is set")
@@ -122,7 +124,7 @@ def check_failures(o: dict, floor: float = MIN_RELIABILITY, verified_only: bool 
     frac = number(o.get("gpu_frac") if o.get("gpu_frac") is not None else 0)
     if frac is None:
         frac = 0.0
-    if frac < 1.0:
+    if frac < 1.0 and not allow_shared:
         failed.append(f"shared machine (gpu_frac {o.get('gpu_frac')})")
     if o.get("is_bid"):
         failed.append("an interruptible (bid) offer, not on-demand")

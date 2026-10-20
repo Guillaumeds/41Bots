@@ -1572,6 +1572,7 @@ mod tests {
             ("m3-hybrid-t2-hlabels.manifest.json", 1),
             ("o3-learnedleaf.manifest.json", 1),
             ("o2-leafrisk.manifest.json", 1),
+            ("o2-silver.manifest.json", 1),
             ("o2-gv2-labels.manifest.json", 1),
             ("o2-labeltest.manifest.json", 2),
         ] {

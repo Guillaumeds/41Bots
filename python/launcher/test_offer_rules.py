@@ -45,6 +45,11 @@ class OfferRulesTest(unittest.TestCase):
         self.assertIn("interruptible", R.check_failures(offer(is_bid=True))[0])
         self.assertEqual(R.check_failures(offer(rentable=False)), ["not rentable"])
 
+    def test_shared_machine_only_with_the_opt_in(self):
+        self.assertEqual(R.check_failures(offer(gpu_frac=0.8), allow_shared=True), [])
+        self.assertIn("shared machine", R.check_failures(offer(gpu_frac=0.8))[0])
+        self.assertEqual(R.check_failures(offer(gpu_frac=0.8, rentable=False), allow_shared=True), ["not rentable"])
+
     def test_verified_hosts_are_preferred_not_required(self):
         for word in ("unverified", "deverified"):
             o = offer(verification=word)

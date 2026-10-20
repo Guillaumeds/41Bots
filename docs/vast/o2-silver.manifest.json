@@ -1,22 +1,24 @@
 {
  "format": 2,
- "run_id": "o2-silver-1",
+ "run_id": "o2-silver-2",
  "run_seed": 1,
  "threads": null,
  "benchmark_seconds": 0,
  "upload_every_s": 300,
  "heartbeat_every_s": 30,
- "note": "Owner 2026-10-20: the current (provisional) O_2, 505a0c7c, against the trick-1 silver set (docs/m3-hybrid/silver.md): 400 trick-1 decisions x 80 worlds (the first 80 of the golden sets' stream; nested, so the set extends to 320 later without redoing anything), every candidate valued by H_3 (O_3 f5766aa9 at the start of trick 3), stored at inputs/sha256/ for later O_2s; then H_2 with O_2 checked against it, with the score and race groups.",
+ "note": "Owner 2026-10-20: the current (provisional) O_2, 505a0c7c, against the trick-1 silver set (docs/m3-hybrid/silver.md): 200 trick-1 decisions x 80 worlds (first stage; the first run, 400 decisions, was lost with its host after 143 worlds), every candidate valued by H_3 with O_3 G v2 (O_3 f5766aa9 at the start of trick 3, risky trick-3 positions solved exactly by the learned leaf-risk model 20c41678, t=277338260), stored at inputs/sha256/ for later O_2s; then H_2 with O_2 checked against it, with the score and race groups.",
  "machine": {
   "min_cores": 150,
   "min_ram_gb": 64,
   "disk_gb": 40,
   "min_inet_down": 100,
-  "max_dph": 0.7
+  "max_dph": 0.7,
+  "blackwell": true
  },
  "inputs": {
   "o3": "sha256:f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
-  "o2": "sha256:505a0c7c65147ffa9565e06059f47664ea9f1bfdf0c5ea2f8d392b0e6e1337b0"
+  "o2": "sha256:505a0c7c65147ffa9565e06059f47664ea9f1bfdf0c5ea2f8d392b0e6e1337b0",
+  "leafrisk-o3-v1": "sha256:20c41678c64681855003e5b8660e0a2e1fb9e8d552f7d898dd956055c767a9d5"
  },
  "streams": [
   {
@@ -27,7 +29,7 @@
    "params": {
     "threads": "all",
     "trick": 1,
-    "count": 400,
+    "count": 200,
     "seed": 1,
     "allow_uneven": true,
     "start_hands": 20000,
@@ -38,7 +40,8 @@
     "grid": "10,20,40,80",
     "reference": {
      "cut": 3,
-     "net_input": "o3"
+     "net_input": "o3",
+     "exact_leaves": "learned:leafrisk-o3-v1:t=277338260"
     },
     "table": {
      "hands": 1000000,

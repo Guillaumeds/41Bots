@@ -423,7 +423,8 @@ def parse_gpu_names(text: str) -> list[str]:
 # The keys of a manifest's "machine" object (what the launcher rents for it).
 MACHINE_KEYS = ("gpus", "min_gpu_ram_gb", "min_compute_cap", "min_cores", "min_ram_gb", "disk_gb", "min_inet_down",
                 "min_inet_up",
-                "max_dph", "wait_for_offer_min", "offer_poll_s", "price_steps", "tries_per_step", "gpu_names", "blackwell")
+                "max_dph", "wait_for_offer_min", "offer_poll_s", "price_steps", "tries_per_step", "gpu_names", "blackwell",
+                "allow_shared")
 
 
 def apply_machine(a, manifest: dict) -> None:
@@ -457,8 +458,10 @@ def apply_machine(a, manifest: dict) -> None:
                      f"[\"RTX 4090\", \"RTX 5090\"] (got {names!r})")
     if "blackwell" in m and not isinstance(m["blackwell"], bool):
         sys.exit(f"launch: machine.blackwell must be true or false (got {m['blackwell']!r})")
+    if "allow_shared" in m and not isinstance(m["allow_shared"], bool):
+        sys.exit(f"launch: machine.allow_shared must be true or false (got {m['allow_shared']!r})")
     for k, v in m.items():
-        if k in ("price_steps", "gpu_names", "blackwell"):
+        if k in ("price_steps", "gpu_names", "blackwell", "allow_shared"):
             continue
         if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
             sys.exit(f"launch: machine.{k} must be a number, 0 or more (got {v!r})")
@@ -491,6 +494,7 @@ def apply_machine(a, manifest: dict) -> None:
     if "gpu_names" in m and getattr(a, "gpu_names", None) is None:
         a.gpu_names = list(names)
     a.allow_blackwell = allow_blackwell(a) or m.get("blackwell") is True
+    a.allow_shared = bool(getattr(a, "allow_shared", False)) or m.get("allow_shared") is True
     if gpu_job(a) and a.cpu_only:
         log(f"the run needs {a.gpus} GPU(s): the GPU filters apply (--cpu-only is ignored)")
         a.cpu_only = False
@@ -691,11 +695,12 @@ def describe(o: dict) -> str:
             f"rate {o['_rate']:.2f} ({unit}), cost/work {o['_cost_per_work']:.5f}")
 
 
-def offer_check_failures(o: dict, floor: float = MIN_RELIABILITY, verified_only: bool = False) -> list[str]:
+def offer_check_failures(o: dict, floor: float = MIN_RELIABILITY, verified_only: bool = False,
+                         allow_shared: bool = False) -> list[str]:
     """Why an offer fails the launcher's safety checks (offer_rules.check_failures): reliability at least
-    0.90, the whole machine, on-demand and rentable; with `verified_only` also a verified host. Empty when
-    it passes."""
-    return check_failures(o, floor, verified_only)
+    0.90, the whole machine (unless `allow_shared`, a manifest's machine.allow_shared, named offers only),
+    on-demand and rentable; with `verified_only` also a verified host. Empty when it passes."""
+    return check_failures(o, floor, verified_only, allow_shared)
 
 
 def named_text(o: dict) -> str:
@@ -794,7 +799,11 @@ def lookup_offer(a) -> dict:
         log(f"named offer {oid}: vast's search by id missed it; found in the market listing, checked as usual")
     log(f"named offer {oid}: {named_text(row)}")
     verified_only = bool(getattr(a, "verified_only", False))
-    failed = offer_check_failures(row, float(a.min_reliability), verified_only)
+    allow_shared = bool(getattr(a, "allow_shared", False))
+    failed = offer_check_failures(row, float(a.min_reliability), verified_only, allow_shared)
+    if allow_shared and (row.get("gpu_frac") or 1) < 1:
+        log(f"::warning::named offer {oid} is a shared machine (gpu_frac {row.get('gpu_frac')}), rented because the "
+            f"manifest opted in (machine.allow_shared): its speed is not a clean measurement")
     # The run's own needs, as the normal search filters them (`offer_query`): vast's raw records
     # give cpu_ram in MB. Review E (2026-10-16): the named offer was never checked against
     # --min-ram-gb, so a table run needing 480 GB could be rented on a 251 GB machine.
