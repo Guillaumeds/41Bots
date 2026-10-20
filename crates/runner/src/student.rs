@@ -651,6 +651,38 @@ mod tests {
         assert!(parse(&bad).is_err());
     }
 
+    /// The G v2 relabelling manifest parses: its learned model named by stored key becomes the
+    /// `leafrisk_o3` input, and its streams are the stored data's (same seeds, sources, parts).
+    #[test]
+    fn the_gv2_manifest_parses() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/vast");
+        let v: Value = serde_json::from_str(
+            &fs::read_to_string(root.join("student-t2-gv2.manifest.json")).expect("read"),
+        )
+        .expect("JSON");
+        let m = crate::sched::parse_v2(&v).expect("parses");
+        let mut decisions = 0;
+        for s in &m.streams {
+            let q = parse(&s.params).expect("params");
+            assert_eq!(
+                q.exact_leaves.as_deref(),
+                Some("learned:leafrisk_o3:t=277338260")
+            );
+            assert!(
+                input_names(&s.params)
+                    .expect("names")
+                    .contains(&"leafrisk_o3".into())
+            );
+            if q.role == "train" {
+                let crate::sched::Chunks::Fixed(n) = s.chunks else {
+                    panic!("fixed chunks")
+                };
+                decisions += q.count * n;
+            }
+        }
+        assert_eq!(decisions, 1_000_000);
+    }
+
     /// The chunk with a fake `search` writing a shard: the records file and its sidecar go into
     /// `out/student/`, both shard files to the store's `inputs/sha256/<hex>` (listed in
     /// `<name>.inputs.json`); with no store the values file goes into `out/student/` instead; a
