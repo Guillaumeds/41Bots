@@ -6,7 +6,7 @@
   "benchmark_seconds": 0,
   "upload_every_s": 300,
   "heartbeat_every_s": 30,
-  "note": "The trick-2 student's teacher data relabelled on G v2 (owner 2026-10-20): the same positions as the stored 1M decisions (rules seed 401 parts 0-159, mixed seed 402 parts 0-39: the generator's same streams, so the same decisions), each valued by PIMC over 64 deals with H_3 (O_3 f5766a) plus the adopted learned exact leaves (leaf-risk model leafrisk-o3-v1, threshold t=277338260; docs/m3-hybrid/learned-leaves.md); and a new fixed test set, 4,096 decisions at 256 deals (seed 32343, role test). Shard names end -x<hash> so they never mix with the plain-H_3 shards. Cost (the golden-set measure, about 1.55 thread-seconds a deal on rented threads against about 0.03 for plain H_3): about 99 thread-seconds a decision at 64 deals, so the 1M training decisions are about 27,500 thread-hours (112 hours on 245 threads, about $34 at $0.30/h) and the test set about 450 thread-hours (1.8 hours on 245 threads, about $0.55). Streams are in priority order (test first); stop early for a smaller relabelled set: every part is a prefix of the same stream. Not launched.",
+  "note": "The trick-2 student's teacher data relabelled on G v2 (owner 2026-10-20): the same positions as the stored 1M decisions (rules seed 401 parts 0-159, mixed seed 402 parts 0-39: the generator's same streams, so the same decisions), each valued by PIMC over 64 deals with H_3 (O_3 f5766a) plus the adopted learned exact leaves (leaf-risk model leafrisk-o3-v1, threshold t=277338260; docs/m3-hybrid/learned-leaves.md). Shard names end -x<hash> so they never mix with the plain-H_3 shards. Cost (the golden-set measure, about 1.55 thread-seconds a deal on rented threads against about 0.03 for plain H_3): about 99 thread-seconds a decision at 64 deals, so the 1M training decisions are about 27,500 thread-hours (112 hours on 245 threads, about $34 at $0.30/h). Streams are in priority order; stop early for a smaller relabelled set: every part is a prefix of the same stream. Not launched. No new test set (lead, 2026-10-20): the student is scored on the stored trick-2 golden set (exact values; search student-check --golden-decisions/--golden-worlds).",
   "machine": {
     "min_cores": 190,
     "min_ram_gb": 96,
@@ -17,28 +17,6 @@
     "leafrisk_o3": "sha256:20c41678c64681855003e5b8660e0a2e1fb9e8d552f7d898dd956055c767a9d5"
   },
   "streams": [
-    {
-      "name": "test",
-      "priority": 1,
-      "kind": "student_teacher",
-      "chunks": 2,
-      "params": {
-        "threads": "all",
-        "trick": 2,
-        "count": 2048,
-        "deals": 256,
-        "seed": 32343,
-        "role": "test",
-        "source": "rules",
-        "net_input": "o3",
-        "exact_leaves": "learned:inputs/sha256/20c41678c64681855003e5b8660e0a2e1fb9e8d552f7d898dd956055c767a9d5:t=277338260",
-        "tt_mb": 64,
-        "table": {
-          "hands": 1000000,
-          "seed": 1
-        }
-      }
-    },
     {
       "name": "rules",
       "priority": 2,

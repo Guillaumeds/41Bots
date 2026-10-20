@@ -162,6 +162,36 @@ impl Merged {
     }
 }
 
+/// Decisions a check reads one by one, merged over their deals: teacher shards ([`Shards`]) or
+/// decisions already in memory (`Vec<Merged>`: the stored golden set's exact worlds,
+/// `search student-check --golden-decisions`).
+pub trait Decisions {
+    /// How many.
+    fn count(&self) -> usize;
+    /// Decision `g`, merged.
+    fn merged(&mut self, g: usize) -> Result<Merged, String>;
+}
+
+impl Decisions for Shards {
+    fn count(&self) -> usize {
+        self.groups.len()
+    }
+    fn merged(&mut self, g: usize) -> Result<Merged, String> {
+        Shards::merged(self, g)
+    }
+}
+
+impl Decisions for Vec<Merged> {
+    fn count(&self) -> usize {
+        self.len()
+    }
+    fn merged(&mut self, g: usize) -> Result<Merged, String> {
+        self.get(g)
+            .cloned()
+            .ok_or_else(|| format!("no decision {g}"))
+    }
+}
+
 /// Teacher shards opened together.
 pub struct Shards {
     /// The shards, in the order given.

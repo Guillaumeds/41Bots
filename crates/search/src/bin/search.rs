@@ -48,6 +48,7 @@
 //!                  [--label-net WEIGHTS [--exact-share 0.1] [--exact-leaves SPEC
 //!                   [--exact-leaf-tt-mb N]]]
 //! search student-check --net STUDENT.safetensors --teacher SHARD.npy [--teacher …] --equity TABLE
+//!                     (or --golden-decisions D.jsonl --golden-worlds W.jsonl [--to N] for exact values)
 //!                  [--allow-stamp KEY …] [--boot 1000] [--boot-seed 1] [--json OUT]
 //!                  [--baseline rules] [--baseline random] [--split-half] [--top-k 2,3]
 //! search hybrid-check --trick T --cut K --net WEIGHTS --equity TABLE
@@ -131,6 +132,15 @@
 //! the other, both ways), and the loss when the teacher picks among the student's top K (all
 //! deals, and split-half with `--split-half`); the JSON gains `top_k` and `split_half`. Without
 //! them the output is as before.
+//! `--golden-decisions D --golden-worlds W` (instead of `--teacher`; `--trick` 2, `--to N` the
+//! first N worlds) scores the student against a stored golden set's **exact** worlds (the files
+//! `hybrid-check --decisions/--worlds` read, e.g. the trick-2 golden set, 2,000 decisions x 320
+//! worlds; `search::student_teacher::golden_merged`): each decision's app candidates take their
+//! exact values world by world, decisions a student never meets (one candidate, the play after
+//! the seat's own rob) are skipped and counted, and the report is the same (the loss is the exact
+//! best mean less the student's choice's; split-half halves are even and odd worlds). The worlds'
+//! equity table must be `--equity`'s; the JSON's `role` is `golden` and `golden` names the files
+//! and their SHA-256s.
 //! `labels` writes training labels for the oracle network O_K (docs/M3-HYBRID-SPEC.md §5,
 //! `search::oracle_labels`): a label shard (`nn::shard`, `.npy` records: encoded features, the exact
 //! value as four u64, the source tag, the trick) and a JSON sidecar `FILE.npy.json` with the
@@ -1838,25 +1848,102 @@ fn student_check(a: &Args) -> Result<(), String> {
         &std::fs::read(net_path).map_err(|e| format!("{net_path}: {e}"))?,
     )?;
     let paths: Vec<PathBuf> = a.all("--teacher").into_iter().map(PathBuf::from).collect();
-    if paths.is_empty() {
-        return Err("give at least one --teacher shard".into());
-    }
-    let allow: Vec<String> = a
-        .all("--allow-stamp")
-        .into_iter()
-        .map(String::from)
-        .collect();
-    let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
-    let mut shards = student::data::Shards::open(&refs, &allow)?;
+    let golden = a.get("--golden-decisions");
     let (table, equity_sha) = load_equity_sha(a.req("--equity")?)?;
-    for r in &shards.readers {
-        if r.sidecar["equity_sha256"] != equity_sha.as_str() {
-            return Err(format!(
-                "{}: made with another equity table",
-                r.path.display()
-            ));
+    // The decisions: teacher shards, or the stored golden set with its exact worlds.
+    let mut shards_opt: Option<student::data::Shards> = None;
+    let mut golden_set: Vec<student::data::Merged> = Vec::new();
+    let mut golden_info = serde_json::Value::Null;
+    match (golden, paths.is_empty()) {
+        (Some(_), false) => {
+            return Err("give --teacher shards or --golden-decisions, not both".into());
+        }
+        (None, true) => {
+            return Err("give at least one --teacher shard (or --golden-decisions)".into());
+        }
+        (None, false) => {
+            let allow: Vec<String> = a
+                .all("--allow-stamp")
+                .into_iter()
+                .map(String::from)
+                .collect();
+            let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+            let shards = student::data::Shards::open(&refs, &allow)?;
+            for r in &shards.readers {
+                if r.sidecar["equity_sha256"] != equity_sha.as_str() {
+                    return Err(format!(
+                        "{}: made with another equity table",
+                        r.path.display()
+                    ));
+                }
+            }
+            shards_opt = Some(shards);
+        }
+        (Some(dpath), true) => {
+            let wpath = a.req("--golden-worlds")?;
+            let trick = a.num("--trick", 2)? as u8;
+            let to = a.num("--to", u64::MAX)?;
+            let ds: Vec<DecisionSpec> = read_lines(dpath)?;
+            let (ws, _) = search::measure::read_worlds(&[Path::new(wpath)])?;
+            let by_id: std::collections::BTreeMap<u64, &search::measure::WorldRows> =
+                ws.iter().map(|w| (w.id, w)).collect();
+            let (mut skipped, mut worlds) = (0u64, None);
+            for d in ds.iter().filter(|d| d.trick == trick) {
+                let w = by_id
+                    .get(&d.id)
+                    .ok_or_else(|| format!("{wpath}: no worlds for decision {}", d.id))?;
+                if let Some(fp) = &w.fp
+                    && fp.table != equity_sha
+                {
+                    return Err(format!(
+                        "{wpath}: decision {} was valued with another equity table",
+                        d.id
+                    ));
+                }
+                let mut w = (*w).clone();
+                if w.from != 0 {
+                    return Err(format!(
+                        "{wpath}: decision {}: worlds from {}",
+                        d.id, w.from
+                    ));
+                }
+                w.rows.truncate(usize::try_from(to).unwrap_or(usize::MAX));
+                if *worlds.get_or_insert(w.rows.len()) != w.rows.len() {
+                    return Err(format!(
+                        "{wpath}: decision {} has {} worlds, others {}",
+                        d.id,
+                        w.rows.len(),
+                        worlds.unwrap_or(0)
+                    ));
+                }
+                match search::student_teacher::golden_merged(d, &w)? {
+                    Some(m) => golden_set.push(m),
+                    None => skipped += 1,
+                }
+            }
+            if golden_set.is_empty() {
+                return Err(format!(
+                    "{dpath}: no trick-{trick} decision a student meets"
+                ));
+            }
+            println!(
+                "golden set: {} trick-{trick} decisions x {} exact worlds ({skipped} the student \
+                 never meets: one candidate, or the play after the seat's own rob)",
+                golden_set.len(),
+                worlds.unwrap_or(0)
+            );
+            golden_info = serde_json::json!({
+                "decisions": dpath, "decisions_sha256": sha256_hex_file(dpath)?,
+                "worlds": wpath, "worlds_sha256": sha256_hex_file(wpath)?,
+                "trick": trick, "worlds_per_decision": worlds, "judged": golden_set.len(),
+                "skipped": skipped, "values": "exact",
+            });
         }
     }
+    let shards: &mut dyn student::data::Decisions = match shards_opt.as_mut() {
+        Some(s) => s,
+        None => &mut golden_set,
+    };
     let t0 = Instant::now();
     // The extra measures (docs/STUDENT.md §14): `--split-half` and `--top-k K` (repeated or
     // `2,3`), computed in the same pass over the decisions.
@@ -1875,7 +1962,7 @@ fn student_check(a: &Args) -> Result<(), String> {
     let mut judged = Vec::new();
     let mut extra = Extra::default();
     let mut half: Option<u64> = None;
-    student::check::judge_each(&net, &mut shards, &table, |m, student, j| {
+    student::check::judge_each(&net, shards, &table, |m, student, j| {
         judged.push(j);
         if !split && ks.is_empty() {
             return Ok(());
@@ -1933,7 +2020,7 @@ fn student_check(a: &Args) -> Result<(), String> {
         let boot_seed = a.num("--boot-seed", 1)?;
         match b {
             "rules" => {
-                let (j, missing) = student::check::judge_rules(&mut shards)?;
+                let (j, missing) = student::check::judge_rules(shards)?;
                 let brows = student::check::report(&j, boots, boot_seed);
                 println!("baseline rules-v1 (its choice not among the candidates: {missing}):");
                 print!("{}", student::check::print(&brows));
@@ -1942,7 +2029,7 @@ fn student_check(a: &Args) -> Result<(), String> {
                 );
             }
             "random" => {
-                let (j, expected) = student::check::judge_random(&mut shards, boot_seed)?;
+                let (j, expected) = student::check::judge_random(shards, boot_seed)?;
                 let brows = student::check::report(&j, boots, boot_seed);
                 println!(
                     "baseline random (a seeded random legal card; expected loss {:.5} %):",
@@ -1971,8 +2058,8 @@ fn student_check(a: &Args) -> Result<(), String> {
             "net_sha256": net.sha256,
             "hidden": net.hidden(),
             "encoder_sha256": student::encode::encoder_sha256(),
-            "teacher_shards": shards.readers.iter().map(|r| r.key.clone()).collect::<Vec<_>>(),
-            "role": shards.role(),
+            "teacher_shards": shards_opt.as_ref().map(|s| s.readers.iter().map(|r| r.key.clone()).collect::<Vec<_>>()),
+            "role": shards_opt.as_ref().map_or("golden".to_string(), |s| s.role()),
             "equity_sha256": equity_sha,
             "rows": rows,
             "decisions": judged
@@ -1980,6 +2067,9 @@ fn student_check(a: &Args) -> Result<(), String> {
                 .map(|d| serde_json::json!([d.trick, d.place, d.stratum, d.n_cands, d.best, d.chosen, d.loss]))
                 .collect::<Vec<_>>(),
         });
+        if !golden_info.is_null() {
+            v["golden"] = golden_info;
+        }
         // The extra measures' keys appear only when asked for (the rest stays as before).
         if let serde_json::Value::Object(o) = extra_json {
             for (k, x) in o {
@@ -1989,6 +2079,13 @@ fn student_check(a: &Args) -> Result<(), String> {
         write_json(out, &v)?;
     }
     Ok(())
+}
+
+/// SHA-256 (hex) of a file's bytes.
+fn sha256_hex_file(path: &str) -> Result<String, String> {
+    Ok(equity::sha256::sha256_hex(
+        &std::fs::read(path).map_err(|e| format!("{path}: {e}"))?,
+    ))
 }
 
 /// `student-check`'s extra measures (docs/STUDENT.md §14), per decision, whole numbers.

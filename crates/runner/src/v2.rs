@@ -1567,7 +1567,7 @@ mod tests {
     fn manifests_resolve_into_settings_their_chunks_accept() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/vast");
         for (file, kinds) in [
-            ("student-t2-gv2.manifest.json", 3),
+            ("student-t2-gv2.manifest.json", 2),
             ("student-t2-base.manifest.json", 3),
             ("m3-hybrid-t2-hlabels.manifest.json", 1),
             ("o3-learnedleaf.manifest.json", 1),

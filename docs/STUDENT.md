@@ -234,6 +234,14 @@ sources.
 - **Honest measures** (`--split-half`, `--top-k K`): the floor of the test set, the unbiased gap to
   a 512-deal teacher and the loss of a top-K shortlist (§14).
 
+**Against exact values (2026-10-20).** `search student-check --golden-decisions D --golden-worlds
+W` scores a trick-2 student on the stored trick-2 golden set (inputs `sha256:635e9aef…` decisions,
+`sha256:6ddc59b1…` worlds: 2,000 decisions x 320 worlds, every candidate's exact value in every
+world) instead of teacher shards, with the same report (loss by place and score class, split-half
+floor, unbiased gap, top-K). The values are exact, so this measures the student against the truth,
+not against its teacher; it is how a student trained on G v2 labels (`student-t2-gv2`) is scored,
+with no new test set bought. A random 16-8 network on the build VM: 1.6 s for all 2,000 decisions.
+
 ## 8. Sizes, speed and cost
 
 - **Sizes:** start with 256-128 and 512-256 hidden units (A7: T0/T1 student 2 × 128–256), chosen by

@@ -11,7 +11,7 @@ use equity::{MoneyChance, ONE};
 use serde_json::{Value, json};
 use solver::Leaf;
 
-use crate::data::{Merged, Shards, Uniform, feature_row};
+use crate::data::{Decisions, Merged, Uniform, feature_row};
 use crate::net::{StudentNet, choose};
 
 /// One decision's outcome.
@@ -38,10 +38,10 @@ pub struct Judged {
 /// Judge every decision of the shards (merged by deal index; plain means).
 pub fn judge(
     net: &StudentNet,
-    shards: &mut Shards,
+    shards: &mut dyn Decisions,
     leaf: &dyn Leaf,
 ) -> Result<Vec<Judged>, String> {
-    let mut out = Vec::with_capacity(shards.groups.len());
+    let mut out = Vec::with_capacity(shards.count());
     judge_each(net, shards, leaf, |_, _, j| {
         out.push(j);
         Ok(())
@@ -53,11 +53,11 @@ pub fn judge(
 /// values), the student's values per candidate (real pair order) and its [`Judged`].
 pub fn judge_each(
     net: &StudentNet,
-    shards: &mut Shards,
+    shards: &mut dyn Decisions,
     leaf: &dyn Leaf,
     mut visit: impl FnMut(&Merged, &[MoneyChance], Judged) -> Result<(), String>,
 ) -> Result<(), String> {
-    for g in 0..shards.groups.len() {
+    for g in 0..shards.count() {
         let m = shards.merged(g)?;
         let row = feature_row(&m, leaf, &Uniform)?;
         let team = engine::team_of(m.head.pos.seat);
@@ -100,11 +100,11 @@ pub fn rank(values: &[MoneyChance], team: u8) -> Vec<usize> {
 /// numbers. A robber's joint decision is its burn then the card it plays after it. A choice that is
 /// not among the stored candidates (the bot burning the card it has just taken, which the app's
 /// candidates leave out) is not judged; the second number counts them.
-pub fn judge_rules(shards: &mut Shards) -> Result<(Vec<Judged>, u64), String> {
+pub fn judge_rules(shards: &mut dyn Decisions) -> Result<(Vec<Judged>, u64), String> {
     use engine::game::{Action, Rules};
-    let mut out = Vec::with_capacity(shards.groups.len());
+    let mut out = Vec::with_capacity(shards.count());
     let mut missing = 0;
-    for g in 0..shards.groups.len() {
+    for g in 0..shards.count() {
         let m = shards.merged(g)?;
         let r = m.head.pos.replay()?;
         let team = engine::team_of(m.head.pos.seat);
@@ -151,10 +151,10 @@ const RANDOM_TAG: u64 = 0x7A4D;
 /// random pick over all decisions (the mean over each decision's candidates of the best less that
 /// candidate, then over decisions), in money chance (a fraction): the seeded picks' mean estimates
 /// it.
-pub fn judge_random(shards: &mut Shards, seed: u64) -> Result<(Vec<Judged>, f64), String> {
-    let mut out = Vec::with_capacity(shards.groups.len());
+pub fn judge_random(shards: &mut dyn Decisions, seed: u64) -> Result<(Vec<Judged>, f64), String> {
+    let mut out = Vec::with_capacity(shards.count());
     let mut expected = 0.0f64;
-    for g in 0..shards.groups.len() {
+    for g in 0..shards.count() {
         let m = shards.merged(g)?;
         let team = engine::team_of(m.head.pos.seat);
         let teacher = m.means();

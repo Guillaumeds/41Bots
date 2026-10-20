@@ -326,6 +326,113 @@ pub fn make_record(
     }
 }
 
+/// A stored golden decision with its exact worlds as a student check reads a teacher decision
+/// (`search student-check --golden-decisions D --golden-worlds W`): the position, the app's
+/// candidates ([`app_candidates`], in their order), and per world each candidate's exact value
+/// taken from the golden record by candidate (the golden set lists `crate::pimc::candidates`,
+/// a superset). `None` for a decision the student never meets: fewer than two app candidates,
+/// or the play straight after the seat's own rob. Refused: a record of another decision
+/// (id, trick, seat's team), not exact, or missing a candidate.
+pub fn golden_merged(
+    d: &crate::measure::DecisionSpec,
+    w: &crate::measure::WorldRows,
+) -> Result<Option<student::data::Merged>, String> {
+    let what = format!("golden decision {}", d.id);
+    if w.id != d.id || w.trick != d.trick || w.position != d.position {
+        return Err(format!("{what}: its worlds record is another decision's"));
+    }
+    if w.method != "exact" {
+        return Err(format!(
+            "{what}: its worlds are {}, not exact values",
+            w.method
+        ));
+    }
+    let deck: [u8; engine::cards::DECK_SIZE] = d
+        .deck
+        .as_slice()
+        .try_into()
+        .map_err(|_| format!("{what}: a deck of {} cards", d.deck.len()))?;
+    let pos = RawPosition {
+        start: d.start,
+        deck,
+        actions: d.actions.clone(),
+        seat: d.seat,
+    };
+    let r = pos.replay()?;
+    if engine::team_of(d.seat) != w.team {
+        return Err(format!("{what}: its worlds record another team's decision"));
+    }
+    if play_after_own_rob(&r.view) {
+        return Ok(None);
+    }
+    let (kind, cands) = app_candidates(&r.view, &r.legal);
+    if cands.len() < 2 {
+        return Ok(None);
+    }
+    let kind = match kind {
+        DecisionKind::JointBurnPlay => KIND_JOINT,
+        DecisionKind::Play => KIND_PLAY,
+        k => {
+            return Err(format!(
+                "{what}: a {k:?} decision is not a student decision"
+            ));
+        }
+    };
+    let at: Vec<usize> = cands
+        .iter()
+        .map(|c| {
+            w.cands
+                .iter()
+                .position(|x| x == c)
+                .ok_or_else(|| format!("{what}: candidate {c:?} has no golden value"))
+        })
+        .collect::<Result<_, _>>()?;
+    let values: Vec<Vec<MoneyChance>> = w
+        .rows
+        .iter()
+        .map(|row| {
+            at.iter()
+                .map(|&i| {
+                    row.get(i)
+                        .map(|&v| MoneyChance(v))
+                        .ok_or_else(|| format!("{what}: a world row is short"))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<_, _>>()?;
+    if values.is_empty() {
+        return Err(format!("{what}: no worlds"));
+    }
+    let n = values.len() as u32;
+    let from = u32::try_from(w.from).map_err(|_| format!("{what}: first world too large"))?;
+    let means = student::record::means_of(&values, cands.len());
+    let head = student::record::RecordHead {
+        pos_sha256: pos.sha256(),
+        pos,
+        source: 0,
+        gen_seed: crate::oracle_labels::GOLDEN_SEED,
+        index: d.id,
+        trick: d.trick,
+        place: d.position,
+        stratum: d.stratum,
+        kind,
+        cands: cands.iter().map(|&(a, p)| -> Cand { (a, p) }).collect(),
+        dseed: crate::measure::measure_seed(crate::oracle_labels::GOLDEN_SEED, w.label, d.id),
+        deal_from: from,
+        n_deals: n,
+        log2_worlds_q8: w.log2_worlds.map_or(0, |x| (x.min(255) as u16) << 8),
+        means,
+        own_sd: vec![0; cands.len()],
+        values_at: 0,
+        values_sha256: [0; 32],
+    };
+    Ok(Some(student::data::Merged {
+        head,
+        deals: (from..from + n).collect(),
+        values,
+    }))
+}
+
 /// Counts of a shard's decisions, for its sidecar.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TeacherCounts {
@@ -878,6 +985,64 @@ mod tests {
         }
         assert!((expected - want / r.len() as f64).abs() < 1e-12);
     }
+    /// The stored golden set as a student check reads it (a tiny fixture: 16 trick-3 decisions
+    /// x 3 exact worlds, cheap at trick 3): each judged decision's values are the golden
+    /// record's for the app's candidates, world by world; decisions the student never meets are
+    /// skipped; the loss is the exact best mean less the student's choice's; a record of another
+    /// decision or method is refused.
+    #[test]
+    fn golden_decisions_are_judged_on_their_exact_worlds() {
+        use crate::measure::{build_decisions, world_rows};
+        use crate::pimc::Method;
+        let starts = collect_starts(400, 9);
+        let l = leaf();
+        let source = BeliefSource::new();
+        let ctx = belief_ctx(&*l, &source);
+        let cfg = teacher_config(8);
+        let ds = build_decisions(3, 16, 5, &starts);
+        let mut set = Vec::new();
+        let mut skipped = 0;
+        for d in &ds {
+            let w = world_rows(d, Method::ExactPimc, 1, 5, 0, 3, "t", &ctx, &cfg);
+            match golden_merged(d, &w).expect("reads") {
+                None => skipped += 1,
+                Some(m) => {
+                    assert_eq!((m.deals.clone(), m.values.len()), (vec![0, 1, 2], 3));
+                    for (j, row) in m.values.iter().enumerate() {
+                        for (c, v) in row.iter().enumerate() {
+                            let i = w
+                                .cands
+                                .iter()
+                                .position(|x| *x == m.head.cands[c])
+                                .expect("a golden candidate");
+                            assert_eq!(v.0, w.rows[j][i]);
+                        }
+                    }
+                    assert_eq!(m.head.place, d.position);
+                    set.push(m);
+                }
+            }
+            let mut bad = w.clone();
+            bad.method = "rollout".into();
+            assert!(golden_merged(d, &bad).is_err());
+            let mut other = w.clone();
+            other.id += 1;
+            assert!(golden_merged(d, &other).is_err());
+        }
+        assert!(set.len() >= 8, "{} judged, {skipped} skipped", set.len());
+        let net = student::net::random_net(4, &[16, 8], 12);
+        let judged = student::check::judge(&net, &mut set, &*l).expect("judged");
+        assert_eq!(judged.len(), set.len());
+        for (m, d) in set.iter().zip(&judged) {
+            let means = m.means();
+            let t = engine::team_of(m.head.pos.seat);
+            let best = means.iter().map(|v| v.get(t)).max().expect("candidates");
+            assert_eq!(d.loss, best - means[usize::from(d.chosen)].get(t));
+        }
+        let rows = student::check::report(&judged, 50, 1);
+        assert!(!rows.is_empty());
+    }
+
     /// `student encode --max-deals N` (docs/STUDENT.md §5): a record of 5 deals cut to its first
     /// 2 gives exactly the merged values, means and feature rows of a record generated with
     /// `--deals 2` for the same seed; cut to all its deals it gives byte-identical feature rows;
