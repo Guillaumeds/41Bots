@@ -470,7 +470,11 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
     let reference = match p.get("reference") {
         None | Some(Value::Null) => None,
         Some(r) => {
-            for k in r.as_object().ok_or("hybrid_checks: reference must be an object")?.keys() {
+            for k in r
+                .as_object()
+                .ok_or("hybrid_checks: reference must be an object")?
+                .keys()
+            {
                 if !["cut", "net_input", "exact_leaves", "defer_expert"].contains(&k.as_str()) {
                     return Err(format!("hybrid_checks: reference: unknown key `{k}`"));
                 }
@@ -482,8 +486,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
                      most 5)"
                 ));
             }
-            let net_input =
-                s(r, "net_input")?.ok_or("hybrid_checks: reference needs net_input")?;
+            let net_input = s(r, "net_input")?.ok_or("hybrid_checks: reference needs net_input")?;
             let (exact_leaves, defer_expert, models, expert_nets) = leaf_settings(
                 s(r, "exact_leaves")?.as_deref(),
                 s(r, "defer_expert")?.as_deref(),
@@ -620,9 +623,12 @@ pub(crate) fn check_command(
         })
         };
     let net_path = |n: &str| -> Result<String, String> {
-        p["net_paths"][n].as_str().map(str::to_string).ok_or_else(|| {
-            format!("hybrid_checks: no local path for network `{n}` (inputs not resolved)")
-        })
+        p["net_paths"][n]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| {
+                format!("hybrid_checks: no local path for network `{n}` (inputs not resolved)")
+            })
     };
     let model_path = |m: &str| p_models(p_in, m);
     let nets: Vec<String> = c
@@ -783,7 +789,9 @@ pub(crate) fn chunk_with(
     let threads = ctx.threads.max(1);
     // A check with exact leaves holds a second table per thread, for the leaf solves.
     let per_thread = if q.checks.iter().any(|c| c.exact_leaves.is_some())
-        || q.reference.as_ref().is_some_and(|r| r.exact_leaves.is_some())
+        || q.reference
+            .as_ref()
+            .is_some_and(|r| r.exact_leaves.is_some())
     {
         2
     } else {

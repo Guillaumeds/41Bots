@@ -212,11 +212,7 @@ impl Expert {
         let err = |m: String| format!("--defer-expert {text:?}: {m}");
         match expert_parts(text)? {
             ExpertText::Exact => Ok(Expert::Exact),
-            ExpertText::Deeper {
-                cut: k,
-                nets,
-                spec,
-            } => {
+            ExpertText::Deeper { cut: k, nets, spec } => {
                 if k != cut + 1 {
                     return Err(err(format!(
                         "the leaves lie at the start of trick {cut}: the deeper hybrid's \
@@ -747,9 +743,7 @@ impl<'a> ExactLeaves<'a> {
         team: u8,
         family: Option<SolveFamily>,
     ) -> Self {
-        let mut mem = LEAF_MEM
-            .with(|m| m.borrow_mut().pop())
-            .unwrap_or_default();
+        let mut mem = LEAF_MEM.with(|m| m.borrow_mut().pop()).unwrap_or_default();
         match family {
             Some(f) => mem.share(f),
             None => mem.unshare(),
@@ -859,9 +853,7 @@ impl Frontier for ExactLeaves<'_> {
                 "a deeper expert looks one trick past the leaf"
             );
             drop(guard);
-            let mut mem = LEAF_MEM
-                .with(|m| m.borrow_mut().pop())
-                .unwrap_or_default();
+            let mut mem = LEAF_MEM.with(|m| m.borrow_mut().pop()).unwrap_or_default();
             mem.unshare();
             let t = Instant::now();
             let (v, nodes, evals, lc) = crate::oracle_labels::hybrid_value(

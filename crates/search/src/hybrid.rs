@@ -2830,7 +2830,11 @@ mod tests {
             &o5,
         )
         .expect("runs");
-        assert_eq!(world_values(&d1), world_values(&h5), "defer all = H_5 + leaves");
+        assert_eq!(
+            world_values(&d1),
+            world_values(&h5),
+            "defer all = H_5 + leaves"
+        );
         assert_eq!(key(&d1), key(&h5));
         assert_ne!(world_values(&d1), world_values(&base));
         // The same as a silver reference with those leaves, recomputed by the check: the
@@ -2908,7 +2912,11 @@ mod tests {
                         .map(|w| w.iter().map(|&x| MoneyChance(x)).collect::<Vec<_>>())
                 })
                 .collect();
-            assert_eq!(got, world_values(&h5), "{threads} x {solve_threads} threads");
+            assert_eq!(
+                got,
+                world_values(&h5),
+                "{threads} x {solve_threads} threads"
+            );
         }
         // A worlds job whose frontier does not name its leaves is refused.
         let cfg = SearchConfig {
@@ -2936,7 +2944,11 @@ mod tests {
         // each with the deeper hybrid's value of its position; thread-independent.
         let m4 = risk_model(nn::encode::N_FEATURES + 9, 0, 5, 50);
         let split = LeafPolicy::learned(m4.clone(), Some(50), 4).with_expert(expert());
-        assert!(split.describe().contains("+defer:h5:"), "{}", split.describe());
+        assert!(
+            split.describe().contains("+defer:h5:"),
+            "{}",
+            split.describe()
+        );
         let r1 = run4(&leaf_job(1, Some(split.clone())));
         let r3 = run4(&leaf_job(3, Some(split.clone())));
         assert_eq!(key(&r1), key(&r3));
@@ -3049,7 +3061,10 @@ mod tests {
             }
             let st = r.exact_leaves.clone().expect("counted");
             assert_eq!(st.exact, st.distinct);
-            assert!(st.expert_exact > 0 && st.expert_exact < st.expert_leaves, "{st:?}");
+            assert!(
+                st.expert_exact > 0 && st.expert_exact < st.expert_leaves,
+                "{st:?}"
+            );
             runs.push((world_values(&r), st.counts(), st.expert_counts()));
         }
         assert_eq!(runs[0], runs[1]);

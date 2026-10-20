@@ -774,7 +774,9 @@ fn leaf_policy_arg(
     let tt = a.num(&k_tt, search::oracle_labels::tt_mb_for(cut) as u64)? as usize;
     let Some(mut pol) = search::exact_leaves::LeafPolicy::parse(text, tt)? else {
         if a.has(&k_de) {
-            return Err(format!("{k_de} defers the leaves {k_el} picks: none are picked"));
+            return Err(format!(
+                "{k_de} defers the leaves {k_el} picks: none are picked"
+            ));
         }
         return Ok(None);
     };

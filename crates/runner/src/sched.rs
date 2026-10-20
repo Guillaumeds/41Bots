@@ -289,7 +289,7 @@ pub fn parse_v2(v: &Value) -> Result<Manifest2, String> {
         if !KINDS.contains(&kind.as_str()) {
             return Err(format!("stream `{name}`: unknown kind `{kind}`"));
         }
-        let params = s.get("params").cloned().unwrap_or_else(|| json!({}));
+        let mut params = s.get("params").cloned().unwrap_or_else(|| json!({}));
         if !params.is_object() {
             return Err(format!("stream `{name}`: `params` must be an object"));
         }
@@ -436,8 +436,10 @@ pub fn parse_v2(v: &Value) -> Result<Manifest2, String> {
                 }
             }
         }
-        // The student's teacher records name their network among the manifest's inputs.
+        // The student's teacher records name their network (and their exact leaves' models
+        // and expert's networks, by name or by stored key) among the manifest's inputs.
         if kind == "student_teacher" {
+            params = crate::student::name_keyed_inputs(&params, &inputs);
             for n in
                 crate::student::input_names(&params).map_err(|e| format!("stream `{name}`: {e}"))?
             {

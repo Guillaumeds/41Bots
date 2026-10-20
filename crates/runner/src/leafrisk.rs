@@ -257,7 +257,12 @@ pub(crate) fn labels_command(
 ) -> Command {
     let mut c = Command::new(search);
     c.args(["labels", "--trick", &q.trick.to_string()])
-        .args(["--count", &s.count.to_string(), "--seed", &s.seed.to_string()])
+        .args([
+            "--count",
+            &s.count.to_string(),
+            "--seed",
+            &s.seed.to_string(),
+        ])
         .args(["--source", "harvest", "--harvest-net", net])
         .args(["--harvest-cap", &q.harvest_cap.to_string()])
         .args(["--harvest-positions", &q.harvest_positions])
@@ -454,7 +459,10 @@ mod tests {
         assert!(bad(&|p| p["harvest_positions"] = json!("0.5,0.5")));
         assert!(bad(&|p| p["targets"] = json!("1,x")));
         let inputs = std::collections::BTreeMap::from([("o2".to_string(), "/in/o2".to_string())]);
-        assert_eq!(resolve(&params(), &inputs).expect("resolves")["net"], "/in/o2");
+        assert_eq!(
+            resolve(&params(), &inputs).expect("resolves")["net"],
+            "/in/o2"
+        );
         assert!(resolve(&params(), &Default::default()).is_err());
         let c = labels_command(
             Path::new("search"),

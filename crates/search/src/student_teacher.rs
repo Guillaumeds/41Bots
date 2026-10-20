@@ -629,6 +629,41 @@ mod tests {
         }
     }
 
+    /// Exact leaves on the teacher: `all` (every frontier leaf solved exactly) gives the exact
+    /// teacher's values, deal by deal, and its stamp names the policy; no policy is the hybrid
+    /// as before.
+    #[test]
+    fn teacher_exact_leaves_all_is_the_exact_teacher() {
+        let starts = collect_starts(400, 6);
+        let l = leaf();
+        let source = BeliefSource::new();
+        let ctx = belief_ctx(&*l, &source);
+        let o = oracle(4);
+        let all = crate::exact_leaves::LeafPolicy::all(8);
+        let with = Teacher::Hybrid {
+            net: &o,
+            cut: 4,
+            sha256: &o.sha256,
+            leaves: Some(&all),
+        };
+        let plain = Teacher::Hybrid {
+            net: &o,
+            cut: 4,
+            sha256: &o.sha256,
+            leaves: None,
+        };
+        assert_eq!(plain.stamp(), format!("hybrid:{}:cut4", o.sha256));
+        assert_eq!(with.stamp(), format!("hybrid:{}:cut4+exact:all", o.sha256));
+        let j = job(3, 4, 3, SOURCE_RULES, 1);
+        check_job(&j, &with, false).expect("checks");
+        let mut mem = SolveMem::new();
+        for i in 0..j.count {
+            let a = make_record(&j, i, &starts, &ctx, with, &mut mem);
+            let b = make_record(&j, i, &starts, &ctx, Teacher::Exact, &mut mem);
+            assert_eq!(a.values, b.values, "decision {i}");
+        }
+    }
+
     /// A shard is the same bytes for 1 and 3 threads, and reads back as the records made one by
     /// one.
     #[test]

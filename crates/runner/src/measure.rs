@@ -703,33 +703,36 @@ pub(crate) fn chunk_with(
     };
     // The reference's exact leaves as `search` arguments (without the `--` / `--reference-`
     // prefix), its inputs' names turned into paths.
-    let leaf_args: Vec<(String, String)> = match &silver.ref_leaves {
-        None => Vec::new(),
-        Some(l) => {
-            let rp = &p["reference"];
-            let model = |m: &str| -> Result<String, String> {
-                rp["model_paths"][m].as_str().map(str::to_string).ok_or_else(|| {
+    let leaf_args: Vec<(String, String)> =
+        match &silver.ref_leaves {
+            None => Vec::new(),
+            Some(l) => {
+                let rp = &p["reference"];
+                let model =
+                    |m: &str| -> Result<String, String> {
+                        rp["model_paths"][m].as_str().map(str::to_string).ok_or_else(|| {
                     format!("search_measure: reference: leaf-risk model `{m}` is not resolved")
                 })
-            };
-            let net = |m: &str| -> Result<String, String> {
-                rp["expert_net_paths"][m].as_str().map(str::to_string).ok_or_else(|| {
+                    };
+                let net =
+                    |m: &str| -> Result<String, String> {
+                        rp["expert_net_paths"][m].as_str().map(str::to_string).ok_or_else(|| {
                     format!("search_measure: reference: expert network `{m}` is not resolved")
                 })
-            };
-            let mut a = vec![(
-                "exact-leaves".to_string(),
-                crate::checks::leaves_with_paths(&l.leaves, &l.models, &model)?,
-            )];
-            if let Some(e) = &l.expert {
-                a.push((
-                    "defer-expert".to_string(),
-                    crate::checks::expert_with_paths(e, &net, &model)?,
-                ));
+                    };
+                let mut a = vec![(
+                    "exact-leaves".to_string(),
+                    crate::checks::leaves_with_paths(&l.leaves, &l.models, &model)?,
+                )];
+                if let Some(e) = &l.expert {
+                    a.push((
+                        "defer-expert".to_string(),
+                        crate::checks::expert_with_paths(e, &net, &model)?,
+                    ));
+                }
+                a
             }
-            a
-        }
-    };
+        };
     let mut fingerprint = json!({
         "method": if reference.is_some() { "hybrid" } else { "exact" },
         "label": 1, "seed": seed, "trick": trick, "count": count,

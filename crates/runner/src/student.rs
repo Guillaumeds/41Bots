@@ -25,7 +25,21 @@
 //! never 1; `student::STUDENT_TEST_SEED` only with `role: "test"`), `source` (`rules`, `mixed`
 //! or `random`), `role` (`train` or `test`), `net_input` (required), `tt_mb` (64), `start_hands`
 //! (20,000), `first_part` (0), `skip_parts` ([]), `upload` (true), `table` (as `hybrid_t1check`:
-//! table v0 built, or the `equity` input), `equity_input`; any other key is refused ([`KEYS`]).
+//! table v0 built, or the `equity` input), `equity_input`, `exact_leaves` and `defer_expert`
+//! (below); any other key is refused ([`KEYS`]).
+//!
+//! **Exact leaves** (`exact_leaves`, default none; docs/m3-hybrid/learned-leaves.md): the syntax
+//! of `search teacher --exact-leaves` (`search::exact_leaves`): in each deal the hybrid's
+//! frontier positions the policy picks are valued by their expert instead of the network, e.g.
+//! the adopted rule for trick-2 labels `"learned:inputs/sha256/<hex>:t=T"` (H_3 with learned
+//! exact leaves). `defer_expert` (default exact; needs `exact_leaves`) hands the picked leaves to
+//! a deeper hybrid instead, `"h3:NET:SPEC"` (learned deferral, for trick-1 labels with H_2). A
+//! learned model and an expert's network are manifest inputs, named by input name or by stored
+//! key `inputs/sha256/<hex>` (the scheduler turns a key into the input listing that SHA-256, and
+//! refuses one no input lists: fetched and hash-checked like every input); `search teacher`
+//! checks that a model is one made for its network's leaves (trick and SHA-256). Without them
+//! the command, the shard and its name are exactly as before; with them the shard's name ends
+//! `-x<8 hex>` (of the settings as written) and its stamp names the policy and its SHA-256s.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -40,7 +54,7 @@ use crate::{Ctx, sibling};
 
 /// The settings a `student_teacher` chunk takes (after `v2.rs` added the network's path,
 /// `net`); any other key is refused.
-pub(crate) const KEYS: [&str; 17] = [
+pub(crate) const KEYS: [&str; 19] = [
     "trick",
     "count",
     "deals",
@@ -58,6 +72,8 @@ pub(crate) const KEYS: [&str; 17] = [
     "threads",
     "est_seconds",
     "chunk_sizes",
+    "exact_leaves",
+    "defer_expert",
 ];
 
 /// The checked settings.
@@ -75,6 +91,14 @@ pub(crate) struct Params {
     pub first_part: u64,
     pub skip_parts: Vec<u64>,
     pub upload: bool,
+    /// Exact leaves as written (learned models by input name; `None`: none).
+    pub exact_leaves: Option<String>,
+    /// Their expert as written (`None`: exact).
+    pub defer_expert: Option<String>,
+    /// Input names of the leaf-risk models (the expert's own included) and of the expert's
+    /// networks.
+    pub models: Vec<String>,
+    pub expert_nets: Vec<String>,
 }
 
 /// The test set's seed (`student::STUDENT_TEST_SEED`).
@@ -149,6 +173,19 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
             .collect::<Result<Vec<_>, _>>()?,
         Some(_) => return Err("student_teacher: skip_parts must be a list".into()),
     };
+    let opt = |k: &str| -> Result<Option<String>, String> {
+        match p.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(x)) if x.trim() == "none" && k == "exact_leaves" => Ok(None),
+            Some(Value::String(x)) => Ok(Some(x.clone())),
+            Some(_) => Err(format!("student_teacher: {k} must be a string")),
+        }
+    };
+    let (exact_leaves, defer_expert, models, expert_nets) = crate::checks::leaf_settings(
+        opt("exact_leaves")?.as_deref(),
+        opt("defer_expert")?.as_deref(),
+        "student_teacher",
+    )?;
     let upload = match p.get("upload") {
         None | Some(Value::Null) => true,
         Some(Value::Bool(b)) => *b,
@@ -167,12 +204,42 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         first_part: n("first_part", Some(0))?,
         skip_parts,
         upload,
+        exact_leaves,
+        defer_expert,
+        models,
+        expert_nets,
     })
 }
 
 /// The inputs a stream names (its network).
 pub(crate) fn input_names(p: &Value) -> Result<Vec<String>, String> {
-    Ok(vec![parse(p)?.net_input])
+    let q = parse(p)?;
+    let mut v = vec![q.net_input];
+    for n in q.models.into_iter().chain(q.expert_nets) {
+        if !v.contains(&n) {
+            v.push(n);
+        }
+    }
+    Ok(v)
+}
+
+/// The settings with each learned model and expert network named by stored key
+/// (`inputs/sha256/<hex>`) turned into the name of the manifest input listing that SHA-256
+/// (`inputs`: name and SHA-256 in lowercase hex, as the scheduler reads them), so the scheduler fetches and checks it like any
+/// input. A key no input lists is left as it is (and then refused as an unknown input).
+pub(crate) fn name_keyed_inputs(p: &Value, inputs: &[(String, String)]) -> Value {
+    let mut out = p.clone();
+    for k in ["exact_leaves", "defer_expert"] {
+        let Some(text) = p.get(k).and_then(Value::as_str) else {
+            continue;
+        };
+        let mut t = text.to_string();
+        for (name, hex) in inputs {
+            t = t.replace(&input_key(hex), name);
+        }
+        out[k] = json!(t);
+    }
+    out
 }
 
 /// Adds the network's local path (`net`) from the worker's `inputs` (name → path).
@@ -189,13 +256,36 @@ pub(crate) fn resolve(
     })?;
     let mut out = p.clone();
     out["net"] = json!(path);
+    let path_of = |n: &str| -> Result<String, String> {
+        inputs
+            .get(n)
+            .cloned()
+            .ok_or_else(|| format!("student_teacher needs input `{n}` in the manifest's inputs"))
+    };
+    if let Some(l) = &q.exact_leaves {
+        out["exact_leaves_path"] = json!(crate::checks::leaves_with_paths(l, &q.models, &path_of)?);
+    }
+    if let Some(e) = &q.defer_expert {
+        out["defer_expert_path"] = json!(crate::checks::expert_with_paths(e, &path_of, &path_of)?);
+    }
     Ok(out)
 }
 
 /// The shard's file name for part `part`.
 pub(crate) fn shard_name(q: &Params, part: u64) -> String {
+    let x = match (&q.exact_leaves, &q.defer_expert) {
+        (None, None) => String::new(),
+        (l, e) => {
+            let text = format!(
+                "{}|{}",
+                l.as_deref().unwrap_or("none"),
+                e.as_deref().unwrap_or("exact")
+            );
+            format!("-x{}", &crate::bundle::sha256_hex(text.as_bytes())[..8])
+        }
+    };
     format!(
-        "t{}-{}-{}-s{}-d{}-p{part:05}.npy",
+        "t{}-{}-{}-s{}-d{}{x}-p{part:05}.npy",
         q.trick, q.role, q.source, q.seed, q.deals
     )
 }
@@ -207,6 +297,7 @@ pub(crate) fn command(
     q: &Params,
     part: u64,
     net: &str,
+    leaves: Option<(&str, Option<&str>)>,
     table: &Path,
     out: &Path,
     threads: usize,
@@ -231,6 +322,12 @@ pub(crate) fn command(
         .args(["--start-hands", &q.start_hands.to_string()])
         .arg("--progress")
         .arg(progress);
+    if let Some((l, e)) = leaves {
+        c.args(["--exact-leaves", l]);
+        if let Some(e) = e {
+            c.args(["--defer-expert", e]);
+        }
+    }
     c
 }
 
@@ -283,11 +380,23 @@ pub(crate) fn chunk_with(
     let shard = work.join(&name);
     let progress = work.join("progress.json");
     let t = Instant::now();
+    let path = |k: &str| -> Result<String, String> {
+        p.get(k)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| format!("student_teacher: {k} was not resolved"))
+    };
+    let leaves = match (&q.exact_leaves, &q.defer_expert) {
+        (None, _) => None,
+        (Some(_), None) => Some((path("exact_leaves_path")?, None)),
+        (Some(_), Some(_)) => Some((path("exact_leaves_path")?, Some(path("defer_expert_path")?))),
+    };
     let cmd = command(
         search,
         &q,
         part,
         &net,
+        leaves.as_ref().map(|(l, e)| (l.as_str(), e.as_deref())),
         table,
         &shard,
         ctx.threads,
@@ -365,7 +474,7 @@ pub(crate) fn chunk_with(
             .unwrap_or_default();
         fs::copy(&values, outdir.join(vname)).map_err(|e| e.to_string())?;
     }
-    Ok(json!({
+    let mut r = json!({
         "kind": "student_teacher",
         "part": part,
         "first": part * q.count,
@@ -379,7 +488,13 @@ pub(crate) fn chunk_with(
         "seconds": secs,
         "decisions_per_hour": q.count as f64 * 3600.0 / secs.max(1e-9),
         "table": table_rec,
-    }))
+    });
+    if let Some(l) = &q.exact_leaves {
+        r["exact_leaves"] = json!(l);
+        r["defer_expert"] = json!(q.defer_expert.as_deref().unwrap_or("exact"));
+        r["teacher"] = side["teacher"].clone();
+    }
+    Ok(r)
 }
 
 #[cfg(test)]
@@ -437,6 +552,7 @@ mod tests {
             &q,
             12,
             "o3.safetensors",
+            None,
             Path::new("equity.npy"),
             Path::new("out.npy"),
             8,
@@ -454,6 +570,85 @@ mod tests {
         let inputs = std::collections::BTreeMap::from([("o3".to_string(), "/x/o3".to_string())]);
         assert_eq!(resolve(&p, &inputs).expect("resolves")["net"], "/x/o3");
         assert!(resolve(&p, &std::collections::BTreeMap::new()).is_err());
+    }
+
+    /// Exact leaves: none leaves the command and the name as before; a learned model by stored
+    /// key becomes the input listing it, its path goes to `--exact-leaves`, an expert's to
+    /// `--defer-expert`; a key no input lists, or an expert without leaves, is refused.
+    #[test]
+    fn exact_leaves_are_inputs_and_args() {
+        let hex = "20c41678c64681855003e5b8660e0a2e1fb9e8d552f7d898dd956055c767a9d5";
+        let q0 = parse(&base()).expect("parses");
+        let mut p = base();
+        p["exact_leaves"] = json!("none");
+        assert_eq!(parse(&p).expect("none"), q0);
+        assert_eq!(shard_name(&q0, 1), "t2-train-rules-s401-d320-p00001.npy");
+        let mut p = base();
+        p["exact_leaves"] = json!(format!("learned:inputs/sha256/{hex}:t=277338260"));
+        let inputs = vec![
+            ("o3".to_string(), "f".repeat(64)),
+            ("risk".to_string(), hex.to_string()),
+        ];
+        let named = name_keyed_inputs(&p, &inputs);
+        assert_eq!(named["exact_leaves"], "learned:risk:t=277338260");
+        assert_eq!(
+            input_names(&named).expect("names"),
+            vec!["o3".to_string(), "risk".to_string()]
+        );
+        // A key no input lists stays a key: an unknown input.
+        let unlisted = name_keyed_inputs(&p, &inputs[..1]);
+        assert!(input_names(&unlisted).expect("names")[1].starts_with("inputs/sha256/"));
+        let q = parse(&named).expect("parses");
+        assert!(shard_name(&q, 1).starts_with("t2-train-rules-s401-d320-x"));
+        let paths = std::collections::BTreeMap::from([
+            ("o3".to_string(), "/x/o3".to_string()),
+            ("risk".to_string(), "/x/risk.safetensors".to_string()),
+            ("o3b".to_string(), "/x/o3b".to_string()),
+        ]);
+        let r = resolve(&named, &paths).expect("resolves");
+        assert_eq!(
+            r["exact_leaves_path"],
+            "learned:/x/risk.safetensors:t=277338260"
+        );
+        let c = command(
+            Path::new("search"),
+            &q,
+            1,
+            "/x/o3",
+            Some((
+                r["exact_leaves_path"].as_str().expect("path"),
+                Some("h3:/x/o3b"),
+            )),
+            Path::new("equity.npy"),
+            Path::new("out.npy"),
+            8,
+            Path::new("p.json"),
+        );
+        let args: Vec<String> = c
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let at = |k: &str| args[args.iter().position(|a| a == k).expect(k) + 1].clone();
+        assert_eq!(
+            at("--exact-leaves"),
+            "learned:/x/risk.safetensors:t=277338260"
+        );
+        assert_eq!(at("--defer-expert"), "h3:/x/o3b");
+        // Trick 1 with a deeper expert: its network and model are inputs too.
+        let mut p1 = base();
+        p1["trick"] = json!(1);
+        p1["exact_leaves"] = json!("learned:risk2:t=5");
+        p1["defer_expert"] = json!("h3:o3b:learned:risk:t=277338260");
+        let names = input_names(&p1).expect("names");
+        for n in ["o3", "risk2", "risk", "o3b"] {
+            assert!(names.contains(&n.to_string()), "{n}");
+        }
+        let mut bad = base();
+        bad["defer_expert"] = json!("h3:o3b");
+        assert!(parse(&bad).is_err());
+        let mut bad = base();
+        bad["exact_leaves"] = json!(3);
+        assert!(parse(&bad).is_err());
     }
 
     /// The chunk with a fake `search` writing a shard: the records file and its sidecar go into
