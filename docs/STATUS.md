@@ -103,6 +103,13 @@ The owner wants the teachers and their deal counts decided last; first O_2 G v2 
   (every instance on the account); `gh workflow run r2-fetch.yml -f run_id=<run>` then
   `gh run download <id>` for a run's files (results bundles `out/*.tar.zst`, unpack with Python 3.14
   `compression.zstd`); `gh workflow run release-binaries.yml --ref m3-hybrid` for new binaries.
+- **With keys on the laptop (`.env`, git-ignored; names in `.env.example`):** install the `aws` CLI
+  and `vastai` (pip), load the file (`set -a; source .env; set +a`), then from `python/launcher`:
+  `uv run python -c "import launch; print(launch.latest_heartbeat('RUN'))"`, `launch.r2_list('runs/RUN/')`,
+  `launch.r2_get(key)`, `python launch.py put-input FILE` (store a model or shard content-addressed),
+  `vastai show instances`. Prefer launching through the `vast-run.yml` workflow even then: its
+  launcher watches and enforces the dollar cap for up to 6 hours without the laptop staying awake (a
+  run outliving it is finished by its own self-destroy and the hourly `vast-cleanup`).
 - **Test a manifest before launching:** add it to `v2::tests::manifests_resolve_into_settings_their_chunks_accept`
   (`crates/runner/src/v2.rs`; kinds hybrid_rung, student_teacher, hybrid_checks, leafrisk) and run
   `cargo test --release -p runner manifests_resolve`.
