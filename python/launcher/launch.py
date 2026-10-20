@@ -424,7 +424,7 @@ def parse_gpu_names(text: str) -> list[str]:
 MACHINE_KEYS = ("gpus", "min_gpu_ram_gb", "min_compute_cap", "min_cores", "min_ram_gb", "disk_gb", "min_inet_down",
                 "min_inet_up",
                 "max_dph", "wait_for_offer_min", "offer_poll_s", "price_steps", "tries_per_step", "gpu_names", "blackwell",
-                "allow_shared", "resume_existing")
+                "allow_shared", "resume_existing", "auto_restart")
 
 
 def apply_machine(a, manifest: dict) -> None:
@@ -462,8 +462,10 @@ def apply_machine(a, manifest: dict) -> None:
         sys.exit(f"launch: machine.allow_shared must be true or false (got {m['allow_shared']!r})")
     if "resume_existing" in m and not isinstance(m["resume_existing"], bool):
         sys.exit(f"launch: machine.resume_existing must be true or false (got {m['resume_existing']!r})")
+    if "auto_restart" in m and not isinstance(m["auto_restart"], bool):
+        sys.exit(f"launch: machine.auto_restart must be true or false (got {m['auto_restart']!r})")
     for k, v in m.items():
-        if k in ("price_steps", "gpu_names", "blackwell", "allow_shared", "resume_existing"):
+        if k in ("price_steps", "gpu_names", "blackwell", "allow_shared", "resume_existing", "auto_restart"):
             continue
         if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
             sys.exit(f"launch: machine.{k} must be a number, 0 or more (got {v!r})")
@@ -498,6 +500,7 @@ def apply_machine(a, manifest: dict) -> None:
     a.allow_blackwell = allow_blackwell(a) or m.get("blackwell") is True
     a.allow_shared = bool(getattr(a, "allow_shared", False)) or m.get("allow_shared") is True
     a.resume_existing = bool(getattr(a, "resume_existing", False)) or m.get("resume_existing") is True
+    a.auto_restart = bool(getattr(a, "auto_restart", False)) or m.get("auto_restart") is True
     if gpu_job(a) and a.cpu_only:
         log(f"the run needs {a.gpus} GPU(s): the GPU filters apply (--cpu-only is ignored)")
         a.cpu_only = False
@@ -1933,7 +1936,11 @@ def rent_and_watch(a, run_id: str, best: dict | None, resumable: bool, run_start
             reason = (f"{reason}; " if reason else "") + f"budget of ${a.max_dollars:.2f} used (${spent:.2f}): no replacement"
             log(f"::error::{reason}")
             break
+        best_before = best
         best, instance_id = rent(a, run_id, best)
+        if not best and best_before is not None and getattr(a, "auto_restarted_now", False):
+            log("auto-restart: the same offer could not be rented; searching for another")
+            best, instance_id = rent(a, run_id, None)
         if not best:
             reason = (f"{reason}; " if reason else "") + "no offer could be rented"
             log(f"::error::{reason}")
@@ -2007,7 +2014,9 @@ def rent_and_watch(a, run_id: str, best: dict | None, resumable: bool, run_start
         start_failed = reason.startswith(START_FAILED) or reason.startswith(THIN_PREFIX)
         if final or not ((resumable and replaceable) or start_failed):
             break
-        if len(attempts) > MAX_REPLACEMENTS:
+        auto = bool(getattr(a, "auto_restarted_now", False))
+        a.auto_restarted_now = False
+        if len(attempts) - getattr(a, "auto_restarts", 0) > MAX_REPLACEMENTS:
             reason = f"{reason}; {MAX_REPLACEMENTS} replacements used, stopping"
             log(f"::error::{reason}")
             break
@@ -2018,13 +2027,17 @@ def rent_and_watch(a, run_id: str, best: dict | None, resumable: bool, run_start
             reason = f"{reason}; stopped by an operator ({NO_REPLACE} is set): no replacement"
             log(reason)
             break
-        # Another machine: the same host may have the same fault.
-        a.exclude_machines.add(best.get("machine_id", best.get("id")))
+        # Another machine: the same host may have the same fault (not after an auto-restart: the fault was the
+        # search's, and the same cheap offer is wanted back).
+        if not auto:
+            a.exclude_machines.add(best.get("machine_id", best.get("id")))
         # A stop request written for the machine just destroyed (e.g. silent while busy) would
         # stop the replacement at its first heartbeat: it would write its marker at once and the
         # run would end with its work undone (review E, 2026-10-16).
         clear_stop(run_id)
-        best = None
+        if not auto:
+            best = None
+        a.auto_restarted_now = auto
         log(f"replacement {len(attempts)} of {MAX_REPLACEMENTS}: renting another machine; it resumes from the done-list")
     return final, reason
 
@@ -2358,6 +2371,27 @@ def stop_and_wait(run_id: str, reason: str, wait_s: int) -> str:
     return ""
 
 
+AUTO_RESTART_MAX = 12  # machine.auto_restart: restarts after a failed chunk before the launcher gives up
+AUTO_RESTART_MIN_S = 600  # a machine that failed sooner than this failed for a reason a restart will not mend
+
+
+def should_auto_restart(a, run_id: str, body: bytes, alive_s: float) -> bool:
+    """machine.auto_restart (owner, 2026-10-20: the silver search is killed after 75-95 minutes, and a cheap fast
+    machine must not be lost): a FAILED marker whose error is a failed chunk is cleared and the run carries on from
+    its stored checkpoint on a fresh machine (the same offer first). Not after an operator's stop, within the first
+    10 minutes of a machine's life, or after AUTO_RESTART_MAX restarts."""
+    if not getattr(a, "auto_restart", False) or getattr(a, "auto_restarts", 0) >= AUTO_RESTART_MAX:
+        return False
+    text = body.decode("utf-8", "replace")
+    if not re.search(r"chunk \S+ failed", text) or alive_s < AUTO_RESTART_MIN_S or operator_stopped(run_id):
+        return False
+    r2_delete(f"runs/{run_id}/FAILED")
+    a.auto_restarts = getattr(a, "auto_restarts", 0) + 1
+    a.auto_restarted_now = True
+    log(f"::warning::auto-restart {a.auto_restarts} of {AUTO_RESTART_MAX}: {text.strip()[:200]!r}")
+    return True
+
+
 def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
           cpu_samples: list[float], dph: float = 0.0, spent_before: float = 0.0) -> tuple[str, str, bool, bool]:
     """Watch one instance. Returns (DONE/FAILED or "", reason, whether a replacement may resume,
@@ -2387,7 +2421,10 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
         time.sleep(a.poll_s)
         now = time.time()
         for marker in ("DONE", "FAILED"):
-            if r2_get(f"runs/{run_id}/{marker}") is not None:
+            body = r2_get(f"runs/{run_id}/{marker}")
+            if body is not None:
+                if marker == "FAILED" and should_auto_restart(a, run_id, body, now - created):
+                    return "", "a chunk failed (its search was killed?): auto-restart from the checkpoint", True, False
                 return marker, marker, False, False
         if a.max_minutes > 0 and now - run_start > a.max_minutes * 60:
             return "", f"max_minutes ({a.max_minutes}) reached", False, True
