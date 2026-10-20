@@ -1,0 +1,105 @@
+{
+ "format": 2,
+ "run_id": "o2-labeltest-1",
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "Owner 2026-10-20: which labels train O_2 best per dollar? The same network (2048-1024-256, outcome head, seed 1) trained on 600,000 trick-2 positions of three kinds, each scored on the same 20,000 exact validation positions (seed 602, stored by o2-gv2-labels-2): (a) plain hybrid labels (H_3, O_3 f5766a at the leaves, no exact solves; made here, 600k random play, seed 541); (c) exact labels (the first half of the stored 1.2M random-play exact labels of m3-hybrid-t2-loop-2, seed 511, train_fraction 0.5). The third arm, (b) G v2 labels, trains on the first three stored parts of o2-gv2-labels-2 (600k random play) in a later run. Compare the validation loss and value error SD in each rung.json.",
+ "machine": {
+  "gpus": 1,
+  "min_gpu_ram_gb": 8,
+  "min_cores": 64,
+  "min_ram_gb": 32,
+  "disk_gb": 60,
+  "max_dph": 0.7
+ },
+ "inputs": {
+  "o3": "sha256:f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad"
+ },
+ "streams": [
+  {
+   "name": "plain",
+   "priority": 1,
+   "kind": "hybrid_rung",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "cut": 2,
+    "check": false,
+    "labels_random": 600000,
+    "labels_random_seed": 541,
+    "label_source": "hybrid",
+    "label_net": "inputs/sha256/f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
+    "label_inputs": [
+     {
+      "set": "val",
+      "seed": 602,
+      "rows": 20000,
+      "shard": "inputs/sha256/855ba467ee6bd7521a442cf668980af8cefacf00701939237895d7c749dfdeea",
+      "sidecar": "inputs/sha256/6e346cbf05b9f2cc0d4368e224e4dd81a11a7c2aaab1fd5af0c52a8ad177c86d"
+     }
+    ],
+    "widths": "2048,1024,256",
+    "head": "outcome",
+    "epochs": 40,
+    "patience": 6,
+    "batch": 1024,
+    "lr": 0.001,
+    "train_seed": 1,
+    "max_minutes": 0,
+    "device": "cuda",
+    "overlap": false,
+    "upload_shards": false,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  },
+  {
+   "name": "exact",
+   "priority": 2,
+   "kind": "hybrid_rung",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "cut": 2,
+    "check": false,
+    "train_fraction": 0.5,
+    "label_inputs": [
+     {
+      "set": "val",
+      "seed": 602,
+      "rows": 20000,
+      "shard": "inputs/sha256/855ba467ee6bd7521a442cf668980af8cefacf00701939237895d7c749dfdeea",
+      "sidecar": "inputs/sha256/6e346cbf05b9f2cc0d4368e224e4dd81a11a7c2aaab1fd5af0c52a8ad177c86d"
+     },
+     {
+      "set": "random",
+      "seed": 511,
+      "rows": 1200000,
+      "shard": "inputs/sha256/fb51c217b5406e4b4ba1454f14b8884bced45cff51a0e29bcca7f4440f6f0931",
+      "sidecar": "inputs/sha256/bc4165ed9408f83ff342ab6fa157992c5910654513e417a9271a700fbbb77117"
+     }
+    ],
+    "widths": "2048,1024,256",
+    "head": "outcome",
+    "epochs": 40,
+    "patience": 6,
+    "batch": 1024,
+    "lr": 0.001,
+    "train_seed": 1,
+    "max_minutes": 0,
+    "device": "cuda",
+    "overlap": false,
+    "upload_shards": false,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  }
+ ]
+}

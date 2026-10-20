@@ -1573,6 +1573,7 @@ mod tests {
             ("o3-learnedleaf.manifest.json", 1),
             ("o2-leafrisk.manifest.json", 1),
             ("o2-gv2-labels.manifest.json", 1),
+            ("o2-labeltest.manifest.json", 2),
         ] {
             let v: Value = serde_json::from_str(&fs::read_to_string(root.join(file)).expect(file))
                 .expect(file);
