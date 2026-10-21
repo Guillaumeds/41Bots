@@ -58,3 +58,8 @@ score close to exact on those positions, and does the golden set show it?
   the code yet; the filter takes it as an argument, so nothing is decided by the build.
 - **Not run on real data:** the command has not been run on a real O_3, G2 or base shard. The
   first real run is the rented scoring pass.
+- **The cut (decided 2026-10-21):** today's play rule solves a position exactly when its G2 score
+  is at least `t = 277338260` (`learned:…leafrisk-o3-v1…:t=277338260`, the 40% share;
+  docs/m3-hybrid/learned-leaves.md). `search risk-filter --threshold 277338260` uses that number,
+  so the flagged set is exactly the set play sends to the exact solver today. `--step K` remains
+  for a budget step of the model's own table.

@@ -2298,7 +2298,7 @@ fn binary_sha256() -> String {
 }
 
 /// `search risk-filter --shard IN.npy --out OUT.npy --equity TABLE --net O3.safetensors
-/// --risk-model G2.json --step K [--threads N]`: keeps the trick-3 rows of a stored shard that G2
+/// --risk-model G2.json (--threshold T | --step K) [--threads N]`: keeps the trick-3 rows of a stored shard that G2
 /// flags as riskiest at budget step `K` of the model (`search::risk_filter`), for the specialist
 /// network S (docs/m3-hybrid/specialist.md). Prints the counts; writes the kept rows as a shard.
 fn risk_filter_cmd(a: &Args) -> Result<(), String> {
@@ -2326,10 +2326,23 @@ fn risk_filter_cmd(a: &Args) -> Result<(), String> {
             "--risk-model {model_path} was built for another network"
         ));
     }
-    let step = a.num("--step", 0)? as usize;
-    let threshold = model
-        .threshold_for_share(step)
-        .ok_or("--step 0 keeps nothing: give a budget step from 1 up")?;
+    // The play rule's own threshold (`learned:MODEL:t=T`, as in play), or a budget step of the
+    // model's table (`--step K`, `threshold_for_share`).
+    let (threshold, step) = match (a.get("--threshold"), a.get("--step")) {
+        (Some(t), None) => (
+            t.parse::<i64>()
+                .map_err(|_| format!("--threshold: not a number: {t}"))?,
+            0,
+        ),
+        (None, Some(_)) => {
+            let k = a.num("--step", 0)? as usize;
+            let t = model
+                .threshold_for_share(k)
+                .ok_or("--step 0 keeps nothing: give a budget step from 1 up")?;
+            (t, k)
+        }
+        _ => return Err("give exactly one of --threshold T and --step K".into()),
+    };
     let threads = a.num("--threads", 1)?.max(1) as usize;
     let (in_path, out_path) = (a.req("--shard")?, a.req("--out")?);
     let rows =
