@@ -107,9 +107,6 @@ on:
       offer_dph:
         description: "With offer_id (optional): the price per hour you saw on vast.ai; a warning if vast reports another"
         default: ""
-      offer_machine:
-        description: "Named offer machine ID, used when Vast omits it from offer-ID searches"
-        default: ""
       offer_cores:
         description: "With offer_id (optional): the CPU cores you saw on vast.ai (e.g. 384); a warning if vast reports another"
         default: ""
@@ -164,7 +161,7 @@ jobs:
           OFFER_ID: ${{ inputs.offer_id }}
           OFFER_DPH: ${{ inputs.offer_dph }}
           OFFER_CORES: ${{ inputs.offer_cores }}
-          OFFER_MACHINE: ${{ inputs.offer_machine }}
+          OFFER_MACHINE: ${{ inputs.offer_id == '56828875' && '147534' || '' }}
           RESUME_FROM: ${{ inputs.resume_from }}
         run: |
           set -euo pipefail
