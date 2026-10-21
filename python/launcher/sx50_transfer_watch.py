@@ -6,6 +6,7 @@ import time
 import launch
 
 SOURCE_ID = 56879188
+OFFER_ID = 52858375
 LABEL = "retained-sx50_2-transfer"
 MAX_DPH = 0.999
 MIN_THREADS = 191
@@ -109,7 +110,10 @@ def watch(hours=5):
             print("ACQUIRED " + json.dumps({k: existing.get(k) for k in
                   ("id", "actual_status", "cpu_name", "cpu_cores_effective", "cpu_ram", "dph_total", "gpu_name", "label")}), flush=True)
             return existing
-        offer = launch.choose(a)
+        rows = launch.vast("search", "offers", f"id={OFFER_ID} verified=any", "--type", "on-demand", "--limit", "5")
+        if not isinstance(rows, list):
+            raise RuntimeError("cannot inspect requested offer; refusing to rent")
+        offer = next((row for row in rows if int(row.get("id") or 0) == OFFER_ID), None)
         if offer:
             verify_offer(offer)
             existing = inventory(instances())
