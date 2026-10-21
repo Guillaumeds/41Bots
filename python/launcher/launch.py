@@ -795,7 +795,16 @@ def lookup_offer(a) -> dict:
     if row is None:
         # vast's `id=N` filter misses some live offers (2026-10-19: offer 56041192, rentable and not rented in
         # the market listing, read as gone twice and was lost); the market listing, matched by id here, decides.
-        row = market_offer(oid)
+        machine = getattr(a, "offer_machine", None)
+        if machine:
+            try:
+                candidates = vast("search", "offers", f"machine_id={machine} verified=any external=any rentable=any",
+                                  "--type", "on-demand", "--limit", "20")
+                row = next((o for o in candidates if isinstance(o, dict) and o.get("id") == oid), None)
+            except RuntimeError:
+                pass
+        if row is None:
+            row = market_offer(oid)
         if row is None:
             sys.exit(f"launch: offer {oid} is not on offer (on-demand) any more; nothing was rented"
                      f"{why_offer_missing(oid)}")

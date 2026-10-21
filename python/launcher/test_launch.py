@@ -1326,6 +1326,19 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual((code, w.created_on), (0, [500]))
         self.assertIn("vast's search by id missed it; found in the market listing", self.log)
 
+    def test_named_machine_lookup_finds_offer_omitted_from_truncated_market(self):
+        w = World([offer(500, 50, 1.0, machine_id=147534, rentable=True, rented=False)], ["done:1"])
+        w.id_filter_misses = {500}
+        original = w.vast
+
+        def vast(*args, **kwargs):
+            if args[:2] == ("search", "offers") and not args[2].startswith(("id=", "machine_id=")):
+                return []
+            return original(*args, **kwargs)
+
+        w.vast = vast
+        code, _ = self.run_launch(w, self.FORMAT1, "--offer-id", "500", "--offer-machine", "147534")
+        self.assertEqual((code, w.created_on), (0, [500]))
     def test_a_named_offer_missed_by_the_id_filter_still_meets_every_check(self):
         w = World([offer(500, 50, 1.0, reliability2=0.5)], ["done:1"])
         w.id_filter_misses = {500}
