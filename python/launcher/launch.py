@@ -2244,10 +2244,10 @@ def take_check(a, info: dict | None) -> tuple[dict | None, list[str]]:
 
 
 def take_instance(a, run_id: str, best: dict) -> int | None:
-    """Takes over the instance the owner rented (`--instance-id`): vast recreates its container in
-    place with this run's image, environment and start command (`vastai update instance`, the
-    documented way to change what a rented instance runs; its disk and machine stay), and labels it
-    for the run. Returns its id, or None when vast refuses."""
+    """Takes over the instance the owner rented (`--instance-id`): its settings become this run's
+    image, environment and start command (`vastai update instance`), then vast rebuilds its
+    container in place from them (`vastai recycle instance`; its disk and machine stay), and it is
+    labelled for the run. Returns its id, or None when vast refuses."""
     iid = int(a.instance_id)
     env = instance_env(run_id, int(best["cpu_cores_effective"]), float(best["dph_total"]), a.bin_sha,
                        a.image, getattr(a, "destroy_key", ""), offer=best)
@@ -2259,6 +2259,14 @@ def take_instance(a, run_id: str, best: dict) -> int | None:
         return None
     if isinstance(res, dict) and res.get("success") is False:
         log(f"::error::vast refused to update instance {iid}: {redact(str(res.get('msg')))[:300]}")
+        return None
+    # `update instance` stores the new image, environment and start command but leaves the running
+    # container as it was (seen 2026-10-21 on instance 57085233: the old image kept running, idle);
+    # `recycle instance` rebuilds the container in place from the stored settings.
+    try:
+        res = vast("recycle", "instance", str(iid), raw=False, timeout=None)
+    except RuntimeError as e:
+        log(f"::error::vast refused to recycle instance {iid} after its update: {e}")
         return None
     with contextlib.suppress(RuntimeError):
         vast("label", "instance", str(iid), f"41bots-{run_id}", raw=False)

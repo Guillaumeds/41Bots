@@ -114,12 +114,14 @@ From a laptop with `gh`: `gh workflow run o3-round.yml --ref <branch> -f round=1
 amounts=2M,4M,8M -f offer_id=36863856 -f min_gpu_ram_gb=12`.
 
 **Taking over a machine you rented by hand** (`instance_id`; `launch.py run --instance-id`): vast.ai's
-documented `vastai update instance ID --image … --env … --onstart …` recreates the instance's
-container in place with this run's image, settings and start command
-([docs](https://docs.vast.ai/cli/reference/update-instance)); the launcher then watches, stops and
-destroys it like one it rented. Two limits: **the disk is fixed when you rent** (a round needs about
+documented `vastai update instance ID --image … --env … --onstart …` stores this run's image,
+settings and start command ([docs](https://docs.vast.ai/cli/reference/update-instance)), and
+`vastai recycle instance ID` rebuilds the container in place from them
+([docs](https://docs.vast.ai/cli/reference/recycle-instance)): `update` alone left the old
+container running (2026-10-21, instance 57085233). The launcher then watches, stops and destroys it
+like one it rented. Two limits: **the disk is fixed when you rent** (a round needs about
 250 GB; the launcher refuses a smaller one before touching it), and if the machine fails no other is
-rented. Not yet tried on a real instance.
+rented. First used on 2026-10-21 (round 1).
 
 **Watch / stop / results:** as every run (STATUS "How to run things"): heartbeats name the step
 (`risk profile`, `new labels (part k)`, `train (candidate i)`, `golden check (ci)`, `G2 (g2-winner)`);
