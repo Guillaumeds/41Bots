@@ -61,6 +61,7 @@ mod mem;
 mod net;
 mod remote;
 mod sched;
+mod specialist;
 mod spike;
 mod stop;
 mod student;
@@ -1751,6 +1752,7 @@ fn run_kind(ctx: &mut Ctx, kind: &str, params: &Value) -> Result<Value, String> 
         "hybrid_t1check" => t1check::chunk(ctx, params)?,
         "hybrid_checks" => checks::chunk(ctx, params)?,
         "leafrisk" => leafrisk::chunk(ctx, params)?,
+        "specialist" => specialist::chunk(ctx, params)?,
         "arena_block" => {
             return Err("arena_block chunks need the arena binary (not built yet)".into());
         }

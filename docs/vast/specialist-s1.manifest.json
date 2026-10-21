@@ -1,0 +1,73 @@
+{
+ "format": 2,
+ "run_id": "specialist-s1",
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "Specialist S (docs/m3-hybrid/specialist.md): the trick-3 positions G2 flags at the play rule's threshold (t=277338260, the 40% share), from the 40M stored base, filtered by search risk-filter (O_3's value, G2's score) and used alone to train S from random weights (2048-1024-256, 20 epochs), with the 100k validation shard as the held-out set. Routed play check follows in its own run.",
+ "machine": {
+  "gpus": 1,
+  "min_gpu_ram_gb": 16,
+  "min_compute_cap": 600,
+  "min_cores": 190,
+  "min_ram_gb": 60,
+  "min_inet_down": 100,
+  "max_dph": 0.5,
+  "blackwell": true,
+  "disk_gb": 260
+ },
+ "inputs": {
+  "o3": "sha256:f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
+  "g2": "sha256:20c41678c64681855003e5b8660e0a2e1fb9e8d552f7d898dd956055c767a9d5",
+  "base-random": "sha256:fd846dadc7996734120b758ee2f3bbeeb0ef159ad27014ce1ee7f796fe52a220",
+  "base-rules": "sha256:91c6e0014b76e0764f451aea7a093a7b79cfe9ac8a69f706cbe127cab109f086",
+  "base-harvest": "sha256:a80cc28708543687cf743a69cff080be92ff0d25ee5021af740db5d12989b508",
+  "val": "sha256:d51e22abd0aad9a699b28da82725bb163249148092fc1daca739a62e9a71c9e0"
+ },
+ "streams": [
+  {
+   "name": "specialist",
+   "priority": 1,
+   "kind": "specialist",
+   "chunks": 1,
+   "params": {
+    "trick": 3,
+    "net_input": "o3",
+    "risk_input": "g2",
+    "threshold": 277338260,
+    "shards": [
+     {
+      "input": "base-random",
+      "role": "train"
+     },
+     {
+      "input": "base-rules",
+      "role": "train"
+     },
+     {
+      "input": "base-harvest",
+      "role": "train"
+     },
+     {
+      "input": "val",
+      "role": "val"
+     }
+    ],
+    "widths": "2048,1024,256",
+    "epochs": 20,
+    "batch": 1024,
+    "lr": 0.001,
+    "patience": 4,
+    "seed": 1,
+    "threads": "all",
+    "device": "cuda",
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  }
+ ]
+}

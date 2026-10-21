@@ -319,6 +319,9 @@ pub(crate) fn chunk_params(
     if kind == "leafrisk" {
         p = crate::leafrisk::resolve(&p, inputs)?;
     }
+    if kind == "specialist" {
+        p = crate::specialist::resolve(&p, inputs)?;
+    }
     // A `search_measure` chunk's silver reference, check network and stored worlds
     // (`measure.rs`, "A silver reference") are inputs too.
     if kind == "search_measure" {
@@ -333,6 +336,7 @@ pub(crate) fn chunk_params(
         "hybrid_t1check",
         "hybrid_checks",
         "leafrisk",
+        "specialist",
     ]
     .contains(&kind)
     {
