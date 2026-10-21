@@ -1,0 +1,46 @@
+name: r2-peek
+
+# Read-only look at a running (or finished) run, for sessions without R2 keys or SSH: the files
+# under runs/<run_id>/ (newest last) and its latest heartbeat (the runner's step, rows done,
+# dollars, warnings), printed in this job's log and on the run page.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Run id under runs/ (e.g. o3r-1-1)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  peek:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Look
+        env:
+          AWS_ACCESS_KEY_ID: ${{ vars.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          ENDPOINT: ${{ vars.R2_S3_ENDPOINT }}
+          BUCKET: ${{ vars.R2_BUCKET }}
+          RUN_ID: ${{ inputs.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUN_ID" in *[!A-Za-z0-9._-]*|'') echo "bad run_id"; exit 1;; esac
+          s3() { aws --endpoint-url "$ENDPOINT" s3 "$@"; }
+          echo "== files under runs/$RUN_ID/ other than heartbeats (oldest first, last 60)"
+          s3 ls "s3://$BUCKET/runs/$RUN_ID/" --recursive | grep -v "/heartbeat/" | sort | tail -60 || true
+          n=$(s3 ls "s3://$BUCKET/runs/$RUN_ID/heartbeat/" | grep -c '\.json' || true)
+          echo "== heartbeats: $n"
+          hb=$(s3 ls "s3://$BUCKET/runs/$RUN_ID/heartbeat/" | grep '\.json' | awk '{print $4}' | sort | tail -1 || true)
+          [ -n "$hb" ] && hb="runs/$RUN_ID/heartbeat/$hb"
+          if [ -n "$hb" ]; then
+            echo "== latest heartbeat: $hb"
+            s3 cp "s3://$BUCKET/$hb" - | python3 -m json.tool | head -150 | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "== no heartbeat yet" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
