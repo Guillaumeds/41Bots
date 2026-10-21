@@ -63,3 +63,16 @@ score close to exact on those positions, and does the golden set show it?
   docs/m3-hybrid/learned-leaves.md). `search risk-filter --threshold 277338260` uses that number,
   so the flagged set is exactly the set play sends to the exact solver today. `--step K` remains
   for a budget step of the model's own table.
+
+## Build progress (2026-10-21, later)
+- **Runner kind `specialist`** (`crates/runner/src/specialist.rs`): filters each stored shard
+  (`search risk-filter` at the play rule's threshold), stores the flagged shards, trains S from
+  random weights on the `train` shards with the `val` shard as held-out, stores S (int and
+  float). Tests: settings, refusals, input resolution.
+- **Expert `s:NET`** (`search::exact_leaves`, `Expert::Specialist`): a picked leaf is valued by
+  S directly, one network evaluation, no search. It must be a network for the leaves' own trick
+  (3). `hybrid_checks` accepts it (`defer_expert: "s:<input name>"`). Tests: parsing, refusals.
+- **Manifests:** `docs/vast/specialist-s1.manifest.json` (filter and train, 2048-1024-256, 20
+  epochs, cuda). The routed golden check follows as its own manifest once S is stored.
+- Note: the harvest shard's row weights are not used by the filter (the flagged rows are kept
+  whatever their weight). The first run's record says so.
