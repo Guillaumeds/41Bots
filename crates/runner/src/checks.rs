@@ -192,6 +192,10 @@ pub(crate) fn leaf_settings(
         }
         Some(text) => match search::exact_leaves::expert_parts(text).map_err(err)? {
             search::exact_leaves::ExpertText::Exact => None,
+            search::exact_leaves::ExpertText::Specialist { net } => {
+                nets = vec![net.to_string()];
+                Some(text.trim().to_string())
+            }
             search::exact_leaves::ExpertText::Deeper { nets: n, spec, .. } => {
                 nets = n.iter().map(|x| x.to_string()).collect();
                 if let Some(sp) = spec {
@@ -232,6 +236,7 @@ pub(crate) fn expert_with_paths(
 ) -> Result<String, String> {
     match search::exact_leaves::expert_parts(text)? {
         search::exact_leaves::ExpertText::Exact => Ok("exact".into()),
+        search::exact_leaves::ExpertText::Specialist { net } => Ok(format!("s:{}", net_path(net)?)),
         search::exact_leaves::ExpertText::Deeper { cut, nets, spec } => {
             let nets: Vec<String> = nets.iter().map(|n| net_path(n)).collect::<Result<_, _>>()?;
             let mut t = format!("h{cut}:{}", nets.join(","));

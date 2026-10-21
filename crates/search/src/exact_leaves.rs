@@ -102,6 +102,17 @@ pub enum Expert {
     Exact,
     /// A deeper hybrid ([`Deeper`]).
     Deeper(Arc<Deeper>),
+    /// A specialist network that values the picked leaf itself, with no search (`s:NET`): a
+    /// network trained for the leaves' own trick ([`Specialist`]).
+    Specialist(Arc<Specialist>),
+}
+
+/// The specialist expert (`s:NET`): the network values a picked leaf directly.
+pub struct Specialist {
+    /// The network (a trick-`cut` network, trained on the leaves' own positions).
+    pub net: nn::Ensemble,
+    /// The network's name (`nn::Ensemble::id`).
+    pub net_id: String,
 }
 
 /// The deeper hybrid expert H_`cut` (module notes): exact search through the leaf's trick, the
@@ -131,6 +142,7 @@ impl PartialEq for Expert {
             (Expert::Deeper(a), Expert::Deeper(b)) => {
                 a.cut == b.cut && a.net_id == b.net_id && a.leaves == b.leaves
             }
+            (Expert::Specialist(a), Expert::Specialist(b)) => a.net_id == b.net_id,
             _ => false,
         }
     }
@@ -152,6 +164,8 @@ pub enum ExpertText<'a> {
         /// The expert's own exact leaves as written (`None`: none).
         spec: Option<&'a str>,
     },
+    /// `s:NET`: the specialist network (a path or a manifest input name).
+    Specialist { net: &'a str },
 }
 
 /// The words an exact-leaves policy text starts with ([`LeafPolicy::parse`]).
@@ -166,8 +180,18 @@ pub fn expert_parts(text: &str) -> Result<ExpertText<'_>, String> {
     if t == "exact" {
         return Ok(ExpertText::Exact);
     }
-    let usage = "exact, or hK:NET[:SPEC] (a deeper hybrid: H_K with network NET, an O_K, and \
-                 its own exact leaves SPEC, e.g. h3:o3.safetensors:learned:m.json:t=5)";
+    if let Some(net) = t.strip_prefix("s:") {
+        let net = net.trim();
+        if net.is_empty() || net.contains(',') || net.contains(':') {
+            return Err(err(
+                "s:NET takes exactly one network (a path or an input name)",
+            ));
+        }
+        return Ok(ExpertText::Specialist { net });
+    }
+    let usage = "exact, s:NET (a specialist network valuing the picked leaves itself), or \
+                 hK:NET[:SPEC] (a deeper hybrid: H_K with network NET, an O_K, and its own exact \
+                 leaves SPEC, e.g. h3:o3.safetensors:learned:m.json:t=5)";
     let rest = t.strip_prefix('h').ok_or_else(|| err(usage))?;
     let (k, rest) = rest.split_once(':').ok_or_else(|| err(usage))?;
     let cut = k
@@ -212,6 +236,19 @@ impl Expert {
         let err = |m: String| format!("--defer-expert {text:?}: {m}");
         match expert_parts(text)? {
             ExpertText::Exact => Ok(Expert::Exact),
+            ExpertText::Specialist { net } => {
+                let o = nn::Oracle::load(Path::new(net), leaf.clone()).map_err(err)?;
+                if o.trick != cut {
+                    return Err(err(format!(
+                        "the specialist was trained for trick {} positions, but the leaves lie at \
+                         the start of trick {cut}: a specialist values the leaves' own trick",
+                        o.trick
+                    )));
+                }
+                let net = nn::Ensemble::new(vec![o]).map_err(err)?;
+                let net_id = net.id();
+                Ok(Expert::Specialist(Arc::new(Specialist { net, net_id })))
+            }
             ExpertText::Deeper { cut: k, nets, spec } => {
                 if k != cut + 1 {
                     return Err(err(format!(
@@ -259,6 +296,7 @@ impl Expert {
     pub fn describe(&self) -> String {
         match self {
             Expert::Exact => "exact".into(),
+            Expert::Specialist(sp) => format!("s:{}", short(&sp.net_id)),
             Expert::Deeper(d) => {
                 let mut s = format!("h{}:{}", d.cut, short(&d.net_id));
                 if let Some(p) = &d.leaves {
@@ -841,6 +879,15 @@ impl Frontier for ExactLeaves<'_> {
             net = Some(v);
         }
         let k = usize::from(class);
+        if exact && let Expert::Specialist(sp) = &self.policy.expert {
+            // A specialist values the picked leaf itself: one network evaluation, no search.
+            let v = sp.net.eval(canon, ctx);
+            st.stats.distinct[k] += 1;
+            st.stats.exact[k] += 1;
+            st.stats.expert_evals += 1;
+            st.memo.insert(*canon, (*pos, *ctx, v, true));
+            return v;
+        }
         if exact && let Expert::Deeper(d) = &self.policy.expert {
             // A deeper expert's search is long: it runs without the lock, so the parallel
             // solver's other threads keep searching meanwhile, on this thread's own leaf memory.
@@ -916,6 +963,26 @@ impl Frontier for ExactLeaves<'_> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn specialist_text_is_one_network() {
+        assert!(matches!(
+            expert_parts("s:s3.safetensors").unwrap(),
+            ExpertText::Specialist {
+                net: "s3.safetensors"
+            }
+        ));
+        assert!(
+            expert_parts("s:/w/a:b.safetensors").is_err(),
+            "a colon would be a spec: refused"
+        );
+        assert!(expert_parts("s:").is_err(), "no network");
+        assert!(expert_parts("s:a,b").is_err(), "one network only");
+        assert!(
+            expert_parts("h3:o3.safetensors").is_ok(),
+            "the deeper form is unchanged"
+        );
+    }
     use super::*;
 
     #[test]
