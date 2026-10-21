@@ -233,8 +233,19 @@ pub const NET_LIMIT: Duration = Duration::from_secs(45);
 /// and still finish (a host with a slow route to R2 was seen below 1 MiB/s).
 pub const SECS_PER_MIB: u64 = 2;
 
-/// The longest wall-clock limit a size-scaled call gets (never below the base limit itself).
-pub const MAX_NET_LIMIT: Duration = Duration::from_secs(30 * 60);
+/// The longest wall-clock limit a size-scaled call gets (never below the base limit itself). Three
+/// hours: a 36 GB stored shard fetched by one stream from R2's European region to a host in
+/// Thailand took longer than the former 30 minutes on every attempt (round o3r-1-1, 2026-10-21),
+/// so the run never got past its inputs; rclone's own `--timeout` still ends a transfer that stalls.
+pub const MAX_NET_LIMIT: Duration = Duration::from_secs(3 * 60 * 60);
+
+/// Downloads larger than this are fetched as [`MULTI_THREAD_STREAMS`] parallel ranges (rclone's
+/// multi-thread download): one stream to a far host is limited by the route's latency, not its
+/// bandwidth.
+pub const MULTI_THREAD_CUTOFF_MIB: u64 = 64;
+
+/// Parallel ranges of a large download.
+pub const MULTI_THREAD_STREAMS: u32 = 16;
 
 /// The wall-clock limit of a call moving `bytes`: `base` plus [`SECS_PER_MIB`] per MiB, at most
 /// [`MAX_NET_LIMIT`] (or `base` when that is larger). Used for uploads and downloads alike.
@@ -432,6 +443,13 @@ impl Remote for RcloneRemote {
             return Ok(false);
         };
         let mut c = self.cmd("copyto");
+        if bytes > MULTI_THREAD_CUTOFF_MIB << 20 {
+            c.args(["--multi-thread-streams", &MULTI_THREAD_STREAMS.to_string()])
+                .args([
+                    "--multi-thread-cutoff",
+                    &format!("{MULTI_THREAD_CUTOFF_MIB}M"),
+                ]);
+        }
         c.arg(self.url(key)).arg(local);
         self.run(c, self.limit_for(bytes)).map(|()| true)
     }
@@ -734,12 +752,17 @@ mod tests {
         assert_eq!(limit_for_bytes(base, 100 * mib), Duration::from_secs(260));
         // The 14 MiB file killed at ~56-59 s on the slow host now gets 88 s.
         assert_eq!(limit_for_bytes(base, 14 * mib), Duration::from_secs(88));
-        // Capped at 30 minutes, whatever the size (no overflow either).
+        // Capped at three hours, whatever the size (no overflow either).
         assert_eq!(limit_for_bytes(base, 10_000 * mib), MAX_NET_LIMIT);
         assert_eq!(limit_for_bytes(base, u64::MAX), MAX_NET_LIMIT);
         // A base above the cap is kept as it is.
-        let big = Duration::from_secs(3600);
+        let big = Duration::from_secs(4 * 3600);
         assert_eq!(limit_for_bytes(big, 5 * mib), big);
+        // The 36 GB base shard that one stream could not fetch in 30 minutes now gets three hours.
+        assert_eq!(
+            limit_for_bytes(base, 36_000 * mib),
+            Duration::from_secs(3 * 3600)
+        );
         // Monotonic in size.
         assert!(limit_for_bytes(base, 50 * mib) < limit_for_bytes(base, 51 * mib));
     }
