@@ -10,6 +10,9 @@ on:
       run_id:
         description: "Run id under runs/ (e.g. o3r-1-1)"
         required: true
+      show:
+        description: "Optional: small files to print, space-separated, relative to runs/<run_id>/ (or starting rounds/)"
+        default: ""
 
 permissions:
   contents: read
@@ -27,6 +30,7 @@ jobs:
           ENDPOINT: ${{ vars.R2_S3_ENDPOINT }}
           BUCKET: ${{ vars.R2_BUCKET }}
           RUN_ID: ${{ inputs.run_id }}
+          SHOW: ${{ inputs.show }}
         shell: bash
         run: |
           set -euo pipefail
@@ -44,3 +48,10 @@ jobs:
           else
             echo "== no heartbeat yet" | tee -a "$GITHUB_STEP_SUMMARY"
           fi
+          for f in $SHOW; do
+            case "$f" in *..*|*[!A-Za-z0-9._/-]*) echo "bad path $f"; continue;; esac
+            case "$f" in rounds/*) k="$f";; *) k="runs/$RUN_ID/$f";; esac
+            echo "== $k"
+            s3 cp "s3://$BUCKET/$k" - | head -c 200000 || echo "(not found)"
+            echo
+          done
