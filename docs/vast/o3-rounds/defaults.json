@@ -16,8 +16,8 @@
     "device": "cuda", "upload_shards": true, "table": { "hands": 1000000, "seed": 1 }
   },
   "round": {
-    "risk_power": "1", "risk_floor": "0.2", "risk_bands": 20, "risk_pilot": 2000, "risk_cap": 32,
-    "risk_tricks": "1,2", "risk_positions": "0.4,0.3,0.3",
+    "risk_power": "1", "risk_floor": "0.2", "risk_bands": 20, "risk_pilot": 2000, "risk_cap": 1000,
+    "risk_tricks": "2", "risk_positions": "0.4,0.3,0.3",
     "scratch_epochs": 40, "scratch_lr": 0.001,
     "label_check": {
       "shard": "inputs/sha256/38de48356209cbec0f9ce41ceba28e6d5df52428abc0c866d443f9eb57964327",

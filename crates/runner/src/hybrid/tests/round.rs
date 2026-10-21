@@ -268,7 +268,7 @@ fn a_round_trains_checks_and_picks_the_winner() {
     for want in [
         "--seed 93000",
         "--power 1 --floor 0.2",
-        "--harvest-tricks 1,2",
+        "--harvest-tricks 2",
         "--harvest-positions 0.4,0.3,0.3",
     ] {
         assert!(profile.contains(want), "{profile}");
@@ -282,7 +282,7 @@ fn a_round_trains_checks_and_picks_the_winner() {
         assert!(
             p.contains(&format!("--count {rows} --seed {seed}"))
                 && p.contains("--risk-profile")
-                && p.contains("--harvest-cap 32"),
+                && p.contains("--harvest-cap 1000"),
             "{p}"
         );
     }

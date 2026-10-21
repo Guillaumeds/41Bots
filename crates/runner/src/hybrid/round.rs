@@ -86,6 +86,13 @@ pub(crate) const KEYS: [&str; 15] = [
     "g2",
 ];
 
+/// The default `risk_cap`: rows a decision may give. High enough that it rarely binds: risky
+/// positions bunch in a few decisions, and a low cap (the plain harvest's 32) takes them out of the
+/// mix the profile asks for (measured 2026-10-21: 56% of rows in the risky band at 32, 69% at 256,
+/// 80% uncapped, against a target of 86%). At 2M+ rows a round still draws on tens of thousands of
+/// decisions.
+const RISK_CAP: u64 = 1000;
+
 /// The standard the adoption rule judges passes by (percent of money chance).
 const STANDARD_PCT: f64 = 0.01;
 
@@ -239,17 +246,18 @@ pub(crate) fn parse(
         .map_err(|e| format!("hybrid_rung: round.risk_floor {e}"))?;
     let bands = u("risk_bands", search::risk_harvest::RISK_BANDS as u64)?;
     let pilot = u("risk_pilot", search::risk_harvest::RISK_PILOT_DECISIONS)?;
-    let cap = u("risk_cap", 32)?;
+    let cap = u("risk_cap", RISK_CAP)?;
     if !(1..=255).contains(&bands) || pilot == 0 || cap == 0 {
         return Err(
             "hybrid_rung: round: risk_bands 1 to 255, risk_pilot and risk_cap at least 1".into(),
         );
     }
-    let tricks = t("risk_tricks", "1,2")?;
+    let tricks = t("risk_tricks", "2")?;
     if tricks.split(',').any(|x| !matches!(x.trim(), "1" | "2")) {
         return Err(format!(
-            "hybrid_rung: round.risk_tricks {tricks:?}: decision tricks 1 and/or 2 (\"1,2\": half \
-             from each)"
+            "hybrid_rung: round.risk_tricks {tricks:?}: decision tricks 1 and/or 2 (\"2\", the \
+             default; \"1,2\": half from each, but a trick-1 search reaches about 600,000 trick-3 \
+             positions against about 700 for trick 2, so trick 1 costs hours of CPU a round)"
         ));
     }
     let positions = t("risk_positions", "0.4,0.3,0.3")?;
@@ -1133,6 +1141,35 @@ fn round_text(r: &Value) -> String {
             p["part"], p["rows"], p["seed"]
         );
     }
+    // The mix the profile aimed at and what the parts hold, for the riskiest tenth of the bands.
+    let table = r["profile"]["table"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let top = table.len().div_ceil(10).max(1);
+    let target: f64 = table
+        .iter()
+        .rev()
+        .take(top)
+        .filter_map(|b| b["target_share"].as_f64())
+        .sum();
+    let (mut got, mut all) = (0u64, 0u64);
+    for p in r["parts"].as_array().into_iter().flatten() {
+        let rows: Vec<u64> = p["rows_by_band"]
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_u64).collect())
+            .unwrap_or_default();
+        all += rows.iter().sum::<u64>();
+        got += rows.iter().rev().take(top).sum::<u64>();
+    }
+    if all > 0 && !table.is_empty() {
+        t += &format!(
+            "  new rows in the riskiest {top} of {} bands: {:.1}% (the profile aimed at {:.1}%)\n",
+            table.len(),
+            got as f64 * 100.0 / all as f64,
+            target * 100.0
+        );
+    }
     t += "\nGolden check, H_3 without exact leaves (decision loss):\n";
     t += &line("incumbent", &r["incumbent"]["golden"]);
     for c in r["candidates"].as_array().into_iter().flatten() {
@@ -1219,7 +1256,8 @@ mod tests {
         assert_eq!((s.part_seed(1), s.part_seed(3)), (93001, 93003));
         assert_eq!(s.power, "1");
         assert_eq!(s.floor, "0.2");
-        assert_eq!(s.tricks, "1,2");
+        assert_eq!(s.tricks, "2");
+        assert_eq!(s.cap, 1000);
         assert_eq!(
             s.candidates[2].mode,
             Mode::Scratch("4096,2048,1024,256".into())
