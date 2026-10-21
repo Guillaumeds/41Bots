@@ -44,3 +44,17 @@ score close to exact on those positions, and does the golden set show it?
 - Plan written (this file). Build not started yet beyond the code survey: `nn::encode::decode`,
   `nn::leafrisk::RiskModel::score`, `nn::rowweights` exist; a per-row scorer over stored shards
   does not.
+
+## Build progress (2026-10-21)
+- **Done:** `search risk-filter` (`crates/search/src/risk_filter.rs`, command in `bin/search.rs`):
+  decodes each trick-3 row, scores it with G2 using O_3's own value, keeps rows at or above the
+  model's budget threshold for `--step K`, writes them as a shard. Refuses a G2 model built for
+  another network, a wrong trick, or step 0. Tests: thread independence, order, the threshold
+  cut, an error on a bad row. Clippy and `search` tests pass.
+- **Not yet built:** the runner entry that loops this over the 40M base's shards and rents a
+  machine; the training of S on the flagged shard (existing trainer, random start); the held-out
+  check; the routed golden run (`--exact-leaves learned:G2.json --defer-expert h3:S`).
+- **Open choice:** which budget step `K` to use. Today's play rule's step has not been read from
+  the code yet; the filter takes it as an argument, so nothing is decided by the build.
+- **Not run on real data:** the command has not been run on a real O_3, G2 or base shard. The
+  first real run is the rented scoring pass.

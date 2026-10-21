@@ -430,6 +430,7 @@ fn main() -> ExitCode {
         Some("robber-burn") => robber_burn(&a),
         Some("labels") => labels_cmd(&a),
         Some("risk-profile") => risk_profile_cmd(&a),
+        Some("risk-filter") => risk_filter_cmd(&a),
         Some("hybrid-check") => hybrid_check(&a),
         Some("hybrid-paired") => hybrid_paired(&a),
         Some("student-check") => student_check(&a),
@@ -2294,6 +2295,65 @@ fn binary_sha256() -> String {
         .and_then(std::fs::read)
         .map(|b| equity::sha256::sha256_hex(&b))
         .unwrap_or_default()
+}
+
+/// `search risk-filter --shard IN.npy --out OUT.npy --equity TABLE --net O3.safetensors
+/// --risk-model G2.json --step K [--threads N]`: keeps the trick-3 rows of a stored shard that G2
+/// flags as riskiest at budget step `K` of the model (`search::risk_filter`), for the specialist
+/// network S (docs/m3-hybrid/specialist.md). Prints the counts; writes the kept rows as a shard.
+fn risk_filter_cmd(a: &Args) -> Result<(), String> {
+    use search::risk_filter::{keep, score_rows};
+    let (table, _) = load_equity_sha(a.req("--equity")?)?;
+    let leaf: Arc<SharedLeaf> = Arc::new(table);
+    let net_path = a.req("--net")?;
+    let o = nn::Oracle::load(Path::new(net_path), leaf.clone())?;
+    if o.trick != 3 {
+        return Err(format!(
+            "--net {net_path} is for trick {}, not trick 3",
+            o.trick
+        ));
+    }
+    let model_path = a.req("--risk-model")?;
+    let model = nn::leafrisk::RiskModel::load(Path::new(model_path))?;
+    if model.trick != 3 {
+        return Err(format!(
+            "--risk-model {model_path} is for trick {}, not 3",
+            model.trick
+        ));
+    }
+    if !model.net_sha256.is_empty() && model.net_sha256 != o.sha256 {
+        return Err(format!(
+            "--risk-model {model_path} was built for another network"
+        ));
+    }
+    let step = a.num("--step", 0)? as usize;
+    let threshold = model
+        .threshold_for_share(step)
+        .ok_or("--step 0 keeps nothing: give a budget step from 1 up")?;
+    let threads = a.num("--threads", 1)?.max(1) as usize;
+    let (in_path, out_path) = (a.req("--shard")?, a.req("--out")?);
+    let rows =
+        nn::shard::from_npy(&std::fs::read(in_path).map_err(|e| format!("{in_path}: {e}"))?)?;
+    let scores = score_rows(&rows, threads, |r| {
+        if r.trick != 3 {
+            return Ok(None);
+        }
+        let (c, ctx) = nn::encode::decode(&r.features)
+            .ok_or_else(|| format!("{in_path}: a row's features are not an encoding"))?;
+        Ok(Some(model.score(&c, &ctx, &*leaf, &o.eval(&c, &ctx))))
+    })?;
+    let kept = keep(&rows, &scores, threshold);
+    let v = rows.first().map_or(0, |r| r.outcomes.len());
+    std::fs::write(out_path, nn::shard::to_npy(&kept, v))
+        .map_err(|e| format!("{out_path}: {e}"))?;
+    let t3 = scores.iter().filter(|s| s.is_some()).count();
+    println!(
+        "risk-filter: {} rows, {t3} trick-3 starts, step {step} threshold {threshold}: kept {} ({:.2}% of trick-3 starts) -> {out_path}",
+        rows.len(),
+        kept.len(),
+        100.0 * kept.len() as f64 / t3.max(1) as f64
+    );
+    Ok(())
 }
 
 /// `search risk-profile`: the pilot of a risk-guided harvest (`search::risk_harvest`): the
