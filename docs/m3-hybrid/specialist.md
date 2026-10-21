@@ -19,8 +19,12 @@ score close to exact on those positions, and does the golden set show it?
    from the rest of the base, nothing from the rounds' non-risky rows.
 4. **Check S before play.** S's error and one-sided error (bias) against exact on held-out flagged
    rows (not used in training).
-5. **Golden set in play.** `search hybrid-check --exact-leaves learned:G2.json --defer-expert
-   h3:S` against the stored golden set, compared with: O_3 alone (0.0068%, seat 1 0.0201%), and
+5. **Golden set in play, routed by G2.** In play, G2 decides which network answers each frontier
+   position: a position G2 flags goes to S, every other position goes to O_3 (today's rule sends the
+   flagged ones to the exact solver). This is the routed check, and it is what the run measures:
+   the `--exact-leaves learned:G2.json` picks the flagged positions, `--defer-expert h3:S` answers
+   them, and O_3 answers the rest. `search hybrid-check --exact-leaves learned:G2.json --defer-expert
+   h3:S` against the stored golden set (the routed check), compared with: O_3 alone (0.0068%, seat 1 0.0201%), and
    G2 with exact solving (0.0008%, seat 1 0.0022%).
 
 ## Expected size and cost (estimates, to be measured)
