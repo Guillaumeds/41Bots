@@ -23,16 +23,16 @@ already be about 250 GB); `.github/workflows/o3-round.yml`; round 1's manifest
 `docs/vast/o3-round-1.manifest.json`. All tests pass (fmt, clippy, workspace, Python).
 
 **Next, in order:**
-1. Copy `.github/workflows/o3-round.yml` to `main` (GitHub lists dispatchable workflows from the
-   default branch), merge or PR the branch into `m3-hybrid` as the owner prefers.
-2. `release-binaries.yml` for the branch head; put its commit in `docs/vast/o3-rounds/defaults.json`
-   `bin_sha`.
-3. A rehearsal round (e.g. `amounts=20k,40k`, `max_dollars=1.5`): checks boot, take-over or offer,
+1. Done 2026-10-21: `o3-round.yml` is on `main` (dispatch it with `--ref
+   claude/admiring-ptolemy-ym00uf` until the branch is merged); release binaries for 2b19d2c
+   (`bin/2b19d2c17c83dacc2cc460eddf8e74f3d384489b/`) are the defaults' `bin_sha`. Disk for a round:
+   about 250 GB (round 1's manifest asks 249).
+2. A rehearsal round (e.g. `amounts=20k,40k`, `max_dollars=1.5`): checks boot, take-over or offer,
    the stored base fetch, the overlap, the uploads and `rounds/<id>/round.json`; vast shows 0
    instances afterwards. A 256-thread EPYC 7B12 with an RTX 3060 ($0.30/h, offer 36863856 on
    2026-10-21) suits an all-additive round with `min_gpu_ram_gb=12`.
-4. Round 1: `round=1, from=seed, amounts=2M,4M,8M` (optionally `scratch_last=4096,2048,1024,256`).
-5. Free reads still owed: the results of `o3-base80-1` (O_3 at 80M base) and the ensemble rerun
+3. Round 1: `round=1, from=seed, amounts=2M,4M,8M` (optionally `scratch_last=4096,2048,1024,256`).
+4. Free reads still owed: the results of `o3-base80-1` (O_3 at 80M base) and the ensemble rerun
    were never written into the docs (`r2-fetch.yml`).
 
 ## Earlier: state and next steps (2026-10-20, written for the next session or model)
