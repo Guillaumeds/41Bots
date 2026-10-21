@@ -215,11 +215,12 @@ use crate::{Ctx, sibling};
 mod audit;
 mod hlabels;
 mod reuse;
+mod round;
 
 use audit::additive;
 
 /// The settings a `hybrid_rung` chunk takes; any other key is refused.
-pub(crate) const KEYS: [&str; 82] = [
+pub(crate) const KEYS: [&str; 83] = [
     "cut",
     "check",
     "audit_rounds",
@@ -299,6 +300,8 @@ pub(crate) const KEYS: [&str; 82] = [
     "compare_cpu",
     "upload_shards",
     "table",
+    // The O3G2 round ([`round`]).
+    "round",
     // Read by the format-2 scheduler and worker.
     "threads",
     "est_seconds",
@@ -470,6 +473,8 @@ pub(crate) struct Params {
     pub pair_scale: f64,
     /// `tie_aware` (false): the trainer's `--tie-aware`.
     pub tie_aware: bool,
+    /// The O3G2 round's settings ([`round`]); `None`: no round.
+    pub round: Option<round::RoundSettings>,
 }
 
 /// Whether a set of `search labels --source` comes by decision (a harvest or sibling groups): one
@@ -556,6 +561,7 @@ impl Params {
             "label_source": hlabels::to_json(self.hybrid_labels.as_ref()),
             "pair_weight": self.pair_weight, "pair_scale": self.pair_scale,
             "tie_aware": self.tie_aware,
+            "round": self.round.as_ref().map(round::RoundSettings::to_json),
         })
     }
 
@@ -1076,20 +1082,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         );
     }
     let widths_text = s("widths", "1024,512,128")?;
-    let widths: Vec<u64> = widths_text
-        .split(',')
-        .map(|w| w.trim().parse::<u64>().ok().filter(|&w| (1..=65_536).contains(&w)))
-        .collect::<Option<Vec<_>>>()
-        .filter(|w| !w.is_empty())
-        .ok_or_else(|| {
-            format!("hybrid_rung: widths {widths_text:?} must be hidden-layer sizes like \"1024,512,128\"")
-        })?;
-    // The integer inference cannot load a layer wider than nn::MAX_WIDTH, so a network with one is
-    // refused here, before the machine installs or trains anything (a trick-3 run once trained
-    // 2048-1024-256 for 27 minutes and then failed at the check, when the limit was 1024).
-    let hidden: Vec<usize> = widths.iter().map(|&w| w as usize).collect();
-    nn::mlp::check_hidden_widths(&hidden)
-        .map_err(|e| format!("hybrid_rung: widths {widths_text:?}: {e}"))?;
+    let widths = parse_widths_text(&widths_text).map_err(|e| format!("hybrid_rung: {e}"))?;
     let head = s("head", "outcome")?;
     if !["outcome", "money4"].contains(&head.as_str()) {
         return Err(format!("hybrid_rung: head {head:?}: outcome or money4"));
@@ -1213,7 +1206,10 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
                 .into(),
         );
     }
-    Ok(Params {
+    let round = round::parse(o, cut, &seen.iter().map(|(s, _)| *s).collect::<Vec<_>>())?;
+    // A round's candidates are additive trainings judged like the audit loop's rounds.
+    let loop_rounds = audit_rounds.max(u64::from(round.is_some()));
+    let params = Params {
         cut,
         check,
         train,
@@ -1252,7 +1248,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         overlap,
         partial_epochs,
         audit,
-        additive: additive::parse(o, audit_rounds, label_parts)?,
+        additive: additive::parse(o, loop_rounds, label_parts)?,
         label_inputs,
         seat_weights: additive::parse_seat_weights(o)?,
         reused_harvest_args,
@@ -1260,7 +1256,33 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         pair_weight,
         pair_scale,
         tie_aware,
-    })
+        round,
+    };
+    round::check_rung(&params)?;
+    Ok(params)
+}
+
+/// Hidden-layer sizes `"1024,512,128"`, each one the integer inference can load (`nn::MAX_WIDTH`:
+/// a network with a wider layer is refused here, before the machine installs or trains anything;
+/// a trick-3 run once trained 2048-1024-256 for 27 minutes and then failed at the check, when the
+/// limit was 1024).
+pub(crate) fn parse_widths_text(text: &str) -> Result<Vec<u64>, String> {
+    let widths: Vec<u64> = text
+        .split(',')
+        .map(|w| {
+            w.trim()
+                .parse::<u64>()
+                .ok()
+                .filter(|&w| (1..=65_536).contains(&w))
+        })
+        .collect::<Option<Vec<_>>>()
+        .filter(|w| !w.is_empty())
+        .ok_or_else(|| {
+            format!("widths {text:?} must be hidden-layer sizes like \"1024,512,128\"")
+        })?;
+    let hidden: Vec<usize> = widths.iter().map(|&w| w as usize).collect();
+    nn::mlp::check_hidden_widths(&hidden).map_err(|e| format!("widths {text:?}: {e}"))?;
+    Ok(widths)
 }
 
 /// The trick an integer network file was trained for (its `trick` metadata).
@@ -1715,6 +1737,7 @@ pub(crate) fn chunk_with(
         pending_shards: Vec::new(),
         shared: Vec::new(),
         label_kinds: Vec::new(),
+        train_override: None,
     };
     r.rec.insert("params".into(), params.to_json());
     r.rec.insert("table".into(), table_rec);
@@ -1734,6 +1757,11 @@ pub(crate) fn chunk_with(
     }
     if params.audit.is_some() {
         let out = r.audit_chunk(shards);
+        r.retry_pending_shards()?;
+        return out;
+    }
+    if params.round.is_some() {
+        let out = r.round_chunk(shards);
         r.retry_pending_shards()?;
         return out;
     }
@@ -1871,6 +1899,9 @@ struct Rung<'a> {
     /// Every label shard of the run (made or reused) with its set and label source, in order
     /// ([`Rung::note_labels`]; `rung.json`'s `label_sources`).
     label_kinds: Vec<Value>,
+    /// The next training's epochs and rate when they are neither `epochs`/`lr` nor the additive
+    /// ones (a round's scratch candidate, [`round`]).
+    train_override: Option<(u64, f64)>,
 }
 
 /// A label shard shared for later runs: its `shards.json` entry, its `manifest_inputs` pair,
@@ -2043,6 +2074,16 @@ impl Rung<'_> {
             want.push(("init_net".into(), a.init_net.clone()));
             want.push(("init_net_float".into(), a.init_float.clone()));
         }
+        // A round's G2 and its label check's exact shard ([`round`]).
+        if let Some(rs) = &self.p.round {
+            if let Some(m) = &rs.risk_model {
+                want.push(("round_risk_model".into(), m.clone()));
+            }
+            if let Some((sh, side)) = &rs.label_check {
+                want.push(("round_check_shard".into(), sh.clone()));
+                want.push(("round_check_sidecar".into(), side.clone()));
+            }
+        }
         if want.is_empty() {
             return Ok(());
         }
@@ -2178,6 +2219,20 @@ impl Rung<'_> {
         if let Some(w) = self.inputs.get("golden_worlds") {
             search::measure::require_exact(w)
                 .map_err(|e| format!("hybrid_rung: golden_worlds_input: {e}"))?;
+        }
+        // A round's G2 must be the incumbent's: `search labels --harvest-risk` refuses another,
+        // but only after the profile's pilot.
+        if let (Some(m), Some(a)) = (self.inputs.get("round_risk_model"), &self.p.additive) {
+            let model = nn::leafrisk::RiskModel::load(m)
+                .map_err(|e| format!("hybrid_rung: round.risk_model: {e}"))?;
+            if model.net_sha256 != a.init_net || u64::from(model.trick) != self.p.cut {
+                return Err(format!(
+                    "hybrid_rung: round.risk_model was made for the trick-{} network {}, not the \
+                     incumbent init_net {} (trick {}): give the incumbent's G2, or leave it out to \
+                     build it first",
+                    model.trick, model.net_sha256, a.init_net, self.p.cut
+                ));
+            }
         }
         self.rec.insert("inputs".into(), Value::Object(recs));
         self.additive_check_init()?;
@@ -3308,6 +3363,9 @@ mod tests {
 
     /// Label shards shared as each is made (`hybrid/tests/shard_share.rs`).
     mod shard_share;
+
+    /// The O3G2 round (`hybrid/tests/round.rs`).
+    mod round;
 
     /// A machine of `gib` GiB (`MemTotal`, no cgroup limit).
     fn machine(gib: u64) -> crate::mem::Limit {
@@ -4752,6 +4810,7 @@ mod tests {
             pending_shards: Vec::new(),
             shared: Vec::new(),
             label_kinds: Vec::new(),
+            train_override: None,
         }
     }
 

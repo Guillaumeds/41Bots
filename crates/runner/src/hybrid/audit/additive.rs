@@ -703,6 +703,9 @@ impl Rung<'_> {
     /// The trainer's epochs and learning rate: in additive mode the next training's
     /// (`additive_epochs`, 0 for round 1) and `additive_lr`, else `epochs` and `lr`.
     pub(in crate::hybrid) fn epochs_lr(&self) -> (u64, f64) {
+        if let Some(x) = self.train_override {
+            return x;
+        }
         match (
             &self.p.additive,
             self.additive.as_ref().and_then(|a| a.next.as_ref()),

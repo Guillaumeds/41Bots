@@ -14,7 +14,7 @@ fn net_file(path: &Path, widths: &[usize], int: bool, other: bool) {
 
 /// [`net_file`] for frontier trick `trick`.
 #[cfg(unix)]
-fn net_file_at(path: &Path, widths: &[usize], int: bool, other: bool, trick: u8) {
+pub(super) fn net_file_at(path: &Path, widths: &[usize], int: bool, other: bool, trick: u8) {
     let io = (nn::encode::N_FEATURES, nn::outcome::vocab(trick));
     net_file_shaped(path, widths, int, other, trick, io);
 }
@@ -75,7 +75,7 @@ fn net_file_shaped(
 
 /// Stores a file in the fake remote; its SHA-256.
 #[cfg(unix)]
-fn store(f: &Fakes, path: &Path) -> String {
+pub(super) fn store(f: &Fakes, path: &Path) -> String {
     let remote = DirRemote {
         root: f.base.join("remote"),
     };

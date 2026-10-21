@@ -40,11 +40,11 @@ use std::time::Instant;
 
 use serde_json::{Value, json};
 
+use crate::Ctx;
 use crate::bundle::sha256_file;
 use crate::hybrid::{Tools, python_command, uv_sync};
 use crate::remote::{input_key, put_input};
 use crate::spike::build_table_from;
-use crate::{Ctx, sibling};
 
 /// The settings a `leafrisk` chunk takes (after `v2.rs` added the network's path, `net`); any
 /// other key is refused.
@@ -292,12 +292,32 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         .and_then(Value::as_str)
         .ok_or("leafrisk: net_input is not resolved to a file")?
         .to_string();
-    let t0 = Instant::now();
     let work = ctx.root.join("leafrisk-work");
     let out = ctx.root.join("out").join("leafrisk");
-    fs::create_dir_all(&work).map_err(|e| e.to_string())?;
-    fs::create_dir_all(&out).map_err(|e| e.to_string())?;
-    let search = sibling("search");
+    let mut r = build(ctx, &tools, &q, &net, &table, &work, &out, None)?;
+    r["table"] = table_rec;
+    Ok(r)
+}
+
+/// The rows, training and calibration of a leaf-risk model for the network `net` (module
+/// notes): shards in `work`, the model, calibration and sidecars in `out`. `python`: an
+/// installed environment with numpy (the round's, `hybrid::round`), else the CPU group is
+/// installed in `work`. Returns the chunk's record (without the table's).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build(
+    ctx: &mut Ctx,
+    tools: &Tools,
+    q: &Params,
+    net: &str,
+    table: &Path,
+    work: &Path,
+    out: &Path,
+    python: Option<&Path>,
+) -> Result<Value, String> {
+    let t0 = Instant::now();
+    fs::create_dir_all(work).map_err(|e| e.to_string())?;
+    fs::create_dir_all(out).map_err(|e| e.to_string())?;
+    let search = tools.search.clone();
     let threads = ctx.threads.max(1);
     let mut splits = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
@@ -313,7 +333,7 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
                         "partial_cpu_ok": false }),
             );
             ctx.run_child(
-                labels_command(&search, &q, s, &net, &table, threads, &shard),
+                labels_command(&search, q, s, net, table, threads, &shard),
                 &format!("leafrisk/labels-{}.log", s.name),
             )?;
         }
@@ -338,9 +358,15 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         "chunk",
         json!({ "kind": "leafrisk", "step": "python environment", "partial_cpu_ok": true }),
     );
-    let env_dir = work.join("pyenv-cpu");
-    let (python, uv_version, _) = uv_sync(ctx, &tools, "cpu", &env_dir, "leafrisk/uv-sync.log")?;
-    let net_abs = std::path::absolute(&net).map_err(|e| e.to_string())?;
+    let (python, uv_version) = match python {
+        Some(p) => (p.to_path_buf(), Value::Null),
+        None => {
+            let env_dir = work.join("pyenv-cpu");
+            let (py, v, _) = uv_sync(ctx, tools, "cpu", &env_dir, "leafrisk/uv-sync.log")?;
+            (py, json!(v))
+        }
+    };
+    let net_abs = std::path::absolute(net).map_err(|e| e.to_string())?;
     let npz = |name: &str| work.join(format!("{name}.npz"));
     for s in &q.splits {
         if npz(&s.name).exists() {
@@ -407,7 +433,7 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
             Err(e) => warnings.push(format!("the model was not stored: {e}")),
         }
     }
-    let net_sha = sha256_file(Path::new(&net))?.0;
+    let net_sha = sha256_file(Path::new(net))?.0;
     ctx.set_phase(
         "chunk",
         json!({ "kind": "leafrisk", "step": "done", "partial_cpu_ok": true }),
@@ -417,7 +443,7 @@ pub(crate) fn chunk(ctx: &mut Ctx, p: &Value) -> Result<Value, String> {
         "splits": splits,
         "model": { "sha256": model_sha, "bytes": model_bytes, "stored": stored },
         "python": { "uv": uv_version },
-        "table": table_rec, "threads": threads, "warnings": warnings,
+        "threads": threads, "warnings": warnings,
         "seconds": (t0.elapsed().as_secs_f64() * 10.0).round() / 10.0,
     }))
 }
