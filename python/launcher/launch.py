@@ -1882,7 +1882,13 @@ def cmd_run(a) -> int:
             log("dry run: no offer to rent right now; a real run would wait as described above")
         log("dry run: would upload manifest and create the instance:\n" + json.dumps(manifest, indent=2))
         return 0
-    best = choose_or_wait(a)
+    if getattr(a, "instance_id", None):
+        best, why = take_check(a, instance_status(int(a.instance_id)))
+        if why:
+            sys.exit(f"launch: instance {a.instance_id} cannot take this run: " + "; ".join(why))
+        log(f"instance {a.instance_id} (taken over): {describe(best)}")
+    else:
+        best = choose_or_wait(a)
     if not best:
         sys.exit("launch: no offer matches the filters")
     r2_put(f"runs/{run_id}/manifest.json", json.dumps(manifest, indent=2).encode())
@@ -2191,10 +2197,92 @@ def run_benchmarks(run_id: str, resumable: bool) -> list[dict]:
     return out
 
 
+# The command a taken-over instance runs at its start (`--instance-id`): the boot script, unless it
+# already runs (an instance in vast's entrypoint mode starts it as the image's ENTRYPOINT).
+TAKE_ONSTART = (f"pgrep -f {BOOT_PATH} >/dev/null || "
+                f"nohup {BOOT_PATH} > /var/log/41bots-boot.log 2>&1 &")
+
+
+def env_dict(env: str) -> dict[str, str]:
+    """`instance_env`'s "-e K=V -e K2=V2" as a dict (`vastai update instance --env` takes JSON)."""
+    toks = env.split()
+    return dict(t.split("=", 1) for f, t in zip(toks, toks[1:]) if f == "-e" and "=" in t)
+
+
+def take_check(a, info: dict | None) -> tuple[dict | None, list[str]]:
+    """An instance the owner rented by hand (`--instance-id`), read by `show instance`: the
+    offer-like record the watch uses, and why it cannot take the run (empty when it can). Its disk
+    is fixed when it is rented: it must already be as large as the run needs."""
+    if not info:
+        return None, [f"instance {a.instance_id} could not be read (is it on this account?)"]
+    why = []
+    disk = float(info.get("disk_space") or 0)
+    if disk + 0.5 < float(a.disk_gb):
+        why.append(f"its disk is {disk:.0f} GB, the run needs {a.disk_gb} GB (a disk is fixed when the "
+                   f"instance is rented: rent it again with a larger disk)")
+    if gpu_job(a):
+        if int(info.get("num_gpus") or 0) < int(a.gpus or 1):
+            why.append(f"it has {info.get('num_gpus') or 0} GPUs, the run needs {a.gpus or 1}")
+        ram = float(info.get("gpu_ram") or 0) / 1000
+        if ram + 0.5 < float(a.min_gpu_ram_gb or 0):
+            why.append(f"its GPU has {ram:.0f} GB, the run asks for {a.min_gpu_ram_gb} GB "
+                       f"(min_gpu_ram_gb)")
+    cores = float(info.get("cpu_cores_effective") or 0)
+    if cores + 0.5 < float(a.min_cores or 0):
+        why.append(f"it has {cores:.0f} threads, the run asks for {a.min_cores} (min_cores)")
+    if str(info.get("actual_status")) in ("exited", "offline", "destroyed"):
+        why.append(f"it is {info.get('actual_status')}")
+    best = dict(info)
+    best["id"] = info.get("id", a.instance_id)
+    best["cpu_cores_effective"] = cores or 1.0
+    best["dph_total"] = float(info.get("dph_total") or 0)
+    # Not ranked (as a named offer): what the watch and the report read.
+    best["_rate"], best["_measured"], best["_link_factor"] = 1.0, False, 1.0
+    best["_work_per_hour"] = best["cpu_cores_effective"]
+    best["_cost_per_work"] = best["dph_total"] / max(best["cpu_cores_effective"], 1e-9)
+    return best, why
+
+
+def take_instance(a, run_id: str, best: dict) -> int | None:
+    """Takes over the instance the owner rented (`--instance-id`): vast recreates its container in
+    place with this run's image, environment and start command (`vastai update instance`, the
+    documented way to change what a rented instance runs; its disk and machine stay), and labels it
+    for the run. Returns its id, or None when vast refuses."""
+    iid = int(a.instance_id)
+    env = instance_env(run_id, int(best["cpu_cores_effective"]), float(best["dph_total"]), a.bin_sha,
+                       a.image, getattr(a, "destroy_key", ""), offer=best)
+    try:
+        res = vast("update", "instance", str(iid), "--image", a.image, "--env", json.dumps(env_dict(env)),
+                   "--onstart", TAKE_ONSTART, timeout=None)
+    except RuntimeError as e:
+        log(f"::error::vast refused to update instance {iid}: {e}")
+        return None
+    if isinstance(res, dict) and res.get("success") is False:
+        log(f"::error::vast refused to update instance {iid}: {redact(str(res.get('msg')))[:300]}")
+        return None
+    with contextlib.suppress(RuntimeError):
+        vast("label", "instance", str(iid), f"41bots-{run_id}", raw=False)
+    log(f"took over instance {iid} for run {run_id}: its container is recreated with {a.image}; the run "
+        f"then watches, stops and destroys it like one it rented")
+    if a.state_file:
+        with open(a.state_file, "w") as fh:
+            fh.write(str(iid))
+    return iid
+
+
 def rent(a, run_id: str, first: dict | None = None) -> tuple[dict | None, int | None]:
     """Create the instance on the best offer (`first` if given, else a fresh search); when that
     fails (the offer was taken meanwhile, or vast refuses it), drop the offer and take the next
-    best from a fresh search, up to MAX_CREATE_TRIES offers."""
+    best from a fresh search, up to MAX_CREATE_TRIES offers. With `--instance-id` the owner's
+    instance is taken over instead, once: no replacement is rented when it fails."""
+    if getattr(a, "instance_id", None):
+        if getattr(a, "taken", False):
+            log("::error::the taken-over instance ended before the run did; with --instance-id no other "
+                "machine is rented (relaunch without it to resume on a new one)")
+            return None, None
+        a.taken = True
+        iid = take_instance(a, run_id, first) if first else None
+        return (first, iid) if iid else (None, None)
     for attempt in range(1, MAX_CREATE_TRIES + 1):
         try:
             best = first if attempt == 1 and first else choose_or_wait(a)
@@ -2499,7 +2587,8 @@ def cmd_round_manifest(a) -> int:
     try:
         prev = rm.previous(a.from_round, r2_get)
         m = rm.build(a.round, prev, rm.parse_amounts(a.amounts), scratch_last=a.scratch_last or None,
-                     risk_power=a.risk_power or None, g2=a.g2, note=a.note)
+                     risk_power=a.risk_power or None, g2=a.g2, note=a.note,
+                     min_gpu_ram_gb=a.min_gpu_ram_gb, attempt=a.attempt)
     except ValueError as e:
         sys.exit(f"launch: round-manifest: {e}")
     text = json.dumps(m, indent=1 if a.pretty else None)
@@ -2671,6 +2760,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--handover-min", type=float, default=0,
                    help="after this many minutes, stop watching but leave the machine working: the vast-cleanup "
                         "workflow watches it from then on (GitHub ends jobs at 6 hours; 0 = never hand over)")
+    s.add_argument("--instance-id", type=int, default=None,
+                   help="take over an instance already rented on this account (by hand on vast.ai) instead of "
+                        "renting one: its container is recreated with this run's image and start command "
+                        "(vastai update instance); its disk must already be --disk-gb or more. No replacement "
+                        "is rented if it fails")
     s.add_argument("--dry-run", action="store_true", help="choose the offer, but create nothing")
     s.add_argument("--no-destroy-key", action="store_true",
                    help="do not create the run's destroy-only key (machines are then destroyed by the launcher only)")
@@ -2685,6 +2779,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--g2", default="auto", choices=("auto", "rebuild"),
                    help="auto: reuse the previous round's G2 of the incumbent; rebuild: build it first")
     s.add_argument("--note", default="", help="a line added to the manifest's note")
+    s.add_argument("--min-gpu-ram-gb", type=int, default=None,
+                   help="the GPU memory floor in GB (default: defaults.json, 16; 12 lets an RTX 3060 in)")
+    s.add_argument("--attempt", type=int, default=1, help="the run's number: run id o3r-<round>-<attempt> (a relaunch)")
     s.add_argument("--out", default="", help="also write the manifest to this file")
     s.add_argument("--pretty", action="store_true")
     s.set_defaults(fn=cmd_round_manifest)

@@ -1,0 +1,152 @@
+name: o3-round
+
+# One O3G2 round of O_3 (docs/m3-hybrid/o3-rounds.md) on one rented machine: G2 chooses new trick-3
+# training positions, up to three candidate networks are trained and checked on the golden set,
+# the winner's G2 is built, everything is stored in R2 (rounds/<id>/round.json names it all) and
+# the machine destroys itself. The manifest is built from the previous round's record by
+# `launch.py round-manifest` (docs/vast/o3-rounds/defaults.json holds the fixed settings).
+#
+# Quick start (phone or laptop): Actions -> o3-round -> Run workflow, fill round, from, amounts and,
+# if you spotted a machine, offer_id (its "Type #" number) or instance_id (a machine you already
+# rented by hand on vast.ai; its disk must already be about 250 GB).
+
+on:
+  workflow_dispatch:
+    inputs:
+      round:
+        description: "Round number (1, 2, ...): the round's id is o3r-<round>"
+        required: true
+      from:
+        description: "Previous round's id (e.g. o3r-1), or seed for round 1"
+        required: true
+        default: "seed"
+      attempt:
+        description: "Attempt number (1 = first launch of this round; 2, 3 ... to relaunch it)"
+        default: "1"
+      amounts:
+        description: "New G2-chosen rows per candidate, one to three, growing (nested), e.g. 2M,4M,8M"
+        required: true
+        default: "2M,4M,8M"
+      scratch_last:
+        description: "Optional: train the last candidate from scratch at these widths, e.g. 4096,2048,1024,256 (blank = all continue the incumbent)"
+        default: ""
+      risk_power:
+        description: "Optional: alpha (0, 0.25, 0.5, 0.75, 1); blank = the default (1)"
+        default: ""
+      g2:
+        description: "auto (reuse the previous round's G2) or rebuild"
+        default: "auto"
+      offer_id:
+        description: "Optional: rent exactly this vast.ai offer (the Type # number)"
+        default: ""
+      instance_id:
+        description: "Optional: take over this instance you already rented by hand (its disk must be large enough; no other machine is rented)"
+        default: ""
+      cpu_match:
+        description: "Optional: regex the CPU name must match when searching, e.g. 7B12"
+        default: ""
+      min_gpu_ram_gb:
+        description: "GPU memory floor in GB (16 is the rule; 12 allows an RTX 3060 for an all-additive round)"
+        default: "16"
+      max_dollars:
+        description: "Dollar cap: stop, upload what is finished and destroy at this spend"
+        default: "6"
+      bin_sha:
+        description: "Commit whose release binaries to run (blank = defaults.json's, else this commit)"
+        default: ""
+      image:
+        description: "Base image (blank = defaults.json's)"
+        default: ""
+      dry_run:
+        description: "Only print the manifest and the machine that would be used; rent nothing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: o3-round-${{ inputs.round }}
+
+jobs:
+  round:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      VAST_API_KEY: ${{ secrets.VAST_API_KEY }}
+      R2_ACCESS_KEY_ID: ${{ vars.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+      R2_S3_ENDPOINT: ${{ vars.R2_S3_ENDPOINT }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the vast.ai CLI
+        run: pip install --quiet "vastai==1.8.3"
+      - name: Build the round's manifest
+        shell: bash
+        env:
+          ROUND: ${{ inputs.round }}
+          FROM: ${{ inputs.from }}
+          AMOUNTS: ${{ inputs.amounts }}
+          SCRATCH_LAST: ${{ inputs.scratch_last }}
+          RISK_POWER: ${{ inputs.risk_power }}
+          G2: ${{ inputs.g2 }}
+          ATTEMPT: ${{ inputs.attempt }}
+          MIN_GPU_RAM_GB: ${{ inputs.min_gpu_ram_gb }}
+        run: |
+          set -euo pipefail
+          python3 python/launcher/launch.py round-manifest --round "$ROUND" --from "$FROM" --amounts "$AMOUNTS" \
+            ${SCRATCH_LAST:+--scratch-last "$SCRATCH_LAST"} ${RISK_POWER:+--risk-power "$RISK_POWER"} --g2 "$G2" \
+            --attempt "$ATTEMPT" --min-gpu-ram-gb "$MIN_GPU_RAM_GB" --out round-manifest.json --pretty > /dev/null
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          m = json.load(open("round-manifest.json"))
+          r = m["streams"][0]["params"]["round"]
+          print(f"### O3G2 round {r['id']}\n\n{m['note']}\n\nCandidates: {r['candidates']}; disk {m['machine']['disk_gb']} GB")
+          PY
+          cat round-manifest.json
+      - name: Launch, watch, destroy
+        shell: bash
+        env:
+          OFFER_ID: ${{ inputs.offer_id }}
+          INSTANCE_ID: ${{ inputs.instance_id }}
+          CPU_MATCH: ${{ inputs.cpu_match }}
+          MIN_GPU_RAM_GB: ${{ inputs.min_gpu_ram_gb }}
+          MAX_DOLLARS: ${{ inputs.max_dollars }}
+          BIN_SHA_IN: ${{ inputs.bin_sha }}
+          IMAGE_IN: ${{ inputs.image }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          D=docs/vast/o3-rounds/defaults.json
+          BIN_SHA=${BIN_SHA_IN:-$(python3 -c "import json;print(json.load(open('$D'))['bin_sha'])")}
+          BIN_SHA=${BIN_SHA:-$GITHUB_SHA}
+          IMAGE=${IMAGE_IN:-$(python3 -c "import json;print(json.load(open('$D'))['image'])")}
+          COMMON=(--manifest round-manifest.json --min-cores 190 --min-ram-gb 60 --cpu-match "$CPU_MATCH" --any-host --gpus 1 --min-gpu-ram-gb "$MIN_GPU_RAM_GB")
+          PICK=()
+          [ -n "$OFFER_ID" ] && PICK=(--offer-id "$OFFER_ID")
+          if [ "$DRY_RUN" = "true" ]; then
+            if [ -n "$INSTANCE_ID" ]; then
+              echo "dry run: would take over instance $INSTANCE_ID with the machine needs:"
+              python3 -c "import json;print(json.dumps(json.load(open('round-manifest.json'))['machine']))"
+              exit 0
+            fi
+            python3 python/launcher/launch.py plan "${COMMON[@]}" "${PICK[@]}"
+            exit 0
+          fi
+          [ -n "$INSTANCE_ID" ] && PICK=(--instance-id "$INSTANCE_ID")
+          python3 python/launcher/launch.py run "${COMMON[@]}" "${PICK[@]}" \
+            --max-minutes 0 --low-cpu-pct 1 --max-dollars "$MAX_DOLLARS" \
+            --image "$IMAGE" --bin-sha "$BIN_SHA" --state-file instance-id.txt --handover-min 330
+      - name: Cancelled - ask the run to stop and wait (at most 5 minutes) for it to upload what it finished
+        if: cancelled() && hashFiles('instance-id.txt.run-id') != ''
+        shell: bash
+        run: python3 python/launcher/launch.py stop "$(cat instance-id.txt.run-id)" --instance "$(cat instance-id.txt)" --wait-s 300 --reason "workflow cancelled" || true
+      - name: Safety net - destroy the instance if the job was cancelled or failed
+        if: always() && hashFiles('instance-id.txt') != ''
+        shell: bash
+        run: python3 python/launcher/launch.py destroy "$(cat instance-id.txt)" || true
+      - name: Safety net - delete the run's destroy-only API key if the launcher did not
+        if: always() && hashFiles('instance-id.txt.destroy-key') != ''
+        shell: bash
+        run: python3 python/launcher/launch.py delete-key "$(cat instance-id.txt.destroy-key)" || true

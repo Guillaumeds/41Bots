@@ -84,8 +84,11 @@ def dataset_rows(entries):
     return sum(int(e.get("rows") or 0) for e in entries)
 
 
-def build(n, prev, amounts, scratch_last=None, risk_power=None, g2="auto", dflt=None, note=""):
-    """The manifest of round ``n`` from ``prev`` (a round.json or the seed record)."""
+def build(n, prev, amounts, scratch_last=None, risk_power=None, g2="auto", dflt=None, note="",
+          min_gpu_ram_gb=None, attempt=1):
+    """The manifest of round ``n`` from ``prev`` (a round.json or the seed record). ``min_gpu_ram_gb``
+    replaces the defaults' GPU memory floor (12 lets an RTX 3060 in for an all-additive round);
+    ``attempt`` numbers the run (``o3r-<n>-<attempt>``: a relaunch of the same round)."""
     d = dflt or defaults()
     if n < 1:
         raise ValueError("the round number is 1 or more")
@@ -121,6 +124,8 @@ def build(n, prev, amounts, scratch_last=None, risk_power=None, g2="auto", dflt=
     rows = dataset_rows(nxt["label_inputs"]) + amounts[-1]
     disk = d["disk"]
     machine = dict(d["machine"])
+    if min_gpu_ram_gb is not None:
+        machine["min_gpu_ram_gb"] = int(min_gpu_ram_gb)
     machine["disk_gb"] = int(disk["base_gb"] + disk["gb_per_million_rows"] * rows / 1e6 + 0.999)
     text = (f"O3G2 round {n} (docs/m3-hybrid/o3-rounds.md), from {prev.get('id') or 'the previous round'}: "
             f"new G2-chosen rows {', '.join(str(a) for a in amounts)} (nested), "
@@ -129,7 +134,7 @@ def build(n, prev, amounts, scratch_last=None, risk_power=None, g2="auto", dflt=
             f"{'reused' if rnd.get('risk_model') else 'built first'}. {note}").strip()
     return {
         "format": 2,
-        "run_id": f"{round_id(n)}-1",
+        "run_id": f"{round_id(n)}-{int(attempt)}",
         "run_seed": 1,
         "threads": None,
         "benchmark_seconds": 0,
