@@ -2,7 +2,40 @@
 
 **Current checkpoint: M3 (in progress)** (PLAN §13, as revised on 2026-10-13): PIMC bots, the exact early-trick yardstick and its N-curves, the trick-1 runs on rented machines, the gate against rules-v1. M0 (engine, reference, RNG, CI), M1 (equity table, arena, launcher) and M2 (solver spike) are done; see the dated entries below.
 
-## START HERE: state and next steps (2026-10-20, written for the next session or model)
+## START HERE (2026-10-21): O3G2 rounds built, not yet run on a rented machine
+
+**Decision (owner, 2026-10-21):** before O_2, push O_3 *alone* close to O_3 + G2, because O_2's
+training labels (exact through trick 2, then O_3, no G2) and the bronze set (O_2's test set: exact
+through tricks 1-2, then O_3, G2 only if cheap by then) both use O_3 alone. Target: O_3 alone at
+most 0.0025% (95% bound) overall and at every seat (today 0.0068%, seat 1 0.0201%; with G2 0.0008%,
+seat 1 0.0022%). Method: **O3G2 rounds**, `docs/m3-hybrid/o3-rounds.md` (read it first): G2 chooses
+the new training positions (frequency x risk^α, α = 1, 20% plain), up to three candidates a round
+(nested amounts, e.g. 2M, 4M, 8M), the winner by the additive adoption rule on the golden set, a
+label check of O_3's trick-2 labels, the next G2 on the winner, everything stored in R2
+(`rounds/<id>/round.json`). The Copilot work of 2026-10-19/20 was discarded; this starts from
+m3-hybrid 3935df4.
+
+**Built (branch `claude/admiring-ptolemy-ym00uf`):** `search risk-profile` and `search labels
+--harvest-risk` (`crates/search/src/risk_harvest.rs`); the round in `hybrid_rung`
+(`crates/runner/src/hybrid/round.rs`); `fortyone_nn.labelcmp`; `launch.py round-manifest` and
+`--instance-id` (take over a machine rented by hand: `vastai update instance`; its disk must
+already be about 250 GB); `.github/workflows/o3-round.yml`; round 1's manifest
+`docs/vast/o3-round-1.manifest.json`. All tests pass (fmt, clippy, workspace, Python).
+
+**Next, in order:**
+1. Copy `.github/workflows/o3-round.yml` to `main` (GitHub lists dispatchable workflows from the
+   default branch), merge or PR the branch into `m3-hybrid` as the owner prefers.
+2. `release-binaries.yml` for the branch head; put its commit in `docs/vast/o3-rounds/defaults.json`
+   `bin_sha`.
+3. A rehearsal round (e.g. `amounts=20k,40k`, `max_dollars=1.5`): checks boot, take-over or offer,
+   the stored base fetch, the overlap, the uploads and `rounds/<id>/round.json`; vast shows 0
+   instances afterwards. A 256-thread EPYC 7B12 with an RTX 3060 ($0.30/h, offer 36863856 on
+   2026-10-21) suits an all-additive round with `min_gpu_ram_gb=12`.
+4. Round 1: `round=1, from=seed, amounts=2M,4M,8M` (optionally `scratch_last=4096,2048,1024,256`).
+5. Free reads still owed: the results of `o3-base80-1` (O_3 at 80M base) and the ensemble rerun
+   were never written into the docs (`r2-fetch.yml`).
+
+## Earlier: state and next steps (2026-10-20, written for the next session or model)
 
 Read this section, then `docs/m3-hybrid/learned-leaves.md` (G v2 and O_2 G v2), `docs/STUDENT.md`
 §11-14 and `docs/m3-hybrid/silver.md`. The dated sections further down are history. The working plan
