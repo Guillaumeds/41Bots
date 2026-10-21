@@ -95,6 +95,7 @@ use crate::ordered::{ordered, window_for};
 use crate::pimc::{
     Candidate, Ctx, DynLeaf, SearchConfig, SharedLeaf, WorldSolve, candidates, exact_world,
 };
+use crate::risk_harvest::RiskKeep;
 use crate::worlds::{BeliefSource, WorldSource, rebuild};
 
 /// Seed label of label rows.
@@ -1256,6 +1257,10 @@ pub struct HarvestJob {
     /// --source siblings`): `cap` is then the most groups a decision gives. Not with `race` or
     /// `keep`.
     pub siblings: bool,
+    /// The risk-guided harvest (`--harvest-risk`, [`crate::risk_harvest`]): each reached
+    /// position is kept with its risk band's acceptance, then up to `cap` of the kept ones per
+    /// decision. Needs a network driver; not with `race`, `keep` or `siblings`.
+    pub risk: Option<RiskKeep>,
 }
 
 /// The default cap of a targeted harvest's in-group positions per decision.
@@ -1576,6 +1581,14 @@ pub struct HarvestDecision {
     /// then, so other runs' facts are as before).
     #[serde(skip_serializing_if = "is_zero")]
     pub keep_distinct: u32,
+    /// A risk-guided harvest: the decision's distinct reached positions by risk band (empty
+    /// otherwise; not written then).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub risk_reached: Vec<u32>,
+    /// A risk-guided harvest: the decision's rows by risk band (the rows it gives, the last
+    /// decision's cut included; empty otherwise).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub risk_rows: Vec<u32>,
 }
 
 fn is_zero(x: &u32) -> bool {
@@ -1598,6 +1611,8 @@ pub struct DecisionHarvest {
     pub row_groups: Vec<Vec<u32>>,
     /// A targeted harvest: distinct reached positions in each group (empty for other runs).
     pub reached_groups: Vec<u32>,
+    /// A risk-guided harvest: each row's risk band, in row order (empty for other runs).
+    pub row_bands: Vec<u8>,
     /// Time in the search (reports only).
     pub search_time: Duration,
     /// Time labelling the sample, its exact solves included when a network drove the search
@@ -1758,6 +1773,9 @@ pub struct DecisionPlan {
     pub row_groups: Vec<Vec<u32>>,
     /// A targeted harvest: distinct reached positions in each group (empty for other runs).
     pub reached_groups: Vec<u32>,
+    /// A risk-guided harvest: each sampled position's risk band, in sample order (empty for
+    /// other runs).
+    pub row_bands: Vec<u8>,
     /// The family whose solves may share a table: every frontier position the decision's
     /// search reaches in its world descends from it (`None`: each solve from empty tables).
     pub family: Option<SolveFamily>,
@@ -1893,10 +1911,30 @@ pub fn harvest_plan(
     };
     let mut race_distinct = 0;
     let mut keep_distinct = 0;
+    // A risk-guided harvest's band of every reached position, and its distinct positions by band.
+    let mut bands: Vec<u8> = Vec::new();
+    let mut risk_reached: Vec<u32> = Vec::new();
     // A targeted harvest's groups of every reached position.
     let mut members: Vec<Vec<u32>> = Vec::new();
     let mut reached_groups: Vec<u32> = Vec::new();
     let mut chosen = match (job.race, &job.keep) {
+        (None, None) if job.risk.is_some() => {
+            // Each reached position kept with its band's acceptance (a coin from the decision's
+            // stream, in reach order), then up to `cap` of the kept ones.
+            let risk = job.risk.as_ref().expect("checked");
+            let pr = &risk.profile;
+            risk_reached = vec![0; pr.bands()];
+            let mut kept = Vec::new();
+            for (i, r) in list.iter().enumerate() {
+                let b = pr.band(risk.model.score(&r.canon, &r.ctx, leaf, &r.value));
+                bands.push(b as u8);
+                risk_reached[b] += 1;
+                if (rng.next_u64() >> 32) < pr.accept[b] {
+                    kept.push(i);
+                }
+            }
+            sample(kept, job.cap as usize, &mut rng)
+        }
         (None, Some(keep)) => {
             // The in-group positions first, up to their cap, then the others up to `cap`.
             let mut ev = Evaluator::new(&keep.preds, leaf);
@@ -1951,6 +1989,11 @@ pub fn harvest_plan(
     } else {
         chosen.iter().map(|&i| members[i].clone()).collect()
     };
+    let row_bands: Vec<u8> = if bands.is_empty() {
+        Vec::new()
+    } else {
+        chosen.iter().map(|&i| bands[i]).collect()
+    };
     let plan = DecisionPlan {
         info: HarvestDecision {
             id: j,
@@ -1964,10 +2007,13 @@ pub fn harvest_plan(
             search_nodes: run.stats.nodes,
             race_distinct,
             keep_distinct,
+            risk_reached,
+            risk_rows: Vec::new(),
         },
         sample: samples,
         row_groups,
         reached_groups,
+        row_bands,
         family,
         search_time: t0.elapsed(),
     };
@@ -2164,10 +2210,13 @@ pub fn sibling_plan(
             search_nodes: run.stats.nodes,
             race_distinct: 0,
             keep_distinct: 0,
+            risk_reached: Vec::new(),
+            risk_rows: Vec::new(),
         },
         sample,
         row_groups: Vec::new(),
         reached_groups: Vec::new(),
+        row_bands: Vec::new(),
         family,
         search_time: t0.elapsed(),
     };
@@ -2327,6 +2376,7 @@ fn harvest_decision_with(
         reached,
         row_groups: plan.row_groups,
         reached_groups: plan.reached_groups,
+        row_bands: plan.row_bands,
         search_time: plan.search_time,
         label_time: t1.elapsed(),
     }
@@ -2356,6 +2406,12 @@ fn check_harvest_job(job: &HarvestJob) {
         "a sibling run keeps its groups (at least 1 a decision), not race classes or a \
          predicate file's groups"
     );
+    assert!(
+        job.risk.is_none()
+            || (job.race.is_none() && job.keep.is_none() && !job.siblings && job.cap >= 1),
+        "a risk-guided harvest keeps by risk band, at least 1 a decision; not with race classes, \
+         a predicate file's groups or sibling groups"
+    );
     if let Some(k) = &job.keep {
         assert!(
             k.cap >= 1 && !k.preds.is_empty(),
@@ -2375,6 +2431,20 @@ fn check_harvest_job(job: &HarvestJob) {
         "the strata are 1-4, ascending and distinct"
     );
     assert!(!job.schedule.is_empty() && job.schedule.iter().all(|&p| p < 8));
+}
+
+/// A risk-guided harvest's rows by band (empty for other runs).
+fn bands_of(rows: &[u8], job: &HarvestJob) -> Vec<u32> {
+    match &job.risk {
+        None => Vec::new(),
+        Some(r) => {
+            let mut v = vec![0u32; r.profile.bands()];
+            for &b in rows {
+                v[usize::from(b)] += 1;
+            }
+            v
+        }
+    }
 }
 
 /// A harvest's run, whatever its schedule: decisions 0, 1, 2, … in order, each giving its sampled
@@ -2438,6 +2508,7 @@ fn run_harvest<T: Send>(
                     let (k, go) = keep(plan.sample.len());
                     let mut info = plan.info.clone();
                     info.rows = k as u32;
+                    info.risk_rows = bands_of(&plan.row_bands[..k.min(plan.row_bands.len())], job);
                     decision(&info, &plan.reached_groups, &groups_of(&plan.row_groups, k));
                     search_time += plan.search_time;
                     Ok((label_items(&plan, k, exec.group, job.seed), go))
@@ -2475,6 +2546,8 @@ fn run_harvest<T: Send>(
                     let (k, go) = keep(out.rows.len());
                     out.rows.truncate(k);
                     out.info.rows = k as u32;
+                    out.info.risk_rows =
+                        bands_of(&out.row_bands[..k.min(out.row_bands.len())], job);
                     decision(
                         &out.info,
                         &out.reached_groups,
@@ -2900,6 +2973,7 @@ mod tests {
             race: None,
             keep: None,
             siblings: false,
+            risk: None,
         }
     }
 
@@ -3168,6 +3242,7 @@ mod tests {
             count,
             threads,
             siblings: true,
+            risk: None,
             ..harvest_job(4, vec![3], [1; 8], 16)
         };
         let (a, da) = harvest_rows(&job(1, 90), &starts, &*l, Driver::Exact, None);
@@ -3778,6 +3853,7 @@ mod tests {
             let job = HarvestJob {
                 keep: Some(keep.clone()),
                 siblings: false,
+                risk: None,
                 cap: other,
                 ..base.clone()
             };
@@ -3937,6 +4013,90 @@ mod tests {
         let net = nn::synthetic::random_net(seed, &[32, 16], nn::outcome::vocab(k), 100);
         let meta = BTreeMap::from([("head".to_string(), "outcome-v1".to_string())]);
         nn::Oracle::from_bytes(&nn::oracle::write_net(&net, k, &meta), leaf()).expect("loads")
+    }
+
+    /// A leaf-risk model for `net` whose score is `low` at race classes 0-1 and `high` above.
+    fn race_risk_model(net: &nn::Oracle, low: i64, high: i64) -> nn::leafrisk::RiskModel {
+        let v = serde_json::json!({
+            "format": nn::leafrisk::FORMAT, "encoder": nn::encode::ENCODER,
+            "n_inputs": nn::leafrisk::N_INPUTS, "extras": nn::leafrisk::EXTRA_NAMES,
+            "net_sha256": net.sha256, "trick": net.trick, "base": 0,
+            "trees": [{"f": [nn::encode::N_FEATURES as i64, -1, -1], "t": [1, 0, 0],
+                       "l": [1, 0, 0], "r": [2, 0, 0], "v": [0, low, high]}],
+        });
+        nn::leafrisk::RiskModel::parse(v.to_string().as_bytes()).expect("model")
+    }
+
+    /// The risk-guided harvest (`crate::risk_harvest`): the pilot's scores and the shard are the
+    /// same on any thread count; every decision's reached positions and rows are counted by band;
+    /// a band of risk 0 with no floor is never kept; a model for another network is refused.
+    #[test]
+    fn risk_guided_harvest_keeps_by_band_and_is_thread_independent() {
+        use crate::risk_harvest::{RiskKeep, RiskProfile, build_profile, pilot_scores};
+        let starts = collect_starts(400, 9);
+        let l = leaf();
+        let net = random_oracle(3, 29);
+        let model = race_risk_model(&net, 0, 1000);
+        let base = HarvestJob {
+            threads: 1,
+            ..harvest_job(3, vec![2], [1; 8], 6)
+        };
+        let pilot = |threads| {
+            pilot_scores(
+                &base,
+                6,
+                &model,
+                &starts,
+                &*l,
+                Driver::Net(&net),
+                tt_mb_for(3),
+                threads,
+            )
+        };
+        let scores = pilot(1);
+        assert_eq!(scores, pilot(3));
+        assert!(scores.contains(&0) && scores.contains(&1000), "{scores:?}");
+        let (edges, counts, mean, accept) = build_profile(scores, 2, 4, 0);
+        assert_eq!(accept[0], 0, "risk 0, no floor: never kept");
+        let profile = RiskProfile {
+            model_sha256: model.sha256.clone(),
+            net_sha256: net.sha256.clone(),
+            power_q: 4,
+            floor_ppm: 0,
+            edges,
+            counts,
+            mean,
+            accept,
+            pilot_seed: 5,
+            pilot_decisions: 6,
+        };
+        let keep = RiskKeep::new(model.clone(), profile.clone(), &net.sha256).expect("for net");
+        let job = |threads| HarvestJob {
+            threads,
+            count: 40,
+            risk: Some(keep.clone()),
+            ..base.clone()
+        };
+        let (a, da) = harvest_rows(&job(1), &starts, &*l, Driver::Net(&net), None);
+        let (b, db) = harvest_rows(&job(4), &starts, &*l, Driver::Net(&net), None);
+        let rows = |r: &[(Row, RowInfo)]| r.iter().map(|x| x.0.clone()).collect::<Vec<Row>>();
+        assert_eq!(rows(&a), rows(&b));
+        let facts = |d: &[HarvestDecision]| serde_json::to_string(d).expect("json");
+        assert_eq!(facts(&da), facts(&db));
+        assert_eq!(a.len(), 40);
+        for d in &da {
+            assert_eq!(d.risk_reached.iter().sum::<u32>(), d.distinct);
+            assert_eq!(d.risk_rows.iter().sum::<u32>(), d.rows);
+            assert_eq!(d.risk_rows[0], 0, "band 0 is never kept");
+        }
+        // Every row is a race class 2-4 position (the model's risky ones).
+        assert!(a.iter().all(|(_, info)| info.class >= 2));
+        // A model made for another network, or a profile made with another model, is refused.
+        let other = random_oracle(3, 31);
+        assert!(
+            RiskKeep::new(race_risk_model(&other, 0, 1), profile.clone(), &net.sha256).is_err()
+        );
+        assert!(RiskKeep::new(model.clone(), profile, &other.sha256).is_err());
     }
 
     /// Driven by a network, the harvest's search is the hybrid H_k with that network (the same
@@ -4260,6 +4420,7 @@ mod tests {
                 HarvestJob {
                     keep: Some(keep.clone()),
                     siblings: false,
+                    risk: None,
                     cap: 1,
                     ..base(4, 1, 30)
                 },
@@ -4271,6 +4432,7 @@ mod tests {
                 HarvestJob {
                     keep: Some(keep.clone()),
                     siblings: false,
+                    risk: None,
                     cap: 1,
                     ..base(4, 1, 30)
                 },
@@ -4282,6 +4444,7 @@ mod tests {
                 HarvestJob {
                     keep: Some(keep.clone()),
                     siblings: false,
+                    risk: None,
                     cap: 1,
                     schedule: position_schedule(parse_band_shares("0,0,1").expect("shares")),
                     ..base(3, 1, 8)

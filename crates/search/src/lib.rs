@@ -51,6 +51,7 @@ pub mod oracle_labels;
 pub mod ordered;
 pub mod pimc;
 pub mod plan;
+pub mod risk_harvest;
 pub mod saved;
 pub mod student_teacher;
 pub mod t1bench;

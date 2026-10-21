@@ -45,8 +45,13 @@
 //!                  [--harvest-keep PRED.json [--keep-cap 256]] [--max-decisions N]
 //!                  [--harvest-schedule pooled|decision]
 //!                  [--seat-weights 2,1,1]
+//!                  [--harvest-risk MODEL.json --risk-profile PROFILE.json]
 //!                  [--label-net WEIGHTS [--exact-share 0.1] [--exact-leaves SPEC
 //!                   [--exact-leaf-tt-mb N]]]
+//! search risk-profile --trick K --seed S --harvest-net WEIGHTS --harvest-risk MODEL.json
+//!                  --equity TABLE --out PROFILE.json [--decisions 2000] [--bands 20] [--power 1]
+//!                  [--floor 0.2] [--harvest-tricks K-1] [--harvest-positions 0.25,0.25,0.5]
+//!                  [--harvest-strata 1,2,3,4] [--start-hands 20000] [--threads T]
 //! search student-check --net STUDENT.safetensors --teacher SHARD.npy [--teacher …] --equity TABLE
 //!                     (or --golden-decisions D.jsonl --golden-worlds W.jsonl [--to N] for exact values)
 //!                  [--allow-stamp KEY …] [--boot 1000] [--boot-seed 1] [--json OUT]
@@ -424,11 +429,12 @@ fn main() -> ExitCode {
         Some("bench-t1") => bench_t1(&a),
         Some("robber-burn") => robber_burn(&a),
         Some("labels") => labels_cmd(&a),
+        Some("risk-profile") => risk_profile_cmd(&a),
         Some("hybrid-check") => hybrid_check(&a),
         Some("hybrid-paired") => hybrid_paired(&a),
         Some("student-check") => student_check(&a),
         _ => Err(
-            "usage: search decisions|worlds|agree|curves|score|teacher|bench-t1|robber-burn|labels|hybrid-check|hybrid-paired|student-check … (see the source docs)"
+            "usage: search decisions|worlds|agree|curves|score|teacher|bench-t1|robber-burn|labels|risk-profile|hybrid-check|hybrid-paired|student-check … (see the source docs)"
                 .into(),
         ),
     };
@@ -2290,6 +2296,144 @@ fn binary_sha256() -> String {
         .unwrap_or_default()
 }
 
+/// `search risk-profile`: the pilot of a risk-guided harvest (`search::risk_harvest`): the
+/// harvest's own search on `--decisions` decisions (a seed derived from `--seed`, never the
+/// labels' decisions), every reached position scored by the leaf-risk model, cut into `--bands`
+/// bands of equal count, and each band's acceptance for `--power` and `--floor`. Writes the
+/// profile JSON that `search labels --risk-profile` reads; the same file for any thread count.
+fn risk_profile_cmd(a: &Args) -> Result<(), String> {
+    use search::oracle_labels::{
+        Driver, GOLDEN_SEED, HARVEST_SHARES, HARVEST_STRATA, HarvestJob, parse_band_shares,
+        parse_strata, position_schedule, tt_mb_for,
+    };
+    use search::risk_harvest::{
+        RISK_BANDS, RISK_FLOOR_PPM, RISK_PILOT_DECISIONS, RiskProfile, build_profile, parse_power,
+        parse_ppm, pilot_scores, pilot_seed,
+    };
+    let trick = a.num("--trick", 3)? as u8;
+    if !(2..=5).contains(&trick) {
+        return Err("--trick is 2..=5 (the start of that trick)".into());
+    }
+    let seed = a.num("--seed", 0)?;
+    if seed == 0 || seed == GOLDEN_SEED {
+        return Err("--seed: the labels' seed (not 0 or the golden seed 1)".into());
+    }
+    let threads = a.num("--threads", 1)?.max(1) as usize;
+    let decisions = a.num("--decisions", RISK_PILOT_DECISIONS)?;
+    let bands = a.num("--bands", RISK_BANDS as u64)? as usize;
+    if decisions == 0 || !(1..=255).contains(&bands) {
+        return Err("--decisions is at least 1 and --bands 1 to 255".into());
+    }
+    let power_q = parse_power(a.get("--power").unwrap_or("1"))?;
+    let floor_ppm = match a.get("--floor") {
+        None => RISK_FLOOR_PPM,
+        Some(f) => parse_ppm(f).map_err(|e| format!("--floor {e}"))?,
+    };
+    let strata = match a.get("--harvest-strata") {
+        None => HARVEST_STRATA.to_vec(),
+        Some(x) => parse_strata(x).map_err(|e| format!("--harvest-strata: {e}"))?,
+    };
+    let shares = a.get("--harvest-positions").unwrap_or(HARVEST_SHARES);
+    let weights = parse_band_shares(shares).map_err(|e| format!("--harvest-positions: {e}"))?;
+    let tricks: Vec<u8> = match a.get("--harvest-tricks") {
+        None => vec![trick - 1],
+        Some(t) => t
+            .split(',')
+            .map(|x| {
+                x.trim()
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|t| (1..trick).contains(t))
+            })
+            .collect::<Option<Vec<_>>>()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| format!("--harvest-tricks {t:?}: decision tricks before {trick}"))?,
+    };
+    let (table, _) = load_equity_sha(a.req("--equity")?)?;
+    let leaf: Arc<SharedLeaf> = Arc::new(table);
+    let net_path = a.req("--harvest-net")?;
+    let o = nn::Oracle::load(Path::new(net_path), leaf.clone())?;
+    if o.trick != trick {
+        return Err(format!(
+            "--harvest-net {net_path} was trained for trick {} positions, not trick {trick}",
+            o.trick
+        ));
+    }
+    let model_path = a.req("--harvest-risk")?;
+    let model = nn::leafrisk::RiskModel::load(Path::new(model_path))?;
+    if model.net_sha256 != o.sha256 {
+        return Err(format!(
+            "--harvest-risk {model_path} was made for the network {}, not {net_path} ({})",
+            model.net_sha256, o.sha256
+        ));
+    }
+    let ps = pilot_seed(seed);
+    let job = HarvestJob {
+        trick,
+        count: 0,
+        seed: ps,
+        threads,
+        cap: 1,
+        tricks,
+        schedule: position_schedule(weights),
+        strata,
+        race: None,
+        keep: None,
+        siblings: false,
+        risk: None,
+    };
+    let t0 = Instant::now();
+    let starts = collect_starts_with(a.num("--start-hands", 20_000)?, ps, threads);
+    let scores = pilot_scores(
+        &job,
+        decisions,
+        &model,
+        &starts,
+        &*leaf,
+        Driver::Net(&o),
+        tt_mb_for(trick),
+        threads,
+    );
+    if scores.is_empty() {
+        return Err("the pilot reached no position".into());
+    }
+    let (edges, counts, mean, accept) = build_profile(scores, bands, power_q, floor_ppm);
+    let p = RiskProfile {
+        model_sha256: model.sha256.clone(),
+        net_sha256: o.sha256.clone(),
+        power_q,
+        floor_ppm,
+        edges,
+        counts,
+        mean,
+        accept,
+        pilot_seed: ps,
+        pilot_decisions: decisions,
+    };
+    let mut v = p.to_json();
+    v["trick"] = serde_json::json!(trick);
+    v["harvest_positions"] = serde_json::json!(shares);
+    v["seconds"] = serde_json::json!((t0.elapsed().as_secs_f64() * 10.0).round() / 10.0);
+    let out = a.req("--out")?;
+    std::fs::write(
+        out,
+        serde_json::to_string_pretty(&v).map_err(|e| e.to_string())? + "\n",
+    )
+    .map_err(|e| format!("{out}: {e}"))?;
+    eprintln!(
+        "risk-profile: {} positions from {decisions} pilot decisions in {:.1} s; {} bands, power \
+         {}, floor {floor_ppm} ppm; keeps {:.2}% of reached positions before the cap; target \
+         shares (lowest risk first) {:?}",
+        p.counts.iter().sum::<u64>(),
+        t0.elapsed().as_secs_f64(),
+        p.bands(),
+        search::risk_harvest::power_text(power_q),
+        p.yield_ppm() as f64 / 1e4,
+        p.target_ppm()
+    );
+    Ok(())
+}
+
 /// `search labels`: a label shard for the oracle network O_K and its sidecar.
 fn labels_cmd(a: &Args) -> Result<(), String> {
     use search::oracle_labels::{
@@ -2331,6 +2475,8 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
         "--max-decisions",
         "--seat-weights",
         "--harvest-schedule",
+        "--harvest-risk",
+        "--risk-profile",
     ];
     // The rows' loss weights by their decision's seat band, written beside the shard
     // (`NAME.npy.rowweights`) before it is renamed into place.
@@ -2355,7 +2501,30 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
             }
         }
     }
-    let harvest = if matches!(job.source, Source::Harvest | Source::Siblings) {
+    if a.has("--harvest-risk") || a.has("--risk-profile") {
+        if !(a.has("--harvest-risk") && a.has("--risk-profile")) {
+            return Err(
+                "a risk-guided harvest needs both --harvest-risk MODEL.json and --risk-profile \
+                 PROFILE.json (search risk-profile)"
+                    .into(),
+            );
+        }
+        for f in ["--harvest-keep", "--harvest-race-classes", "--seat-weights"] {
+            if a.has(f) {
+                return Err(format!(
+                    "{f} and --harvest-risk: a harvest keeps by one rule only"
+                ));
+            }
+        }
+        if siblings || !a.has("--harvest-net") {
+            return Err(
+                "--harvest-risk scores the network's values: a harvest (--source harvest) driven \
+                 by --harvest-net, the network the model was made for"
+                    .into(),
+            );
+        }
+    }
+    let mut harvest = if matches!(job.source, Source::Harvest | Source::Siblings) {
         let keep = match a.get("--harvest-keep") {
             None => {
                 if a.has("--keep-cap") {
@@ -2482,6 +2651,8 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
                 race,
                 keep: keep.as_ref().map(|(k, _)| k.clone()),
                 siblings,
+                // Set once the driving network is loaded (the model must be made for it).
+                risk: None,
             },
             shares.to_string(),
             weights,
@@ -2521,6 +2692,26 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
             Some((o, p.to_string()))
         }
         None => None,
+    };
+    // The risk-guided harvest (`--harvest-risk`): the model and the profile, both for this
+    // network.
+    let risk_files = match (a.get("--harvest-risk"), a.get("--risk-profile"), &net) {
+        (Some(m), Some(pf), Some((o, _))) => {
+            let model = nn::leafrisk::RiskModel::load(Path::new(m))?;
+            let text = std::fs::read_to_string(pf).map_err(|e| format!("{pf}: {e}"))?;
+            let v: serde_json::Value =
+                serde_json::from_str(&text).map_err(|e| format!("{pf}: {e}"))?;
+            let profile = search::risk_harvest::RiskProfile::from_json(&v)
+                .map_err(|e| format!("{pf}: {e}"))?;
+            let keep = search::risk_harvest::RiskKeep::new(model, profile, &o.sha256)
+                .map_err(|e| format!("--harvest-risk: {e}"))?;
+            if let Some((h, ..)) = harvest.as_mut() {
+                h.risk = Some(keep);
+            }
+            eprintln!("labels: risk-guided harvest: model {m}, profile {pf}");
+            Some((m.to_string(), pf.to_string()))
+        }
+        _ => None,
     };
     let driver = net.as_ref().map_or(Driver::Exact, |(o, _)| Driver::Net(o));
     // Hybrid labels (`--label-net`): the network at the start of the next trick.
@@ -2897,6 +3088,32 @@ fn labels_cmd(a: &Args) -> Result<(), String> {
             HARVEST_TT_MB,
             net.as_ref().map(|(o, p)| (o, p.as_str())),
         );
+        if let (Some(r), Some((m, pf))) = (&h.risk, &risk_files) {
+            // What the risk profile asked for and what the shard holds, band by band.
+            let mut rows = vec![0u64; r.profile.bands()];
+            let mut reached = vec![0u64; r.profile.bands()];
+            for d in &decisions {
+                for (x, &n) in rows.iter_mut().zip(&d.risk_rows) {
+                    *x += u64::from(n);
+                }
+                for (x, &n) in reached.iter_mut().zip(&d.risk_reached) {
+                    *x += u64::from(n);
+                }
+            }
+            let mut prof = r.profile.to_json();
+            prof["file"] = serde_json::json!(pf);
+            side["risk"] = serde_json::json!({
+                "model": m, "model_sha256": r.model.sha256, "net_sha256": r.model.net_sha256,
+                "profile": prof,
+                "rows_by_band": rows,
+                "reached_by_band": reached,
+                "what": "a risk-guided harvest (search::risk_harvest): each reached position kept \
+                         with its band's acceptance before labelling, then up to the cap per \
+                         decision; rows_by_band counts the shard's rows, reached_by_band the \
+                         decisions' distinct reached positions",
+            });
+            eprintln!("labels: risk-guided harvest: rows by band {rows:?}");
+        }
         if h.siblings {
             side["harvest"]["what"] = serde_json::json!(
                 "sibling groups from training decisions (see siblings): not a sample of the \
@@ -5244,6 +5461,8 @@ mod tests {
             search_nodes: 10,
             race_distinct: distinct / 4,
             keep_distinct: 0,
+            risk_reached: Vec::new(),
+            risk_rows: Vec::new(),
         }
     }
 
@@ -5264,6 +5483,7 @@ mod tests {
             race: None,
             keep: None,
             siblings: false,
+            risk: None,
         };
         let ds = [
             decision(1, 2000, 2500, 16),
