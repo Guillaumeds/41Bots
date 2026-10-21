@@ -107,6 +107,9 @@ on:
       offer_dph:
         description: "With offer_id (optional): the price per hour you saw on vast.ai; a warning if vast reports another"
         default: ""
+      offer_machine:
+        description: "Named offer machine ID, used when Vast omits it from offer-ID searches"
+        default: ""
       offer_cores:
         description: "With offer_id (optional): the CPU cores you saw on vast.ai (e.g. 384); a warning if vast reports another"
         default: ""
@@ -161,6 +164,7 @@ jobs:
           OFFER_ID: ${{ inputs.offer_id }}
           OFFER_DPH: ${{ inputs.offer_dph }}
           OFFER_CORES: ${{ inputs.offer_cores }}
+          OFFER_MACHINE: ${{ inputs.offer_machine }}
           RESUME_FROM: ${{ inputs.resume_from }}
         run: |
           set -euo pipefail
@@ -171,7 +175,7 @@ jobs:
           # --offer-id: the one offer the owner named, checked by id (no other search); blank: the normal search.
           OFFER_ARGS=""
           if [ -n "$OFFER_ID" ]; then
-            OFFER_ARGS="--offer-id $OFFER_ID ${OFFER_DPH:+--offer-dph $OFFER_DPH} ${OFFER_CORES:+--offer-cores $OFFER_CORES}"
+            OFFER_ARGS="--offer-id $OFFER_ID ${OFFER_DPH:+--offer-dph $OFFER_DPH} ${OFFER_CORES:+--offer-cores $OFFER_CORES} ${OFFER_MACHINE:+--offer-machine $OFFER_MACHINE}"
           fi
           if [ "$DRY_RUN" = "true" ]; then
             # Prints the offer that would be rented (the named one with offer_id, else the search's choice); rents nothing.
