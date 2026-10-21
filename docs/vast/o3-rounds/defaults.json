@@ -1,6 +1,6 @@
 {
   "note": "Fixed settings of every O3G2 round (docs/m3-hybrid/o3-rounds.md); python/launcher/round_manifest.py fills in the round's own (id, seeds, amounts, the previous round's networks, G2 and dataset). Change a default here, in a commit, not per launch.",
-  "bin_sha": "2b19d2c17c83dacc2cc460eddf8e74f3d384489b",
+  "bin_sha": "ffbe6607ec1bfceaa34139837192c6eede85a4f9",
   "image": "ghcr.io/guillaumeds/41bots-base:20261017-bc692e446939",
   "max_dollars": 6,
   "machine": {
