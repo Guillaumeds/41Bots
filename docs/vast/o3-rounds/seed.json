@@ -1,0 +1,26 @@
+{
+  "id": "seed",
+  "note": "The start of the O3G2 rounds (docs/m3-hybrid/o3-rounds.md): the adopted O_3 (2048-1024-256, outcome head, trained on the 40M stored trick-3 base), its float twin, its G2 (leafrisk-o3-v1, built on this O_3: no rebuild needed), the stored base (random 25.6M s321, rules-v1 6.4M s322, harvest 8M s313 with its row weights) and validation shard (100k s401), and the stored trick-2 golden set (2,000 decisions x 320 exact worlds). Read by python/launcher/round_manifest.py as the 'previous round' of round 1, in the same shape as a round's round.json.",
+  "next": {
+    "init_net": "inputs/sha256/f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
+    "init_net_float": "inputs/sha256/b567967707852e8ae02f64890f4445ceac21eedd356b1beb7a570c157f64d447",
+    "risk_model": "inputs/sha256/20c41678c64681855003e5b8660e0a2e1fb9e8d552f7d898dd956055c767a9d5",
+    "golden_decisions_input": "inputs/sha256/635e9aef196c816380f3f15c05ede90b38b875fa4817061a57e6d39550065ab0",
+    "golden_worlds_input": "inputs/sha256/6ddc59b191e1fd534f260f9dfe103f742d6026768ca74acdbbb4fd430eb8265e",
+    "label_inputs": [
+      { "set": "random", "seed": 321, "rows": 25600000,
+        "shard": "inputs/sha256/fd846dadc7996734120b758ee2f3bbeeb0ef159ad27014ce1ee7f796fe52a220",
+        "sidecar": "inputs/sha256/da58c2dbc4f44aa735a3acf4dba5ee4c585ca116ab22ce233f114680301b5468" },
+      { "set": "rules", "seed": 322, "rows": 6400000,
+        "shard": "inputs/sha256/91c6e0014b76e0764f451aea7a093a7b79cfe9ac8a69f706cbe127cab109f086",
+        "sidecar": "inputs/sha256/401d9ed95d1291fdd7a9bdff7a5c98ee4c4d15d4c3997f9cf3107d3650afb82f" },
+      { "set": "harvest", "seed": 313, "rows": 8000000,
+        "shard": "inputs/sha256/a80cc28708543687cf743a69cff080be92ff0d25ee5021af740db5d12989b508",
+        "sidecar": "inputs/sha256/1522915f70385f02679026b3504cf11d506b7245d8cd2db6a9c994ed795c389e",
+        "rowweights": "inputs/sha256/d999c353e62bfa937abd544ad5ad68ce099af3bfc2e0f371c6bcdeeafecc4211" },
+      { "set": "val", "seed": 401, "rows": 100000,
+        "shard": "inputs/sha256/d51e22abd0aad9a699b28da82725bb163249148092fc1daca739a62e9a71c9e0",
+        "sidecar": "inputs/sha256/99c298a224010d8067f1e1bea7277ab54da8d6fb665df66dd899fbf5637a4c66" }
+    ]
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "note": "Fixed settings of every O3G2 round (docs/m3-hybrid/o3-rounds.md); python/launcher/round_manifest.py fills in the round's own (id, seeds, amounts, the previous round's networks, G2 and dataset). Change a default here, in a commit, not per launch.",
+  "bin_sha": "",
+  "image": "ghcr.io/guillaumeds/41bots-base:20261017-bc692e446939",
+  "max_dollars": 6,
+  "machine": {
+    "gpus": 1, "min_gpu_ram_gb": 16, "min_compute_cap": 600, "min_cores": 190, "min_ram_gb": 60,
+    "min_inet_down": 100, "max_dph": 1.7, "blackwell": true
+  },
+  "disk": { "base_gb": 80, "gb_per_million_rows": 3.5 },
+  "rung": {
+    "threads": "all", "cut": 3, "train_mode": "additive",
+    "additive_epochs": 8, "additive_lr": 0.0003, "adopt_tolerance": 0.002,
+    "golden_trick": 2, "golden_count": 2000, "golden_seed": 1, "golden_worlds": 320, "verify_pct": 1,
+    "head": "outcome", "batch": 1024, "patience": 4, "train_seed": 1, "max_minutes": 0,
+    "device": "cuda", "upload_shards": true, "table": { "hands": 1000000, "seed": 1 }
+  },
+  "round": {
+    "risk_power": "1", "risk_floor": "0.2", "risk_bands": 20, "risk_pilot": 2000, "risk_cap": 32,
+    "risk_tricks": "1,2", "risk_positions": "0.4,0.3,0.3",
+    "scratch_epochs": 40, "scratch_lr": 0.001,
+    "label_check": {
+      "shard": "inputs/sha256/38de48356209cbec0f9ce41ceba28e6d5df52428abc0c866d443f9eb57964327",
+      "sidecar": "inputs/sha256/b39dbd6bf8f00a9b71fa800ccdaf9dd7de0ef25bc5dd3fa7b8b9e718fe895df8"
+    },
+    "g2": {
+      "counts": { "train": 400000, "cal": 100000, "test": 100000 },
+      "harvest_cap": 32, "harvest_positions": "0.4,0.3,0.3", "start_hands": 20000,
+      "train": { "trees": 150, "depth": 6, "rate": 0.05, "min_leaf": 400, "subsample": 0.5, "seed": 1, "holdout": 0.1 },
+      "targets": "1.6,1.4,1.2,1.0,0.9,0.8,0.7,0.6,0.5,0.4", "delta": 0.05
+    }
+  }
+}

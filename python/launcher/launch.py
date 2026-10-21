@@ -1787,6 +1787,11 @@ def param_inputs(manifest: dict) -> dict[str, str]:
             for e in entries:
                 run = e.get("run") if isinstance(e, dict) else None
                 named.append((f"{k}[{run}]", e.get("input") if isinstance(e, dict) else e))
+        # An O3G2 round's stored G2 and its label check's exact shard (hybrid/round.rs).
+        rnd = params.get("round") if isinstance(params.get("round"), dict) else {}
+        named.append(("round.risk_model", rnd.get("risk_model")))
+        lc = rnd.get("label_check") if isinstance(rnd.get("label_check"), dict) else {}
+        named.extend((f"round.label_check.{k}", lc.get(k)) for k in ("shard", "sidecar"))
         entries = params.get("label_inputs")
         if entries is not None:
             if not isinstance(entries, list):
@@ -2485,6 +2490,26 @@ def cmd_plan(a) -> int:
     return 0 if plan_search(a) or float(a.wait_for_offer_min) > 0 else 1
 
 
+def cmd_round_manifest(a) -> int:
+    """Prints the manifest of an O3G2 round (round_manifest.py) built from the previous round's
+    record: the seed file for --from seed, else rounds/<from>/round.json in R2."""
+    import round_manifest as rm
+    if a.from_round != "seed":
+        need_env("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET", "R2_S3_ENDPOINT")
+    try:
+        prev = rm.previous(a.from_round, r2_get)
+        m = rm.build(a.round, prev, rm.parse_amounts(a.amounts), scratch_last=a.scratch_last or None,
+                     risk_power=a.risk_power or None, g2=a.g2, note=a.note)
+    except ValueError as e:
+        sys.exit(f"launch: round-manifest: {e}")
+    text = json.dumps(m, indent=1 if a.pretty else None)
+    if a.out:
+        with open(a.out, "w") as f:
+            f.write(text + "\n")
+    print(text)
+    return 0
+
+
 def cmd_put_input(a) -> int:
     """Uploads a file to inputs/sha256/<hex> (if not there yet) and prints the manifest value."""
     need_env("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET", "R2_S3_ENDPOINT")
@@ -2650,6 +2675,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-destroy-key", action="store_true",
                    help="do not create the run's destroy-only key (machines are then destroyed by the launcher only)")
     s.set_defaults(fn=cmd_run)
+    s = sub.add_parser("round-manifest", help="print the manifest of an O3G2 round (docs/m3-hybrid/o3-rounds.md)")
+    s.add_argument("--round", type=int, required=True, help="the round's number (1, 2, ...): its id o3r-N and seeds")
+    s.add_argument("--from", dest="from_round", required=True,
+                   help="the previous round's id (e.g. o3r-1), or 'seed' for round 1")
+    s.add_argument("--amounts", required=True, help="one to three growing amounts of new rows, e.g. 2M,4M,8M")
+    s.add_argument("--scratch-last", default="", help="train the last candidate from scratch at these widths, e.g. 4096,2048,1024,256")
+    s.add_argument("--risk-power", default="", help="alpha: 0, 0.25, 0.5, 0.75 or 1 (default: defaults.json, 1)")
+    s.add_argument("--g2", default="auto", choices=("auto", "rebuild"),
+                   help="auto: reuse the previous round's G2 of the incumbent; rebuild: build it first")
+    s.add_argument("--note", default="", help="a line added to the manifest's note")
+    s.add_argument("--out", default="", help="also write the manifest to this file")
+    s.add_argument("--pretty", action="store_true")
+    s.set_defaults(fn=cmd_round_manifest)
     s = sub.add_parser("put-input", help="upload a manifest input to R2 by content hash")
     s.add_argument("file")
     s.set_defaults(fn=cmd_put_input)
