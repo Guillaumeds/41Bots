@@ -48,6 +48,9 @@ on:
       min_gpu_ram_gb:
         description: "GPU memory floor in GB (16 is the rule; 12 allows an RTX 3060 for an all-additive round)"
         default: "16"
+      min_reliability:
+        description: "Host reliability floor (0.90 is the rule; lower only for a machine the owner picked)"
+        default: "0.90"
       max_dollars:
         description: "Dollar cap: stop, upload what is finished and destroy at this spend"
         default: "6"
@@ -113,6 +116,7 @@ jobs:
           CPU_MATCH: ${{ inputs.cpu_match }}
           MIN_GPU_RAM_GB: ${{ inputs.min_gpu_ram_gb }}
           MAX_DOLLARS: ${{ inputs.max_dollars }}
+          MIN_RELIABILITY: ${{ inputs.min_reliability }}
           BIN_SHA_IN: ${{ inputs.bin_sha }}
           IMAGE_IN: ${{ inputs.image }}
           DRY_RUN: ${{ inputs.dry_run }}
@@ -122,7 +126,7 @@ jobs:
           BIN_SHA=${BIN_SHA_IN:-$(python3 -c "import json;print(json.load(open('$D'))['bin_sha'])")}
           BIN_SHA=${BIN_SHA:-$GITHUB_SHA}
           IMAGE=${IMAGE_IN:-$(python3 -c "import json;print(json.load(open('$D'))['image'])")}
-          COMMON=(--manifest round-manifest.json --min-cores 190 --min-ram-gb 60 --cpu-match "$CPU_MATCH" --any-host --gpus 1 --min-gpu-ram-gb "$MIN_GPU_RAM_GB")
+          COMMON=(--manifest round-manifest.json --min-cores 190 --min-ram-gb 60 --cpu-match "$CPU_MATCH" --any-host --gpus 1 --min-gpu-ram-gb "$MIN_GPU_RAM_GB" --min-reliability "$MIN_RELIABILITY")
           PICK=()
           [ -n "$OFFER_ID" ] && PICK=(--offer-id "$OFFER_ID")
           if [ "$DRY_RUN" = "true" ]; then
