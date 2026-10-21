@@ -1,0 +1,57 @@
+name: r2-inventory
+
+# Read-only: lists every object in the R2 bucket with its size and date, and summarises the space by
+# area (inputs/sha256, runs/<run>, bin/<commit>, rounds/<id>, ...). Deletes nothing. The full list
+# is the run's artifact (inventory.tsv); the summary is on the run page. It is the first step of the
+# R2 cleanup (owner, 2026-10-21): the register of what to keep and the delete list come from it, and
+# nothing is deleted without the owner's approval.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: List the bucket
+        env:
+          AWS_ACCESS_KEY_ID: ${{ vars.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          ENDPOINT: ${{ vars.R2_S3_ENDPOINT }}
+          BUCKET: ${{ vars.R2_BUCKET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          aws --endpoint-url "$ENDPOINT" s3 ls "s3://$BUCKET/" --recursive \
+            | awk '{size=$3; date=$1" "$2; $1=$2=$3=""; sub(/^ +/, ""); print date "\t" size "\t" $0}' > out/inventory.tsv
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY" > out/summary.md
+          import collections
+          rows = [l.rstrip("\n").split("\t") for l in open("out/inventory.tsv") if l.strip()]
+          def area(k):
+              p = k.split("/")
+              if p[0] in ("runs", "bin", "rounds", "partial", "done") and len(p) > 2:
+                  return "/".join(p[:2]) + "/"
+              return p[0] + "/" if len(p) > 1 else k
+          size, count, last = collections.Counter(), collections.Counter(), {}
+          for date, s, k in rows:
+              a = area(k)
+              size[a] += int(s); count[a] += 1
+              last[a] = max(last.get(a, ""), date)
+          total = sum(size.values())
+          print(f"### R2 inventory: {len(rows)} objects, {total / 1e9:.1f} GB\n")
+          print("| area | objects | GB | latest |")
+          print("|---|---|---|---|")
+          for a, s in size.most_common():
+              print(f"| `{a}` | {count[a]} | {s / 1e9:.2f} | {last[a]} |")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r2-inventory
+          path: out/
+          retention-days: 30

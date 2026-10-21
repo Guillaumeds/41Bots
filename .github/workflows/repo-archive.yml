@@ -1,0 +1,62 @@
+name: repo-archive
+
+# Tidies the branch list (owner, 2026-10-21): every branch except the ones kept becomes a permanent
+# tag archive/<branch> at its last commit, then the branch is deleted. Nothing is lost: the code of
+# an archived branch is `git checkout archive/<branch>`, and docs/README.md says what each one was.
+# dry_run (the default) only prints what would happen.
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep:
+        description: "Branches to keep, space-separated (main is always kept)"
+        default: "main claude/admiring-ptolemy-ym00uf"
+      dry_run:
+        description: "Only print the plan"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  archive:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Tag and delete the old branches
+        shell: bash
+        env:
+          KEEP: ${{ inputs.keep }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          git config user.name "repo-archive"
+          git config user.email "repo-archive@users.noreply.github.com"
+          keep=" main $KEEP "
+          n=0
+          for b in $(git ls-remote --heads origin | awk '{print $2}' | sed 's|refs/heads/||' | sort); do
+            case "$keep" in *" $b "*) echo "keep    $b"; continue;; esac
+            sha=$(git ls-remote --heads origin "refs/heads/$b" | awk '{print $1}')
+            tag="archive/$b"
+            echo "archive $b -> $tag ($sha)"
+            n=$((n+1))
+            [ "$DRY_RUN" = "true" ] && continue
+            if git ls-remote --tags origin "refs/tags/$tag" | grep -q .; then
+              echo "  tag $tag exists already"
+            else
+              git tag -a "$tag" "$sha" -m "Archived branch $b (repo-archive, $(date -u +%F))"
+              git push -q origin "refs/tags/$tag"
+            fi
+            # Delete only once the tag is on the remote and points at the branch's commit.
+            t=$(git ls-remote --tags origin "refs/tags/$tag^{}" | awk '{print $1}')
+            if [ "$t" = "$sha" ]; then
+              git push -q origin --delete "$b"
+              echo "  deleted branch $b"
+            else
+              echo "::error::tag $tag does not point at $sha; branch $b kept"
+            fi
+          done
+          echo "$n branches $( [ "$DRY_RUN" = "true" ] && echo 'would be' || echo 'were') archived" | tee -a "$GITHUB_STEP_SUMMARY"
