@@ -18,6 +18,10 @@
 //! RUNNER_TEST_BIN_DIR=target/release cargo test --release -p runner --test student_train -- --ignored --nocapture
 //! ```
 
+// The one test below runs on Linux only (it needs `uv` and release binaries); elsewhere its
+// helpers and imports are unused, which `-D warnings` in CI would turn into errors.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
