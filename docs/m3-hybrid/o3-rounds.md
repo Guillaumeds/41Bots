@@ -190,7 +190,7 @@ Label check: RMS 2.112% (c1), 2.104% (c2), 2.258% (c3, the wide network is worse
 **c2 is not better than O_3**: 0.0070% against 0.0068% is inside the ±0.002-point noise of a retrain.
 Nothing was switched to c2.
 
-### Reading (2026-10-22)
+### Reading (the 2026-10-22 session's interpretation, not a measurement; facts in `docs/EXPERIMENTS.md` C12)
 - Targeted extra data (G2-chosen rows, up to +8M on a 40M base) did not move the golden bound, and
   the candidates landed within noise of each other. A bigger network from scratch was clearly worse
   here. The 95% bound did not move toward the 0.0025% target.

@@ -806,3 +806,8 @@ before acting on one (a stale reminder asked to dispatch the golden run a second
 finished. speedtest-rtxpro6000-1: refused (manifest key), then rented and stopped (46 usable threads).
 speedtest-57070744 and -57070738: rented, stopped (46 usable threads). speedtest-55530460: offer gone.
 golden-routed-s2 and net-error-o3-val-1: rented and finished.
+
+## 2026-10-22 (later): the free reads done
+The 80M-base O_3, the optimizer's-curse test, the ensemble attempts, the additive loop and the O_2 error
+predictor were read from R2 and written up in `docs/EXPERIMENTS.md` (C3, C4, C7, C8, D3). The
+summary above calls the 80M-base result "unread"; that was true when it was written.

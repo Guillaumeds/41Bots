@@ -53,7 +53,7 @@ exact solves (586 ms a world) would be replaced by a network call (43 ms a world
 ## Results
 
 ### Filter and training (run `specialist-s2`, 2026-10-22)
-Machine: AMD EPYC 9B14, 184 usable threads, RTX 5090, $1.50/h, about 22 minutes (about $0.55).
+Machine: AMD EPYC 9B14 server chip (184 usable threads, 132 GB RAM, RTX 5090, $1.34/h), 25 minutes of rental, $0.56.
 
 | shard | rows | flagged | share |
 |---|---|---|---|
@@ -98,7 +98,7 @@ routed against O_3 alone is +0.0008 (interval -0.0006 to +0.0024), no measurable
 bias of routed: 0.0179% overall, 0.0411% in positions 1 and 2 (limit 0.01%), the only check to fail
 the bias limit. Speed: 14x faster than the exact solve, 1.8x O_3 alone.
 
-## Reading
+## Reading (the 2026-10-22 session's interpretation, not a measurement; the facts are above and in `docs/EXPERIMENTS.md` C13)
 - S does not replace the exact solve. The exact solve removes about 88% of O_3's loss (0.0068% to
   0.0008%); S removes none of it.
 - Why: the flagged positions are the ones O_3 itself is worst at; a network of the same shape trained
@@ -109,6 +109,8 @@ the bias limit. Speed: 14x faster than the exact solve, 1.8x O_3 alone.
   already at O_3's level on its own rows, and the routed check showed no gain from that level. The
   data-versus-capacity test that would settle it (O_3 trained on 20M rows against 40M, golden set) was
   prepared on 2026-10-19 (`o3-basecurve-50/100`) and **never ran** (both cancelled at the start).
+  Read later the same day: O_3 trained on 80M rows had lower value error but no better decisions
+  (0.0080% against 0.0068%; `docs/EXPERIMENTS.md` C4).
 
 ## Not done / open
 - The 20M-row O_3 (basecurve, never ran). The 80M-base O_3 was read on 2026-10-22: `docs/EXPERIMENTS.md` C4.

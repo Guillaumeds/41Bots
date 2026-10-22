@@ -27,7 +27,7 @@ record: `docs/m3-hybrid/o3-rounds.md` "Results" and `docs/m3-hybrid/specialist.m
    golden set) were cancelled at the start on 2026-10-19; the manifests exist, untested since (C5).
 3. A 2-4-network ensemble of O_3 for building the bronze set only (offline, so 2-4x network time is
    acceptable), judged by the same golden check. Its two earlier attempts ran at about 10 worlds a
-   second on an AMD EPYC 7B12 (members' weights exceed the chip's cache; C8).
+   second on an AMD EPYC 7B12 server chip (256 threads, $0.30/h; members' weights exceed the chip's cache; C8).
 4. A round 3 only if a new lever appears (it would start from round 2's c2:
    `rounds/o3r-2/round.json`). After about three rounds, or before claiming a number: a fresh golden
    set (seed 2).
@@ -138,7 +138,7 @@ The owner wants the teachers and their deal counts decided last.
   booted (`specialist-s1` had loaded for 29 minutes, $0.68, before it said so) (register new kinds in `sched.rs` `KINDS`, `v2.rs`, `mem.rs`, `main.rs` and the manifest
   test); **a machine can list 384 threads and give the container 46** (every AMD EPYC 9B45 /
   RTX PRO 6000 offer tried on 2026-10-22: the launcher rents, sees `usable_cores`, stops it after
-  about 5 minutes for about $0.12): prefer the EPYC 9B14 (184 usable of 192) that ran everything else.
+  about 5 minutes for about $0.12): prefer the AMD EPYC 9B14 server chip with an RTX 5090 (184 usable of 192 threads, 132 GB RAM, $1.34/h) that ran everything else.
 - **Repository and storage housekeeping:** `repo-archive.yml` (old branches become `archive/<name>`
   tags; dry run by default), `r2-inventory.yml` (read-only list of the bucket).
 
