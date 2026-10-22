@@ -64,6 +64,15 @@ small capped anchor), 4 S1, 5 ship and the improvements. The solver half of the 
    loses most: the lever there is the cost of a deal (WebAssembly network kernel) and top-2.
    Next: session 1 (S2 A/B tests) is unaffected; the open question for the app is the cost per leader deal.
 
+**Session 1 (S2 teacher A/B) in progress, 2026-10-22 (E12, branch `claude/s2-teacher-ab-test-tiv5yj`):** built the
+trainer's rank loss and the `student_train` point options; the G2 teacher run (`docs/vast/student-t2-gv2-250k.manifest.json`,
+250,000 decisions, parts of 5,000) has stored 2 of 50 parts (R2 `runs/student-t2-gv2-250k-4/out/rules/000000-...`
+and `runs/student-t2-gv2-250k-6/out/rules/000000-,000001-...`; use `skip_parts`/`bundles`). Two throughput bugs
+found and fixed (ordered-writer window; a decision's 64 deals on one thread: now blocks of 8, byte-identical).
+**Next:** rerun the labelling on binaries with the block fix (release-binaries on main), then train the arms
+(plain 64 deals, plain 320, G2 64, G2 32, rank variants, seeds) and judge on the golden set. Cost of the
+labelling is still unmeasured; budget $30. Also built: machine keep and takeover (below, "How to run things").
+
 **Records:** `docs/EXPERIMENTS.md` (every experiment and its result), `docs/RESEARCH.md` (the outside
 research), `docs/README.md` (index).
 

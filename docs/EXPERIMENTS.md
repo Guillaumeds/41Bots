@@ -956,6 +956,44 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 - **Sources.** `tools/shortlist_time.py`, `crates/wasm/src/bin/shortlist_cost.rs`,
   `crates/wasm/tests/api.rs`, E8.
 
+### E12. S2 teacher A/B: plain H_3 against H_3 + G2 (session 1, started 2026-10-22; result open)
+- **Question.** Does a cleaner teacher (the same PIMC at trick 2 over 64 deals, but with G2's learned exact
+  leaves) give a better trick-2 student than the plain H_3 teacher? Same network (512-256), same seed, same
+  250,000 positions and deals, judged on the exact golden set (alone and top-3). Also: does the decision-aware
+  loss (`rank_weight`) help, and how large is the retraining noise?
+- **Built (all tested).** `fortyone_nn.student` trains with `--rank-weight W --rank-temperature T` (per
+  decision KL between the teacher's and the student's softmax over the candidates' own-pair value / T; W = 0 is
+  the old loss bit for bit) and `--stop-on decision`; `student_train` points take `seed`, `rank_weight`,
+  `rank_temperature`, `stop_on` (a point's directory name carries them). The plain arm needs no new
+  labelling: the stored 320-deal base shards cut to 64 deals (`deals: 64`, exact subsets, E3); the G2 arm is
+  `docs/vast/student-t2-gv2-250k.manifest.json` (rules seed 401 / mixed seed 402, the same positions; its
+  stream is the same for any part size, checked: records of a 1,000-decision part equal the same decisions
+  inside a 5,000 part, only the offset into the values file differs).
+- **Run record (cost and failures, as they happened).** Local smoke test of the G2 teacher: 6 decisions at 8
+  deals took 46 s on 4 threads against 3 s plain (about 15 times). Rentals: `-3` (AMD EPYC 7B12, 245 threads,
+  $0.708/h) was stopped by the idle watchdog after 28 minutes, $0.33, no part stored: with parts of 1,000
+  decisions the heaviest decisions form a tail of 8+ minutes on single threads (average CPU 58%). `-4` (EPYC
+  7742, 245 threads, $0.735/h, parts of 5,000, watchdog relaxed) stored part 0 after about an hour with CPU
+  swinging between 100% and 2-5%: the ordered writer let workers run only 4 x threads + 16 decisions ahead,
+  so one slow decision starved the machine. Fix 1 (window = the whole part; binaries 258ef77): `-6` (EPYC
+  7B12, $0.723/h) kept 100% CPU for 25 minutes then fell to about 0.5% behind one straggler decision; parts 0
+  (from `-4`) and 1 stored. Fix 2 (this session, after `-6`): a decision's deals are worked in blocks of 8
+  deals (`DEAL_BLOCK`) on any thread and joined, so no single decision can hold the machine; records
+  byte-identical (test `blocks_of_deals_join_into_the_whole_decisions_records`). Spend on the G2 teacher so
+  far about $1.5; no part list beyond parts 0 and 1 of 5,000 (10,000 decisions) exists yet.
+- **Result.** Open: the G2 labels are not finished, so the A/B has not run.
+- **Operations built alongside** (`docs/STATUS.md`, "Deploy onto a kept machine"): `machine.keep` /
+  `machine.keep_hours` (the machine stays up when a run ends or is cancelled; the runner parks), and
+  `machine.instance_id` (take over an instance, a stopped one is started), with a guard against taking another
+  run's live machine, a cleanup that destroys a kept machine at its keep time, and 25 launcher tests. Tried
+  end to end on a $0.04/h spare machine: `keep-trial-1` ended DONE and its machine stayed up with its keep record;
+  `keep-trial-2` took that machine over (recycled and relabelled, keep record deleted; its end not yet recorded here).
+  Starting a *stopped* instance (update then start) is unit-tested against the fake vast only, not yet tried on vast.
+- **Limits.** Cost per decision of the G2 teacher on rented machines is not yet measured per part (the
+  rentals above were starved or stopped); the estimate of $20-30 for 250k at $0.72/h stands unmeasured.
+- **Sources.** `docs/vast/student-t2-gv2-250k.manifest.json`, `docs/m3-hybrid/path-forward.md` §6 session 1,
+  `python/launcher/monitor_run.py`, R2 `runs/student-t2-gv2-250k-{3,4,6}/`.
+
 ---
 
 ## Part F. Runs and builds without a result, and work set aside
