@@ -21,7 +21,7 @@ def main():
     ap.add_argument("--total-decisions", type=int, default=250_000)
     ap.add_argument("--part-size", type=int, default=1000)
     a = ap.parse_args()
-    hb = launch.latest_heartbeat(a.run)
+    _, hb = launch.latest_heartbeat(a.run)
     if not hb:
         print("no heartbeat yet")
         return
