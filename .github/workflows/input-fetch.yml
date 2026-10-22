@@ -1,0 +1,46 @@
+name: input-fetch
+
+# Copies stored inputs (inputs/sha256/<hex>) out of R2 into a GitHub artifact, so a session without
+# R2 keys can use them (the golden set, a network). Each file's SHA-256 is checked against its key.
+# Read-only on R2; the artifact is kept 7 days.
+
+on:
+  workflow_dispatch:
+    inputs:
+      keys:
+        description: "SHA-256 keys (64 hex characters each), space-separated; files up to a few hundred MB"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Download from R2 and check the hashes
+        env:
+          AWS_ACCESS_KEY_ID: ${{ vars.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          ENDPOINT: ${{ vars.R2_S3_ENDPOINT }}
+          BUCKET: ${{ vars.R2_BUCKET }}
+          KEYS: ${{ inputs.keys }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          for k in $KEYS; do
+            case "$k" in *[!0-9a-f]*) echo "bad key $k"; exit 1;; esac
+            [ ${#k} -eq 64 ] || { echo "bad key length $k"; exit 1; }
+            aws --endpoint-url "$ENDPOINT" s3 cp "s3://$BUCKET/inputs/sha256/$k" "out/$k" --only-show-errors
+            got=$(sha256sum "out/$k" | cut -d' ' -f1)
+            [ "$got" = "$k" ] || { echo "hash mismatch for $k: $got"; exit 1; }
+            ls -l "out/$k"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inputs
+          path: out/
+          retention-days: 7
