@@ -80,7 +80,9 @@ Old branches are tags (`git tag -l 'archive/*'`; `git checkout archive/<name>` r
 | run `student-check --sub-deals` | shortlist + search at the app's deal counts (25-100) on the exact golden set | **done** (session 0a, E9): top-3 + search beats S2 alone from about 25 deals (0.0733% to 0.0596 / 0.0402 / 0.0293 at 25 / 50 / 100), loses at 10; top-3 is hard to tell from search-all because trick-2 decisions have only 2-4 candidates; top-2 is the real shortlist |
 | `tools/router_fit.py` | concentration of S2's loss and the "router" | **done** (session 0b, E10): loss is concentrated (worst 5% of decisions hold 75%) but S2's margin does not find them (do not build the margin router); a learned router gets about half the gain for 30% of the searches |
 | root-restricted solve (`shortlist` in the app API) | search only the shortlisted cards | **built and exact** (session 0c, E11): cost proportional to the cards kept (4-card trick-2 decisions: 2 kept 0.49, 3 kept 0.80 of the nodes); trick 2 has only 2-4 candidates, so little to drop |
-| run `student-t2-gv2-250k-*` | S2 teacher A/B: plain H_3 against H_3 + G2 (session 1) | **open** (E12): trainer rank loss and runner point options built; G2 labels 10,000 of 250,000 stored; machine keep/takeover tooling built |
+| run `student-t2-gv2-250k-{3,4,6}` | S2 teacher A/B: plain H_3 against H_3 + G2 (session 1) | **open** (E12): trainer rank loss and runner point options built; 10,000 of 250,000 G2 labels stored |
+| same runs | throughput of the G2 teacher on rented machines | **done** (E13): 7,900 decisions an hour, $92 per million at $0.723/h on a 245-thread EPYC 7B12; two idle-CPU bugs found and fixed |
+| `machine.keep` / `machine.instance_id` (`launch.py`, `test_keep.py`) | leave a machine up after a run and take it over, a stopped one included | **built and tried** (E14) on a $0.04/h spare machine; takeover of a stopped instance tested on the fake vast only |
 
 ## History
 - `history/STATUS-history.md`: every dated status entry, 2026-10-13 to 22.

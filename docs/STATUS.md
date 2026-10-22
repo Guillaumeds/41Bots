@@ -70,8 +70,8 @@ trainer's rank loss and the `student_train` point options; the G2 teacher run (`
 and `runs/student-t2-gv2-250k-6/out/rules/000000-,000001-...`; use `skip_parts`/`bundles`). Two throughput bugs
 found and fixed (ordered-writer window; a decision's 64 deals on one thread: now blocks of 8, byte-identical).
 **Next:** rerun the labelling on binaries with the block fix (release-binaries on main), then train the arms
-(plain 64 deals, plain 320, G2 64, G2 32, rank variants, seeds) and judge on the golden set. Cost of the
-labelling is still unmeasured; budget $30. Also built: machine keep and takeover (below, "How to run things").
+(plain 64 deals, plain 320, G2 64, G2 32, rank variants, seeds) and judge on the golden set. Measured cost of the
+G2 labelling: $92 per million decisions on a 245-thread EPYC 7B12 at $0.723/h (E13), about $23 for the 250,000; budget $30. Also built: machine keep and takeover (below, "How to run things").
 
 **Records:** `docs/EXPERIMENTS.md` (every experiment and its result), `docs/RESEARCH.md` (the outside
 research), `docs/README.md` (index).

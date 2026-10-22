@@ -958,41 +958,89 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 
 ### E12. S2 teacher A/B: plain H_3 against H_3 + G2 (session 1, started 2026-10-22; result open)
 - **Question.** Does a cleaner teacher (the same PIMC at trick 2 over 64 deals, but with G2's learned exact
-  leaves) give a better trick-2 student than the plain H_3 teacher? Same network (512-256), same seed, same
-  250,000 positions and deals, judged on the exact golden set (alone and top-3). Also: does the decision-aware
-  loss (`rank_weight`) help, and how large is the retraining noise?
-- **Built (all tested).** `fortyone_nn.student` trains with `--rank-weight W --rank-temperature T` (per
-  decision KL between the teacher's and the student's softmax over the candidates' own-pair value / T; W = 0 is
-  the old loss bit for bit) and `--stop-on decision`; `student_train` points take `seed`, `rank_weight`,
-  `rank_temperature`, `stop_on` (a point's directory name carries them). The plain arm needs no new
-  labelling: the stored 320-deal base shards cut to 64 deals (`deals: 64`, exact subsets, E3); the G2 arm is
-  `docs/vast/student-t2-gv2-250k.manifest.json` (rules seed 401 / mixed seed 402, the same positions; its
-  stream is the same for any part size, checked: records of a 1,000-decision part equal the same decisions
-  inside a 5,000 part, only the offset into the values file differs).
-- **Run record (cost and failures, as they happened).** Local smoke test of the G2 teacher: 6 decisions at 8
-  deals took 46 s on 4 threads against 3 s plain (about 15 times). Rentals: `-3` (AMD EPYC 7B12, 245 threads,
-  $0.708/h) was stopped by the idle watchdog after 28 minutes, $0.33, no part stored: with parts of 1,000
-  decisions the heaviest decisions form a tail of 8+ minutes on single threads (average CPU 58%). `-4` (EPYC
-  7742, 245 threads, $0.735/h, parts of 5,000, watchdog relaxed) stored part 0 after about an hour with CPU
-  swinging between 100% and 2-5%: the ordered writer let workers run only 4 x threads + 16 decisions ahead,
-  so one slow decision starved the machine. Fix 1 (window = the whole part; binaries 258ef77): `-6` (EPYC
-  7B12, $0.723/h) kept 100% CPU for 25 minutes then fell to about 0.5% behind one straggler decision; parts 0
-  (from `-4`) and 1 stored. Fix 2 (this session, after `-6`): a decision's deals are worked in blocks of 8
-  deals (`DEAL_BLOCK`) on any thread and joined, so no single decision can hold the machine; records
-  byte-identical (test `blocks_of_deals_join_into_the_whole_decisions_records`). Spend on the G2 teacher so
-  far about $1.5; no part list beyond parts 0 and 1 of 5,000 (10,000 decisions) exists yet.
-- **Result.** Open: the G2 labels are not finished, so the A/B has not run.
-- **Operations built alongside** (`docs/STATUS.md`, "Deploy onto a kept machine"): `machine.keep` /
-  `machine.keep_hours` (the machine stays up when a run ends or is cancelled; the runner parks), and
-  `machine.instance_id` (take over an instance, a stopped one is started), with a guard against taking another
-  run's live machine, a cleanup that destroys a kept machine at its keep time, and 25 launcher tests. Tried
-  end to end on a $0.04/h spare machine: `keep-trial-1` ended DONE and its machine stayed up with its keep record;
-  `keep-trial-2` took that machine over (recycled and relabelled, keep record deleted; its end not yet recorded here).
-  Starting a *stopped* instance (update then start) is unit-tested against the fake vast only, not yet tried on vast.
-- **Limits.** Cost per decision of the G2 teacher on rented machines is not yet measured per part (the
-  rentals above were starved or stopped); the estimate of $20-30 for 250k at $0.72/h stands unmeasured.
-- **Sources.** `docs/vast/student-t2-gv2-250k.manifest.json`, `docs/m3-hybrid/path-forward.md` §6 session 1,
-  `python/launcher/monitor_run.py`, R2 `runs/student-t2-gv2-250k-{3,4,6}/`.
+  leaves) give a better trick-2 student than the plain H_3 teacher? Also: does the decision-aware loss
+  (`rank_weight`) help, and how large is the retraining noise?
+- **Method.** Same network (512-256), seed and positions in every arm: the first 250,000 decisions of the
+  stored student data (rules seed 401 decisions 0-199,999, mixed seed 402 decisions 0-49,999), 64 deals each.
+  Plain arm: the stored 320-deal base shards cut to their first 64 deals (exact subsets, E3), no new labelling.
+  G2 arm: `docs/vast/student-t2-gv2-250k.manifest.json` (H_3 with O_3 f5766a and G v2, t=277338260); a part of
+  1,000 decisions holds exactly the records of the same decisions inside a part of 5,000 (checked: every field
+  equal except the offset into the values file). Extra arms from cuts of those data: plain at 320 deals,
+  G2 at 32 deals; rank variants and several seeds (`student_train` points take `seed`, `rank_weight`,
+  `rank_temperature`, `stop_on`). Judged on the exact golden set (`search student-check --golden-decisions`),
+  alone and top-3, 95% bounds. The decision-aware term is the per-decision KL between the teacher's and the
+  student's softmax over the candidates' own-pair value divided by T (`fortyone_nn.student --rank-weight W
+  --rank-temperature T`; W = 0 is the old loss bit for bit; `--stop-on decision` stops on the validation
+  decision loss); tests in `python/nn/tests/test_student.py` and `crates/runner/src/student_train/tests.rs`.
+- **Result.** Open. The G2 labels are not finished (10,000 of 250,000 decisions stored, parts 0 and 1 of
+  5,000), so no student has been trained for the A/B. The throughput of the labelling is E13.
+- **Cost.** Spent on the G2 labelling so far about $1.8 (E13); budget $30 for the labelling. Training and
+  judging not started (estimate $2-5 plus the golden check, which takes seconds on the build VM).
+- **Limits.** The A/B is not yet run; the G2 cost per decision is now measured (E13) but only on one machine
+  type.
+- **Sources.** `docs/vast/student-t2-gv2-250k.manifest.json`, `docs/m3-hybrid/path-forward.md` section 6
+  session 1, `python/nn/fortyone_nn/student.py`, R2 `runs/student-t2-gv2-250k-{4,6}/out/rules/`.
+
+### E13. Throughput of the G2 teacher on rented machines (runs `student-t2-gv2-250k-3`, `-4`, `-6`, 2026-10-22)
+- **Question.** What does a trick-2 decision at 64 deals cost with G2, and does the teacher keep a 245-thread
+  machine busy?
+- **Method.** Four rentals of the same manifest (`docs/vast/student-t2-gv2-250k.manifest.json`), each with
+  every usable thread: `-3` AMD EPYC 7B12, 245 threads, $0.708/h, parts of 1,000 decisions; `-4` AMD EPYC
+  7742, 245 threads, $0.735/h, parts of 5,000; `-6` AMD EPYC 7B12, 245 threads, $0.723/h, parts of 5,000, the
+  ordered writer's window widened to the whole part (binaries 258ef77). A local smoke test (4 vCPU build VM): 6
+  decisions at 8 deals, plain against G2. Part times from the stored parts' timestamps in R2, CPU use from the
+  30-second heartbeats.
+- **Result.**
+
+| run | machine and price | part | part time | CPU use | outcome |
+|---|---|---|---|---|---|
+| build VM | 4 vCPU | 6 decisions x 8 deals | 3.0 s plain, 45.9 s G2 (15 times) | - | smoke test |
+| `-3` | 7B12, $0.708/h | 1,000 decisions | not finished in 28 min | 100% for 5 min, then falling to 2%; average 58% | stopped by the idle watchdog, $0.33, nothing stored |
+| `-4` | 7742, $0.735/h | part 0, 5,000 | 41 min | 100% swinging to 0-5% (ordered window of 4 x threads + 16) | part 0 stored; part 1 not finished in 28 min; cancelled, about $0.93 in all |
+| `-6` | 7B12, $0.723/h | part 1, 5,000 | 38 min | 100% for about 25 min, then one straggler decision at about 0.5% | part 1 stored; part 2 cancelled; about $0.55 in all |
+
+  From `-6`: 5,000 decisions in 38 minutes on 245 threads is 112 thread-seconds a decision, 1.75 thread-seconds
+  a deal (the docs' 1.55 on a 7B12 plus the idle tail): about 7,900 decisions an hour and $92 per million
+  decisions at $0.723/h, so about $23 and 32 hours for 250,000. Causes found: (1) the ordered writer let workers
+  run only 4 x threads + 16 decisions ahead, so one slow decision stalled every worker behind it (fixed:
+  window = the whole part); (2) a decision's 64 deals ran on one thread, so the heaviest decisions (leader
+  seats) leave the machine idle for the last 10-20 minutes of a part (fixed: a decision's deals are worked in
+  blocks of 8 on any thread and joined, `DEAL_BLOCK`; records byte-identical, test
+  `blocks_of_deals_join_into_the_whole_decisions_records` for 19, 8, 3 and 16 deals on 1-4 threads).
+- **Cost.** `-3` $0.33, `-4` about $0.93, `-6` about $0.55; about $1.8 spent, 10,000 decisions stored.
+- **Limits.** The block fix is tested for byte-identical records but not yet timed on a rented machine, so the
+  idle tail it removes is not measured; part times include about 1 minute of setup; one machine type (Zen 2)
+  measured; the estimate in E1/path-forward ($15-30 per million) was for a Zen 4 machine at $1.34/h.
+- **Sources.** R2 `runs/student-t2-gv2-250k-{3,4,6}/` (`report.json`, `heartbeat/`, `out/`), `crates/search/src/student_teacher.rs`,
+  `crates/search/src/ordered.rs`, `docs/VAST-MACHINES.md` section 5.
+
+### E14. Keeping a machine after a run and taking it over (session 1, 2026-10-22)
+- **Question.** Can the next job be deployed onto a machine without renting another (an hour's search found the
+  one cheap 245-thread machine), and can a run leave its machine up when it ends or fails?
+- **Method.** `machine.keep` / `machine.keep_hours` / `machine.instance_id` in the manifest (`launch.py`
+  `keep_machine`, `take_instance`; the runner parks on `KEEP_MACHINE=1`, `crates/runner` `end_machine`;
+  `cleanup.py` `decide_kept`): the machine is left running when a run ends (DONE or FAILED) or the workflow is
+  cancelled, recorded in `keep/<instance>.json` and `runs/<run>/KEPT.json` with a warning and a job-summary
+  banner; the hourly cleanup destroys it at its keep time; a takeover updates the instance's image,
+  environment and binaries and recycles the container (a stopped instance is updated and started). Refused: another run's live
+  machine (heartbeat within 15 minutes), a machine another run started under an hour ago, a label that is not
+  `41bots-`. Tested with 25 tests against the launcher's fake vast and R2 (`python/launcher/test_keep.py`, 36
+  cleanup tests) and tried on a spare machine (GTX TITAN X, Xeon E5-2630 v4, 20 threads, $0.04/h) with
+  `difftest` jobs: run `keep-trial-1` with `keep: true`, then `keep-trial-2` with `instance_id` of that machine.
+- **Result.** `keep-trial-1` ended DONE after 20.5 minutes (mostly the image pull on a 278 Mbps link), $0.014:
+  its machine stayed up (instance 57255649 running afterwards), `keep/57255649.json`, `runs/keep-trial-1/KEPT.json`
+  and the warning were written. `keep-trial-2` took the same machine over: the instance was relabelled
+  `41bots-keep-trial-2`, its keep record deleted, and the run was still going when this was written (its end is
+  not recorded here). Starting a stopped instance is tested against the fake vast only. A first plan to take
+  over a live G2 run's machine was refused by the guard and not tried: recycling it would have let the old
+  launcher destroy it, and cancelling that run's workflow destroys its machine (it did, instance 57253570).
+- **Cost.** About $0.05 for the trial machine.
+- **Limits.** One spare machine type; the takeover of a stopped instance and of a machine with a different disk
+  size are not tried on vast; a boot failure (missing manifest, bad binary hash) still destroys the machine because
+  the image's boot script does (an image change would be needed); the runner image and run workflow were not
+  changed beyond the manifest keys and the cancel steps in `vast-run.yml`.
+- **Sources.** `python/launcher/launch.py`, `cleanup.py`, `test_keep.py`, `monitor_run.py`, `.github/workflows/vast-run.yml`,
+  R2 `runs/keep-trial-{1,2}/`.
 
 ---
 

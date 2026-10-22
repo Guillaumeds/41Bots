@@ -109,6 +109,8 @@ the 7663); the 4096-wide network 77.5 against 23.5 ms on the 9B14.
 | trick 2, H_3 | AMD Threadripper PRO 7995WX workstation chip | 184 | 1.14 | 320 | 69,900 | 122 | 16.3 | student-t2-more-1 |
 | trick 2, H_3 | AMD EPYC 7K62 server chip | 184 | 0.86 | 64 | 181,000 | 63 | 4.7 | student-t2-more-2 |
 | trick 1, H_2 (provisional O_2) | AMD EPYC 7B13 server chip | 245 | 1.05 | 64 | 12,500 | 3.3 | 84 | student-t1-cost-2 |
+| trick 2, H_3 + G2 (learned exact leaves) | AMD EPYC 7B12 server chip | 245 | 0.723 | 64 | 7,900 | 2.1 | 92 | student-t2-gv2-250k-6 (5,000 decisions in 38 min, window fix, before the deal-block fix; E13) |
+| trick 2, H_3 + G2 (learned exact leaves) | AMD EPYC 7742 server chip | 245 | 0.735 | 64 | 7,200 | 1.9 | 102 | student-t2-gv2-250k-4 (part 0 in 41 min, CPU starved by the ordered window; E13) |
 
 Per deal the 64-deal rows cost more than the 320-deal rows: each decision has a fixed cost (belief
 sampling, setup) shared over fewer deals.
@@ -447,6 +449,12 @@ Since 2026-10-16 every rented machine writes its own cost record (`machines/<run
 | AMD EPYC 9B45 + RTX PRO 6000 S 96 GB (m:154394, 150493, 150302; $1.36-1.46/h; deverified host) | 384 threads | **46 usable** | every run stopped by the launcher after about 5 minutes (about $0.12): below the 190-thread floor; no speed measured |
 | Xeon Phi 7210 + RTX 5060 Ti (m:53716, $0.40/h, verified) | 256 threads | not rented | the launcher never rents Xeon Phi (about a tenth of an EPYC thread's work); the owner asked about it, was told the rule, and picked an EPYC machine instead |
 | Threadripper PRO 7995WX + RTX PRO 6000 (m:26994, offer 55530460, $1.59/h) | 192 threads | not rented | the offer was gone when the run started |
+| AMD EPYC 7B12 + RTX 3080 (m:43901, host 95290, Thailand, verified, 99.4% reliable; offers 35971321, 52858375 area; $0.708-0.723/h) | 256 threads | **245 usable**, 257 GB RAM, 757/790 Mbps | G2 teacher runs `student-t2-gv2-250k-3` and `-6` (E13): 7,900 decisions an hour at 64 deals; the same physical machine was rented again by hand as instance 57259029 |
+| AMD EPYC 7742 + RTX 5090 (host 620288, $0.735-0.759/h) | 256 threads | **245 usable** | `student-t2-gv2-250k-4` (E13): part 0 in 41 minutes, CPU starved by the writer's window |
+| AMD EPYC 9654 (Rostov, host 53226) + RTX 5080 16 GB (offers 57215766 / 57216403 / 57181349, $0.336/h, deverified, 64 GB RAM) | 192 threads | not rented | no longer on offer when the owner asked for it; the 2026-10-19 plan named this type for labelling jobs (`history/plan-log-2026-10.md`) |
+| Threadripper PRO 9995WX + 2 x RTX 5090D (Greece, offer 57221898, $2.003/h, unverified) | 192 threads | not rented | about as fast per thread as a 9B14 (23-24 thread-ms an H_3 world), so the 250k G2 job would take 13-17 hours and $27-34: six times the price of the cheap Zen 4 estimate for the same time |
+| AMD EPYC 9654, 128 of 384 threads shared, offer 57209632 ($0.784/h, 88% reliable) | 128 threads | not rented | gone when checked; below the 190-thread and 90% floors |
+| GTX TITAN X + Xeon E5-2630 v4 (host 154621, unverified, $0.006-0.046/h) | 20 threads | 20 | the spare machine of the keep / takeover trial (E14), $0.014 for the first run |
 The `benchmark` chunk (matches a second with every thread busy, `crates/runner/src/main.rs`) was set up
 as a speedtest manifest for the 9B45 offers; no machine finished one. The listed thread count is
 therefore not the container's: read `usable_cores` in the first heartbeat before trusting a machine.

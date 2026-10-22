@@ -55,6 +55,10 @@ Costs are rental dollars; "estimate" means not measured.
 - Cost of the teacher: H_3 + G2 is about 24 times a plain H_3 world (586 against 24 thread-ms on a 9B14,
   E-table G), so about **$15-30 per million decisions at 64 deals** against about $0.8 plain (estimate
   from the 4.7 thread-s decision cost, E1).
+  **Measured 2026-10-22 (E13):** 112 thread-seconds a decision on a 245-thread EPYC 7B12 at $0.723/h, i.e.
+  7,900 decisions an hour and **about $92 per million decisions**, so about $23 and 32 hours for the 250,000 of
+  this A/B. The estimate above was for a Zen 4 machine at $1.34/h. Two throughput bugs (ordered-writer window,
+  a decision's deals on one thread) wasted about 40% of the first rentals; both are fixed (E13).
 - Run it as a **cheap A/B, not a build**: 250k decisions plain against 250k with the G2 teacher, same
   network and seed, judged on the exact golden set (alone and top-3), about $5-10 plus training.
 - Also A/B the decision-aware loss (`rank_weight`, planned step 3 of the student plan, about $0.5).
@@ -189,7 +193,10 @@ Goal: the three questions of section 3, step 0, answered on the build VM and rec
 - Decision-aware loss: `rank_weight` and `rank_temperature` in `python/nn/fortyone_nn/student.py`, A/B at
   equal data (about $0.5), stop on the validation decision loss.
 - The student audit loop stays low priority.
-- Record in EXPERIMENTS (Part E).
+- Record in EXPERIMENTS (Part E): E12 (the A/B, open), E13 (labelling throughput), E14 (keep and takeover).
+- Status 2026-10-22: the G2 labels are 10,000 of 250,000 decisions; resume with `skip_parts`/`bundles` from the
+  stored parts of `runs/student-t2-gv2-250k-4/` and `-6/`; a machine can be kept and taken over (STATUS, "Deploy
+  onto a kept machine").
 
 ### Session 2: O_2
 - The label test at equal money: plain hybrid labels (`label_source: hybrid`, `label_exact_leaves:
