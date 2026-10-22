@@ -293,7 +293,7 @@ Since 2026-10-16 every rented machine writes its own cost record (`machines/<run
 |---|---|---|---|
 | AMD EPYC 9B14 + RTX 5090 32 GB (m:154756, offer 57086337, $1.34-1.50/h, reliability 90%) | 192 threads | **184 usable** | ran the O3G2 rounds, the specialist training, the routed golden check and the error measurement; a plain O_3 golden check (2,000 decisions x 320 worlds) took 163 s, 24 thread-ms a world; the G2 + exact-leaves check 2,042 s, 586 thread-ms a world |
 | AMD EPYC 9B45 + RTX PRO 6000 S 96 GB (m:154394, 150493, 150302; $1.36-1.46/h; deverified host) | 384 threads | **46 usable** | every run stopped by the launcher after about 5 minutes (about $0.12): below the 190-thread floor; no speed measured |
-| Xeon Phi 7210 + RTX 5060 Ti (m:53716, $0.40/h, verified) | 256 threads | not rented | the launcher never rents Xeon Phi (about a tenth of an EPYC thread's work); the owner's request to override it was not needed |
+| Xeon Phi 7210 + RTX 5060 Ti (m:53716, $0.40/h, verified) | 256 threads | not rented | the launcher never rents Xeon Phi (about a tenth of an EPYC thread's work); the owner asked about it, was told the rule, and picked an EPYC machine instead |
 | Threadripper PRO 7995WX + RTX PRO 6000 (m:26994, offer 55530460, $1.59/h) | 192 threads | not rented | the offer was gone when the run started |
 The `benchmark` chunk (matches a second with every thread busy, `crates/runner/src/main.rs`) was set up
 as a speedtest manifest for the 9B45 offers; no machine finished one. The listed thread count is
