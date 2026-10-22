@@ -14,7 +14,7 @@
   "min_ram_gb": 64,
   "min_inet_down": 100,
   "max_dph": 1.7,
-  "disk_gb": 100
+  "disk_gb": 64
  },
  "inputs": {
   "o3": "sha256:f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
