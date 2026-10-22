@@ -2,6 +2,7 @@
 //! step tests (docs/m3-hybrid/audit-loop.md §10).
 
 use super::*;
+#[cfg(unix)]
 use crate::remote::{DirRemote, put_input};
 
 /// A safetensors network of hidden widths `widths` at trick 4 (outcome head): the integer form
@@ -907,12 +908,14 @@ fn a_sidecar_upload_failure_is_only_a_warning() {
 
 /// A remote store whose first `fail` uploads of label shards (`.npy` files) fail, everything else
 /// as `DirRemote`.
+#[cfg(unix)]
 struct FlakyShards {
     inner: DirRemote,
     fail: usize,
     seen: std::sync::atomic::AtomicUsize,
 }
 
+#[cfg(unix)]
 impl Remote for FlakyShards {
     fn describe(&self) -> String {
         self.inner.describe()
