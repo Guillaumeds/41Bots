@@ -20,18 +20,22 @@ record: `docs/m3-hybrid/o3-rounds.md` "Results" and `docs/m3-hybrid/specialist.m
    check $1, the three stopped speedtests and the error measurement about $0.5, the refused start $0.7).
 
 **Next, in order (owner chooses):**
-1. Free reads still owed (r2-fetch, no rental): the result of `o3-base80-1` (O_3 on an 80M base) and
-   the optimizer's-curse / ensemble reruns (`curse-ensemble.md`). They say whether O_3 is limited by data
-   or by capacity.
+1. The free reads are done (2026-10-22, `docs/EXPERIMENTS.md`): O_3 on an 80M base had lower value
+   error but no better decisions (0.0080%, C4); the optimizer's-curse test reproduced the leader's
+   own-team under-valuation from zero-mean noise alone (C7); the ensemble was never measured (C8).
 2. The data-versus-capacity test that never ran: `o3-basecurve-50/100` (O_3 on 20M against 40M rows,
-   golden set) were cancelled at the start on 2026-10-19; the manifests exist, untested since.
+   golden set) were cancelled at the start on 2026-10-19; the manifests exist, untested since (C5).
 3. A 2-4-network ensemble of O_3 for building the bronze set only (offline, so 2-4x network time is
-   acceptable), judged by the same golden check.
+   acceptable), judged by the same golden check. Its two earlier attempts ran at about 10 worlds a
+   second on an AMD EPYC 7B12 (members' weights exceed the chip's cache; C8).
 4. A round 3 only if a new lever appears (it would start from round 2's c2:
    `rounds/o3r-2/round.json`). After about three rounds, or before claiming a number: a fresh golden
    set (seed 2).
 5. Then the trick-1 check of O_3 alone against O_3 + G2 on about 100 trick-1 decisions (decides
    whether G2 is used for the bronze set).
+
+**Records:** `docs/EXPERIMENTS.md` (every experiment and its result), `docs/RESEARCH.md` (the outside
+research), `docs/README.md` (index).
 
 **Built and merged into `main` (the single current line; old branches are `archive/*` tags):**
 `search risk-profile`, `search labels --harvest-risk`, `search risk-filter`, `search net-error`,

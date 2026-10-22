@@ -172,6 +172,9 @@ The same code must also run anywhere, from a phone to a GPU server, as strong as
 
 ## 2. What each linked paper contributes
 
+*Sections 2-4 are the research as read when the plan was written (2026-10-13). The collected,
+updated record of all outside research, with the review's verified numbers, is `docs/RESEARCH.md`.*
+
 | Paper | What it is | Key result | What 41 takes from it |
 |---|---|---|---|
 | **GIB**, Ginsberg, JAIR 2001 (the arXiv 1106.0669 link is the same paper) | The first expert-level bridge program. For each decision it deals 50–500 random versions of the hidden cards that fit what is known. It solves each one **double dummy** [as if all hands were face up] with exact search, then plays the card with the best total. Deals are weighted by how likely the opponents' actual plays would be, using **Bayes' rule** [the maths for updating odds with new evidence]. Its solver uses **partition search** [it remembers whole families of equivalent positions, not single positions]. | Partition search cut the search far beyond normal shortcuts: the branching factor fell from *b* to *b*^0.76. A full deal took about 18,000 search steps (about 1 second on a 2000-era PC). On Bridge Master problems GIB solved 100 versus Bridge Baron's 33, and it dominated the 1998 and 2000 championships. GIB states that "all competitive bridge programs switched" to its method. **Weakness:** it assumes it will know the hidden cards later, so it undervalues safe plays and never plays to gain information. Its declarer fix (achievable sets plus squeaky-wheel optimisation) added only about 0.1 IMP per deal [IMP = bridge's standard scoring unit], and in defence plain Monte Carlo was preferred. | The core method; an exact solver with partition search; weighting guesses by how likely the observed plays are |

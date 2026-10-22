@@ -1,870 +1,512 @@
-# Research record: every experiment, its method and its result
+# Research: the outside evidence this project builds on
 
-This is the single collected record of what the project has measured, built to measure, tried and
-stopped, from the first engine test (2026-10-13) to the specialist test (2026-10-22). Each entry is
-a short study: the question, the method, the result in numbers, the cost, the limits of the evidence,
-and where the files are. It reports what was done and what came out. It does not recommend what to
-do next; where the project made a decision at the time, the decision is stated as a fact, with its
-date. Numbers were read from the runs' own stored outputs in R2 (`runs/<run_id>/...`,
-`rounds/<id>/...`, `inputs/sha256/<hex>`) or, where a run's files were not re-read, from the
-document named under "Sources".
+This is the single collected record of the published research, other programs and game sources
+the project relies on: what each source did, under what conditions, and what it measured. It is
+meant to let a new reader (a person or an AI) learn the field as it bears on 41 and its family
+(the "five fingers" games: 25, 31, 41, 45, 110 and relatives) without re-reading the papers. It
+states what the sources report; it gives no advice. Where the project adopted, rejected or deferred
+a method, that fact is recorded with its date and a pointer, so the reader can see which evidence
+each design choice rests on; the reasoning and the amendments themselves are in `docs/PLAN.md` and
+`docs/REVIEW-2026-10-13.md`, and our own measurements are in `docs/EXPERIMENTS.md`.
 
-Other documents hold designs and code detail; this one holds outcomes. `docs/README.md` lists every
-document with a one-line outcome and points here.
-
-## 0. How to read the numbers
-
-**Terms.**
-- **Money chance**: each partnership's (team's) chance of winning the match money, four numbers
-  summing to 1, stored as whole numbers in units of 2^-32. Every value, label and loss below is in
-  percent of money chance, the decider's team's unless said otherwise.
-- **World**: one complete guess of the hidden cards consistent with what the deciding seat knows,
-  drawn exactly uniformly by the world generator (§A5).
-- **Exact search**: the max^n solver [each seat picks the card best for its own team, all cards
-  face up] to the end of the hand, with the documented tie rule (first strictly best card in
-  increasing card index).
-- **O_k**: a network that values a position at the start of trick k (all cards face up). **H_k**:
-  exact search to the start of trick k, then O_k at every position reached there (the "frontier"
-  or "leaves"). H_k plus exact solves of some leaves is written H_k + G.
-- **Outcome head**: the network predicts how the hand ends (8, 14, 24 and 39 possible endings at
-  tricks 5, 4, 3, 2); each ending's money is computed exactly from the equity table.
-- **Golden set**: fixed decisions, each valued on 320 worlds by exact search, never trained on.
-  The trick-3 set (for O_4) has 400 or 4,000 decisions; the trick-2 set (for O_3) has 400, later
-  2,000 decisions (seed 1, keys 635e9aef… / 6ddc59b1…). No trick-1 golden set exists (owner
-  decision 2026-10-16).
-- **Decision loss**: per decision, the exact mean value of the exact best card minus the exact mean
-  value of the card the tested method picks (both over the same worlds). Reported as the mean over
-  decisions and as the **95% bound** (the upper end of a bootstrap over decisions, 1,000 replicates,
-  seed 1). **The standard**: 95% bound at most 0.01% overall and in each seat band (seats 1-2, 3-4,
-  5-8), and every team's mean value error (**bias**) at most 0.01%.
-- **Seat** (`pos` in program output): the decider's place in the trick, seat 1 leads. Seat-band
-  bounds rest on 104-504 decisions; single-seat bounds on 48-252 decisions and are coarse.
-- **Value SD**: spread of the network's (or method's) value error per position and team, on a named
-  set of positions.
-- **Race class** of a position (from the outcome head's exact mask): 0 no team can win the game
-  this hand; 1 one team can win the game, not the match; 2 two or more teams can win the game, none
-  the match; 3 one team can win the match, nobody else the game; 4 a team can win the match and
-  another the game (a race for the money).
-- **Score stratum S1-S4** of a decision: the hand's start state; S4 is a team close to the money.
-- **Paired comparison**: two methods on the same decisions and worlds, bootstrap of the
-  difference; "interval" is its 95% range.
-- **Thread-ms a world**: CPU time to value one world of one decision with all candidates.
-
-**Noise levels measured** (useful when comparing rows below):
-- Retraining the same recipe with another seed moved the trick-3 golden 95% bound (400 decisions)
-  by up to about 0.0025 points (trick-4 rung 1, §B2).
-- Rounds of the trick-4 loop with growing data moved the 4,000-decision bound 0.0016 → 0.0021 →
-  0.0016 → 0.0024% (§B5).
-- The O3G2 rounds' adoption rule uses a tolerance of 0.002 points for this reason (§C12).
-
-**Costs** are dollars of vast.ai rental (whole rental unless "training only" is said), at the
-machine's hourly rate. Rented threads ran 2.4-4.6 times slower than the 4-vCPU build VM under full
-load (§A8).
+**Provenance of the facts.** Most entries were gathered in the plan's research (2026-10-13) and its
+review the same day: eight web-research sweeps over about 150 primary sources, then a loose-ends
+sweep in which the key papers (Sturtevant's three PDFs, Furtak's thesis, Furtak & Buro 2013, Bouzy
+et al. 2020, Sturtevant 2008) were downloaded and their numbers read from the text. Later entries
+come from the design documents of 2026-10-16 to 2026-10-22 (`docs/m3-hybrid/*.md`, `docs/STUDENT.md`)
+and from checks made for this record on 2026-10-22 (game-family pages, Smith & Winkler 2006). Each
+entry says **verified** when its numbers were read in the primary source, **secondary** when they come
+from a summary, abstract, forum or encyclopaedia, and **design citation** when the source was cited as
+the basis of a method without its numbers being re-read. Source links are in §14.
 
 ---
 
-## Part A. Foundations and measurements
+## 1. The game family ("five fingers" / Maw family)
 
-### A1. Rules engine and independent reference (M0, 2026-10-13/14)
-- **Question.** Are the rules implemented exactly, including the owner's house rules (RULES H)?
-- **Method.** Engine (`crates/engine`) and a naive independent reference (`crates/reference`,
-  written separately from RULES.md, no shared internals) driven by identical random legal actions;
-  every legal-action set, trick winner, score, event stream, seat view and money result compared at
-  every step (`crates/difftest`). One test per numbered rule; about 25 plain-English transcripts read
-  and approved by the owner; property tests; RNG golden vectors on Windows, Linux and wasm32.
-- **Result.** 10,000,000 matches (5 shards on GitHub CI, run 38480695319): zero disagreements, rare
-  branches covered. After the 2026-10-14 rule changes: 100,000-match reruns, zero disagreements. Owner
-  approved the transcripts 2026-10-14. Later adversarial review (2026-10-15/16, review D) found and
-  fixed one gap (hand-start states accepted unreachable scores 1 and 6); 150,000 further
-  differential matches (65M actions) showed zero disagreements.
-- **Sources.** `M0-SPEC.md`, `TRANSCRIPTS.md`, `history/STATUS-history.md` (M0 gate).
+**History and naming** (secondary: Wikipedia "Twenty-five", Parlett).
+- The family descends from the Scottish game Maw (recorded from at least 1548), fashionable at the
+  court of James I. Charles Cotton's *The Compleat Gamester* (1674) describes its ancestor "Five
+  Cards", in which the five of trumps ("five fingers") is the highest card.
+- Members: Spoil Five, Twenty-five (described in detail by H.E. Heather, 1876), Forty-five, 110
+  (and 55/220 bidding forms). Twenty-five is called the Irish national card game; Canadian
+  Forty-fives descends from it. Heather's 1876 Twenty-five had no jink and no best-trump bonus.
 
-### A2. Fixed-point money chance, exact match-equity table, arena (M1, 2026-10-13/14)
-- **Method.** Money chances as u64 per team in units of 2^-32 summing exactly to 2^32;
-  largest-remainder rounding. Match-equity table v0: an exact sweep over about 810,000 match states,
-  with per-hand transition probabilities estimated from 1M rules-v1 self-play hands (seed 1). Arena:
-  14-way duplicate blocks, a 0.000 canary.
-- **Result.** Table checks pass (sums, rotation, monotonicity, Monte Carlo |z| ≤ 2.52); table
-  sha256 64740dab…6808 (used by every later run). Arena canary exactly 0 on every block. Spread of a
-  block, rules-v1 against random play: σ_b = 0.146 money chance (1.17 stakes), mean +0.26. rules-v1
-  wins about 56% of the money against random play.
-- **Limit.** The table's hand-transition model comes from rules-v1 play, not from strong play.
-- **Sources.** `M1-SPEC.md`, `history/STATUS-history.md` (M1).
+**Common core across sources** (secondary: Pagat "Twenty-Five", Wikipedia "Forty-fives").
+- Five cards each, dealt 2+3 or 3+2; the next card is turned for trumps; deal passes left.
+- Trump order: 5, J, A♥, A (when hearts are not trumps), K, Q, then numerals; red numerals rank
+  high-to-low (10 best), black numerals low-to-high (2 best): "highest in red, lowest in black".
+  Plain suits: K, Q, J, then numerals; the ace of diamonds is lowest of its suit; black aces sit
+  between the J and the 2. The A♥ is always a trump.
+- Reneging: the top trumps (5, J, A♥) may be withheld when a lower trump is led; some tables allow
+  only the 5; some forbid reneging.
+- Robbing: the holder of the ace of trumps may rob the turned card (discard one, take it) before the
+  first card is played; the dealer may rob a turned ace. Traditional sources make robbing optional.
+- 25: 5 points a trick, first to 25; the game can end mid-hand. 45: 5 a trick plus a 5-point bonus
+  for the trick won by the best trump (10 for that trick), first to 45. Auction 45 (Canada): bids
+  15-30, 30-for-60, game 120. 110/55/220 (Ireland): a kitty, bids 10-60, no robbing, the bidder names
+  trumps. Jink: in Wikipedia's account the player who takes all five tricks wins the game "whether
+  played for twenty-five or forty-five"; Pagat reports only a double stake for five tricks, and only
+  with no previous score.
+- Players: 2-10 individually, or pairs with partners opposite (Pagat: 4, 6, 8 or 10 in pairs).
+- Joker: the traditional 45 uses one; Irish 31/41 players place it third, between the J of trumps and
+  the A♥ (boards.ie 2010-2016); in 110 it is usually just below the J; the Nova Scotia variant omits
+  it; one secondary site places it below the A♥.
 
-### A3. What an exact solve costs (M2 spike and optimised solver, 2026-10-14)
-- **Question.** At which trick is exact search affordable, per world?
-- **Method.** Naive max^n solver, then an optimised one (bounded transposition table, equivalent
-  cards with the game's exceptions, Sturtevant shallow pruning, optional move ordering). Identity
-  gate: optimised = naive on every root value, card value and chosen card, all 16 switch
-  combinations, both tie orders (150,000 worlds at tricks 4 and 5, 3,000 at trick 3, 64 at trick 2),
-  on an Intel Xeon build VM and an AMD EPYC 7502.
-- **Result** (optimised, one thread, median / p90 per world): trick 5 0.003 ms; trick 4 0.04 / 0.11
-  ms; trick 3 8.8 / 30 ms (71k nodes); trick 2 3.1 s / 15.4 s (worst 29 s, 18.5M nodes); trick 1:
-  none of 8 worlds in 60 s, none of 2 in 300 s (over 1.5 billion nodes, table full at 3 GB).
-  Equivalent cards gave most of the gain (3.3× fewer nodes at trick 3, 5× at trick 2); shallow
-  pruning fired at about 1 node in 10,000; move ordering cost 15% and saved nothing (left off).
-  82-85% of decision nodes have tied best cards; reversing the tie order never changed a root's
-  money vector at tricks 3-4 (3,000 roots). Same costs within machine variation on the EPYC 7502.
-- **Trick 1 on a big machine** (run `m2-trick1-1`, AMD EPYC 9654, 368 threads, parallel solver, 86
-  GB table cap, $0.14): four worlds took 7, 32, 140 and 25 s (1.2-28.9 billion nodes, up to 65 GB
-  of table). One world spread over 368 threads ran each thread about 7 times slower than a thread of
-  the 4-thread VM.
-- **Sources.** `M2-SPIKE.md`, `m2-epyc/`.
+**31 and 41** (secondary: boards.ie 2010-2016; the Irish 25 app). 31 and 41 are Cork/Kerry/Limerick
+partnership offshoots of 45 in which the best-trump trick scores 11 instead of 10. No source found
+online documents "6 the first time, 5 later" (the project's RULES rule 28); every source gives a flat
+11. The Irish 25 app (Tricksmith Games, 2024-) lists "41: first to 41 points; +6 bonus for strongest
+trump; includes Joker" and "31: first to 31; +6 bonus", with robbing optional; it publishes no 41
+rulebook. A 2016 forum ruling on a 41 dispute gave the game to the pair that reached 41 by tricks
+mid-hand ahead of an unconfirmed best-trump claim. The full point-by-point comparison with
+`docs/RULES.md` (11 points, confidence per point) is `docs/REVIEW-2026-10-13.md`, Part 4; the owner's
+answers are in RULES section H.
 
-### A4. Trick-1 exact cost at scale: benches, table sizes, layouts (2026-10-15/16)
-- **Question.** What does an exact trick-1 world cost on rented machines, and what table per world
-  is needed?
-- **Method.** `t1bench` runner chunk: a 240-s "fill" window (one world per thread, every thread
-  busy) and a 120-s production-schedule window; 11 machine types in three waves; a table-size sweep
-  on the same worlds; run `m3-t1-tables-1` (AMD EPYC 7542, 122 threads, $1.92/h) solving trick-1
-  worlds one per thread at 12, 3 and 1 GB tables.
-- **Result.** Cost per 10^12 solver nodes at fill speed: AMD Threadripper PRO 9995WX (184 threads,
-  241 GB, $1.27/h) $0.28-0.31, repeat within 2%; Xeon E5-2695 v4 (69 threads, $0.41/h) $0.53;
-  Xeon Gold 5220R $0.59; EPYC 9734 $0.83; EPYC 9654P $0.84; EPYC 9754 $0.94; EPYC 9554 $1.20; a Zen 5
-  engineering sample (491 threads, $13.66/h) $1.50. The production schedule ran at 0.34-0.54 of the
-  fill rate. Table sweep (9995WX, against 448 MB a thread): 256 MB 1.07× the nodes, 128 MB 1.21×, 64
-  MB 1.88×, 32 MB 3.2×; 1-2 GB on an old Xeon changed nothing for short worlds. Leader (seat 1)
-  worlds in `m3-t1-tables-1`: 0.6-79 ×10^9 nodes, median 12 ×10^9, 10 of 16 finished, the other 6
-  past 95 ×10^9 at the cap, so the mean leader world is at least 47 ×10^9 nodes; seat-2 worlds mean
-  12 ×10^9. Trick 2 is about 1.8 ×10^7 nodes a world, so trick 1 costs 1,000-2,500 times more per
-  world. One hard world (decision 0, world 3): 79.3 ×10^9 nodes, 13,057 s on one thread.
-- **Consequence recorded at the time.** A full exact trick-1 golden set (≥ 25 decisions per cell, N
-  about 500 worlds) was estimated at about 2 ×10^15 nodes for the leader position alone, about
-  $300-700 and two machine-weeks. On 2026-10-16 the owner decided that no trick-1 golden set is
-  built.
-- **Sources.** `history/STATUS-history.md` (2026-10-15 waves), `plan-log-2026-10.md` (Phase 4),
-  `VAST-MACHINES.md` ("Measured on our runs"), `vast/measured-machines.json`.
+**No published AI for 41 exists** (review sweep, 2026-10-13). The closest same-family program is
+§1.1.
 
-### A5. Card tracker and world generator (M3, 2026-10-14)
-- **Method.** Facts each seat knows for certain (voids, trump limits, ace facts, burns), the exact
-  number of consistent worlds (u128), max-flow feasibility, exactly uniform sampling.
-- **Result.** The true deal was never excluded (20,000 mixed matches, every seat at every decision;
-  plus rare-branch hands); on small late positions the tracker's worlds equal the engine's rebuilt
-  deals exactly; chi-square tests against uniform and against a rejection oracle pass. World counts:
-  about 10^36 at the start of trick 1, 10^14 at trick 4, 10^8 at trick 5. Cost: 0.1-0.5 ms median a
-  decision for tracker + count + 100 samples.
-- **Sources.** `M3-SPEC.md` §3-4, `history/STATUS-history.md`.
-
-### A6. How many worlds a decision needs (N-curves, tricks 2-4, 2026-10-14)
-- **Question.** For PIMC with exact search on each world, how does the decision loss fall with the
-  number of worlds N, and what N reaches 0.01%?
-- **Method.** 400 decisions per trick, 320 exact worlds each; the reference is the best card on
-  K = 160 held-out worlds; loss fitted as a·N^-b on N ≤ 80 with 400 random splits and bootstrap;
-  held-out and extrapolation checks.
-- **Result.** Shared exponent b: trick 2 0.738 [0.61, 0.94], trick 3 0.709, trick 4 0.819. N for 0.01%
-  loss (95% range): trick 2 243 [119, 563], trick 3 179 [84, 456], trick 4 60 [36, 127]. Held-out
-  checks: 63/63 inside the band at trick 2 (61/63 trick 3, 57/63 trick 4); extrapolation from 160 to
-  320 worlds 134/135 inside at trick 2. Hardest groups at trick 2: leader (N 252), seat 6 (361), score
-  stratum S4 (365), two or more top trumps held (654), 3+ trumps (465). Rollout PIMC with rules-v1
-  playouts at trick 2 lost about 0.35% per decision, about 13 times exact PIMC; the plan was amended
-  (A3', 2026-10-14) to use exact PIMC early.
-- **Limits.** 52 decisions per seat; the reference itself has noise (K = 160).
-- **Sources.** `m3-ncurves/` (`curves-t2.txt`, `-t3`, `-t4`, `score-t2.txt`, `index.html`).
-
-### A7. Trick-1 deal counts (attempted, 2026-10-14/16)
-- **Question.** The same N-curve at trick 1.
-- **Method.** 32 trick-1 decisions × 80 exact worlds (sets A and B), on several rentals.
-- **Result.** Not completed. Runs `m3-agree-t1-b2`, `-a7`, `-b3` were destroyed by the project's own
-  hourly cleanup job (a 2-hour age rule, since removed) after saving 278 + 58 of 2,560 worlds
-  ($9.30); run B earlier lost about $18 to a hung upload. Run `m3-agree-t1-ab1` (old binary, rules-bot
-  robber burn; 5 decisions × 80 worlds) showed one world disagreeing with another by 0.5-1.5% on the
-  best-minus-second difference, and the two halves of 40 worlds disagreeing by 0.04-0.26% (4-26 times
-  0.01%). The golden N for a trick-1 leader decision was estimated at 250-2,000 worlds (not measured).
-  Saved exact trick-1 worlds that remain: 32 decisions in the decisions file, 8 with worlds (31
-  worlds, searched burn) plus 5 decisions × 355 worlds valued with the older rules-bot burn.
-- **Sources.** `history/STATUS-history.md` (2026-10-15), `plan-log-2026-10.md` (Phase 4).
-
-### A8. Rented machines: speed and price
-- **Facts measured.** Containers get about 96% of advertised threads; some hosts give far fewer (an
-  AMD EPYC 9B45 listed with 384 threads gave 46 usable threads on every offer tried: twice on
-  2026-10-17, three offers on 2026-10-22; the launcher stops such machines). Rented threads under full load ran
-  2.4-4.6 times slower than the build VM (H_3 on trick-2 decisions: 46.9 ms a world on a loaded
-  224-thread EPYC 7663 against 16.9 ms on the idle VM; exact trick-2 label 11.3 thread-s on an EPYC
-  7B12 against 3.65 s on the VM). A speed model from SPEC benchmarks predicted three new machines
-  within 11%, the Xeon Gold 5220R 40% too pessimistically and the Zen 5 sample about 20% too
-  optimistically. Pricing is set by the graphics cards; CPU-heavy work is cheapest on big CPUs with
-  cheap cards.
-- **Run-operation failures recorded:** hourly cleanup killing healthy runs (2026-10-15); a hung
-  upload (run B); slow image pulls killing machines (fixed with a pull-aware timeout); a broken
-  NVIDIA runtime rented twice (now remembered for 24 h); the vast balance reaching zero stopped every
-  machine at once (2026-10-18).
-- **Sources.** `VAST-MACHINES.md`, `vast/measured-*.json`, `history/STATUS-history.md`,
-  `plan-log-2026-10.md` (2026-10-22 entries).
-
-### A9. Exact robber burn and the adversarial reviews (2026-10-15/16)
-- **Change.** When another seat robs in a sampled world, its burn is searched inside the exact solve
-  (its team picks the best burn) instead of being chosen by rules-v1. Another seat robs in about 74%
-  of sampled trick-1 worlds (count 32) and 65% (count 128).
-- **Reviews.** Five independent reviews (solver, equity leaf and scoring, PIMC and measurement,
-  engine and reference, runner and cost safety). Found and fixed, each with a failing test first:
-  equivalent-card merging ignored the tie order (wrong values for other teams, sometimes the mover's;
-  fix costs about 3% more nodes); a pending rob's turned card treated as dead; decision sets drawing
-  the play right after a seat's own burn; the rollout leaf reading the match winner from money (wrong
-  with stake 0); runner and launcher safety issues. Records now carry `VALUES_VERSION` = 2; worlds
-  made before 2026-10-15 cannot be extended by later binaries.
-- **Sources.** `history/STATUS-history.md` (2026-10-15/16), `reviews/`.
+### 1.1 Nova Scotia 45s AI (`jitousig/fortyfives-ai`, MIT licence, 2026) — verified (repository read)
+- Game: Nova Scotia 45s, 4 players in two partnerships, auction, kitty, five tricks, pegging to 125.
+  Two sides only, so its solver is two-sided alpha-beta minimax, not max^n.
+- Exact open-hand solver: transposition table keyed by hands, trick, leader, tricks per side and the
+  best trump so far; equivalent cards merged within pools, never across the bonus-relevant trump
+  boundary, A♥ never merged. Fast port ≈2.7 ms per fresh 5-card deal (25× its first version).
+- Four-layer solver validation gate: engine parity on random play-outs; search equals brute force on
+  1-, 2-, 3-card endgames; move reduction on/off gives identical root values; exhaustive best
+  response from real engine states.
+- Evaluation discipline: rule bot against itself must score exactly +0.0000 (canary, rerun after
+  every engine or evaluation change); wins confirmed only at n ≥ 2,000 hands on ≥ 2 seeds with the
+  95% interval excluding 0; no "near-optimal" claim without an oracle upper bound.
+- Results (points per hand against the rule-based table, n = 2,000, two seeds): PIMC with 20 worlds
+  and rule-based playouts +1.97 / +1.76; PIMC with an exact per-world solve +3.19 / +2.81 (+1.22 /
+  +1.05 over the playout version); a cheating best-response oracle +8.62 / +8.25; a paranoid
+  double-dummy oracle +4.26 / +4.40, about half the best-response ceiling. Hard sampler constraints
+  from public actions (discard counts, then auction-consistency) added +0.37 and +0.25 pooled. PIMC
+  averages worlds in final-payoff space "because E[delta] ≠ f(E[raw]) at make-or-set decisions".
+- Not documented: any outcome of its DQN/NFSP/PPO scripts.
+- Project use: the canary, the four-layer gate, paired evaluation and the oracle-headroom idea were
+  adopted (PLAN amendment A2, A9).
 
 ---
 
-## Part B. The trick-4 network O_4 (values the start of trick 4; checked on trick-3 decisions)
+## 2. How strong card-play programs are built: the record
 
-### B1. First networks and the outcome head (rung 1 and 1b, 2026-10-16, build VM)
-- **Method.** Labels: exact values of trick-4 positions from random play and rules-v1 self-play.
-  MLP 512-256-64 with four logits (rung 1), then with the outcome head (rung 1b). Checked on 40
-  trick-3 golden decisions × 64 worlds.
-- **Result.** Four-logit O_4 (900k labels): value SD 3.0%, bias −0.16%, decision loss mean 0.022%
-  (bound 0.043%). Outcome head, same data: value SD 2.08%, outcome accuracy 90.1%, loss mean 0.019%
-  (bound 0.040%). O_5 with the outcome head: 99.96% outcome accuracy, mean |error| 0.016%; H_5 on 40
-  trick-4 decisions: loss 0. An encoder without the equity table's successor values was worse even at
-  trick 5 (SD 2.7% against 1.9%). Network evaluation then cost 64-75 µs.
-- **Sources.** `m3-hybrid/rung1.md`.
+### 2.1 Bridge
+- **GIB** (Ginsberg, JAIR 2001) — design citation, numbers from the plan's reading. For each decision
+  it deals 50-500 hidden-card layouts consistent with what is known, solves each double dummy [all
+  hands face up] exactly, and plays the card with the best total (perfect-information Monte Carlo,
+  PIMC). Deals are weighted by how likely the opponents' actual plays would be (Bayes). Its solver
+  uses partition search [storing families of equivalent positions], which cut the branching factor
+  from b to b^0.76; a full deal took about 18,000 search steps (about 1 s in 2000). It solved 100
+  Bridge Master problems against Bridge Baron's 33 and dominated the 1998 and 2000 championships;
+  by 2001 every competitive program had switched to its method. Stated weakness: it assumes it will
+  know the hidden cards later, so it undervalues safe plays and never plays to gain information.
+- **Championship winners**: 1997 Bridge Baron (hand-written techniques plus planning); 1998-2000 GIB;
+  2001-2019 Jack, WBridge5, Shark, Micro Bridge (PIMC family; WBridge5's 2016-2018 titles followed
+  "seed boosting", Ventos et al. 2017); the official World Computer-Bridge Championship ended in
+  2019 (unofficial 2022 WBridge5, 2023 Q-Plus, whose method is unpublished). Championships use
+  round robin then knockout, duplicate boards, and since 2001 one program per seat over a table
+  manager protocol.
+- **NooK** (NukkAI, 2022): beat 8 world champions at declarer play (67 of 80 sets) with rules plus
+  search; details unpublished.
+- **Ben** and **GIBBO** (BBO, live December 2025): neural networks alongside double dummy; GIBBO
+  reported +0.9 IMP per board (basic) and +0.4 (advanced) over GIB 43; methods not published in
+  detail. Bidding is the weak spot of all bridge programs; 41 has no bidding.
 
-### B2. Rung-1 scaling sweep and harvested positions (ten trainings, 2026-10-16)
-- **Question.** What moves H_4's decision loss: more ordinary labels, network size, harvested
-  positions [frontier positions the hybrid's own search reaches, labelled exactly], harvest weighted
-  to leaders?
-- **Method.** 1024-512-128 (one run 512-256-64), outcome head; trick-3 golden set 400 decisions × 320
-  worlds; one rental each (about $0.10-0.45 each, nine rentals about $2.0).
-- **Result** (95% bounds, %; all / seats 1-2 / 3-4 / 5-8 / largest bias):
+### 2.2 Skat
+- **Kermit** (Buro, Long, Furtak & Sturtevant, IJCAI 2009): PIMC with an exact solver and a learned
+  inference; its inference was worth 996 against 779 points per 36 games (as reported in the review).
+- **Card-location networks** (Solinas, Rebstock & Buro, AAAI 2019) — verified via the review: a
+  network trained on 20 million human games predicts where each card is; +3 to +5 tournament points
+  per game over the old inference in suit and null games (grand games not significant).
+- **Policy-based inference** (Rebstock, Solinas, Buro & Sturtevant 2019): each world weighted by the
+  product of the policy's probabilities of every observed play; beat the card-location network
+  (+2.32 / +0.64 / +1.57 points per game in the three game types, as summarised in the review).
+- **Edelkamp** — verified (two papers), secondary (others): Knowledge-Based Paranoia Search (2021,
+  Skat): the declarer takes the worst case over all consistent worlds with both defenders as a
+  coalition, triggered after the third trick; on 50,000 replayed human games declarer wins 42,228
+  with it, 41,765 without, 41,283 by the humans. "Outer-learning" (arXiv 2512.15435, Dec 2025): 30M
+  self-play games added to a human database; replay prediction accuracy 84.73% → 84.78% (humans
+  76.7%). A general trick-taking framework (KI 2024; Belote, Tarot, Doppelkopf, Spades, Hearts,
+  Euchre, Schafkopf) is paywalled; its multi-side method could not be read. Edelkamp's handling of
+  more than two sides is paranoid worst case in a 1-vs-2 game; it is not evidence about max^n with
+  four sides.
+- **GO-MCTS** (Rebstock et al. 2024): a transformer plus search; best Hearts program, but lost to
+  Kermit in Skat by 9.84 points per game at about 42 s per move.
 
-| run | labels (random + self-play + harvested) | all | 1-2 | 3-4 | 5-8 | bias |
-|---|---|---|---|---|---|---|
-| 4M (`m3-hybrid-rung1b-1`) | 3.2M + 0.8M | 0.0108 | 0.0309 | 0.0174 | 0.0016 | 0.0130 |
-| 4M, training seed 2 | same | 0.0097 | 0.0247 | 0.0177 | 0.0014 | 0.0186 |
-| GitHub CPU run | same | 0.0083 | 0.0113 | 0.0145 | 0.0073 | 0.0168 |
-| 8M | 6.4M + 1.6M | 0.0086 | 0.0281 | 0.0113 | 0.0008 | 0.0089 |
-| 16M | 12.8M + 3.2M | 0.0076 | 0.0211 | 0.0115 | 0.0007 | 0.0091 |
-| 16M, 512-256-64 | same | 0.0084 | 0.0224 | 0.0161 | 0.0001 | 0.0077 |
-| harvest-2 | 6.4M + 1.6M + 4M (cap 16, seats 40/40/20%) | 0.0090 | 0.0210 | 0.0059 | 0.0098 | 0.0094 |
-| lead-1 | 12.8M + 3.2M + 8M (cap 64, seats 60/25/15%) | 0.0037 | 0.0069 | 0.0109 | 0.0002 | 0.0075 |
-| lead-2 | 12.8M + 3.2M + 12M (cap 64, 45/40/15%) | 0.0033 | 0.0046 | 0.0103 | 0.0002 | 0.0079 |
-| lead-3c | 16M + 4M + 20M (cap 64, 30/55/15%) | 0.0057 | 0.0097 | 0.0159 | 0.0007 | 0.0057 |
-
-- **Observed.** Three trainings on the same 4M labels spread 0.0083-0.0108% overall. Leader-weighted
-  harvest (lead-1) halved the overall bound against 16M ordinary labels; lead-1 changed cap, amount
-  and seat shares together, so the parts are not separated. A seat-1 decision reaches about 500
-  trick-4 positions on average, a seat-4 decision about 40. In lead-2 two seat-4 decisions (143 and
-  335) carried 91% of seat 4's loss, and seven of eight networks missed each at exactly the same cost.
-  Lead-2's validation loss rose for five epochs after its best epoch (overfitting).
-- **Sources.** `m3-hybrid/rung1.md` ("Results, 2026-10-16"); R2 `runs/<run_id>/out/rung/`.
-
-### B3. Why seats 3-4 failed: the race for the money (diagnosis, 2026-10-16)
-- **Method.** `search hybrid-check --explain` on every lossy decision of lead-2 and lead-3c, and on
-  golden decisions 0-99; error by race class on golden frontier positions (18.6M values) and on a
-  fresh 300k harvest shard.
-- **Result.** Race class 4 was 7% of frontier positions and carried 75% of lead-3c's decision loss
-  (86% of the seats 3-4 loss). Value SD by class on the golden frontier: class 0 0.33%, 1 0.28%, 2
-  1.65%, 3 0.62%, 4 2.46% (fresh shard: class 4 2.74%, lead-2 3.04%). Class-4 positions were present
-  in the training data (about 7% of rows, about 1.4M of 20M harvested). Example (decision 143): the
-  network over-rated the team that could win the match (team 1 bias +0.62%), i.e. under-rated the
-  other teams' blocking. Decision 335 was decided by the solver's tie rule in one world (tie-decided
-  positions: 0.015% of the frontier, network error SD 59% there). **Ceiling with exact values at
-  chosen classes** (lead-3c, 95% bounds all / 1-2 / 3-4 / 5-8): none 0.0057 / 0.0097 / 0.0159 /
-  0.0007; class 4 exact 0.0016 / 0.0041 / 0.0023 / 0.0007; classes 2 and 4 0.0015 / 0.0041 / 0.0015 /
-  0.0007; classes 1-4 and tie-decided 0.0005 / 0.0002 / 0.0013 / 0.0007. With 104 decisions in a band,
-  one miss of about 0.35% fails the band alone.
-- **Sources.** `m3-hybrid/rung1.md` ("Why seats 3-4 fail").
-
-### B4. Race harvest and network shape (lead-4, lead-5c/6a/6b, 2026-10-16)
-- **Method.** lead-4: lead-3c's mix with half the harvest replaced by race rows (16M random s151,
-  4M rules s152, 10M harvest s154 cap 64, 10M race-class-2/4 rows s155): class-4 rows from about 7.5%
-  to about 19% of 40M. Then three shapes on the same 40M: 1024-1024-512-128, 2048-1024-256,
-  2048-2048-1024-256.
-- **Result.** lead-4 (1024-512-128; read from its R2 bundle for this record): 95% bound all 0.0075%,
-  seats 1-2 0.0231%, 3-4 0.0106%, 5-8 0.0002%, seat 1 0.0395%; integer value SD 0.92% overall, by
-  race class 0.39 / 0.50 / 1.33 / 0.73 / 2.58% (lead-3c's class 4: 2.74%). Shapes:
-
-| shape | val loss | class-4 SD (int / float) | all | 1-2 | 3-4 | 5-8 | bias |
-|---|---|---|---|---|---|---|---|
-| 1024-1024-512-128 (lead-5c) | 1.19817 | 2.33 / 2.99% | 0.0072 | 0.0210 | 0.0109 | 0.0001 | 0.0083 |
-| 2048-1024-256 (lead-6a) | 1.20811 | 3.60 / 3.34% | 0.0074 | 0.0222 | 0.0104 | 0.0002 | 0.0097 |
-| 2048-2048-1024-256 (lead-6b) | 1.19772 | 3.29 / 3.02% | 0.0076 | 0.0239 | 0.0102 | 0.0003 | 0.0060 |
-
-- **Observed.** 2.5× the class-4 data moved class-4 SD by about 6-10%; width did not lower the float
-  class-4 SD (about 3.0% for all three). 1024-1024-512-128 was chosen as the loop's starting shape.
-- **Sources.** `m3-hybrid/rung1.md` (shape comparison); R2 `runs/m3-hybrid-harvest-lead-4/out/rung/`.
-
-### B5. The trick-4 audit loop (mechanism tests and the overnight loop, 2026-10-16/17)
-- **Question.** Can weak groups of positions be found automatically and trained away until none
-  over the standard remains ("flat")?
-- **Method** (`m3-hybrid/audit-loop.md`): each round trains, then an auditor searches conjunctions of
-  up to 6 encoder-feature conditions on a fresh exactly-labelled audit shard (weight ≥ γ; confirmed on
-  a held-out half with Benjamini-Hochberg false-discovery control at 5%; thresholds α_bias 0.25%, α_sd
-  1.0%), measures confirmed groups at the decision level (golden slices; "mini golden sets" of 100
-  decisions by rejection sampling), harvests positions of failing groups, retrains from scratch, with
-  a capacity ladder. Research basis: multiaccuracy (Hébert-Johnson et al. 2018; Kim et al. 2019),
-  slice discovery (SliceFinder, DivExplorer, Domino), boosting/targeted sampling.
-- **Runs.** Mechanism tests `m3-hybrid-t4-audit-mech-1` (EPYC 9654, 384 threads, $0.60) and `-2`
-  (EPYC 7B12, 122 threads, $1.25); loop `m3-hybrid-t4-loop-3` (AMD EPYC 7B13, 122 threads, 504 GB,
-  $0.73/h, about $4.2; two earlier launches about $1.4). Golden set: 4,000 trick-3 decisions × 320
-  worlds; 10M-row audit shards at γ = 0.0001; at most 60 mini sets a round.
-- **Result** (95% bound all / 1-2 / 3-4 / 5-8 / largest bias; groups confirmed; failing at decision
-  level):
-
-| round | shape | all | 1-2 | 3-4 | 5-8 | bias | confirmed | failing |
-|---|---|---|---|---|---|---|---|---|
-| 1 | 1024-1024-512-128 (b28750e3) | 0.0016 | 0.0026 | 0.0023 | 0.0012 | 0.0025 | 1,551 | 8 (1,473 not measured) |
-| 2 | same | 0.0021 | 0.0055 | 0.0026 | 0.0008 | 0.0030 | 3,787 | 14 |
-| 3 | 2048-2048-1024-256 (6d72e18c) | 0.0016 | 0.0040 | 0.0020 | 0.0009 | 0.0035 | 2,724 | 13 |
-| 4 | 4096-2048-1024-256 (stopped) | 0.0024 | 0.0059 | 0.0023 | 0.0012 | 0.0045 | 3,026 | 13 |
-
-- **Observed.** On 4,000 decisions every seat band was under 0.006%; the earlier 400-decision failures
-  of seats 1-2 did not recur. The auditor confirmed thousands of groups because its SD threshold (1%)
-  was close to the network's overall SD (0.8-1.0%); 92.5% of positions lay inside some confirmed
-  group; 60 mini sets a round measured a few percent of them, so "flat" could not be reached as
-  defined. Position-level SD predicted decision-level failure with AUC 0.77-0.79. Of the groups
-  still failing, 62% were race-for-the-money conditions. Retraining from scratch made rounds noisy.
-- **Decision recorded.** O_4 = round 1 (b28750e3…) adopted (owner, 2026-10-17); no more trick-4 runs
-  (an exact trick-3 solve, about 6 ms a deal, is cheaper than H_4, about 18 ms).
-- **Sources.** `m3-hybrid/audit-loop.md` §8-9.
+### 2.3 Other games with lessons for 41
+- **Doppelkopf** (Sievers & Helmert, KI 2015): an ensemble of per-world UCT trees beat a single
+  shared tree (4.52 vs −1.25); splits of 5/2000, 10/1000 and 20/500 worlds/iterations were within
+  error bars.
+- **Hearts and Spades** (Sturtevant): §4.
+- **Jass** (Niklaus thesis 2019), **Wizard** (DQN, 2022), **Big-2** (PPO study, 2026): cited in the
+  review's evidence list; their numbers were not used.
+- **DouDizhu** (DouZero 2021, PerfectDou 2022 and successors), **Mahjong** (Suphx 2020, Mortal),
+  **poker** (Pluribus 2019, AlphaHoldem 2022), **Hanabi** (SPARTA 2020, Learned Belief Search 2021):
+  §6-§8.
+- **Pluribus** (6-player poker, 2019): shows strong bots for more than two sides; its equilibrium
+  method (CFR) has not worked for trick-taking games (Long et al. 2010; Rebstock et al. 2024).
 
 ---
 
-## Part C. The trick-3 network O_3 (values the start of trick 3; checked on trick-2 decisions)
+## 3. Perfect-information Monte Carlo (PIMC) and its limits
 
-All O_3 golden numbers below are on the trick-2 golden set (2,000 decisions × 320 exact worlds,
-seed 1) unless "400 decisions" is said. Reference figures for the adopted O_3 f5766a alone: mean
-0.0056%, 95% bound 0.0068%; seats 1-2 0.0122%; seat 1 0.0154% / 0.0201%; own-team bias −0.0085%
-(seats 1-2 −0.0239%); value SD 1.85%; 85.7% agreement. It fails the standard on seats 1-2 only.
-The same figures were reproduced exactly by the incumbent's check in at least five later runs (C7, C10, C11, C12, C13).
-
-### C1. First O_3 rounds (2026-10-16)
-- **Method.** 1024-512-128 on 12.8M random + 3.2M rules-v1 labels (round 1); plus 8M harvested
-  positions driven by round 1's network, cap 32, seats 40/30/30% (round 2). 400-decision golden set
-  generated in round 1 (1,057 s on 184 threads), reused in round 2. AMD Threadripper PRO 7995WX (184
-  threads), $0.90 and $0.79.
-- **Result** (95% bounds all / 1-2 / 3-4 / 5-8 / largest bias): round 1 0.0105 / 0.0138 / 0.0091 /
-  0.0133 / 0.0108; round 2 0.0111 / 0.0156 / 0.0171 / 0.0109 / 0.0092. Round 2's validation loss was
-  better (1.4971 vs 1.5131; outcome accuracy 87.2% vs 86.4%) but its check was not. O_3's outcome
-  accuracy (87%) against O_4's (98%) indicates trick 3 is a harder function. Hybrid speed at trick 2:
-  12.7 ms a world against 1,289 ms exact (about 100×). A round 3 (2048-1024-256, 40M labels) failed
-  on a chunk error and was not repeated as such.
-- **Sources.** `m3-hybrid/rung2.md` ("Results, 2026-10-16").
-
-### C2. The trick-3 audit loop, scratch mode (overnight 2026-10-16/17)
-- **Method.** As B5, at trick 3; golden set 2,000 trick-2 decisions × 320 worlds generated in the run
-  (about 3 s an exact world) and stored (635e9aef / 6ddc59b1); 10M-row audit shards. Run
-  `m3-hybrid-t3-loop-1`: AMD EPYC 7663 (224 threads, 2× A100 40 GB, $1.60/h), about $9.9.
-- **Result** (95% bound all / 1-2 / 3-4 / 5-8 / own-team bias; confirmed; failing):
-
-| round | shape | all | 1-2 | 3-4 | 5-8 | own bias | confirmed | failing |
-|---|---|---|---|---|---|---|---|---|
-| 1 | 2048-1024-256 (b34e12b5) | 0.0088 | 0.0153 | 0.0071 | 0.0088 | −0.0125 | 628 | 56 |
-| 2 | 2048-1024-256 (f5766a) | 0.0068 | 0.0122 | 0.0080 | 0.0052 | −0.0085 | 630 | 46 |
-| 3 | 2048-2048-1024-256 (a099061b) | 0.0074 | 0.0164 | 0.0057 | 0.0056 | −0.0096 | 629 | 47 |
-| 4 | 2048-2048-1024-256 (stopped) | 0.0076 | 0.0153 | 0.0060 | 0.0061 | −0.0142 | 629 | 47 |
-
-- **Observed.** Seats 1-2 stayed at 0.012-0.016% at both sizes; the leader's own team was
-  under-valued by about 0.02-0.03% in that band. Failing groups were mostly ordinary groups with small
-  slices (median 89 decisions against 299 for passing groups) around a mean of 0.006%.
-- **Decision recorded.** O_3 = round 2, f5766aa98a1d… (2048-1024-256, trained on 40M labels: random
-  25.6M s321, rules 6.4M s322, harvest 8M s313, plus round 1's targeted shard) adopted 2026-10-17.
-- **Sources.** `m3-hybrid/audit-loop.md` §8; `m3-hybrid/rung2.md` ("Adopted O_3").
-
-### C3. The trick-3 audit loop, additive mode (run `m3-hybrid-t3-additive-2`, 2026-10-18/19)
-- **Question.** Does continuing f5766a on old plus new targeted data (warm start with replay) improve
-  it, where retraining from scratch was noisy?
-- **Method.** Round 1 = f5766a unchanged; round 2 continues it for 5 epochs on 48M rows (the 40M
-  base plus an 8M weak-spot shard); 20M-row audit shards; a round is adopted unless it loses a pass
-  the best had or is worse than the noise tolerance (0.002 points). Research basis: warm start with
-  replay; Ash & Adams 2020 (warm-start generalisation gap).
-- **Result** (read from R2 for this record). Round 1 (f5766a): golden 0.0056% / 0.0068%, 637 groups
-  confirmed, 46 over 0.01% at the decision level, 489 not measured. Round 2 (a97ac177…): integer
-  validation SD 1.83% (f5766a 1.85%), golden mean 0.0059%, bound 0.0071%; own-team bias −0.0121%
-  (fails the 0.01% limit; f5766a −0.0085%), so **not adopted**; 53 groups over 0.01%. The auditor's
-  worst groups were score states (a team on 35, 36 or 40 points; SD 4.4-5.2%). No larger shape was
-  left on the ladder. The run was stopped by the owner on 2026-10-19 ("the additive rounds made O_3
-  no better; stop and build an 80M base instead"). An earlier attempt, `m3-hybrid-t3-additive-1`,
-  was stopped for low vast credit.
-- **Sources.** R2 `runs/m3-hybrid-t3-additive-2/partial/rung/000000/out/hybrid/audit/round-{1,2}.txt`,
-  `STOP`.
-
-### C4. O_3 at an 80M base (run `o3-base80-1`, 2026-10-19)
-- **Question.** Does doubling the training data (40M → 80M) improve O_3's decisions?
-- **Method.** 2048-1024-256 from scratch (seed 1, batch 1024, lr 0.001, patience 4), outcome head, on
-  the stored 40M base plus 40M new rows (random 25.6M s331, rules 6.4M s332, harvest 8M s323 driven by
-  O_3 round 1 `b89b26d6`, cap 32, seats 0.4/0.3/0.3). Validation 100k (s401). AMD Threadripper PRO
-  9995WX (192 threads, RTX 5090 D, $0.64/h): fetch 12.5 min, new labels 30 min, training 48 min (best
-  epoch 19 of 24), 128.8 min in all, $1.37. Network 7eeb1f88…, stored.
-- **Result.**
-
-| | f5766a (40M) | 80M (7eeb1f88) |
-|---|---|---|
-| integer value SD, validation rows | 1.85% | 1.82% (float 1.84%; outcome accuracy 89.9%) |
-| value SD on the golden frontier | 1.850% | 1.756% |
-| class-4 SD, validation | 3.6-4.0% | 3.70% |
-| decision loss mean / 95% bound | 0.0056 / 0.0068% | 0.0064 / 0.0080% |
-| seats 1-2 bound | 0.0122% | 0.0149% |
-| seat 1 mean / bound | 0.0154 / 0.0201% | 0.0204 / 0.0264% |
-| own-team bias | −0.0085% | −0.0080% |
-| verdict | fails (seats 1-2) | fails (seats 1-2 and 3-4: 0.0105%) |
-
-- **Observed.** Value error fell slightly; decision loss did not fall (differences within the
-  measured retraining noise). This result was used by the owner on 2026-10-19 to motivate fix E
-  (sibling ranking, C9) and the optimizer's-curse test (C7).
-- **Sources.** R2 `runs/o3-base80-1/out/rung/` (`hybrid/hc-t2-o3.txt`, `hybrid/net/report.json`).
-
-### C5. O_3 base-size curve, 50% vs 100% of the 40M base (runs `o3-basecurve-50-1`, `-100-1`)
-- **Question.** Train from scratch on 50% and 100% of the stored 40M base, same settings; compare
-  validation SD and golden loss.
-- **Result.** **Not run.** Both runs were cancelled by their workflow 37 s after start (2026-10-19
-  14:40 UTC), before any training; the owner's diagnosis plan of that afternoon skipped the 40M size
-  tests and folded the size question into the 80M run (C4). No result exists.
-- **Sources.** R2 `runs/o3-basecurve-{50,100}-1/DONE`, `STOP`; `plan-log-2026-10.md` ("Diagnosis
-  fixes A and B").
-
-### C6. Wider and deeper O_3 (manifests `o3-size-wide`, `o3-size-deep`)
-- **Result.** **Never launched** (no run in R2). Network size was tested elsewhere: 2048-2048-1024-256
-  in the scratch loop (C2: rounds 3-4 no better than round 2) and 4096-2048-1024-256 from scratch on
-  56M rows in O3G2 round 2 (C12: worse on seats 1-2 and bias).
-
-### C7. The optimizer's-curse test (run `o3-curse-ensemble-1`, 2026-10-19)
-- **Question.** H_3 under-values the decider's own team at the decision level (seat 1 −0.033%, seat
-  2 −0.021%, seat 3 −0.032%, seat 4 −0.006%, seats 5-8 about 0) although O_3's position-level bias is
-  about 0 (leader's team −0.003%). Can search over noisy but unbiased leaf values alone produce this
-  [the optimizer's curse: picking the best of several noisy values favours the one whose noise
-  flatters it]?
-- **Method.** "Truth" = H_3 with O_3's own noise-free values at the trick-3 leaves; "player" = the
-  same search with seeded, exactly zero-mean noise added to each leaf's 4-team vector (transfers
-  between pairs of teams, so the vector sums to 2^32 and stays non-negative), with SD per race class
-  set to the auditor's measured O_3 error SD (0.98 / 0.92 / 2.01 / 1.52 / 4.05% for classes 0-4),
-  calibrated. The noise is independent between leaves and has no heavy tail; O_3's real errors are
-  heavy-tailed (99.9th percentile 23%) and correlated between neighbouring positions. Same golden
-  decisions and worlds; AMD EPYC 7B12 (256 threads, $0.30/h), 263 s wall; run $0.19.
-- **Result.** Realised noise SD 1.46% overall (classes 3-4 shrunk to 1.24% and 2.96% because teams
-  with little money cannot take full transfers).
-
-| measure | noise-only player | real O_3 against exact |
-|---|---|---|
-| decision loss mean / 95% bound | 0.0157 / 0.0182% | 0.0056 / 0.0068% |
-| agreement | 72.3% | 85.7% |
-| own-team bias, all | −0.33% | −0.0085% |
-| own-team bias seats 1-2 / 3-4 / 5-8 | −0.57 / −0.03 / −0.35% | −0.024 / −0.017 / +0.004% |
-| own-team bias seat 1 / 2 / 3 / 4 / 8 | −0.69 / −0.41 / −0.15 / +0.09 / +0.00% | −0.024 / −0.024 / −0.030 / −0.003 / +0.004% |
-| next team's bias, all | +0.29% | +0.0054% |
-| worst race group (loss mean) | race 4: 0.0302% | race 4: 0.0126% |
-
-- **Observed.** Zero-mean independent noise alone produced a negative own-team bias, largest at seat
-  1 and at seat 5 (each leads a sub-sequence of four opponents), near zero at seats 4 and 8, and a
-  positive bias for the next team, with the same sign pattern as the real H_3 at about 20-40 times
-  the size. The real network's loss is about a third of the noise player's. The noise's size per
-  race class matches O_3's measured SD but its correlation and tails do not.
-- **Sources.** R2 `runs/o3-curse-ensemble-1/partial/checks/000000/out/hybrid/checks/curse.txt`,
-  `single.txt`; design `m3-hybrid/curse-ensemble.md`.
-
-### C8. Ensemble of four O_3 networks (runs `o3-curse-ensemble-1` step 3, `o3-ensemble4-1`)
-- **Question.** Does the integer mean of four trained O_3s (f5766a, a099061b, bfd1bec2, a97ac177)
-  lower H_3's decision loss?
-- **Method.** `--net A,B,C,D`: each member values the leaf, u128 sum, largest-remainder rounding
-  (byte-identical; one member equals that network). Paired against f5766a alone.
-- **Result.** **Not measured.** On the rented AMD EPYC 7B12 the ensemble check ran at about 10
-  worlds a second, about 100 times slower per world than one network: the four members' weights
-  (about 70 MB) do not fit the chip's 16 MB last-level cache per four cores, while one network
-  (about 9 MB) does. A batching fix cut passes over the weights 15× on a 16 × 32 test (values
-  byte-identical); the rerun (`o3-ensemble4-1`, binary 20e8680) was still at about 10 worlds a second
-  and was stopped after 14 min ($0.07). Both runs stored the single-network check (identical to
-  f5766a's record). No ensemble number exists.
-- **Sources.** R2 `runs/o3-curse-ensemble-1/STOP`, `runs/o3-ensemble4-1/STOP`;
-  `m3-hybrid/curse-ensemble.md` ("Speed of an ensemble").
-
-### C9. Sibling groups and a pairwise ranking loss (fix E, 2026-10-19)
-- **Question.** A decision depends on differences between the positions its cards lead to. Does a
-  pairwise ranking term (RankNet, Burges et al. 2005; decision-focused learning, Elmachtoub & Grigas
-  2022) over "sibling" positions [the frontier positions a choice point's legal cards lead to along
-  their principal lines] improve O_3's decisions?
-- **Method.** Sibling shards (`search labels --source siblings`), trainer `--pair-weight W
-  --pair-scale 100`, optional `--tie-aware`. Rented A/B designed (6M sibling rows + 40M base, A
-  cross-entropy only, B W = 1), about $2-5.
-- **Result.** Only the build-VM A/B ran: 30k random + 12k sibling rows, 256-128-64 for the smoke and
-  a small network for the A/B, judged on 6,000 held-out sibling rows. A (cross-entropy): validation
-  loss 2.280, value SD 5.02%, gap-weighted misordered pairs 15.6%, mean regret of the best-looking
-  sibling 0.278%. B (W = 1): 2.432, 5.83%, 18.3%, 0.310%. B's training pair loss fell to 0.14 while
-  held-out ordering got worse. Measured facts on sibling groups: 10.7 rows a decision, mean group size
-  2.96, 28% of pairs have unequal true values; no two possible outcomes shared a money vector in 44,000
-  trick-3 rows (so `--tie-aware` changes nothing at trick 3). **The rented A/B
-  (`o3-sibrank-a/-b`) was never launched**; no golden-set result exists.
-- **Sources.** `m3-hybrid/sibrank.md`.
-
-### C10. Exact leaves by race class, G v1 (run `o3-exactleaf-1`, 2026-10-19)
-- **Question.** If the trick-3 leaves of chosen race classes are solved exactly inside H_3, how much
-  loss goes and at what time cost?
-- **Method.** `--exact-leaves race:4`, `race:2,4`, `race:1-4`; a second per-thread solver table of 64
-  MB. AMD EPYC 7B12 (256 threads, $0.30/h), 121.5 min, $0.60.
-- **Result** (f5766a; distinct leaves a world 413: class 0 178, 1 115, 2 58, 3 24, 4 38):
-
-| exact leaves | leaves solved | thread-ms a world | mean / 95% bound | seat 1 mean / bound | largest bias | standard |
-|---|---|---|---|---|---|---|
-| none | 0% | 51 (this run) | 0.0056 / 0.0068% | 0.0154 / 0.0201% | 0.0085% | fails (1-2) |
-| race:4 | 9.2% | 232 | 0.0037 / 0.0047% | 0.0119 / 0.0161% | 0.0097% | passes |
-| race:2,4 | 23.3% | 668 | 0.0031 / 0.0040% | 0.0085 / 0.0118% | 0.0068% | passes |
-| race:1-4 | 56.8% | 1,692 | 0.0014 / 0.0018% | 0.0040 / 0.0058% | 0.0041% | passes |
-
-- **Observed.** Each class added lowered the loss and the own-team bias; race:4 alone passed the
-  standard (seat 1, not part of the standard, stayed above 0.01%). An exact leaf solve cost 4-6 ms.
-- **Sources.** R2 `runs/o3-exactleaf-1/partial/checks/000000/out/hybrid/checks/`; `m3-hybrid/rung2.md`
-  ("Exact leaves (G)").
-
-### C11. Learned exact leaves, G v2 (build and runs `o3-learnedleaf-1/-2`, 2026-10-19)
-- **Question.** Can the choice of leaves to solve exactly be learned from data, with a guarantee?
-- **Method.** A predictor of O_3's squared error at a position ("learning to defer": Geifman &
-  El-Yaniv 2017; Mozannar & Sontag 2020): gradient-boosted integer regression trees (Friedman 2001;
-  150 trees, depth 6) over O_3's 909 inputs plus 13 extras from O_3's own answer (race class, its
-  shares, top share, Gini impurity, distance to the nearest and farthest possible ending, number of
-  possible endings). Score = predicted squared error (value of computation, Russell & Wefald 1991).
-  Threshold by Learn then Test (Angelopoulos et al. 2021) with a CLT bound; conformal risk control
-  and empirical Bernstein reported. Data: fresh harvest shards driven by f5766a: train 400k (15,564
-  decisions), calibration 100k (3,559), test 100k (3,592). Model leafrisk-o3-v1, 20c41678…
-- **Result, position level (test split).** O_3's squared error is concentrated: the worst 1% of
-  positions hold 66% of it, the worst 10% hold 96%; race class 4 holds 57%, class 0 12%. Largest split
-  gains: distance to the nearest possible ending 42%, number of possible endings 12.5%, distance to the
-  farthest ending 5.4%. Share of squared error left after solving a share of positions:
-
-| solved | learned | best possible order | race class alone | outcome entropy alone |
-|---|---|---|---|---|
-| 5% | 25.3% | 8.8% | 73.1% | 77.1% |
-| 10% | 16.6% | 2.9% | 53.1% | 61.2% |
-| 20% | 8.9% | 0.3% | 34.0% | 36.5% |
-| 50% | 1.4% | 0.0% | 12.0% | 0.6% |
-
-  At race:1-4's share (61.8%) the learned order leaves 1.0% of the error against race:1-4's 9.6%.
-  Every Learn-then-Test threshold held on the test split; the finite-sample bounds certified no useful
-  target at this sample size (they need hundreds of thousands of decisions).
-- **Result, golden set** (`o3-learnedleaf-2`, AMD EPYC 7B12, 256 threads, $0.30/h, $1.07; `-1` was
-  stopped on a 128-thread machine, $0.70; race:1-4 read from C10):
-
-| exact leaves | thread-ms a world | leaves solved | mean / 95% bound | seats 1-2 bound | seat 1 mean / bound | largest bias | standard |
-|---|---|---|---|---|---|---|---|
-| none | 252 | 0% | 0.0056 / 0.0068% | 0.0122% | 0.0154 / 0.0201% | 0.0239% | fails |
-| race:1-4 | 1,692 | 56.8% | 0.0014 / 0.0018% | 0.0032% | 0.0040 / 0.0058% | 0.0041% | passes |
-| learned t=277338260 | 1,550 | 40.2% | 0.0005 / 0.0008% | 0.0013% | 0.0015 / 0.0022% | 0.0019% | passes |
-| learned t=1057825477 | 1,083 | 20.0% | 0.0023 / 0.0030% | 0.0057% | 0.0071 / 0.0101% | 0.0082% | fails (seat 1) |
-
-  (Times as each run reported them: this run gives 252 thread-ms for "none", C10's run 51 ms for
-  the same check; the two figures were not reconciled.) Every seat, score group and race group passed at t=277338260; the
-  largest seat bound was 0.0031% (seat 5).
-- **Decision recorded.** G v2 at t=277338260 adopted for H_3 (owner, 2026-10-19).
-- **Sources.** `m3-hybrid/learned-leaves.md`; `data/leafrisk/leafrisk-o3-v1*.json`; R2
-  `runs/o3-learnedleaf-2/out/checks/`.
-
-### C12. O3G2 rounds: G2 chooses O_3's new training positions (rounds o3r-1 and o3r-2, 2026-10-21)
-- **Question.** O_3 alone is what values the trick-3 positions in O_2's training labels and in the
-  planned bronze set, so the target was O_3 alone at ≤ 0.0025% (95% bound) overall and at every seat.
-  Does adding positions chosen by G2 [the learned error predictor of C11] bring O_3 alone closer to
-  O_3 + G2?
-- **Method.** Each round: a pilot of 2,000 decisions scores every trick-3 position the incumbent's
-  H_3 reaches with G2; 20 equal-count risk bands; target share of new rows per band
-  (1 − f)·frequency·risk^α/sum + f·frequency with α = 1, f = 0.2; positions kept by a seeded coin per
-  band before labelling, at most 1,000 a decision, from trick-2 decisions. Research basis: Learning Loss
-  for Active Learning (Yoo & Kweon 2019), prioritised replay (Schaul et al. 2016), importance sampling
-  by loss (Katharopoulos & Fleuret 2018), KataGo policy-surprise weighting, defensive importance
-  sampling (Hesterberg 1995). Three nested candidates a round (2M, 4M, 8M new rows); additive
-  candidates continue the incumbent 8 epochs at lr 0.0003 on base + parts; a candidate is adopted
-  unless it loses a pass the incumbent had or is worse beyond 0.002 points; label check of each
-  network on the stored 50k exact trick-2 validation shard (s601) as O_2's labels would be made
-  (exact through trick 2, then O_3); next G2 built on the winner.
-- **Runs.** Round 1 first attempt `o3r-1-1` (AMD EPYC 7B12, 256 threads, RTX 3060, $0.36/h): the
-  instance died, $0.45. `o3r-1-3` (AMD EPYC 9B14, 192 threads, RTX 5090, $1.34/h): 51 min, $1.14.
-  `o3r-2-1` (same machine type): 95 min, $2.10. Round 2's base was the 40M base plus round 1's 8M
-  stored rows.
-- **Mix made.** New rows in the riskiest 2 of 20 bands: round 1 57.8% (aimed 63.3%), round 2 58.7%
-  (aimed 62.1%). Race class 4 was 34% of round 1's part 1 (it is 9% of the distinct leaves H_3 reaches on the golden set, C10).
-- **Result** (golden 95% bound; seat 1 bound; own-team bias; label check against exact trick-2 labels:
-  RMS error and largest team bias):
-
-| round | candidate | new rows | golden bound | seats 1-2 | seat 1 | own bias | label RMS / largest bias | adopted |
-|---|---|---|---|---|---|---|---|---|
-| — | incumbent f5766a | — | 0.0068% | 0.0122% | 0.0201% | −0.0085% | 2.113 / 0.0132% | — |
-| 1 | c1 additive | 2M | 0.0071% | 0.0133% | 0.0227% | −0.0121% | 2.122 / 0.0141% | no (bias) |
-| 1 | c2 additive | 4M | 0.0080% | 0.0169% | 0.0288% | −0.0098% | 2.093 / 0.0140% | no (seats 1-2) |
-| 1 | c3 additive | 8M | 0.0073% | 0.0141% | 0.0229% | −0.0111% | 2.104 / 0.0159% | no (bias) |
-| 2 | c1 additive | 2M | 0.0069% | 0.0135% | 0.0233% | −0.0100% | 2.112 / 0.0142% | no (bias at the line) |
-| 2 | c2 additive | 4M | 0.0070% | 0.0135% | 0.0223% | −0.0085% | 2.104 / 0.0169% | **yes** (1057e9e9) |
-| 2 | c3 scratch 4096-2048-1024-256 | 8M | 0.0079% | 0.0182% | 0.0325% | −0.0155% | 2.258 / 0.0082% | no |
-
-  Paired against the incumbent (mean loss B − A, 95% interval): round 1 c1 +0.0003 (−0.0006..+0.0011),
-  c2 +0.0010 (−0.0001..+0.0023); round 2 c1 +0.0001 (−0.0010..+0.0011), c2 +0.0001
-  (−0.0010..+0.0012), c3 +0.0006 (−0.0008..+0.0023). Own-team bias at seats 1-2 was more negative than
-  the incumbent's for every candidate (e.g. round 1 c1 −0.0300% vs −0.0239%, interval of the difference
-  −0.0109..−0.0015). Every additive candidate's validation loss was lowest after its first epoch (best
-  epoch 0; validation SD 1.93-1.95% at that point, integer SD on 20k rows 1.75-1.85%). The scratch
-  4096-wide network reached validation SD 2.06% (best epoch 9) and cost 77.5 ms a world in H_3
-  against 23.9 ms. Round 2's adopted c2 (1057e9e9…) is within noise of f5766a on every figure; the
-  next G2 (5f7e6792…) was built on it.
-- **Status.** The target (≤ 0.0025%) was not approached; O_3 alone stayed at 0.0068-0.0080% in every
-  candidate. No round 3 has run.
-- **Sources.** R2 `rounds/o3r-1/`, `rounds/o3r-2/` (`report.txt`, `round.json`, `profile.json`),
-  `runs/o3r-1-3/`, `runs/o3r-2-1/` (`round/c*/paired.txt`, `net/report.json`); design
-  `m3-hybrid/o3-rounds.md`.
-
-### C13. Specialist network S on G2-flagged positions (runs `specialist-s2`, `golden-routed-s2`, `net-error-o3-val-1`, 2026-10-22)
-- **Question** (owner). If a network S is trained only on the positions G2 flags as risky, and used
-  on those positions in play instead of exact solves, does it score close to exact?
-- **Method.** `search risk-filter` at the play rule's threshold t=277338260 over the stored 40M base:
-  kept random 11,077,690 of 25.6M (43.3%), rules 2,235,652 of 6.4M (34.9%), harvest 3,162,386 of 8M
-  (39.5%): 16,475,728 rows; held-out 43,681 of the 100k validation rows. S: 2048-1024-256 from random
-  weights, 20 epochs, lr 0.001, batch 1024, RTX 5090 (8.8 min training; run $0.56; first attempt
-  `specialist-s1` failed on a runner registration bug, $0.68). Routed golden check: G2 picks the
-  leaves, S values them, O_3 the rest; compared in the same run with O_3 alone and with G2 + exact
-  (AMD EPYC 9B14, 192 threads, $1.34/h, 43 min, $0.95). Then `search net-error`: O_3's error on the
-  same held-out rows (3 min, $0.07).
-- **Result, position level** (held-out flagged rows; S float from the trainer's report, O_3 integer):
-
-| measure | S | O_3 f5766a |
-|---|---|---|
-| value SD | 3.03% | 2.94% |
-| mean \|error\| | 1.09% | 1.08% |
-| 99.9th percentile \|error\| | 34.0% | 31.2% |
-| largest team bias | 0.027% | 0.033% |
-| SD by race class 0-4 | 1.6 / 1.6 / 3.1 / 2.2 / 5.1% | 1.6 / 1.6 / 3.3 / 2.0 / 5.0% |
-
-  O_3 on all 100k validation rows: SD 1.96%, mean |error| 0.49%. S's outcome accuracy 75.1% (O_3's
-  not measured on these rows).
-- **Result, golden set.** O_3 alone 0.0056 / 0.0068%, seat 1 0.0201%; G2 + exact 0.0005 / 0.0008%,
-  seat 1 0.0022% (passes); routed (S on flagged leaves) 0.0064 / 0.0079%, seat 1 0.0216%, own-team bias
-  0.0179% (seats 1-2 0.0411%), fails. Paired: routed − G2 exact +0.0059 (+0.0044..+0.0075); routed −
-  O_3 alone +0.0008 (−0.0006..+0.0024). Speed: routed 43 ms a world, G2 exact 586 ms, O_3 alone about
-  24 ms.
-- **Sources.** `plan-log-2026-10.md` (2026-10-22 entries); R2 `runs/specialist-s2/`,
-  `runs/golden-routed-s2/out/checks/`, `runs/net-error-o3-val-1/`; design `m3-hybrid/specialist.md`.
-
-### C14. Network evaluation speed (answer-identical engineering)
-- **Result.** Integer forward pass with runtime-dispatched AVX2/AVX-512 kernels and a memo of recent
-  positions: 9-12× faster per evaluation for 512-wide networks, about 7× for 1024-wide; H_4 0.94 ms a
-  world (was 10.1), H_3 17 ms (was 175); byte-identical (old code kept as the reference). Trained O_3
-  2048-1024-256: 21.5-36 µs an evaluation on the build VM or a Threadripper, 84-90 µs on loaded EPYC
-  7B12/7663 threads. CPU/GPU overlap (golden set built beside training; label parts streamed into
-  training) is in `m3-hybrid/overlap.md`.
-- **Sources.** `m3-hybrid/nn-speed.md`, `m3-hybrid/overlap.md`.
+- **Why PIMC works in trick-taking games** (Long, Sturtevant, Buro & Furtak, AAAI 2010) — verified.
+  Three measurable game properties: leaf correlation (how little outcomes change between
+  neighbouring endings), bias, and disambiguation (how fast play reveals hidden information). Skat
+  and Hearts measured leaf correlation 0.8-1.0 and disambiguation about 0.6 (10,000 games per type,
+  1,000 near-leaf samples). 15% of Skat games were unresolved with three tricks left, where PIMC lost
+  0.42 points per deal. PIMC's loss is not monotone in disambiguation (worst at mid-range). The paper
+  gives a procedure to measure these properties for a new game. Project status: the M3 measurement
+  for 41 was specified (M3-SPEC §6) and has not been run.
+- **Strategy fusion** [PIMC assumes it can play differently in worlds it cannot tell apart] and
+  **non-locality** are its two named errors.
+- **αμ** (Cazenave & Ventos 2019): makes "my side" play the same card in every world it cannot
+  distinguish, assuming the opponents see everything. On close 3NT deals: 40 worlds, 62.4% (PIMC) →
+  63.2% (αμ, 3 moves ahead); 20 worlds, 60.2% → 62.0%. Cost rises steeply with look-ahead. Confirms
+  GIB and WBridge5 use PIMC. "Trick costs for αμ" (Bounan & Edelkamp, ISAIM 2024) could not be read.
+- **Extended PIMC / PIMC with postponing reasoning** (Arjonilla, Cazenave & Ventos 2024): gains
+  reported on Dark Chess, not card games.
+- **Saturation (world counts)**: plain PIMC in Skat stopped improving beyond 160 worlds (Furtak &
+  Buro 2013, Fig. 3: K160 vs K160 55.19, K3200 vs K3200 54.57; 18,962 games). In bridge (Bouzy et al.
+  2020) solver-based PIMC plateaued at 100 worlds with 13 cards and 20 worlds with 5 cards; random-
+  rollout PIMC at about 3,000 and 600, and 2.7 tricks weaker. SPARTA used a 100-rollout floor, then
+  dropped options more than two standard deviations behind (about 10× fewer rollouts).
+- **41's world counts** (project measurement, `docs/EXPERIMENTS.md` A5): about 10^36 consistent
+  worlds at trick 1, 10^14-10^16 at trick 4, 10^8 at trick 5, against Skat's 4.3 × 10^7 at the start of
+  play; 12-13 cards are never revealed.
 
 ---
 
-## Part D. The trick-2 network O_2 and trick 1
+## 4. Searching games with more than two sides
 
-### D1. The trick-2 audit loop and the provisional O_2 (runs `m3-hybrid-t2-loop-1`, `-2`, 2026-10-17/19)
-- **Method.** Exact trick-2 labels (about 3 s each on the build VM, 11.3 thread-s on a rented EPYC
-  7B12): 1.2M random (s511) + 300k rules-v1 (s512), validation 50k (s601), all stored. 2048-1024-256,
-  outcome head (39 endings). No golden set at trick 2: the loop's standard is position-level (200k
-  audit shards from trick-1 decisions, γ 0.1%); the only decision-level evidence is the "rough test"
-  on the saved exact trick-1 worlds (8 decisions / 31 worlds with the searched burn; 5 decisions /
-  355 worlds with the old rules-bot burn; seats 1-2 only). Loop-1: AMD EPYC 7742 (245 threads, RTX
-  4060 Ti, $0.72/h); it stopped when the vast balance reached zero (2026-10-18 15:30 Irish). Loop-2
-  resumed from the stored labels (AMD EPYC 7742, 330.8 min, $6.99); stopped by the owner after round
-  3 ("round 3 no better; vast credit low").
-- **Result.** Provisional O_2 = loop-1 round 1, 505a0c7c… (owner, 2026-10-17/18): float validation
-  loss 2.0456, outcome accuracy 68.2%, value SD 3.62%, mean |error| 1.46%, team bias within ±0.12%;
-  integer SD 3.75%. O_3's for comparison: 1.85%. Loop-2 rounds (integer validation SD; groups
-  confirmed; rough test worst set's 95% bound):
-
-| round | network | rows | int SD | confirmed | rough test (rules-burn set, 5 decisions) |
-|---|---|---|---|---|---|
-| 1 | e2a8602f | 1.5M | 3.655% | 681 | 0.1283% (searched-burn set 0.4837%) |
-| 2 | 20188d24 | 1.75M | 3.733% | 678 | 0.1498% (searched-burn set 0.0000%) |
-| 3 | 92b705dd | 2.0M | 3.851% | 681 | 0.1159% (searched-burn set 0.0000%) |
-
-  The worst groups were score states (a team on 35, 36 or 40 points; SD 6-15%). Validation SD rose
-  slightly each round while targeted rows were added.
-- **Limits.** The rough test is 5-8 decisions at seats 1-2; its bounds are coarse and the rules-burn
-  worlds were made by an older binary.
-- **Sources.** `m3-hybrid/rung3.md`; R2 `runs/m3-hybrid-t2-loop-2/partial/rung/000000/out/hybrid/audit/round-*.txt`.
-
-### D2. Cheaper trick-2 labels: hybrid labels, G v2 labels and the label test (2026-10-19/20)
-- **Question.** Can O_2's training labels come from H_3 (exact through trick 2, then O_3; TreeStrap,
-  Veness et al. 2009) instead of exact solves, and at what cost and quality?
-- **Measured cost per trick-2 label.** Build VM: exact 3,650 thread-ms; plain hybrid (O_3 only) 86
-  thread-ms; hybrid + race:1-4 exact leaves 2,800; hybrid + G v2 2,000. Rented EPYC 7B12: exact 11.3
-  thread-s, G v2 9.3 thread-s (G v2 labels about 1.2× cheaper than exact; an exact trick-2 solve is
-  mostly its ~400 trick-3 leaf solves and G v2 still solves 40% of them).
-- **Runs.** `o2-gv2-labels-2` (AMD EPYC 7B12) and `-3`: O_2 on 10M G v2 labels, stopped by the owner
-  after about an hour (no part finished; $0.34 for -2); `-3` made a 5k exact validation shard (s603).
-  `o2-labeltest-1` (plain hybrid vs exact labels at 600k, same exact validation) was cancelled after
-  8 min, before a result; it made a 20k exact validation shard (s602). STATUS-history records "O_2 on
-  G v2 labels: rejected" (2026-10-20) on the cost figure.
-- **Label quality measured instead** (C12's label check): O_3-based trick-2 labels against exact on
-  50k positions: RMS error about 2.1%, largest team bias 0.013-0.017% (leader's team negative).
-- **Sources.** `m3-hybrid/audit-loop.md` §12, `m3-hybrid/learned-leaves.md`, `history/STATUS-history.md`
-  (2026-10-20).
-
-### D3. O_2's own error predictor, "O_2 G v2" (run `o2-leafrisk-1`, 2026-10-20)
-- **Question.** Is O_2's error as concentrated as O_3's, so that deferring a few trick-2 leaves of a
-  trick-1 search to an expert removes most of it?
-- **Method.** Trick-1 decisions searched by H_2 with the provisional O_2 (505a0c7c); trick-2 frontier
-  positions harvested and labelled exactly: train 300k (s79001), calibration 150k (s79002, 5,039
-  decision units), test 50k (s79003, 1,684 units); the same tree model and calibration as C11 (110
-  of 150 trees kept). AMD EPYC 7B12 (256 threads, $0.30/h), 330 min, $1.63. Model 76865b9c… (file),
-  calibration's model SHA 04c02935…; the model was not stored content-addressed by the run (`stored`:
-  null).
-- **Result** (test split; share of O_2's squared error left after solving a share of positions;
-  O_3's figures from C11 for comparison):
-
-| solved | O_2: learned | O_2: best possible order | O_3: learned |
-|---|---|---|---|
-| 5% | 49.1% | 29.7% | 25.3% |
-| 10% | 36.6% | 18.7% | 16.6% |
-| 20% | 23.9% | 8.7% | 8.9% |
-| 30% | 16.5% | 4.0% | 4.7% |
-| 40% | 11.6% | 1.7% | 2.2% |
-| 50% | 7.7% | 0.6% | 1.4% |
-| 75% | 1.4% | 0.0% | 0.5% |
-
-  O_2's unsolved SD on these positions: 3.28% (calibration 3.51%; O_3: 1.92%). Race policies on O_2's
-  positions: race:4 solves 24.1% and leaves 40.2% (learned at that share: 20.6%); race:2,4 solves
-  52.4% and leaves 19.6% (learned: 7.0%). Learn-then-Test thresholds (CLT), target SD left → share
-  solved: 2.0% → 12%, 1.6% → 21.7%, 1.2% → 39.1%, 1.0% → 49.3%, 0.5% → 75.5%. Most important inputs:
-  distance to the nearest possible ending 44.8%, number of possible endings 13.3%, widest money range
-  of one team 3.9%.
-- **Not done.** The trick-1 decision test of O_2 + G v2 (planned against a silver set, D4) has not
-  run.
-- **Sources.** R2 `runs/o2-leafrisk-1/out/leafrisk/` (`model.json`, `calibration.json`);
-  `m3-hybrid/learned-leaves.md` ("O_2 G v2").
-
-### D4. The trick-1 silver set (built 2026-10-17; attempts 2026-10-20/21)
-- **Design.** A reference for trick-1 decisions without exact trick-1 solves: H_3 (exact through
-  tricks 1-2, then O_3) on the same decisions and worlds as H_2 (exact trick 1, then O_2). Identity
-  recorded in the design: true loss of H_2 = loss against silver + H_3's own true loss + (δ_s* − δ_h),
-  so a pass against silver bounds H_2 relative to H_3, not relative to exact.
-- **Pilot cost** (build VM, 4 decisions a seat, world 0): an H_3 leader world searches about 47M solver
-  nodes and asks O_3 about 10.9M times, 712-1,800 s; seat 2 330 s mean; seats 4-8 seconds. Estimated
-  on an AMD EPYC 9654 (368 threads, $1.01/h): 400 × 320 $42-82; 400 × 80 $5-10. 65-75% of the cost is
-  seat 1.
-- **Attempts.** `o2-silver-1` (AMD Threadripper PRO 9995WX, 192 threads, $0.60/h): FAILED after 79
-  min, $0.79, 143 worlds checkpointed of 32,000 (400 × 80). `o2-silver-2/-3/-4` and `sx50_*`,
-  `s2_50` were part of the work of 2026-10-19/20 that the owner discarded (branch
-  `archive/silver-shared`); they checkpointed a few hundred worlds each (210, 192, 471). **No silver
-  set exists.** The optional exact anchor (`m3-hybrid-t1-anchor`) was not run.
-- **Sources.** `m3-hybrid/silver.md`; R2 `runs/o2-silver-*/`.
-
-### D5. Trick-1 checks on the saved exact worlds (rough test)
-- **Result.** See D1: H_2 with the trick-2 loop's networks on 5-8 saved trick-1 decisions; 95% bounds
-  0.12-0.48% on the worst set, team biases 0.32-0.59%. These are the only trick-1 decision-level
-  numbers measured against exact values.
+- **max^n** [each side maximises its own entry of a value vector] and **paranoid** [assume all other
+  sides are a coalition against you]. Korf 1991: multi-player alpha-beta gives no average-case pruning
+  gain; Sturtevant & Korf 2000: pruning techniques for multi-player games.
+- **Sturtevant, IJCAI 2003** (last-branch and speculative pruning) — verified. Requires the values to
+  sum to a constant (true for 41's money chances). Table 12 (3-player perfect-information variants,
+  50 hands, 500k nodes a move): speculative max^n vs paranoid, Hearts 8.01 vs 8.99 (lower better),
+  Spades 5.72 vs 5.61 (higher better), although paranoid searched deeper (Table 11, Spades partial
+  tree 15.4 vs 22.4 ply).
+- **Sturtevant's thesis (2003)** — verified. Perfect-information Hearts: 3-player 8.22 vs 8.82,
+  4-player 6.33 vs 7.04; Spades 5.65 vs 5.68 ("negligible", paranoid ~10 ply deeper). Monte Carlo
+  imperfect-information Hearts (Table 7.10): 3 players 6.91 vs 10.32 (40 models) and 6.43 vs 10.92
+  (20 models); 4 players 5.34 vs 8.81. Imperfect-information Spades 5.81 vs 5.52 (max^n better). §8.3:
+  "paranoid has a large search depth advantage over maxn, but no performance advantage" in card
+  games. Theorem 4.1: with a mis-modelled tie rule the error of a max^n value is unbounded; "the tie-
+  breaking rule must be implicitly defined by the way we order successors". Same move order needed in
+  every part of the tree.
+- **Prob-max^n** (Sturtevant, Zinkevich & Bowling, AAAI 2006): an expected-value backup over a model
+  of the other players' choices (not a tie-break). **Soft-max^n** (Sturtevant & Bowling 2006): in
+  exhaustively searched 3-player Spades a wrong opponent model dropped a 74.7% win rate to 44.0%.
+- **Game-level objective** (Sturtevant 2004, Hearts to 100, Spades to 200): a game-level objective beat
+  a hand-points objective (54.5% game wins despite a worse average score). Transposition gains: 157×
+  in Spades, 26× in Hearts.
+- **UCT in multi-player games** (Sturtevant 2008) — verified; all card-game tests perfect-information.
+  4-player Hearts, 3,244 hands where shooting the moon was possible: the shooter succeeded 7.70%
+  against UCT (50,000 playouts) and 42.45% against simple max^n. UCT beat a learned Hearts player
+  46.12 vs 67.30. In 3-player Spades UCT was on par with prob-max^n (52.8% wins). Chinese Checkers: UCT
+  beat paranoid and max^n 92-96% at 250k expansions (only 16.7% vs paranoid at 1,600). No UCT-vs-
+  paranoid card-game result exists.
+- **MP-Mix** (Zuckerman, Felner & Kraus 2009): switches between "offensive against the leader",
+  paranoid and max^n by game state. **Best-Reply Search / BRS+** (Schadd & Winands 2011; Nijssen &
+  Winands): only one opponent moves at a time. **Information-set MCTS** (Cowling, Powley & Whitehouse
+  2012): no large difference from determinised search in Dou Di Zhu.
+- **Project status**: max^n with the documented tie rule and shallow pruning is the solver (PLAN
+  §6.7). Measured in 41: shallow pruning fires at about 1 node in 10,000 and 82-85% of decision nodes
+  have tied best cards (`docs/EXPERIMENTS.md` A3). Paranoid, BRS and ReBeL-type search are recorded as
+  not used (PLAN §16).
 
 ---
 
-## Part E. Students (small networks for the app's tricks 1-2)
+## 5. Exact open-hand solvers
 
-### E1. Pipeline and the first local student (2026-10-17/18)
-- **Method.** A plain MLP over one seat's view (encoder `student-v1`, 3,292 inputs) scoring every
-  legal candidate, integer inference (byte-identical natively and in WASM), trained on the teacher's
-  per-card values in every deal (Hinton et al. 2015; Rusu et al. 2016; Expert Iteration, Anthony et
-  al. 2017). Teacher at trick 2: PIMC over D deals with H_3 (O_3 f5766a). Generator speed: 4.7
-  thread-s a trick-2 decision at D = 320 on the build VM.
-- **Result.** First tiny student (3,000 decisions at 16 deals; test 512 decisions at 64 deals): random
-  card 0.520%, rules-v1 0.351%, student 256-128 0.366%, 512-256 0.289%. In WASM a 512-256 student
-  request took 0.4-0.7 ms (hybrid PIMC trick-2 request of 4 deals: 12.6 ms natively).
-- **Sources.** `STUDENT.md` §11.
-
-### E2. Learning curve and width (runs `student-t2-base-1`, `-curve-1`, `-more-1/-2`, `-curve-1m-1`, 2026-10-18/19)
-- **Method.** 512-256 students on rules-bot and mixed trick-2 decisions at 320 or 64 deals; fixed test
-  set 4,096 decisions at 1,024 deals.
-- **Result.** Decision loss against the teacher: 50k 0.186%, 100k 0.134%, 250k 0.078% (rules-v1:
-  0.40% on the same test), 1M 0.057%. The last 4× of data gained 27%, consistent with loss ∝ N^-0.23.
-  1024-512 at 1M: 0.056% (no measurable gain over 512-256).
-- **Sources.** `plan-log-2026-10.md` ("Student to 0.01"), `STUDENT.md` §14.
-
-### E3. Deals per decision at equal teacher cost (run `student-t2-dealtest-1`, 2026-10-18, $0.67)
-- **Result** (512-256; loss, 95% bound):
-
-| positions | deals | teacher cost | loss | agree |
-|---|---|---|---|---|
-| 126,000 | 320 | 1× | 0.1140% (0.1317) | 63.7% |
-| 315,000 | 128 | 1× | 0.0695% (0.0771) | 64.2% |
-| 625,000 | 64 | 1× | 0.0760% (0.0875) | 63.8% |
-| 625,000 | 32 | 0.5× | 0.0776% (0.0862) | 63.3% |
-| 126,000 | 64 | 0.2× | 0.1463% (0.1670) | 60.0% |
-| 250,000 | 320 | 2× | 0.0784% (0.0912) | 64.4% |
-
-- **Decision recorded.** New student data at 64 deals (2026-10-18).
-- **Sources.** `STUDENT.md` §13.
-
-### E4. The ruler: split-half floor and the top-k shortlist (2026-10-19, build VM)
-- **Method.** Even deals = half A, odd = half B; pick on one half, score on the other (no winner's
-  curse). "Floor" = a 512-deal teacher scored against the other half. Top-k: the student shortlists k
-  cards and the teacher picks among them.
-- **Result** (1M, 512-256, 64 deals): full loss 0.0566%; split student 0.0586%; floor 0.0080%; gap
-  0.0506% (90% range 0.0443-0.0575); top-2 0.0174% full / 0.0233% split; top-3 0.0050% / 0.0122%.
-  Leaders: floor 0.0177%, full loss 0.0838%, top-3 0.0194%. S4: floor 0.0140%, loss 0.0889%. The
-  1024-512 students' gaps overlap the 512-256's.
-- **Sources.** `STUDENT.md` §14.
-
-### E5. The student against the exact golden set (2026-10-20)
-- **Result.** Trick-2 student (512-256, 1M, plain H_3 teacher; 954223e2…) on the 2,000-decision
-  exact golden set: alone 0.073% (95% bound 0.088%), seat 1 0.18%; top-3 shortlist with a perfect
-  final pick 0.0073% (bound 0.013%), seat 1 0.0148% (bound 0.024%).
-- **Sources.** `history/STATUS-history.md` (2026-10-20).
-
-### E6. Trick-1 teacher cost (run `student-t1-cost-2`, 2026-10-18)
-- **Method.** 2,000 rules-v1 trick-1 decisions at 64 deals, teacher H_2 with the provisional O_2, in 4
-  parts. AMD EPYC 7B13 (256 threads, $1.05/h).
-- **Result.** 12,489 decisions an hour (part 0: 500 decisions in 144 s); 5.28 candidates a decision;
-  run 18 min, $0.32. That is about $84 per million trick-1 decisions at that price. Build VM estimate
-  had been 1.2 thread-s a deal (77 thread-s a decision).
-- **Sources.** R2 `runs/student-t1-cost-2/out/rules/`; `plan-log-2026-10.md`.
-
-### E7. Trick-2 student with a G v2 teacher (runs `student-t2-gv2-1/-2`, 2026-10-20)
-- **Result.** No data produced: `-1` failed on a runner bug (fixed in 6c7acf5), `-2` was stopped by the
-  idle watchdog during setup.
+- **Partition search** (GIB): b → b^0.76 in bridge; **Furtak's thesis (2013)** — verified: Skat solver
+  speed-ups of 45× (suit), 58× (grand), 22× (null) from symmetries, move ordering and tables; Kermit
+  solves ≈68 worlds a second exactly (30 cards, one core), 237 with forward pruning. Kupferschmid &
+  Helmert (2006) Skat solver uses a two-sided zero-window [yes/no] search. Published fast solvers rely
+  on two-sided alpha-beta, which a four-way value vector cannot use; no publication applies partition
+  search to max^n or vector values.
+- **Setrograde** (Stone, Sturtevant & Schaeffer, IJCAI 2025): solves bridge endgames backwards over
+  sets of positions sharing a value; 1,000× fewer operations, 10,000× fewer stored entries; every
+  7-trick bridge ending solved.
+- **Equivalent cards**: two cards in one hand are interchangeable once every card ranked between them
+  is gone (Furtak). The 45s project merges within pools but never across the bonus-relevant trump.
+- **Transposition key**: Skat solvers drop the running score because their score is additive;
+  Edelkamp keys only after a completed trick.
+- **Project status and measurements**: `docs/EXPERIMENTS.md` A3-A4 (41: trick 3 9 ms, trick 2 3 s,
+  trick 1 seconds to hours per world).
 
 ---
 
-## Part F. Runs and builds without a result, and work set aside
+## 6. Beliefs: who holds which card
 
-| item | state | what exists |
-|---|---|---|
-| O_3 base curve 50% / 100% (`o3-basecurve-*`) | cancelled at 37 s, 2026-10-19 | nothing |
-| O_3 wider / deeper (`o3-size-*`) | never launched | manifests |
-| Sibling ranking A/B (`o3-sibrank-a/-b`) | never launched | build-VM A/B only (C9) |
-| Four-network ensemble | stopped twice for speed | single-network checks only (C8) |
-| Hybrid-label test (`o2-labeltest-1`) | cancelled at 8 min | 20k exact validation shard (s602) |
-| O_2 on G v2 labels (`o2-gv2-labels-2/-3`) | stopped by owner | 5k exact validation shard (s603) |
-| Trick-2 hybrid-label run (`m3-hybrid-t2-hlabels`) | never launched | manifest |
-| Silver set and exact anchor (D4) | incomplete / not run | a few hundred checkpointed worlds |
-| O_2 G v2 trick-1 test (D3) | not run | the predictor model |
-| Trick-1 deal-count curves (A7) | incomplete | 31 + 355 saved exact worlds |
-| PIMC-v0 vs rules-v1 SPRT gate (M3-SPEC §8.3), PIMC-suitability report (§6) | not run | — |
-| Speed tests of AMD EPYC 9B45 offers (2026-10-22) | stopped: 46 usable threads | no speed figure |
-| Copilot work of 2026-10-19/20 (`silver-shared`, `sx50_*`, `s2_50`, `o2-silver-2..4`, `o3v2-*`, `o3g2-linux-verify-*`, `o3-targeted2m-recovery-*`) | discarded by the owner | files in R2, not analysed here; branch `archive/silver-shared` |
-
----
-
-## Part G. Measured costs, side by side
-
-| what | measured cost | where |
-|---|---|---|
-| exact solve, start of trick 4 / 3 / 2 (one thread, build VM) | 0.04 ms / 8.8 ms / 3.1 s median | A3 |
-| exact trick-2 world on a loaded EPYC 7B12 thread | about 2.5 s | C10 |
-| exact trick-1 world, leader | ≥ 47 ×10^9 nodes mean; one world 13,057 s on one thread | A4 |
-| H_3 a trick-2 world (2048-1024-256 O_3), loaded EPYC 7B12 | 51 ms; Threadripper 21 ms | C7, C4 |
-| H_3 + G v2 (t=277338260) a trick-2 world | 1,550 thread-ms (586 ms on a 9B14) | C11, C13 |
-| H_3 + race:4 / race:2,4 / race:1-4 | 232 / 668 / 1,692 thread-ms | C10 |
-| H_3 with S on flagged leaves | 43 ms | C13 |
-| H_3 at trick 1 (silver), leader world | 10-30 thread-minutes (build VM) | D4 |
-| exact trick-3 label | about 9 ms (build VM) | A3 |
-| exact trick-2 label | 3.65 s build VM; 11.3 thread-s EPYC 7B12 | D2 |
-| G v2 trick-2 label | 2.0 s build VM; 9.3 thread-s EPYC 7B12 | D2 |
-| plain hybrid trick-2 label | 86 thread-ms build VM | D2 |
-| trick-2 teacher decision at 320 deals (H_3) | 4.7 thread-s build VM | E1 |
-| trick-1 teacher decision at 64 deals (H_2) | 12,489 decisions an hour on 256 EPYC 7B13 threads | E6 |
-| student request in WASM | 0.4-0.7 ms | E1 |
+- **Constraint-respecting deal generation** (GIB; History Filtering): build worlds on a suit-length
+  matrix with a feasibility check; card-level rejection only as a test oracle.
+- **Learned card-location beliefs** (Solinas et al. 2019) and **policy-based weighting** (Rebstock et
+  al. 2019): §2.2. The weight of a world is the product of the policy's probabilities of everyone's
+  observed actions divided by the proposal probability (importance sampling).
+- **History Filtering** (Solinas et al., NeurIPS 2023): a Metropolis-Hastings swap kernel that
+  rejuvenates a set of worlds; requires full-support policies.
+- **Resample-move particle filters** (Gilks & Berzuini 2001; POMCP, Silver & Veness 2010): weights
+  updated per observed action, resampling when the effective sample size falls below half.
+- **Learned Belief Search** (Hu, Lerer, Brown & Foerster 2021) — verified. 2-player Hanabi: rollouts
+  truncated at 16 steps and bootstrapped by a value head scored 19.27 / 24.04 / 24.48 / 24.62 against
+  full rollouts' 18.88 / 23.95 / 24.42 / 24.59 for weak to best blueprints; belief-prediction failures
+  0.0083% vs 0.1%. Two players both searching: 24.34 vs single-agent 24.48 ("noticeably worse",
+  beliefs become inaccurate). Against SPARTA: 24.48 in 47 s vs 24.52 in 215 s (5 cards).
+- **Off-Team Belief Learning** (NeurIPS 2022): under partner shift, plain belief sampling produced a
+  valid sample on about 83% of steps; off-team learning stayed above 99.5% and cut the self-play/
+  cross-play gap below 1%. **Off-Belief Learning** (2021) is restricted to common-payoff games.
+- **Ataraxos** (Sokota et al. 2025/26): transformer-decoder belief; the dou dizhu belief network has
+  3.3M parameters, trained 8 hours on 4 H100s.
+- **Autoregressive beliefs** (LBS, Off-Team, Ataraxos): assign hidden cards one at a time, masking full
+  or forbidden locations; the proposal probability is the product of the conditionals.
+- **Project status**: hard facts and exactly uniform sampling are built (`docs/EXPERIMENTS.md` A5);
+  learned beliefs and policy weighting are planned (PLAN §6.4, amendment A5) and not built.
 
 ---
 
-## Part H. Stored networks and data referred to above (R2 `inputs/sha256/<hex>`)
+## 7. Search with realistic players inside the worlds (recursive Monte Carlo)
 
-| what | key (prefix) |
+- **Furtak & Buro, CIG 2013** — verified. Recursive Kermit (RK: 160 level-1 worlds, 10 level-2) as
+  soloist +6.84 points per game over saturated PIMC Kermit-160 (about 80 points per list), at about
+  8× the cost; RK1600,10 +8.97 ("10× more hardware gives roughly 2 more points", while PIMC did not
+  benefit). As defender −1.35 to −4.42 (lower better). Against information-set UCT ("Bernie", 1,600
+  playouts): soloist 74.37 ± 1.58 vs 53.99 ± 1.97, about 35× faster. On synthetic trees recursion
+  hurts when disambiguation < 0.3 and helps above; the largest drop in exploitability comes from the
+  first recursion level. A post-mortem showed recursive Kermit makes more early perfect-information
+  errors yet wins; the paper suggests recursion only late in the game.
+- **Bouzy, Rimbaud & Ventos, IEEE CoG 2020** — verified. Bridge card play, no-trump, 100 deals per
+  experiment. 13 cards: one recursion level with a double-dummy inner player +0.57 to +0.58 tricks per
+  deal over PIMC-100; a random inner player only reached parity (+0.10, +0.08). 5 cards (20-card deck):
+  level 1 with DDS inner player +0.24 (σ 0.05), random inner player +0.10; level 2 +0.20, level 3
+  +0.16 ("the third recursion is actually not beneficial"; "more worlds is better" fails, best first-
+  level count 20-30). Each level multiplies cost by about worlds × moves × hand length (13 cards,
+  (100,100): 12 h per deal).
+- **SPARTA** (Lerer et al. 2020, Hanabi): search on top of a shared blueprint, deviating only when the
+  gain exceeds a margin (0.05) after a 100-rollout floor; proved search does not make the blueprint
+  worse apart from sampling error; partners searching independently without safeguards did worse.
+- **Sturtevant & White 2006**: a learned open-hand evaluator inside sampled search (not score-aware).
+- **Project status**: the decision-time engine of PLAN §6.8 is not built; the project's hybrid
+  yardstick (exact search to trick k, a value network after) is the built form of a depth-limited
+  search with a learned leaf (`docs/EXPERIMENTS.md` Parts B-D).
+
+---
+
+## 8. Learning: self-play, distillation, networks
+
+- **Self-play RL in team card games.** DouZero (2021): Deep Monte-Carlo [values learned from final
+  results] with a small MLP; 48 cores + four 1080Ti, passing DeltaDou at about 5 × 10^9 steps (30
+  days); from-scratch RL overtook a 50M-sample supervised network within two days. PerfectDou (2022):
+  PPO with a perfect-information critic ("perfect-training, imperfect-execution": γ 1.0, GAE λ 0.95,
+  entropy 0.1, model lag 1); 880 cores + 8 GPUs, 2.5 × 10^9 steps; its ablation shows plain PPO
+  without the oracle critic is weak. DouZero+ (2022): adds hand prediction. DouRN (2024): 2-6 residual
+  blocks on top of DouZero's MLP raised win rate to 52-57% with 2-3× longer training; replacement at
+  the same depth gave 50.3%. DanZero+ (2023): PPO under a day only because it started from a 30-day
+  DMC model. OADMCDou (IJCAI 2024): fixed perfect features in DMC did not beat DouZero in 30 days; a
+  linear anneal 1 → 0 over 20 days plus clipped Q-updates did (ADP +0.104 ± 0.041).
+- **Mahjong.** Suphx (2020): "global reward prediction" turns per-round points into chance of winning
+  the whole game; "oracle guiding" trains the policy on perfect features and anneals them; plain
+  distillation from an oracle policy "does not work well"; 44 GPUs × 2 days per agent; top 0.01% of
+  human players. Mortal: per-round reward = change in expected final payoff.
+- **Poker.** AlphaHoldem (AAAI 2022): Trinal-Clip PPO, K-best self-play. Pluribus: CFR, §2.3.
+- **Expert Iteration** (Anthony, Tian & Barber 2017): training on the search's full action
+  distribution gave 50 ± 13 Elo over chosen-action targets, with top-1 accuracy almost unchanged.
+  AlphaZero: the same loop at scale.
+- **KataGo** (2019): playout-cap randomisation (full search on about 25% of moves) 1.37× training
+  efficiency; auxiliary ownership/score heads 1.65×, auxiliary policy target 1.30×; policy-surprise
+  weighting shows positions where the network was most wrong more often.
+- **Distillation.** Hinton, Vinyals & Dean 2015 (soft targets); Rusu et al., ICLR 2016 (policy
+  distillation, several teachers into one student).
+- **Partners and humans.** Fictitious Co-Play (Strouse et al. 2021): skill-level checkpoints make a
+  bot a good partner to strangers (10.6 vs 4.7 with a human proxy; 8.6 vs 1.0 with random partners);
+  architecture diversity added nothing; the population plateaued at about 32; 114 human participants
+  preferred FCP partners. Other-Play (Hu et al. 2020): the cross-play protocol. piKL (Jacob et al.
+  2022): search regularised toward a human model; its Hanabi imitation model used 235,954 games; no-
+  press Diplomacy (Bakhtin et al. 2022) about 46,000 games. AlphaStar: KL penalty toward the
+  supervised policy, exploiter agents.
+- **Reward shaping.** Ng, Harada & Russell 1999: potential-based shaping preserves optimal policies
+  (one agent). Lu, Schwartz & Givigi (JAIR 2011): per-player potentials are necessary and sufficient
+  in n-player general-sum games. Devlin & Kudenko (AAMAS 2011/2012): shaping preserves the set of
+  equilibria but "can alter the joint policy converged upon"; potentials that change during training
+  keep the guarantee if each transition uses the potential in force when visited.
+- **Integer inference.** Stockfish NNUE docs — verified: int16 first layer and accumulator, int8 hidden
+  layers with int32 accumulation, clipped ReLU; weights must be clamped during training; quantisation
+  error negligible for shallow nets; no Elo figure published. Lc0 (2018): post-training int8 of a
+  large CNN cost about −300 Elo; 2024 claim of int8 without degradation (policy only). KataGo ships
+  FP16. No card-game int8 measurement exists.
+- **Project status**: phases B-E of PLAN §8 (self-play RL, league, human models) are not started;
+  oracle networks, students by distillation and integer inference are built (`docs/EXPERIMENTS.md`
+  Parts B-E).
+
+---
+
+## 9. Objective: the match, the money, and calibration
+
+- **Backgammon match-equity tables** (MET): the chance of winning a match from any score, built by
+  backward induction; Rockwell-Kazaross rolled out every score 38,880 times; Kazaross-XG2 100,000,
+  "piecemeal so that all possible resulting scores had already been rolled out". Zare: a table wrong by
+  a few tenths of a percent costs almost nothing (100,000 GNU Backgammon matches: 50.1% vs 49.9%).
+- **Calibration**: cross-entropy on a softmax is a strictly proper scoring rule; temperature scaling
+  (Guo et al. 2017); equal-width bins are unstable for rare probabilities that are never the top label
+  (Nixon et al. 2019).
+- **Project status**: the exact equity table is built and in every run (`docs/EXPERIMENTS.md` A2).
+
+---
+
+## 10. Networks as leaf evaluators, their errors, and spending exact work where it matters
+
+These sources underlie the hybrid yardstick and its later fixes (2026-10-16 to 22).
+- **TreeStrap** (Veness, Silver, Uther & Blair, NeurIPS 2009) and TD-Leaf: training a value function
+  on the values of a deeper search that uses a learned evaluation at its leaves; TreeStrap trained a
+  chess evaluation from self-play to master level and outperformed TD-Leaf. Errors in leaf values carry
+  into the labels (the project's note: with frontier values off by at most e the backed-up value of the
+  deciding team is off by at most e; with four teams a flipped near-tie can move other teams' values by
+  more).
+- **The optimizer's curse** (Smith & Winkler, Management Science 52(3), 2006) — verified (abstract and
+  erratum): choosing the best of several alternatives by unbiased estimates yields systematic post-
+  decision disappointment, because selection favours over-estimates; the authors propose Bayesian
+  shrinkage; a 2007 erratum states the magnitudes in their Figure 3 were too small. Project test:
+  `docs/EXPERIMENTS.md` C7.
+- **Value of computation** (Russell & Wefald 1991; Hay, Russell, Tolpin & Shimony 2012): spend a
+  computation where it can change a decision. With a leaf off by e and a density f(0) of option gaps
+  near zero, the expected loss is about f(0)·e²/2, so expected squared error measures the value of an
+  exact solve (derivation in `docs/m3-hybrid/learned-leaves.md`).
+- **Learning to defer / selective prediction** (Geifman & El-Yaniv 2017; Mozannar & Sontag 2020): a
+  second model decides when the cheap answer can be trusted and when to hand the case to an expert.
+- **Gradient-boosted trees** (Friedman 2001; row subsampling 2002; histogram splits as in LightGBM,
+  Ke et al. 2017).
+- **Guarantees for a threshold**: Learn then Test (Angelopoulos, Bates, Candès, Jordan & Lei 2021):
+  fixed-sequence testing of thresholds keeps the largest whose upper confidence bound on risk is
+  within target, P(risk ≤ target) ≥ 1 − δ. Conformal risk control (Angelopoulos, Bates, Fisch, Lei &
+  Schuster 2022): (n·R(t) + B)/(n + 1) ≤ target in expectation. Empirical Bernstein bound (Maurer &
+  Pontil 2009). Project measurement: the finite-sample bounds need hundreds of thousands of decisions
+  to certify a useful target (`docs/EXPERIMENTS.md` C11).
+- **Finding weak groups**: multiaccuracy and multicalibration (Hébert-Johnson, Kim, Reingold &
+  Rothblum, ICML 2018; Kim, Ghorbani & Zou, AIES 2019): if an auditor can find a group of weight ≥ γ
+  with mean error > α, "find, correct, repeat" reaches multiaccuracy after at most about 1/(α²γ)
+  corrections. Slice discovery: SliceFinder (Chung et al., ICDE 2019), DivExplorer (Pastor, de Alfaro &
+  Baralis, SIGMOD 2021), Domino (Eyuboglu et al., ICLR 2022). False-discovery control: Benjamini-
+  Hochberg. Boosting (Freund & Schapire 1997). Project use: `docs/EXPERIMENTS.md` B5, C2-C3.
+- **Choosing training data by predicted error**: Learning Loss for Active Learning (Yoo & Kweon, CVPR
+  2019); prioritised experience replay (Schaul et al., ICLR 2016); importance sampling by loss
+  (Katharopoulos & Fleuret, ICML 2018); KataGo policy-surprise weighting; Neyman allocation; defensive
+  importance sampling (Hesterberg 1995: keep a share drawn the plain way). Project use: C12.
+- **Warm starts**: Ash & Adams 2020: a warm-started network can generalise worse than one trained from
+  scratch; shrink-and-perturb is their remedy. Continual training on old plus new data (replay) is the
+  practice of self-play engines. Project use: C3, C12.
+- **Ranking losses**: RankNet (Burges et al., ICML 2005); decision-focused learning, "Smart Predict-
+  then-Optimize" (Elmachtoub & Grigas 2022). Project use: C9.
+- **Ensembles**: deep ensembles' disagreement as uncertainty (Lakshminarayanan et al. 2017). Project
+  use: C8.
+
+---
+
+## 11. Evaluation statistics
+
+- **Duplicate play**: the same deals replayed with seats rotated. For four competitors, every seat
+  assignment of two programs except all-A and all-B (14 arrangements; Sturtevant; GO-MCTS 2024 with a
+  Wilcoxon signed-rank test over blocks).
+- **SPRT / generalised SPRT** (Stockfish Fishtest): log-likelihood ratio from block mean and variance;
+  stop when a pre-set α, β and effect size are reached.
+- **AIVAT** (Burch, Schmid, Moravčík & Bowling, AAAI 2018): 85% standard-deviation cut (44× fewer
+  games) in the DeepStack human match where one strategy was fully known; about 3× in SD bot-vs-bot;
+  MIVAT in six-player poker 20-25%.
+- **Ratings for multi-team tables**: Plackett-Luce; Weng & Lin (JMLR 2011); OpenSkill (JOSS 2024);
+  TrueSkill. Elo is two-player.
+- **Exploitability probes**: approximate best response (Timbers et al. 2022); AlphaStar exploiters.
+- **Project status**: the arena with 14-way duplicate blocks, the canary and σ_b are built
+  (`docs/EXPERIMENTS.md` A2); no tournament between bots has been run yet.
+
+---
+
+## 12. Infrastructure facts (as checked on the dates given)
+
+- **vast.ai** (docs and live probe, 2026-10-13): no CPU-only compute product (`num_gpus=0` returns
+  storage offers); CPU and RAM are allocated in proportion to the GPU fraction; interruptible instances
+  are stopped when outbid (processes killed); storage and bandwidth are billed while loading. Project
+  measurements of rented machines: `docs/EXPERIMENTS.md` A8, `docs/VAST-MACHINES.md`.
+- **PyTorch 2.15** drops CUDA 12.6 wheels and Maxwell/Pascal/Volta GPUs; 2.14.1 is the last line for
+  them.
+- **Cloudflare** (as reported by the 2026-10-13 review; conflicting figures to be re-checked against
+  live docs): Workers 128 MB per isolate, startup 400 ms or 1 s, script 10 MB compressed or 64 MiB
+  uncompressed; Durable Object attachments 2 KB or 16 KB; Containers at $0.000020 per vCPU-second.
+
+---
+
+## 13. What the sources say against some methods (recorded as not used, PLAN §16)
+
+| method | what the sources report |
 |---|---|
-| O_4 adopted (trick-4 loop round 1) | b28750e3d447… |
-| O_3 adopted f5766a (2048-1024-256, 40M) | f5766aa98a1d…, float b5679677… |
-| O_3 at 80M base | 7eeb1f8862cc… |
-| O_3 other loop networks | b34e12b5 (t3 loop r1), a099061b (r3), bfd1bec2 (r4), a97ac177 (additive-2 r2), b89b26d6 (rung-2 round 1) |
-| O3G2 round 1 candidates | e9fabe22 (c1), 1ba7f1ff (c2), 23c1d23f (c3) |
-| O3G2 round 2 candidates | 32042aef (c1), 1057e9e9 (c2, adopted by the round), c2d1f2fa (c3, 4096-wide) |
-| G v2 for O_3 (leafrisk-o3-v1) | 20c41678c646…; next G2 on round 2's winner 5f7e6792… |
-| Specialist S | int d30ef496…, float f5f6768d… |
-| O_2 provisional | 505a0c7c6514… |
-| O_2 leaf-risk model | in `runs/o2-leafrisk-1/out/leafrisk/model.json` (file SHA 76865b9c…) |
-| trick-2 golden set (2,000 × 320) | decisions 635e9aef…, worlds 6ddc59b1… |
-| trick-3 base (40M) | random fd846dad…, rules 91c6e001…, harvest a80cc287…, validation d51e22ab… |
-| trick-3 80M additions | random a27d0ce2…, rules 79ed2709…, harvest 9ea6a23a… |
-| exact trick-2 labels | random 1.2M fb51c217…, rules 0.3M 2160fefc…, validation 50k 38de4835…, 20k 855ba467…, 5k 46ba92fc… |
-| trick-2 student (1M, 512-256) | 954223e2… |
-| equity table v0 | 64740dab…6808 |
+| CFR / equilibrium solving | has not worked for trick-taking games (Long et al. 2010; Rebstock et al. 2024) |
+| paranoid search | deeper but not stronger in card games (Sturtevant thesis §8.3); a paranoid oracle reached about half the best-response ceiling in 45s (§1.1) |
+| plain PIMC as the final engine | saturates at ~100-160 worlds and suffers strategy fusion; recursion keeps gaining (§3, §7) |
+| hand-written rules as the engine | Bridge Baron was overtaken by search programs (§2.1) |
+| Best-Reply Search / BRS+ | only one opponent moves at a time (§4) |
+| ReBeL / Player of Games | guarantees are two-player zero-sum only |
+| endgame databases | Setrograde's gain is depth; 41's cost is the number of hidden-card worlds (§3, §5) |
+| post-training int8 of an unclamped network | Lc0 −300 Elo (§8) |
+| single-tree ISMCTS, GO-MCTS | no trick-taking result beats a solver- or rollout-based engine; GO-MCTS lost to Kermit (§2.2, §4) |
+
+---
+
+## 14. Sources
+
+Primary papers and pages (most also listed with notes in `docs/PLAN.md` §18 and
+`docs/REVIEW-2026-10-13.md` §9):
+- GIB: https://arxiv.org/abs/1106.0669 · αμ: https://arxiv.org/abs/1911.07960 · Furtak thesis:
+  https://doi.org/10.7939/R3H98ZQ52 · Furtak & Buro 2013: https://skatgame.net/mburo/ps/recmc13.pdf ·
+  Bouzy et al. 2020: https://ieee-cog.org/2020/papers/paper_82.pdf · Setrograde:
+  https://arxiv.org/abs/2411.09089 · Kermit: https://cs.du.edu/~sturtevant/papers/skat.pdf · Long et al.
+  2010: https://ojs.aaai.org/index.php/AAAI/article/view/7562 · Kupferschmid & Helmert:
+  https://gki.informatik.uni-freiburg.de/papers/kupferschmid-helmert-cg2006.pdf
+- Sturtevant IJCAI 2003: https://webdocs.cs.ualberta.ca/~nathanst/papers/spec_prune.pdf · thesis:
+  https://webdocs.cs.ualberta.ca/~nathanst/papers/multiplayergamesthesis.pdf · UCT 2008:
+  https://webdocs.cs.ualberta.ca/~nathanst/papers/multi-player_UCT.pdf · Prob-max^n:
+  https://webdocs.cs.ualberta.ca/~nathanst/papers/probmaxn.pdf · soft-max^n:
+  https://webdocs.cs.ualberta.ca/~nathanst/papers/softmaxn.pdf · Sturtevant & Korf 2000:
+  https://cdn.aaai.org/AAAI/2000/AAAI00-031.pdf · MP-Mix: https://www.ijcai.org/Proceedings/09/Papers/113.pdf
+  · Nijssen & Winands: https://dke.maastrichtuniversity.nl/m.winands/documents/Multi_Overview.pdf ·
+  Doppelkopf: https://ai.dmi.unibas.ch/papers/sievers-helmert-ki2015.pdf · Edelkamp KBPS:
+  https://arxiv.org/abs/2104.05423 · outer learning: https://arxiv.org/abs/2512.15435 · GO-MCTS:
+  https://arxiv.org/abs/2404.13150 · EPIMC: https://arxiv.org/abs/2408.02380
+- Beliefs: card location https://arxiv.org/abs/1903.09604 · policy inference
+  https://arxiv.org/abs/1905.10911 · History Filtering https://arxiv.org/abs/2311.14651 · SPARTA
+  https://arxiv.org/abs/1912.02318 · LBS https://arxiv.org/abs/2106.09086 · OBL
+  https://arxiv.org/abs/2103.04000 · Ataraxos https://arxiv.org/html/2511.07312v2 · POMCP
+  https://proceedings.neurips.cc/paper/2010/file/edfbe1afcf9246bb0d40eb4d8027d90f-Paper.pdf
+- Learning: DouZero https://arxiv.org/abs/2106.06135 · PerfectDou https://arxiv.org/abs/2203.16406 ·
+  DouZero+ https://arxiv.org/abs/2204.02558 · DouRN https://arxiv.org/html/2403.14102 · DanZero+
+  https://arxiv.org/html/2312.02561v1 · OADMCDou https://www.ijcai.org/proceedings/2024/0660.pdf ·
+  Suphx https://arxiv.org/abs/2003.13590 · Mortal https://github.com/Equim-chan/Mortal · AlphaHoldem
+  https://ojs.aaai.org/index.php/AAAI/article/view/20394 · ExIt https://arxiv.org/abs/1705.08439 ·
+  KataGo https://arxiv.org/abs/1902.10565 · FCP https://arxiv.org/abs/2110.08176 · Other-Play
+  https://arxiv.org/abs/2003.02979 · piKL https://arxiv.org/abs/2112.07544 · Diplomacy
+  https://arxiv.org/abs/2210.05492 · Wizard https://arxiv.org/abs/2205.13834 · IMPALA
+  https://arxiv.org/abs/1802.01561 · NNUE
+  https://raw.githubusercontent.com/official-stockfish/nnue-pytorch/master/docs/nnue.md
+- Shaping and calibration: Ng 1999 https://people.eecs.berkeley.edu/~russell/papers/icml99-shaping.pdf
+  · Lu et al. https://arxiv.org/abs/1401.3907 · Devlin & Kudenko
+  https://eprints.whiterose.ac.uk/id/eprint/75111/1/aamas11.pdf · Guo et al.
+  https://arxiv.org/abs/1706.04599 · Nixon et al. https://arxiv.org/abs/1904.01685 · MET
+  https://bkgm.com/articles/met.html · Zare https://bkgm.com/articles/Zare/WrongMatchEquityTable/index.html
+- Leaf evaluation and deferral: Smith & Winkler 2006 https://doi.org/10.1287/mnsc.1050.0451 (erratum:
+  https://jimsmith.host.dartmouth.edu/wp-content/uploads/2022/04/pds_correction.pdf) · TreeStrap
+  (Veness et al., NeurIPS 2009) · Learn then Test https://arxiv.org/abs/2110.01052 · conformal risk
+  control https://arxiv.org/abs/2208.02814 · learning to defer (Mozannar & Sontag)
+  https://arxiv.org/abs/2006.01862 · multicalibration (Hébert-Johnson et al.)
+  https://arxiv.org/abs/1711.08513 · Learning Loss https://arxiv.org/abs/1905.03677 · prioritised
+  replay https://arxiv.org/abs/1511.05952 · Ash & Adams https://arxiv.org/abs/1910.08475 · deep
+  ensembles https://arxiv.org/abs/1612.01474
+- Evaluation: AIVAT https://arxiv.org/abs/1612.06915 · MIVAT
+  https://bowlingmh.github.io/papers/09ijcai-mivat.pdf · Fishtest
+  https://github.com/official-stockfish/fishtest/wiki/Fishtest-mathematics · OpenSkill
+  https://joss.theoj.org/papers/10.21105/joss.05901 · exploitability https://arxiv.org/abs/2004.09677
+- Game family: Pagat 25 https://www.pagat.com/spoil5/25.html · Wikipedia Twenty-five
+  https://en.wikipedia.org/wiki/Twenty-five_(card_game) · Forty-fives
+  https://en.wikipedia.org/wiki/Forty-fives · Parlett https://www.parlettgames.uk/histocs/maw.html ·
+  boards.ie 31/41 https://www.boards.ie/discussion/2057461308/31-41-card-game-rules · Irish 25 app
+  https://irish25cardgame.com/scoring/ · 45s AI https://github.com/jitousig/fortyfives-ai
+- Not readable at the time (2026-10-13): Bounan & Edelkamp ISAIM 2024; full text of Edelkamp KI 2024;
+  the Irish 25 app's in-game 41 rules.

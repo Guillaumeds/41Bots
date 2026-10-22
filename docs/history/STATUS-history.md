@@ -6,7 +6,7 @@ Moved out of `docs/STATUS.md` on 2026-10-21 so that STATUS holds only the curren
 
 Read this section, then `docs/m3-hybrid/learned-leaves.md` (G v2 and O_2 G v2), `docs/STUDENT.md`
 §11-14 and `docs/m3-hybrid/silver.md`. The dated sections further down are history. The working plan
-log of 2026-10-16 to 2026-10-20 is `docs/plan-log-2026-10.md`. Branch: everything is on `m3-hybrid`.
+log of 2026-10-16 to 2026-10-20 is `docs/history/plan-log-2026-10.md`. Branch: everything is on `m3-hybrid`.
 
 ### The goal and the chain (owner)
 One objective: the chance of the money. Target: about 0.01% decision loss even at the hardest trick-1
@@ -504,7 +504,7 @@ approved when the pipeline is built.
 
 ## 2026-10-21/22 (Irish time): the O3G2 rounds, the repo cleanup, the specialist S (all on `main`)
 Moved out of `docs/STATUS.md` when it was rewritten on 2026-10-22; the results and the reasoning are in
-`docs/m3-hybrid/o3-rounds.md`, `docs/m3-hybrid/specialist.md` and `docs/plan-log-2026-10.md`.
+`docs/m3-hybrid/o3-rounds.md`, `docs/m3-hybrid/specialist.md` and `docs/history/plan-log-2026-10.md`.
 
 **2026-10-21: design and build of the O3G2 round.** G2 chooses the new training positions of a round
 (`search risk-profile`, `search labels --harvest-risk`, `crates/search/src/risk_harvest.rs`);

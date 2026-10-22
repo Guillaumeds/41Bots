@@ -98,7 +98,7 @@ a `groups` key, required for it); `upload_shards` stores the groups sidecar and 
   says nothing reliable about 6M rows and the full network, but it is a warning: if B loses on the
   golden set, the next step is a smaller weight (0.25) before dropping the idea.
 
-## 5. The A/B (`docs/vast/o3-sibrank-{a,b}.manifest.json`; not launched)
+## 5. The A/B (`docs/vast/o3-sibrank-{a,b}.manifest.json`; never launched)
 
 Both: the stored 40M trick-3 base as `extra` sets plus the validation shard, 6M sibling rows
 (seed 351, `siblings_positions` 0.5,0.25,0.25 so the leader's choice points are not under-sampled:
@@ -118,4 +118,4 @@ $0.64/h (up to $2.6 at the $1.70 cap); both runs about $2–5.**
 
 ## Status (2026-10-22)
 The rented A/B (`o3-sibrank-a`, `-b`) was never launched; no golden-set result exists. The only
-measurement is the build-VM A/B in §4. Write-up: `docs/RESEARCH.md` C9.
+measurement is the build-VM A/B in §4. Write-up: `docs/EXPERIMENTS.md` C9.

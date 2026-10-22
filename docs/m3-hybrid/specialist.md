@@ -111,7 +111,7 @@ the bias limit. Speed: 14x faster than the exact solve, 1.8x O_3 alone.
   prepared on 2026-10-19 (`o3-basecurve-50/100`) and **never ran** (both cancelled at the start).
 
 ## Not done / open
-- The 20M-row O_3 (basecurve) and the 80M-base O_3 (`o3-base80-1`, result never written down).
+- The 20M-row O_3 (basecurve, never ran). The 80M-base O_3 was read on 2026-10-22: `docs/EXPERIMENTS.md` C4.
 - O_3's outcome accuracy on the flagged rows; S as an ensemble member for the bronze set.
 - A faster routed check is possible if S is ever worth keeping (the check took 151 s against 2,042 s
   for the exact one).

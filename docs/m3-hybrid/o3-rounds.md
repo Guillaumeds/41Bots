@@ -196,10 +196,9 @@ Nothing was switched to c2.
   here. The 95% bound did not move toward the 0.0025% target.
 - Together with the specialist test (`specialist.md`: a network trained only on G2's risky
   positions is no better than O_3 on them) three independent attempts all end at O_3's level.
-- Not tried: the 20M-versus-40M base curve (prepared 2026-10-19, never ran) and the 80M base
-  (`o3-base80-1`, result never written down), which would say whether the limit is data or capacity;
-  a 2-4-network ensemble of O_3 for building the bronze set only (`curse-ensemble.md`, its stored
-  result also unread).
+- Not tried: the 20M-versus-40M base curve (prepared 2026-10-19, never ran). The 80M base, read on
+  2026-10-22: lower value error, decisions not better (0.0080%; `docs/EXPERIMENTS.md` C4). The 4-network
+  ensemble was never measured (C8).
 
 ### Launch lessons (each cost a rental or a retry)
 - **A 36 GB shard downloaded on one stream exceeded the 30-minute limit** on a Thailand machine

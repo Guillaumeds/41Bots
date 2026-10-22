@@ -226,8 +226,9 @@ evaluations). Distinct positions reached per decision, by the decider's seat, 1 
    16M, and ran 25 epochs against 19.)
 4. Trick 3 is a much harder function than trick 4: the network's outcome accuracy [how often it
    gets the ending of the hand right] is 87% here against 98% at trick 4.
-5. Round 3 is running to test capacity: 32M random-play and rules-v1 labels plus 8M harvested,
-   and a network of 2048-1024-256 units. Its result will be added here.
+5. Round 3 was launched to test capacity: 32M random-play and rules-v1 labels plus 8M harvested,
+   and a network of 2048-1024-256 units. It failed on a chunk error (run `m3-hybrid-t3-r3`) and was
+   superseded by the overnight audit loop (`docs/EXPERIMENTS.md` C1-C2).
 
 ## 4. Trick-1 checks on the saved exact worlds (spec §3, "Trick-1 checks for O_3 and O_2")
 
@@ -466,7 +467,7 @@ seat 3, keeps its loss under every policy). The paired comparison of race:1-4 ag
 all` on six golden decisions x 4 worlds, H_3's values equal the stored exact worlds in every world (loss 0,
 every error 0): 1.18 s a world, 3.7 ms a leaf solve.
 
-**Price of the rented run** (`docs/vast/o3-exactleaf.manifest.json`, run `o3-exactleaf-1`, not launched):
+**Price of the rented run** (`docs/vast/o3-exactleaf.manifest.json`, run `o3-exactleaf-1`; written before launch, it ran on 2026-10-19: `docs/EXPERIMENTS.md` C10):
 2,000 decisions x 320 worlds per check, (a) none, (b) race:4, (c) race:2,4, (d) race:1-4, and (b)-(d)
 paired against (a). On this VM the four checks cost 0.78 thread-seconds per world-set together, 0.50 M
 thread-seconds; a rented hyper-threaded thread ran the baseline 2.4 times slower (51 against 21 ms a
@@ -487,7 +488,7 @@ the leaves scored at or above `T`, a threshold chosen by Learn then Test on a se
 split. On the held-out test split, at race:1-4's share of positions solved it leaves 1.0% of O_3's
 squared error against race:1-4's 9.6%; in the hybrid on 32 golden decisions, at race:1-4's thread
 time it solves 35% of the leaves and takes the value SD from 0.61% to 0.27%. Design, research,
-numbers and the manifest (`docs/vast/o3-learnedleaf.manifest.json`, not launched):
+numbers and the manifest (`docs/vast/o3-learnedleaf.manifest.json`; ran 2026-10-19, result below):
 `docs/m3-hybrid/learned-leaves.md`.
 
 ### Result on the golden set (run `o3-learnedleaf-2`, 2026-10-19; adopted)

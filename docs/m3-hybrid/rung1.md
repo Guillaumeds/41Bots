@@ -437,10 +437,10 @@ the network.
    harvested plus random-play positions for training and random play only for validation, so only
    the direction matters).
 9. That argues for more and different positions, not more passes over the same 28M.
-10. Lead-3 is therefore running as the next step: 16M random-play + 4M self-play + 20M harvested
+10. Lead-3 was run as the next step: 16M random-play + 4M self-play + 20M harvested
     labels (40M in all), cap 64, with 55% of the harvested decisions at seats 3-4 (30% at seats 1-2,
-    15% at seats 5-8), to see whether the seats 3-4 band and seat 4 finally pass; its result will be
-    added here.
+    15% at seats 5-8), to see whether the seats 3-4 band and seat 4 finally pass; its result (lead-3c) is in "Why seats 3-4 fail"
+    below; lead-4 and the shape comparison follow after it (`docs/EXPERIMENTS.md` B2-B4).
 
 ## Why seats 3-4 fail: the race for the money (2026-10-16)
 

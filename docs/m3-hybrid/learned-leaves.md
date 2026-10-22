@@ -204,7 +204,7 @@ own-team bias is cut as much as by race:1-4: solving a few of a node's leaves ex
 siblings keep O_3's noise can move a comparison either way. Thirty-two decisions cannot judge any
 of this; the rented run can.
 
-## The rented run (`docs/vast/o3-learnedleaf.manifest.json`, run `o3-learnedleaf-1`, not launched)
+## The rented run (`docs/vast/o3-learnedleaf.manifest.json`, run `o3-learnedleaf-1`; written before launch, result below)
 
 The same stored golden set (2,000 decisions x 320 worlds, the same inputs as fix G v1's run), the
 adopted O_3: (a) none, (b) G v1 race:1-4, (c) learned at race:1-4's thread time
@@ -307,7 +307,7 @@ passes 0.01% at every seat against the silver set; note the silver's own error (
 number (`silver.md` §2), and an exact anchor on leader decisions (`m3-hybrid-t1-anchor`) measures it.
 Exact deferral of all leaves is itself exact and can serve as that anchor at seats 3-8 cheaply.
 
-**Result of `o2-leafrisk-1` (read 2026-10-22; write-up `docs/RESEARCH.md` D3).** Run on an AMD EPYC
+**Result of `o2-leafrisk-1` (read 2026-10-22; write-up `docs/EXPERIMENTS.md` D3).** Run on an AMD EPYC
 7B12 (256 threads, $0.30/h), 330 min, $1.63; 110 of 150 trees kept. Share of O_2's squared error left
 on the test split after solving a share of positions, learned order: 5% → 49.1%, 10% → 36.6%, 20% →
 23.9%, 40% → 11.6%, 50% → 7.7%, 75% → 1.4% (O_3's G v2 at 10%: 16.6%, at 40%: 2.2%). O_2's unsolved

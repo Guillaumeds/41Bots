@@ -362,7 +362,7 @@ for the money (stratum S4) are where both the rules bot and the student lose mos
   then 200,000 rules-bot and 50,000 mixed decisions at 320 deals: about 1.4 hours on a 245-thread
   machine, about $1 at $0.72/h (more at the $1.70 cap's prices), about 9.5 GB of shards.
 
-**Stage 4 (training on a rented machine, not launched):**
+**Stage 4 (training on a rented machine; written before launch, results in §11-14 and `docs/EXPERIMENTS.md` E2-E4):**
 
 - Runner chunk kind `student_train` (`crates/runner/src/student_train.rs`, one chunk a stream):
   the learning curve from stored teacher shards. Inputs are named by run and stream
@@ -388,7 +388,7 @@ for the money (stratum S4) are where both the rules bot and the student lose mos
   pair); and the mechanism manifest itself on CPU against a local copy of `student-t2-mech-1`'s
   bundles and shards (3 MB).
 
-**The deal test (2026-10-18, not launched):** `student_train` takes `points` (each a size,
+**The deal test (2026-10-18; result in §13):** `student_train` takes `points` (each a size,
 widths and `deals`: the targets from the first `deals` deals, encoded once per deal count with
 `--max-deals` into its own feature set; the point's directory and resume key gain `-d<deals>`,
 `curve.txt` a deals column), entries in ordered `group`s (a later run's parts follow an earlier

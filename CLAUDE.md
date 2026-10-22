@@ -4,7 +4,7 @@ You are building the strongest possible bots for the 8-player card game **41** (
 
 ## Read first, every session
 1. `docs/STATUS.md`: where we are, what to do next. Update it at the end of every session.
-   `docs/README.md` lists every document and experiment with its outcome (adopted, rejected, open); `docs/RESEARCH.md` is the collected research record (every experiment's question, method, result, cost and limits; add each new result there); old branches are `archive/*` tags. Keep both current: STATUS holds only the present, history goes to `docs/history/`.
+   `docs/README.md` lists every document and experiment with its outcome (adopted, rejected, open); `docs/EXPERIMENTS.md` records every experiment we ran (question, method, result, cost, limits; add each new result there) and `docs/RESEARCH.md` the outside research the methods come from (papers, other programs, the game family); old branches are `archive/*` tags. Keep both current: STATUS holds only the present, history goes to `docs/history/`.
 2. `docs/RULES.md`: the authoritative rules, including the owner's house rules (section H). Rules questions are answered there, never guessed.
 3. `docs/PLAN.md`: the approved research analysis, design, tech stack, run operations and checkpoints M0–M9. Follow it, and don't redesign. If something in the plan seems wrong, raise it with the owner before changing course.
 4. `docs/REVIEW-2026-10-13.md`: the review that amended the plan (the amendments themselves are at the top of PLAN.md). Read it when an amendment needs its evidence.
