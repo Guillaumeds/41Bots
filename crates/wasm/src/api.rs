@@ -157,6 +157,8 @@ struct Request {
     lines: bool,
     /// `"method": "student"`.
     student: bool,
+    /// `"shortlist"`: the cards to search (engine cards, sorted, no repeats), when given.
+    shortlist: Option<Vec<Card>>,
     table: AppTable,
 }
 
@@ -219,6 +221,29 @@ fn read_request(text: &str) -> Result<Request, Refusal> {
         }
         Some(_) => return Err(bad("ownBurns must be an array of cards")),
     };
+    let shortlist = match v.get("shortlist") {
+        None | Some(Value::Null) => None,
+        Some(Value::Array(a)) => {
+            let mut out: Vec<Card> = Vec::new();
+            for (i, x) in a.iter().enumerate() {
+                let n = x
+                    .as_i64()
+                    .ok_or_else(|| bad(format!("shortlist[{i}] must be a card")))?;
+                let c =
+                    engine_card(n).ok_or_else(|| bad(format!("shortlist[{i}]: no such card")))?;
+                if out.contains(&c) {
+                    return Err(bad(format!("shortlist[{i}]: a card twice")));
+                }
+                out.push(c);
+            }
+            if out.len() < 2 {
+                return Err(bad("a shortlist holds at least two cards"));
+            }
+            out.sort_unstable();
+            Some(out)
+        }
+        Some(_) => return Err(bad("shortlist must be an array of cards")),
+    };
     let lines = match v.get("lines") {
         None | Some(Value::Null) => false,
         Some(Value::Bool(b)) => *b,
@@ -240,6 +265,11 @@ fn read_request(text: &str) -> Result<Request, Refusal> {
             "lines come from a search's deals: not with method student",
         ));
     }
+    if student && shortlist.is_some() {
+        return Err(bad(
+            "a shortlist belongs to a search: not with method student",
+        ));
+    }
     let table = AppTable::read(field(&v, "match", "request")?, seat, own_burns)?;
     Ok(Request {
         seat,
@@ -250,6 +280,7 @@ fn read_request(text: &str) -> Result<Request, Refusal> {
         tt_mb,
         lines,
         student,
+        shortlist,
         table,
     })
 }
@@ -391,6 +422,28 @@ impl Engine {
             .into_iter()
             .filter(|&(a, _)| !(matches!(a, Action::Burn(_)) && Some(a.card()) == taken))
             .collect();
+        // A shortlist searches only its cards (the rest are neither valued nor listed); each
+        // must be one of the plays on offer. A decision with a rob or a steal is not shortlisted.
+        let cands: Vec<Candidate> = match &req.shortlist {
+            None => cands,
+            Some(list) => {
+                if cands.iter().any(|c| !matches!(c.0, Action::Play(_))) {
+                    return Err(bad("a shortlist is for plays: not for a rob or a steal"));
+                }
+                for &c in list {
+                    if !cands.iter().any(|x| x.0 == Action::Play(c)) {
+                        return Err(bad(format!(
+                            "shortlist: card {} is not one of the plays on offer",
+                            app_card(c)
+                        )));
+                    }
+                }
+                cands
+                    .into_iter()
+                    .filter(|x| list.contains(&x.0.card()))
+                    .collect()
+            }
+        };
         let verb = if req.table.phase == AppPhase::JokerSteal {
             BurnVerb::Steal
         } else {
@@ -447,7 +500,15 @@ impl Engine {
             _ => None,
         };
         let engine = engine_version(net_sha);
-        let key = request_key(&engine, &view, req.seat, req.deals, req.seed, req.lines);
+        let key = request_key(
+            &engine,
+            &view,
+            req.seat,
+            req.deals,
+            req.seed,
+            req.lines,
+            req.shortlist.as_deref(),
+        );
         let (from, to) = shard_range(req.deals, req.shard, req.shards);
         let mut t = Totals {
             engine,
@@ -566,9 +627,20 @@ fn request_key(
     deals: u32,
     seed: u64,
     lines: bool,
+    shortlist: Option<&[Card]>,
 ) -> String {
     let v = serde_json::to_string(view).expect("a view serialises");
-    sha256_hex(format!("{engine}\n{seat}\n{deals}\n{seed}\n{lines}\n{v}").as_bytes())
+    // A search without a shortlist keeps the key it always had.
+    let short = shortlist.map_or(String::new(), |l| {
+        format!(
+            "\nshortlist:{}",
+            l.iter()
+                .map(|c| app_card(*c).to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    });
+    sha256_hex(format!("{engine}\n{seat}\n{deals}\n{seed}\n{lines}\n{v}{short}").as_bytes())
 }
 
 // ----- writing -----

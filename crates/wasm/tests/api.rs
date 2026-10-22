@@ -1027,3 +1027,93 @@ fn the_student_method_values_with_the_student() {
         e.evaluate(&app_request(&t3, 8, 77, Mask::SeatOwnBurns).to_string())
     );
 }
+
+/// A shortlist (docs/WASM-API.md §3) searches only its cards: each keeps the sums of the full
+/// search byte for byte, the shards of a shortlisted search merge to the whole, and a shortlist of
+/// every play is the full search under another key.
+#[test]
+fn a_shortlist_values_its_cards_exactly_as_the_full_search_does() {
+    let e = engine(false);
+    let plain = |m: &Match| !any_turned(m) && m.reneges().is_empty();
+    for (m, deals) in [
+        (find(61, 0, &|m| plain(m) && playing(m, 2)), 6u32),
+        (find(62, 0, &|m| plain(m) && playing(m, 3)), 9),
+        (find(63, 0, &|m| plain(m) && playing(m, 4)), 5),
+    ] {
+        let mut req = app_request(&m, deals, 777, Mask::SeatOwnBurns);
+        let full = parse(&e.evaluate(&req.to_string()));
+        assert_eq!(full["status"], "ok", "{full}");
+        let cs = full["candidates"].as_array().expect("candidates").clone();
+        if cs.len() < 3 {
+            continue;
+        }
+        let card = |c: &Value| c["action"]["card"].as_i64().expect("a card");
+        // Every other card, then the first two, then all of them.
+        let picks: Vec<Vec<usize>> = vec![
+            (0..cs.len()).step_by(2).collect(),
+            vec![0, 1],
+            (0..cs.len()).collect(),
+        ];
+        for pick in picks {
+            if pick.len() < 2 {
+                continue;
+            }
+            req["shortlist"] = json!(pick.iter().map(|&i| card(&cs[i])).collect::<Vec<_>>());
+            let whole = e.evaluate(&req.to_string());
+            let v = parse(&whole);
+            assert_eq!(v["status"], "ok", "{whole}");
+            let got = v["candidates"].as_array().expect("candidates");
+            assert_eq!(got.len(), pick.len());
+            for (g, &i) in got.iter().zip(&pick) {
+                assert_eq!(g["sum_fp"], cs[i]["sum_fp"], "card {}", card(&cs[i]));
+                assert_eq!(g["sumsq_fp"], cs[i]["sumsq_fp"]);
+            }
+            assert_ne!(
+                v["key"], full["key"],
+                "a shortlist is part of the search's key"
+            );
+            if pick.len() == cs.len() {
+                assert_eq!(v["candidates"], full["candidates"]);
+            }
+            // The shards of the shortlisted search merge to its whole.
+            let mut parts = Vec::new();
+            for i in (0..deals.min(3)).rev() {
+                req["shard"] = json!(i);
+                req["shards"] = json!(deals.min(3));
+                parts.push(e.evaluate(&req.to_string()));
+            }
+            req["shard"] = json!(0);
+            req["shards"] = json!(1);
+            assert_eq!(merge(&format!("[{}]", parts.join(","))), whole);
+            // Shards of different shortlists never merge.
+            let other = {
+                let mut r = req.clone();
+                r["shortlist"] = json!([card(&cs[0]), card(&cs[1])]);
+                r["shard"] = json!(1);
+                r["shards"] = json!(deals.min(3));
+                e.evaluate(&r.to_string())
+            };
+            if pick != vec![0, 1] {
+                assert_eq!(
+                    code(&merge(&format!("[{},{other}]", parts[0]))),
+                    "merge_mismatch"
+                );
+            }
+        }
+        // Refusals.
+        let bad = |list: Value| {
+            let mut r = req.clone();
+            r["shortlist"] = list;
+            code(&e.evaluate(&r.to_string()))
+        };
+        assert_eq!(bad(json!([card(&cs[0])])), "bad_request");
+        assert_eq!(bad(json!([card(&cs[0]), card(&cs[0])])), "bad_request");
+        assert_eq!(bad(json!("x")), "bad_request");
+        assert_eq!(bad(json!([card(&cs[0]), 99])), "bad_request");
+        let offered: Vec<i64> = cs.iter().map(card).collect();
+        let off = (0..52)
+            .find(|c| !offered.contains(c))
+            .expect("a card not on offer");
+        assert_eq!(bad(json!([card(&cs[0]), off])), "bad_request");
+    }
+}

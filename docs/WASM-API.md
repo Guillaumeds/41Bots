@@ -104,6 +104,7 @@ const request = { v: 1, seat, deals: 64, seed: String(seed), match: maskMatch(m,
 | `ttMb` | optional, 1..1024, default 16 | the exact search's memory table in MB: only the speed, never a value (measured: 2 to 64 MB change the time by about 10%) |
 | `ownBurns` | optional, app card ids, oldest first | the cards this seat burned this hand, when `match.hand.discards` hides them |
 | `method` | optional: `"search"` (the default) or `"student"` | `"student"` values a decision at trick 1 or 2 with all eight seats in play by the student network (the bots' fast player, docs/STUDENT.md): no deals, `shards` must be 1, no `lines`; every other decision is valued as without it (exact at tricks 3–5, forced, a pair turned), byte for byte. Needs `loadStudent` (`no_student`). |
+| `shortlist` | optional, array of 2 or more app card ids | search only these plays: each must be one of the plays on offer (else `bad_request`; also refused for a rob or a steal, with `method: "student"`, and for fewer than 2 or repeated cards). The other cards are neither valued nor listed. Each listed card has **exactly** the sums the full search gives it (same deals, byte for byte; tested), and the search costs less: measured 0.64× (2 cards) and 0.70× (3 cards) of the full time at trick 2, 0.69× at trick 3 (docs/EXPERIMENTS.md E11). The `key` includes the shortlist, so shards of different shortlists never merge; a request without one keeps its old key. |
 | `lines` | optional, default false | also the coach's fields from each deal's principal line (§4.1): every candidate then has its own row. Costs about 10% more at trick 2 and about 3× at tricks 3–5 (measured, §8); the bots leave it off. |
 | `match` | the app's `MatchState` | the seat's view: `maskMatch(m, seat)`. The unmasked match gives the same bytes (tested): the engine reads nothing a seat may not see. |
 
@@ -434,3 +435,4 @@ table of deals by trick and place that its slowest supported phone meets, e.g. f
   another seat that burn stays a face-down card in the engine's view, as the engine's own view has
   it (the app shows the Joker gone from the dealer's hand: slightly less information, never a
   wrong one).
+- The request's optional `shortlist` (2026-10-22): search only the listed plays, values unchanged.

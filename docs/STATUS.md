@@ -41,6 +41,24 @@ the app's deal counts, concentration of S2's loss and the router, the root-restr
 small capped anchor), 4 S1, 5 ship and the improvements. The solver half of the root-restricted solve
 (`FastOptions::root_keep`) is already on `main`.
 
+**Session 0 (free checks) done, 2026-10-22, no rental (E9-E11, branch `claude/confident-albattani-sck9ru`):**
+1. *Shortlist + search at 25-100 deals* (S2, O_3, exact golden set): top-3 + search beats S2 alone
+   (0.0733%) from about 25 deals: 0.0596 / 0.0402 / 0.0293 at 25 / 50 / 100; worse at 10. Seat 1: 0.18
+   to 0.097 / 0.073 / 0.061. A shortlist is **no more accurate than searching all cards** at those
+   counts (top-2 helps at 25, hurts at 100): its value is cost only.
+2. *Concentration:* the worst 5% of decisions hold 75% of S2's loss, 10% hold 91%, 73% of decisions lose
+   nothing. But S2's margin does **not** find them (it is anti-informative: low margin = near-tie = small
+   loss). A learned router on cheap features gets about half the gain for 30% of the searches; the oracle
+   needs only 5-10% searched. Verdict: do not build the margin router; a risk model needs better
+   signals (a second student's disagreement, a G2-style predictor) and a test.
+3. *Root-restricted solve:* built through `exact_world` and the app API (`shortlist`, tested, values
+   identical). Measured **0.64x (2 cards) / 0.70x (3 cards)** of the time at trick 2: a 1.4-1.55x
+   speed-up. With result 1 it is worth about 40% more deals, nothing more. Trick 1 not measured.
+   Consequence for the app: the leader needs 368 ms a deal in WebAssembly, so about 19-27 deals in 7 s
+   on the VM and fewer on a phone, at or below the break-even exactly where S2 loses most: the lever
+   there is the cost of a deal (WebAssembly network kernel), not the shortlist.
+   Next: session 1 (S2 A/B tests) is unaffected; the open question for the app is the cost per leader deal.
+
 **Records:** `docs/EXPERIMENTS.md` (every experiment and its result), `docs/RESEARCH.md` (the outside
 research), `docs/README.md` (index).
 

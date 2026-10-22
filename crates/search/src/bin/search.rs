@@ -1967,11 +1967,62 @@ fn student_check(a: &Args) -> Result<(), String> {
             ks.push(k);
         }
     }
+    // `--sub-deals 25,50,100 [--sub-repeats R] [--sub-seed S]`: shortlist + search at the app's
+    // deal counts (search::shortlist).
+    let mut sub_grid: Vec<usize> = Vec::new();
+    for v in a.get("--sub-deals").into_iter() {
+        for n in v.split(',') {
+            sub_grid.push(
+                n.parse()
+                    .ok()
+                    .filter(|&n| n >= 1)
+                    .ok_or_else(|| format!("--sub-deals {v}: whole numbers of at least 1"))?,
+            );
+        }
+    }
+    let sub_repeats = a.num("--sub-repeats", 8)? as u32;
+    let sub_seed = a.num("--sub-seed", 1)?;
+    let mut sub: Vec<search::shortlist::SubDecision> = Vec::new();
+    let mut sub_worlds = 0usize;
     let mut judged = Vec::new();
     let mut extra = Extra::default();
     let mut half: Option<u64> = None;
     student::check::judge_each(&net, shards, &table, |m, student, j| {
         judged.push(j);
+        if !sub_grid.is_empty() {
+            let team = engine::team_of(m.head.pos.seat);
+            let ranking = student::check::rank(student, team);
+            let rows: Vec<Vec<[u64; 4]>> = m
+                .values
+                .iter()
+                .map(|r| r.iter().map(|v| v.0).collect())
+                .collect();
+            if let Some(&big) = sub_grid.iter().find(|&&n| n >= rows.len()) {
+                return Err(format!(
+                    "--sub-deals {big}: the decision holds only {} deals",
+                    rows.len()
+                ));
+            }
+            sub_worlds = rows.len();
+            sub.push(search::shortlist::SubDecision {
+                trick: j.trick,
+                place: j.place,
+                stratum: j.stratum,
+                margin: search::shortlist::margin(student, team, &ranking),
+                loss: j.loss,
+                n_cands: j.n_cands,
+                values: ranking.iter().map(|&c| student[c].get(team)).collect(),
+                rec: search::shortlist::sub_deal_record(
+                    &rows,
+                    team,
+                    &ranking,
+                    &sub_grid,
+                    sub_repeats,
+                    sub_seed,
+                    judged.len() as u64,
+                ),
+            });
+        }
         if !split && ks.is_empty() {
             return Ok(());
         }
@@ -2050,6 +2101,18 @@ fn student_check(a: &Args) -> Result<(), String> {
             x => return Err(format!("--baseline {x}: rules or random")),
         }
     }
+    let sub_json = if sub.is_empty() {
+        serde_json::Value::Null
+    } else {
+        search::shortlist::report(
+            &sub,
+            &sub_grid,
+            sub_worlds,
+            sub_repeats,
+            a.num("--boot", 1000)?,
+            a.num("--boot-seed", 1)?,
+        )
+    };
     let extra_json = extra.print(
         split.then_some(half.unwrap_or(0)),
         &ks,
@@ -2077,6 +2140,12 @@ fn student_check(a: &Args) -> Result<(), String> {
         });
         if !golden_info.is_null() {
             v["golden"] = golden_info;
+        }
+        if !sub_json.is_null() {
+            v["sub_deals"] = sub_json;
+            v["sub_deals_grid"] = serde_json::json!(sub_grid);
+            v["sub_deals_repeats"] = serde_json::json!(sub_repeats);
+            v["sub_deals_seed"] = serde_json::json!(sub_seed);
         }
         // The extra measures' keys appear only when asked for (the rest stays as before).
         if let serde_json::Value::Object(o) = extra_json {

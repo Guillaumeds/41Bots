@@ -77,6 +77,9 @@ Old branches are tags (`git tag -l 'archive/*'`; `git checkout archive/<name>` r
 | `STUDENT.md` §14 | split-half ruler, top-k shortlist | **done**: top-3 shortlist about 0.005-0.012% (E4-E5) |
 | run `student-t1-cost-2` | trick-1 teacher cost | **done**: about 12,500 decisions an hour on 256 threads (E6) |
 | `m3-hybrid/path-forward.md` | **proposed path** from the O3G2 rounds to shipped students: free reads, S2 A/B, O_2 label test, trick-1 yardsticks (copper, playout), S1, then improvements | **open**: path approved in outline (2026-10-22); section 6 holds a brief for each of the six sessions; E8 is its first measurement |
+| run `student-check --sub-deals` | shortlist + search at the app's deal counts (25-100) on the exact golden set | **done** (session 0a, E9): top-3 + search beats S2 alone from about 25 deals (0.0733% to 0.0596 / 0.0402 / 0.0293 at 25 / 50 / 100), loses at 10; a shortlist is no more accurate than searching all cards, it only saves cost |
+| `tools/router_fit.py` | concentration of S2's loss and the "router" | **done** (session 0b, E10): loss is concentrated (worst 5% of decisions hold 75%) but S2's margin does not find them (do not build the margin router); a learned router gets about half the gain for 30% of the searches |
+| root-restricted solve (`shortlist` in the app API) | search only the shortlisted cards | **built and exact** (session 0c, E11): 1.4-1.55x faster at trick 2, not the share of cards kept |
 
 ## History
 - `history/STATUS-history.md`: every dated status entry, 2026-10-13 to 22.

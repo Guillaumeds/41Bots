@@ -148,6 +148,7 @@ locally in 7 s: `equity build --model data/equity/model-rules-v1-1M-seed1.json -
 SHA-256 must be `64740dab...`, `data/equity/equity-v0-rules-v1.sha256`).
 
 ### Session 0: the free checks (no rental)
+**Done 2026-10-22: results in `docs/EXPERIMENTS.md` E9-E11 and the STATUS verdict. The brief below is kept as built (the sub-deal draws are nested prefixes of one shuffle per repeat rather than one shuffle per N; the router table uses a learned model beside the margin).**
 Goal: the three questions of section 3, step 0, answered on the build VM and recorded.
 - **0a Shortlist + search at the app's deal counts.** Extend `search student-check` (golden form:
   `--golden-decisions D --golden-worlds W --trick 2`, `crates/search/src/bin/search.rs`, `student_check`)

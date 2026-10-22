@@ -835,6 +835,106 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   trick 3, `ENGINEERING-2026-10-17.md`, so cost should follow the number of root cards kept).
 - **Sources.** `docs/m3-hybrid/path-forward.md`.
 
+### E9. Shortlist + search at the app's deal counts (`search student-check --sub-deals`, 2026-10-22, build VM, no rental)
+- **Question.** At the 25-100 deals a phone can afford, does "the student shortlists 3 cards, a short
+  search picks" beat the student alone?
+- **Method.** S2 (954223e2) and O_3 (f5766aa9) on the 2,000-decision exact trick-2 golden set (320 exact
+  worlds each). Per decision and per repeat (8, seed 1) a seeded shuffle of the 320 worlds; the first N
+  are the sample (N = 10, 25, 50, 100; nested, so one shuffle serves every N), the method picks on the
+  sample and is **scored on the other 320-N worlds**. Methods: the student alone, search over all cards,
+  top-2 and top-3 of the student searched. "Corrected loss" = the student's loss on all 320 worlds less
+  the method's gain over the student on the scoring worlds, so it is on the golden check's scale (the
+  student's own is 0.0733%, the golden check's number to the digit); the raw numbers (best of the scoring
+  worlds less the pick) are in the JSON. Bounds: bootstrap 95% over decisions (1,000 replicates, seed 1).
+  `crates/search/src/shortlist.rs`, 4 unit tests; the run takes 6 s.
+- **Result** (loss in % of the money chance; 95% bounds in brackets):
+
+| deals | student alone | search all cards | top-2 + search | top-3 + search |
+|---|---|---|---|---|
+| 10 | 0.0733 | 0.1164 | 0.0836 | 0.1030 |
+| 25 | 0.0733 | 0.0619 | **0.0542** | 0.0596 |
+| 50 | 0.0733 | **0.0384** | 0.0422 | 0.0402 |
+| 100 | 0.0733 | **0.0254** | 0.0338 | 0.0293 |
+
+  Gain over the student alone (positive = better): top-3 + search +0.0137 [+0.0018, +0.0259] at 25
+  deals, +0.0331 [+0.0210, +0.0459] at 50, +0.0441 [+0.0319, +0.0570] at 100; at 10 deals it is
+  **worse** by 0.0297 [0.0175, 0.0427]. Seat 1 (the leader, where the student loses most): student
+  0.179; top-3 + search 0.146 / 0.097 / 0.073 / 0.061 at 10 / 25 / 50 / 100 deals. Stratum S4: student
+  0.120; top-3 + search 0.171 / 0.100 / 0.072 / 0.055.
+  **The shortlist against searching every card:** top-2 beats search-all at 10 deals (+0.033) and 25
+  deals (+0.0077 [+0.0013, +0.0138]), no difference at 50, and is **worse** at 100 (-0.0084 [-0.0149,
+  -0.0027]); top-3 is within noise of search-all at 25-100 (+0.0023, -0.0018, -0.0039, every bound
+  across zero). So at the app's deal counts a shortlist buys cost only, not accuracy.
+- **Verdict.** Yes: at 25 deals top-3 + search is better than S2 alone (by 0.014 points, bound just
+  above zero), clearly at 50 and 100, no at 10. It stays far above the "perfect pick" 0.0073% of E5,
+  which needed all 320 worlds. The break-even lies between 10 and 25 deals a decision.
+- **Limits.** Exact world values: no leaf error, optimistic for any real search. The sample is drawn
+  from 320 worlds without replacement (31% of them at N = 100), which lowers its variance by about
+  17% against independent draws, so the 100-deal numbers are a little optimistic. The truth proxy
+  (320-world means) is itself noisy (a 512-deal teacher's floor is 0.008%, E4). The stored golden set
+  is trick 2 only. The phone cost is a separate matter: the leader's trick-2 deal is 368 ms in
+  WebAssembly on the build VM (`WASM-API.md` §8), so 7 s on one thread is about 19 deals for the
+  leader (27 with a 3-card shortlist, E11), and a phone is 2-4 times slower: the leader may not reach
+  the break-even at all, exactly where the student loses most.
+- **Sources.** `docs/m3-hybrid/path-forward.md` section 3 step 0a.
+
+### E10. How concentrated is S2's loss, and can a router find the risky decisions? (same run as E9, plus `tools/router_fit.py`, 2026-10-22)
+- **Question.** If the loss sits in a few decisions, the app can spend its 7 seconds only there.
+- **Concentration** (2,000 decisions; 547 have any loss, 1,453 (72.7%) lose nothing): the worst 1% of
+  decisions hold 38.8% of S2's total loss, the worst 5% hold 75.1%, 10% hold 90.9%, 20% hold 99.1%,
+  40% hold all of it. Concentrated, as G2's idea assumed.
+- **The margin does not find them.** Sorting by S2's own margin (top value less second, for the
+  deciding pair) and searching the lowest f% with top-3 + N deals, at 100 deals (all searched: 0.0293):
+  f = 10% 0.0711, 30% 0.0671, 50% 0.0588, against the student alone 0.0733. The correlation of margin
+  and loss is 0.01 and the 10% with the lowest margin hold 5.4% of the loss, below their share: a low
+  margin is a near-tie, and a near-tie costs little either way.
+- **A learned router does a little better, nowhere near the oracle.** Gradient boosting on what the
+  student shows (place, stratum, candidate count, its top values, margins and spread; 5-fold
+  cross-validation, 5 seeds; `tools/router_fit.py`): correlation with the true loss 0.048; the
+  predicted-riskiest 10% / 20% / 50% hold 23.9% / 40.4% / 72.1% of the loss. Router at 100 deals
+  (loss %; searched share, 95% bounds of the model router): 10% 0.0613 [0.052, 0.071], 20% 0.0548, 30%
+  0.0504 [0.044, 0.063], 50% 0.0423 [0.035, 0.051], 100% 0.0293; i.e. 30% of the searches give 52% of the
+  gain, 50% give 70%. At 25 deals: 30% gives 71% of the gain (0.0636 against 0.0596 for all). The
+  oracle router (search the decisions with the largest true loss): 5% 0.0267, 10% 0.0193, 20% 0.0174,
+  better than searching everything (0.0293) because a search cannot hurt where the student is already
+  right.
+- **Verdict.** The concentration is real and large (the oracle needs to search 5-10% of decisions to
+  beat searching all of them), but nothing the student shows on its own finds them: do **not** build
+  the margin router. A risk model is worth testing only with better signals (a second student's
+  disagreement, a G2-style predictor trained on the student's losses on held-out teacher decisions);
+  the cheap-feature model above is the floor. This router is the assistant's idea (not a published
+  recipe): by the project's rule a duplicate tournament would decide before it ships.
+- **Limits.** One golden set, 2,000 decisions (the router was fitted and scored by cross-validation on
+  the same set); trick 2 only; the router's cost (a fast network call) is not counted.
+- **Sources.** `tools/router_fit.py`; the JSON of the run (`per_decision`) is regenerated by the E9
+  command with `--json`.
+
+### E11. The root-restricted solve (2026-10-22, build VM)
+- **Question.** Does searching only the shortlisted cards make the exact solve cheaper (E8 said the
+  candidate list alone changes nothing)?
+- **Built.** `FastOptions::root_keep` in the solver (earlier commit) is now passed by
+  `search::pimc::exact_world` from the candidates' cards (all legal cards = the full solve; burns pass
+  none), and the app API takes an optional `shortlist` of plays (`WASM-API.md` §3; refusals; the key
+  includes it; shards of one shortlist merge byte for byte; test
+  `a_shortlist_values_its_cards_exactly_as_the_full_search_does`).
+- **Method.** `tools/shortlist_time.py` over the API's bench requests (`engine-native bench`, 16 deals,
+  4 positions a place; native x86-64, one thread; real O_3 and the pinned equity table): value each
+  position in full, then with a shortlist of its best 2 or 3 cards, assert that every shortlisted card
+  has the same sums as the full run, and time both (best of 2).
+- **Result.** Values identical in every case. Time as a ratio of the full search: **trick 2, 2 cards
+  0.64, 3 cards 0.70** (summed over places); by place for 2 / 3 cards: leader 0.66 / 0.71, second 0.57 /
+  0.65, third 0.41, 4th-5th 0.57-0.76; seats 6-8 are too cheap to matter (about 0.1 ms a deal, ratio
+  0.85-1.08, within noise). Trick 3 (exact), 2 cards: 0.69 (leader 0.64). Absolute, leader at trick 2:
+  100 ms a deal falls to 66 (2 cards); 116 to 82 (3 cards).
+- **Verdict.** Exact, but a **1.4-1.55 times** speed-up, not the 2-3 times the share of cards kept
+  suggests: most of the work below the root is not specific to one root card. With E9 (a 3-card
+  shortlist is no more accurate than searching all cards at the same deals) the shortlist is worth
+  about 40% more deals in the same time, nothing more. Trick 1 was not measured (no bench request
+  exists for it and a trick-1 deal is minutes on this VM, E8).
+- **Limits.** 3-4 positions per place and trick; timings on a shared build VM (best of 2); the
+  shortlists were the true best cards, the cost depends on which cards are kept.
+- **Sources.** `tools/shortlist_time.py`, `crates/wasm/tests/api.rs`.
+
 ---
 
 ## Part F. Runs and builds without a result, and work set aside
