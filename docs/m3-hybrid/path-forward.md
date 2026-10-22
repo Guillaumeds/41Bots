@@ -200,6 +200,15 @@ Goal: the three questions of section 3, step 0, answered on the build VM and rec
   (`docs/m3-hybrid/audit-loop.md`, `rung3.md`). O_2 is judged on exact trick-2 positions, never on
   copper.
 - Decision to record: the label source and the volume.
+- **To do before Stage B (recorded 2026-10-22, owner asked not to forget):** allow a reused validation
+  shard together with `label_parts` above 1 (`crates/runner/src/hybrid/reuse.rs` line ~152 refuses
+  `label_inputs` with `label_parts` above 1: parts mode streams a training beside the labels, and a stored
+  shard is all there at once). Without it every parts run re-makes the exact validation set: about
+  50,000 exact trick-2 positions, 28 minutes and about $0.75 on a 215-thread EPYC 7663 (measured in
+  `o2-g2arm-1`, 2026-10-22), paid again by every audit-loop round and every parts run. Change: let a
+  `label_inputs` entry of set `val` (only) be combined with parts; reused training shards stay refused.
+  Needs a Rust change, a test, and a new `release-binaries` build. Also noted there: the same G2-label
+  parts run is cheaper on a 7995WX Threadripper (about 1.7 times faster per thread) when one is on offer.
 
 ### Session 3: trick-1 yardsticks (after O_2 exists)
 - Copper: about 2,000 trick-1 decisions labelled by H_2 + the adopted O_2 at 128 deals
