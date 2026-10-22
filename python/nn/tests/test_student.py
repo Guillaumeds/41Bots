@@ -192,6 +192,42 @@ class Training(unittest.TestCase):
                 shas.append(sha256_file(os.path.join(out, "int.safetensors")))
             self.assertEqual(shas[0], shas[1])
 
+    def test_rank_term_matches_a_direct_kl_and_zero_weight_changes_nothing(self):
+        import math
+
+        import torch
+
+        from fortyone_nn import student
+        from fortyone_nn.formats import sha256_file
+
+        # Two decisions, 3 and 1 candidates; the KL is computed here one decision at a time.
+        z = torch.tensor([[0.3, 0.1, -0.2, 0.0], [1.0, -1.0, 0.5, 0.2], [0.0, 0.4, 0.1, -0.3], [0.7, 0.2, 0.1, 0.0]],
+                         dtype=torch.float64)
+        tgt = torch.tensor([[0.40, 0.20, 0.30, 0.10], [0.35, 0.25, 0.25, 0.15], [0.45, 0.15, 0.2, 0.2],
+                            [0.5, 0.2, 0.2, 0.1]], dtype=torch.float64)
+        dec = torch.tensor([0, 0, 0, 1])
+        T = 0.05
+        got = float(student.rank_term(z, tgt, dec, torch.tensor([3.0, 1.0]), T))
+        vs = torch.softmax(z, dim=1)[:, 0].numpy() / T
+        vt = tgt[:, 0].numpy() / T
+        kl = []
+        for rows in ([0, 1, 2], [3]):
+            ls = vs[rows] - math.log(np.exp(vs[rows]).sum())
+            lt = vt[rows] - math.log(np.exp(vt[rows]).sum())
+            kl.append(float((np.exp(lt) * (lt - ls)).sum()))
+        self.assertAlmostEqual(got, sum(kl) / 2, places=9)
+        self.assertEqual(kl[1], 0.0)  # one candidate: nothing to rank
+        with tempfile.TemporaryDirectory() as d:
+            tr = fixture(d, "train.npy", 60, 9)
+            shas = []
+            for k, extra in enumerate(([], ["--rank-weight", "0"], ["--rank-weight", "1", "--stop-on", "decision"])):
+                out = os.path.join(d, f"w{k}")
+                student.main(["--train", tr, "--out", out, "--widths", "8", "--epochs", "2", "--batch", "8",
+                              "--val-permille", "200", "--threads", "1", *extra])
+                shas.append(sha256_file(os.path.join(out, "int.safetensors")))
+            self.assertEqual(shas[0], shas[1])  # weight 0 is the old loss, bit for bit
+            self.assertNotEqual(shas[0], shas[2])
+
 
 if __name__ == "__main__":
     unittest.main()

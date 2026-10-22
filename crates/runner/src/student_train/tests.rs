@@ -35,11 +35,7 @@ fn shard_entry(records: &[u8], values: &[u8], n: u64, role: &str) -> Value {
 #[test]
 fn settings_are_checked() {
     let q = parse(&base()).expect("parses");
-    let pt = |size, widths: &str, deals| Point {
-        size,
-        widths: widths.into(),
-        deals,
-    };
+    let pt = |size, widths: &str, deals| Point::plain(size, widths.into(), deals);
     assert_eq!(
         q.points,
         vec![
@@ -87,6 +83,40 @@ fn settings_are_checked() {
         q.points.iter().map(Point::name).collect::<Vec<_>>(),
         ["n100-w16x8-d32", "n40-w8", "n40-w8-d320"]
     );
+    // Variants: a seed, a rank term (thousandths, millionths), the stop rule; each its own directory.
+    let mut vp = p.clone();
+    vp["points"] = json!([
+        { "size": 40, "widths": "8", "seed": 2 },
+        { "size": 40, "widths": "8", "rank_weight": 0.5, "rank_temperature": 0.003 },
+        { "size": 40, "widths": "8", "rank_weight": 1, "stop_on": "decision" },
+        { "size": 40, "widths": "8", "stop_on": "val_loss", "rank_weight": 0 }
+    ]);
+    let q = parse(&vp).expect("parses");
+    assert_eq!(
+        q.points.iter().map(Point::name).collect::<Vec<_>>(),
+        [
+            "n40-w8-s2",
+            "n40-w8-r500t3000",
+            "n40-w8-r1000t10000-sd",
+            "n40-w8"
+        ]
+    );
+    assert_eq!(q.points[3], Point::plain(40, "8".into(), None));
+    for bad in [
+        json!({ "rank_weight": -1 }),
+        json!({ "rank_weight": 0.0001 }),
+        json!({ "rank_temperature": 0 }),
+        json!({ "stop_on": "agree" }),
+        json!({ "seed": -3 }),
+    ] {
+        let mut pt = json!({ "size": 40, "widths": "8" });
+        pt.as_object_mut()
+            .expect("object")
+            .extend(bad.as_object().expect("object").clone());
+        let mut q = p.clone();
+        q["points"] = json!([pt]);
+        assert!(parse(&q).is_err(), "point {pt}");
+    }
     for v in [
         json!([]),
         json!([{ "size": 0, "widths": "8" }]),

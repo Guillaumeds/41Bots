@@ -4,6 +4,7 @@
         [--test T.npy] [--widths 256,128] [--epochs 40] [--batch 256] [--lr 1e-3] [--patience 4]
         [--seed 1] [--val-permille 50] [--threads 4] [--device cpu|cuda|auto] [--max-minutes M]
         [--init FLOAT [--shrink-perturb L] [--perturb-seed S]] [--limit N] [--progress FILE]
+        [--rank-weight W] [--rank-temperature T] [--stop-on val_loss|decision]
 
 The data are feature shards written by ``student encode`` (Rust, the only encoder; format
 ``41bots-student-features-v1``): one record per decision with the view's active features, the
@@ -18,6 +19,14 @@ The view's part of the first layer is computed once per decision and added to ea
 
 Loss: per candidate, the cross-entropy of the four-way softmax against the teacher's mean
 four-vector (the oracle head's loss); the mean over a decision's candidates, then over decisions.
+Decision-aware term (``--rank-weight W`` above 0, ``--rank-temperature T``; policy distillation,
+Rusu et al. 2016, docs/STUDENT.md section 5 step 3): a choice depends only on the differences
+between the cards of one decision, so each decision adds W times the KL divergence from the
+teacher's softmax over its candidates to the student's, both taken on the deciding pair's money
+chance divided by T (T in money-chance units: 0.01 is one point of chance). W = 0 (the default) is
+exactly the loss above. ``--stop-on decision`` stops on the validation *decision* loss instead of
+the value cross-entropy.
+
 Validation: decisions whose position key (``pos_key``, the first 8 bytes of the position's SHA-256)
 is below ``--val-permille`` per thousand (``pos_key mod 1000``): a position is never on both sides.
 Early stopping on the validation loss (``--patience`` epochs), the best epoch kept.
@@ -154,6 +163,24 @@ def loss_of(z, target, dec, n_cands):
     return (per / n_cands).mean()
 
 
+def rank_term(z, target, dec, n_cands, temperature):
+    """Mean over decisions of KL(teacher softmax || student softmax) across a decision's candidates,
+    both softmaxes over the deciding pair's money chance / ``temperature``."""
+    n = len(n_cands)
+    vs = torch.softmax(z, dim=1)[:, 0] / temperature
+    vt = target[:, 0] / temperature
+
+    def log_softmax_groups(x):
+        top = torch.full((n,), -math.inf, dtype=x.dtype, device=x.device).scatter_reduce(0, dec, x, "amax")
+        e = torch.exp(x - top[dec])
+        tot = torch.zeros(n, dtype=x.dtype, device=x.device).index_add_(0, dec, e)
+        return x - top[dec] - torch.log(tot)[dec]
+
+    lt, ls = log_softmax_groups(vt), log_softmax_groups(vs)
+    kl = torch.zeros(n, dtype=z.dtype, device=z.device).index_add_(0, dec, torch.exp(lt) * (lt - ls))
+    return kl.mean()
+
+
 def float_scores(model, c, device, batch=1024):
     """Own-pair value (softmax) [n, C] and the mean loss of the float network."""
     model.eval()
@@ -228,6 +255,9 @@ def main(argv=None):
     ap.add_argument("--perturb-seed", type=int)
     ap.add_argument("--limit", type=int)
     ap.add_argument("--progress")
+    ap.add_argument("--rank-weight", type=float, default=0.0)
+    ap.add_argument("--rank-temperature", type=float, default=0.01)
+    ap.add_argument("--stop-on", default="val_loss", choices=["val_loss", "decision"])
     args = ap.parse_args(argv)
     t0 = time.time()
     progress = Progress(args.progress, t0)
@@ -236,6 +266,8 @@ def main(argv=None):
         widths = parse_widths(args.widths)
     except ValueError as e:
         raise SystemExit(f"--widths: {e}") from None
+    if args.rank_weight < 0 or args.rank_temperature <= 0:
+        raise SystemExit("--rank-weight must be at least 0 and --rank-temperature above 0")
     torch.manual_seed(args.seed)
     torch.set_num_threads(max(1, args.threads))
     device = "cuda" if args.device == "cuda" or (args.device == "auto" and torch.cuda.is_available()) else "cpu"
@@ -294,7 +326,10 @@ def main(argv=None):
                 last = time.time()
             b = train_c.take(perm[i : i + args.batch])
             view, dense, cand, dec, tgt, nc = batch_tensors(b, device)
-            loss = loss_of(model(view, dense, cand, dec), tgt, dec, nc)
+            z = model(view, dense, cand, dec)
+            loss = loss_of(z, tgt, dec, nc)
+            if args.rank_weight > 0:
+                loss = loss + args.rank_weight * rank_term(z, tgt, dec, nc, args.rank_temperature)
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -307,8 +342,9 @@ def main(argv=None):
                         "minutes": (time.time() - t0) / 60})
         print(f"epoch {epoch}: train {total / max(n, 1):.6f} val {vloss:.6f} "
               f"loss {rep['decision_loss_pct']:.4f}% agree {rep['agreement']:.3f}", flush=True)
-        if vloss < best[0] - 1e-9:
-            best = (vloss, {k: v.detach().clone() for k, v in model.state_dict().items()}, epoch)
+        stop_metric = vloss if args.stop_on == "val_loss" else rep["decision_loss_pct"]
+        if stop_metric < best[0] - 1e-9:
+            best = (stop_metric, {k: v.detach().clone() for k, v in model.state_dict().items()}, epoch)
             bad = 0
         else:
             bad += 1
