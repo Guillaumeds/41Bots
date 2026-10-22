@@ -1,0 +1,42 @@
+{
+ "format": 2,
+ "run_id": "net-error-o3-val-1",
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "O_3's value error on the held-out flagged rows of the specialist (docs/m3-hybrid/specialist.md): the stored 100k validation shard (s401, exact values), flagged by G2 at the play rule's t=277338260 (43,681 rows, the same rows as S's held-out set), and all rows. Compared with S's held-out numbers (float: SD 3.03%, mean |e| 1.09%, p99.9 34.0%, team biases under 0.03%).",
+ "machine": {
+  "gpus": 0,
+  "min_cores": 128,
+  "min_ram_gb": 60,
+  "min_inet_down": 100,
+  "max_dph": 1.7,
+  "disk_gb": 40
+ },
+ "inputs": {
+  "o3-f5766a": "sha256:f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
+  "leafrisk-o3-v1": "sha256:20c41678c64681855003e5b8660e0a2e1fb9e8d552f7d898dd956055c767a9d5",
+  "val": "sha256:d51e22abd0aad9a699b28da82725bb163249148092fc1daca739a62e9a71c9e0"
+ },
+ "streams": [
+  {
+   "name": "net_error",
+   "priority": 1,
+   "kind": "net_error",
+   "chunks": 1,
+   "params": {
+    "net_input": "o3-f5766a",
+    "risk_input": "leafrisk-o3-v1",
+    "shard_input": "val",
+    "threshold": 277338260,
+    "threads": "all",
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  }
+ ]
+}

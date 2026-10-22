@@ -431,6 +431,7 @@ fn main() -> ExitCode {
         Some("labels") => labels_cmd(&a),
         Some("risk-profile") => risk_profile_cmd(&a),
         Some("risk-filter") => risk_filter_cmd(&a),
+        Some("net-error") => net_error_cmd(&a),
         Some("hybrid-check") => hybrid_check(&a),
         Some("hybrid-paired") => hybrid_paired(&a),
         Some("student-check") => student_check(&a),
@@ -2366,6 +2367,81 @@ fn risk_filter_cmd(a: &Args) -> Result<(), String> {
         kept.len(),
         100.0 * kept.len() as f64 / t3.max(1) as f64
     );
+    Ok(())
+}
+
+/// `search net-error --shard VAL.npy --net O3.safetensors --risk-model G2.json --equity TABLE
+/// [--threshold T] [--threads N] [--out FILE]`: a network's value error against the exact values of
+/// a stored trick-3 shard, on all its rows and on the rows G2 flags at the threshold (default: the
+/// play rule's 277338260). Prints (and writes) JSON: the statistics of each set
+/// (`search::net_error`; the held-out numbers of docs/m3-hybrid/specialist.md).
+fn net_error_cmd(a: &Args) -> Result<(), String> {
+    use search::net_error::{row_error, stats};
+    use search::risk_filter::score_rows;
+    let (table, table_sha) = load_equity_sha(a.req("--equity")?)?;
+    let leaf: Arc<SharedLeaf> = Arc::new(table);
+    let net_path = a.req("--net")?;
+    let o = nn::Oracle::load(Path::new(net_path), leaf.clone())?;
+    if o.trick != 3 {
+        return Err(format!(
+            "--net {net_path} is for trick {}, not trick 3",
+            o.trick
+        ));
+    }
+    let model_path = a.req("--risk-model")?;
+    let model = nn::leafrisk::RiskModel::load(Path::new(model_path))?;
+    if model.trick != 3 {
+        return Err(format!(
+            "--risk-model {model_path} is for trick {}, not 3",
+            model.trick
+        ));
+    }
+    if !model.net_sha256.is_empty() && model.net_sha256 != o.sha256 {
+        return Err(format!(
+            "--risk-model {model_path} was built for another network"
+        ));
+    }
+    let threshold = a.get("--threshold").map_or(Ok(277_338_260i64), |t| {
+        t.parse::<i64>()
+            .map_err(|_| format!("--threshold: not a number: {t}"))
+    })?;
+    let threads = a.num("--threads", 1)?.max(1) as usize;
+    let shard_path = a.req("--shard")?;
+    let rows =
+        nn::shard::from_npy(&std::fs::read(shard_path).map_err(|e| format!("{shard_path}: {e}"))?)?;
+    let scores = score_rows(&rows, threads, |r| {
+        if r.trick != 3 {
+            return Ok(None);
+        }
+        let (c, ctx) = nn::encode::decode(&r.features)
+            .ok_or_else(|| format!("{shard_path}: a row's features are not an encoding"))?;
+        Ok(Some(model.score(&c, &ctx, &*leaf, &o.eval(&c, &ctx))))
+    })?;
+    let (mut all, mut flagged) = (Vec::new(), Vec::new());
+    for (row, score) in rows.iter().zip(&scores) {
+        let Some(score) = *score else { continue };
+        let (c, ctx) =
+            nn::encode::decode(&row.features).ok_or("a row's features are not an encoding")?;
+        let (_, rotation) = nn::encode::encode(&c, &ctx, &*leaf);
+        let e = row_error(row, o.eval(&c, &ctx), rotation % 4);
+        all.push(e);
+        if score >= threshold {
+            flagged.push(e);
+        }
+    }
+    let report = serde_json::json!({
+        "shard": shard_path,
+        "net_sha256": o.sha256,
+        "equity_sha256": table_sha,
+        "threshold": threshold,
+        "all": stats(&all),
+        "flagged": stats(&flagged),
+    });
+    let text = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
+    if let Some(out) = a.get("--out") {
+        std::fs::write(out, &text).map_err(|e| format!("{out}: {e}"))?;
+    }
+    println!("{text}");
     Ok(())
 }
 

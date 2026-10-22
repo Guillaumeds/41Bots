@@ -59,6 +59,7 @@ mod machine;
 mod measure;
 mod mem;
 mod net;
+mod net_error;
 mod remote;
 mod sched;
 mod specialist;
@@ -1753,6 +1754,7 @@ fn run_kind(ctx: &mut Ctx, kind: &str, params: &Value) -> Result<Value, String> 
         "hybrid_checks" => checks::chunk(ctx, params)?,
         "leafrisk" => leafrisk::chunk(ctx, params)?,
         "specialist" => specialist::chunk(ctx, params)?,
+        "net_error" => net_error::chunk(ctx, params)?,
         "arena_block" => {
             return Err("arena_block chunks need the arena binary (not built yet)".into());
         }

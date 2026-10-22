@@ -47,6 +47,7 @@ pub mod exact_leaves;
 pub mod hybrid;
 pub mod hybrid_explain;
 pub mod measure;
+pub mod net_error;
 pub mod oracle_labels;
 pub mod ordered;
 pub mod pimc;

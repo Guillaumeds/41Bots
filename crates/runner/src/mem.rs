@@ -395,7 +395,7 @@ pub(crate) fn chunk_need(
             }
         }
         "solver_spike" | "t1bench" | "hybrid_rung" | "hybrid_t1check" | "hybrid_checks"
-        | "student_teacher" | "student_train" | "leafrisk" | "specialist" => whole,
+        | "student_teacher" | "student_train" | "leafrisk" | "specialist" | "net_error" => whole,
         _ => 0,
     }
 }

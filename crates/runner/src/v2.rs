@@ -322,6 +322,9 @@ pub(crate) fn chunk_params(
     if kind == "specialist" {
         p = crate::specialist::resolve(&p, inputs)?;
     }
+    if kind == "net_error" {
+        p = crate::net_error::resolve(&p, inputs)?;
+    }
     // A `search_measure` chunk's silver reference, check network and stored worlds
     // (`measure.rs`, "A silver reference") are inputs too.
     if kind == "search_measure" {
@@ -337,6 +340,7 @@ pub(crate) fn chunk_params(
         "hybrid_checks",
         "leafrisk",
         "specialist",
+        "net_error",
     ]
     .contains(&kind)
     {
@@ -1581,6 +1585,7 @@ mod tests {
             ("o3-round-1.manifest.json", 1),
             ("specialist-s1.manifest.json", 1),
             ("golden-routed-s2.manifest.json", 1),
+            ("net-error-o3-val.manifest.json", 1),
         ] {
             let v: Value = serde_json::from_str(&fs::read_to_string(root.join(file)).expect(file))
                 .expect(file);
@@ -1641,6 +1646,9 @@ mod tests {
                     }
                     "specialist" => {
                         crate::specialist::parse(&p).unwrap_or_else(|e| panic!("{what}: {e}"));
+                    }
+                    "net_error" => {
+                        crate::net_error::parse(&p).unwrap_or_else(|e| panic!("{what}: {e}"));
                     }
                     k => panic!("{what}: kind {k} not covered"),
                 }

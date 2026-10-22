@@ -25,7 +25,7 @@ use engine::rng::Rng;
 use serde_json::{Value, json};
 
 /// Kinds a format-2 stream may run.
-pub const KINDS: [&str; 18] = [
+pub const KINDS: [&str; 19] = [
     "difftest",
     "equity_sweep",
     "benchmark",
@@ -44,6 +44,7 @@ pub const KINDS: [&str; 18] = [
     "student_train",
     "leafrisk",
     "specialist",
+    "net_error",
 ];
 
 /// The keys of a stream object; everything else goes in `params`.
@@ -392,6 +393,19 @@ pub fn parse_v2(v: &Value) -> Result<Manifest2, String> {
                 if !inputs.iter().any(|(i, _)| *i == n) {
                     return Err(format!(
                         "stream `{name}`: hybrid_t1check names input `{n}`, which the manifest's \
+                         inputs do not list"
+                    ));
+                }
+            }
+        }
+        // A net_error's network, G2 model and shard are among the manifest's inputs.
+        if kind == "net_error" {
+            for n in crate::net_error::input_names(&params)
+                .map_err(|e| format!("stream `{name}`: {e}"))?
+            {
+                if !inputs.iter().any(|(i, _)| *i == n) {
+                    return Err(format!(
+                        "stream `{name}`: net_error names input `{n}`, which the manifest's \
                          inputs do not list"
                     ));
                 }
