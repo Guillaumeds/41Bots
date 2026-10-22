@@ -501,3 +501,33 @@ First data run (trick 2, 250k decisions at 320 deals) about $1-2 per 250k on the
 approved when the pipeline is built.
 
 **Silver set merged** (`eng-silver`, with the per-seat time priors fixed); its size is still the owner's choice.
+
+## 2026-10-21/22 (Irish time): the O3G2 rounds, the repo cleanup, the specialist S (all on `main`)
+Moved out of `docs/STATUS.md` when it was rewritten on 2026-10-22; the results and the reasoning are in
+`docs/m3-hybrid/o3-rounds.md`, `docs/m3-hybrid/specialist.md` and `docs/plan-log-2026-10.md`.
+
+**2026-10-21: design and build of the O3G2 round.** G2 chooses the new training positions of a round
+(`search risk-profile`, `search labels --harvest-risk`, `crates/search/src/risk_harvest.rs`);
+the round in `hybrid_rung` (`crates/runner/src/hybrid/round.rs`): a pilot, 20 risk bands, three nested
+candidates (additive, optionally the last from scratch wider), a golden check of each against the
+incumbent, a label check (`fortyone_nn.labelcmp`), the next G2 on the winner, everything in R2
+(`rounds/<id>/`). Launch tooling: `round_manifest.py`, `launch.py round-manifest`, `--instance-id`
+(take over a hand-rented machine: `vastai update instance` then `recycle instance`),
+`o3-round.yml`. Repository cleanup on the owner's request: `main` is the single line, 52 old
+branches became `archive/*` tags (`repo-archive.yml`), `docs/README.md` became the index of every
+experiment and outcome, STATUS was cut down to the present, an R2 inventory showed 236 GB (nothing
+deleted). The Copilot `sx50` transfer-watch workflow was removed.
+
+**2026-10-21 evening: round 1 launches.** `o3r-1-1` on a hand-rented machine (Thailand) failed: a
+36 GB shard on one download stream exceeded the 30-minute limit (fixed: 16 streams, 3 hours,
+ffbe660). Offer 36863856 vanished before it was rented; attempt 2 (offer 35971321) rented nothing.
+Attempt 3 (`o3r-1-3`) on the owner's EPYC 9B14 / RTX 5090 (offer 57086337, reliability 86%, so
+`min_reliability` was added to the workflow): done in 51 minutes, $1.14. No candidate adopted.
+
+**2026-10-22: round 2, then the specialist.** Round 2 (`o3r-2-1`, 91 minutes, $2.04): c2 adopted by
+the rule at 0.0070% (noise), the wide network from scratch worse (0.0079%). The owner then proposed
+the specialist S. Built: `risk-filter`, the `s:NET` expert, runner kinds `specialist` and
+`net_error`, `store-input.yml`, `net-error`. Runs: S trained (16.5M flagged rows, 22 minutes, $0.55);
+routed golden check (41 minutes, about $1): 0.0079%, no gain; O_3 vs S on the held-out flagged rows:
+O_3 slightly better. Three speedtests of RTX PRO 6000 / EPYC 9B45 offers stopped at 46 usable threads.
+Docs brought up to date the same day.

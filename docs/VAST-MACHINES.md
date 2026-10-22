@@ -288,6 +288,17 @@ Since 2026-10-16 every rented machine writes its own cost record (`machines/<run
 | THREADRIPPER PRO 7995WX | plan | 1 | 0 | - | - | - | ~0.691 | m3-agree-t1-a7 |
 | THREADRIPPER PRO 9995WX | plan | 2 | 0 | - | - | - | ~0.352, ~0.425 | m3-agree-t1-b2 m3-agree-t1-b3 |
 
+## Rented on 2026-10-22: what the machines really gave (O3G2 / specialist work)
+| machine | listed | the container got | result |
+|---|---|---|---|
+| AMD EPYC 9B14 + RTX 5090 32 GB (m:154756, offer 57086337, $1.34-1.50/h, reliability 90%) | 192 threads | **184 usable** | ran the O3G2 rounds, the specialist training, the routed golden check and the error measurement; a plain O_3 golden check (2,000 decisions x 320 worlds) took 163 s, 24 thread-ms a world; the G2 + exact-leaves check 2,042 s, 586 thread-ms a world |
+| AMD EPYC 9B45 + RTX PRO 6000 S 96 GB (m:154394, 150493, 150302; $1.36-1.46/h; deverified host) | 384 threads | **46 usable** | every run stopped by the launcher after about 5 minutes (about $0.12): below the 190-thread floor; no speed measured |
+| Xeon Phi 7210 + RTX 5060 Ti (m:53716, $0.40/h, verified) | 256 threads | not rented | the launcher never rents Xeon Phi (about a tenth of an EPYC thread's work); the owner's request to override it was not needed |
+| Threadripper PRO 7995WX + RTX PRO 6000 (m:26994, offer 55530460, $1.59/h) | 192 threads | not rented | the offer was gone when the run started |
+The `benchmark` chunk (matches a second with every thread busy, `crates/runner/src/main.rs`) was set up
+as a speedtest manifest for the 9B45 offers; no machine finished one. The listed thread count is
+therefore not the container's: read `usable_cores` in the first heartbeat before trusting a machine.
+
 ## Caveats
 
 - **Dense chips (EPYC 9734, 9754, 9965, 9845; "c" cores).** They put twice as many cores in the same space, with half the L3 cache per core (2 MB instead of 4 MB) and lower clock speeds. SPEC says their threads are still as fast as the 7502's or faster (1.13–1.24), and they are cheap per thread. But with 768 threads sharing 24 memory channels [the parallel links between the processor and its memory sticks], the 9965 is the weakest chip per thread for memory-heavy work (TT speed 1.09). Fine for tricks 2–5; measure before trusting it for trick 1.
