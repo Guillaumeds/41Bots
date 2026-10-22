@@ -1,0 +1,62 @@
+{
+ "format": 2,
+ "run_id": "o2-g2arm-2",
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "O_2 stage A 'g75' arm, parts 2-5 on a cheaper machine (owner 2026-10-22): the first part (120k random + 30k rules-v1 G2 labels) was made and stored by o2-g2arm-1 (EPYC 7663, $1.60/h, 68 labels/s) which is then stopped; this run makes the other 480k random + 120k rules-v1 G2 labels (seeds 563/564) in four stored parts, with only a small 2,000-position exact validation set and a throwaway tiny network. A third, training-only run then trains the 2048-1024-256 network on every stored part plus the stored s601 validation shard (label_inputs), so the network sees all 750k labels.",
+ "machine": {
+  "gpus": 1,
+  "min_gpu_ram_gb": 8,
+  "min_cores": 190,
+  "min_ram_gb": 64,
+  "min_inet_down": 100,
+  "max_dph": 1.7,
+  "disk_gb": 100
+ },
+ "inputs": {
+  "o3": "sha256:f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
+  "leafrisk_o3": "sha256:20c41678c64681855003e5b8660e0a2e1fb9e8d552f7d898dd956055c767a9d5"
+ },
+ "streams": [
+  {
+   "name": "g2parts",
+   "priority": 1,
+   "kind": "hybrid_rung",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "cut": 2,
+    "check": false,
+    "widths": "256,64",
+    "head": "outcome",
+    "epochs": 1,
+    "patience": 1,
+    "batch": 1024,
+    "lr": 0.001,
+    "train_seed": 1,
+    "max_minutes": 0,
+    "device": "cuda",
+    "overlap": false,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    },
+    "labels_random": 480000,
+    "labels_random_seed": 563,
+    "labels_rules": 120000,
+    "labels_rules_seed": 564,
+    "val_count": 2000,
+    "val_seed": 7701,
+    "label_parts": 4,
+    "upload_shards": true,
+    "label_source": "hybrid",
+    "label_net": "inputs/sha256/f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
+    "hybrid_exact_share": 0,
+    "label_exact_leaves": "learned:inputs/sha256/20c41678c64681855003e5b8660e0a2e1fb9e8d552f7d898dd956055c767a9d5:t=277338260"
+   }
+  }
+ ]
+}
