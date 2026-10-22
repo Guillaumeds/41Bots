@@ -1587,6 +1587,7 @@ mod tests {
             ("o2-testset-3.manifest.json", 1),
             ("o2-testset-4.manifest.json", 1),
             ("o2-testset-5.manifest.json", 1),
+            ("o2-stagea-1.manifest.json", 5),
             ("o3-round-1.manifest.json", 1),
             ("specialist-s1.manifest.json", 1),
             ("golden-routed-s2.manifest.json", 1),
