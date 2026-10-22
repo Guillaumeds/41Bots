@@ -1035,12 +1035,14 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   first job and failing to upload over its immutable files), so no heartbeat came for `keep-trial-2`; after 15
   minutes the launcher destroyed the machine ($0.013). The same takeover method (`vastai update instance --env`
   then `recycle instance`, built for `o3-round.yml`, `--instance-id`) had also failed on 2026-10-21 (`o3r-1-1`,
-  cause then not found); so the stored environment is not what the recycled container receives. Cause under
-  investigation (trial 3). Afterwards added: a taken-over machine that never starts is kept and recorded, never
+  cause then not found); so the stored environment is not what the recycled container receives. Cause not
+  found (trials 3 and 4 were stopped before they could be probed). The owner then reported that the O2 session's takeover of the
+  stopped instance 57259029 succeeded (details not recorded here), so the stopped-instance path works and only the recycle of a
+  running one is known to fail. Afterwards added: a taken-over machine that never starts is kept and recorded, never
   destroyed (tested against the fake vast). Starting a *stopped* instance is tested against the fake vast only.
 - **Cost.** About $0.05 for the trial machine.
-- **Limits.** One spare machine type; **the takeover itself does not yet work on vast** (above); the takeover of a stopped
-  instance and of a machine with a different disk size are not tried; a boot failure (missing manifest, bad binary hash) still destroys the machine because
+- **Limits.** One spare machine type; **recycling a running instance fails on vast** (above; a stopped instance was taken over by the O2 session, reported); a
+  machine with a different disk size is not tried; a boot failure (missing manifest, bad binary hash) still destroys the machine because
   the image's boot script does (an image change would be needed); the runner image and run workflow were not
   changed beyond the manifest keys and the cancel steps in `vast-run.yml`.
 - **Sources.** `python/launcher/launch.py`, `cleanup.py`, `test_keep.py`, `monitor_run.py`, `.github/workflows/vast-run.yml`,
