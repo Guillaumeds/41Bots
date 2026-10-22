@@ -69,12 +69,12 @@ trainer's rank loss and the `student_train` point options; the G2 teacher run (`
 250,000 decisions, parts of 5,000) has stored 2 of 50 parts (R2 `runs/student-t2-gv2-250k-4/out/rules/000000-...`
 and `runs/student-t2-gv2-250k-6/out/rules/000000-,000001-...`; use `skip_parts`/`bundles`). Two throughput bugs
 found and fixed (ordered-writer window; a decision's 64 deals on one thread: now blocks of 8, byte-identical).
-**Plain arm done (E12):** the decision-aware loss is the finding so far: 250,000 decisions with `rank_weight` 1 and
-`rank_temperature` 0.003, or T=0.01 with `stop_on` decision, reach 0.069% / 0.060% alone (seat 1 0.090 / 0.112) on the golden
-set against 0.0733% (seat 1 0.179) for the 1M-decision S2; plain retraining noise is SD 0.021, so confirm with seeds before
-adopting. **Next:** the G2 labelling (run `student-t2-gv2-250k-7`, searching for a machine) then the G2 arm; in parallel a
-follow-up training run: seeds 2 and 3 for the two best rank variants, their combination, and the loss at 1,000,000 decisions. Measured cost of the
-G2 labelling: $92 per million decisions on a 245-thread EPYC 7B12 at $0.723/h (E13), about $23 for the 250,000; budget $30. Also built: machine keep and takeover (below, "How to run things").
+**Plain arm and the decision-aware loss done (E12):** with `rank_weight` 1, `rank_temperature` 0.01 and `stop_on` decision the
+trick-2 student's golden-set loss halves: 0.0587% (3 seeds, SD 0.003) against 0.1195% for plain at 250,000 decisions, and at
+1,000,000 decisions 0.0389% alone, 0.080% at seat 1 (the existing S2: 0.0733% / 0.179%), top-3 pick 0.0030%. Integer network
+in R2 (E12). **Not yet in the app:** the new loss's 1M network is not adopted as S2 (needs the owner's decision and the
+`method: "student"` export check). **Next:** the G2 labelling (run `student-t2-gv2-250k-8` has a machine; parts 0-1 stored) then the
+G2 arm with the new loss; a loss search (weight, temperature) and 1M seeds are cheap follow-ups (about $0.4 each).
 
 **Records:** `docs/EXPERIMENTS.md` (every experiment and its result), `docs/RESEARCH.md` (the outside
 research), `docs/README.md` (index).
