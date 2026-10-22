@@ -50,7 +50,7 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import glob, hashlib, io, os, sys, tarfile, zstandard
-          archives = glob.glob("fetched/out/*/*.tar.zst")
+          archives = glob.glob("fetched/**/out/*/*.tar.zst", recursive=True)
           if len(archives) != 1:
               sys.exit(f"expected one out/ archive, found {archives}")
           data = zstandard.ZstdDecompressor().stream_reader(open(archives[0], "rb")).read()
