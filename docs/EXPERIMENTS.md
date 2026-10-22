@@ -779,7 +779,22 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 - **G2 arm** (0.75M G2 labels, same recipe): `o2-g2arm-1` (EPYC 7663, $1.60/h) made part 1 (120k random + 30k rules,
   seeds 561/562) and was stopped; `o2-g2arm-2` (EPYC 7B12 taken over by hand, instance 57260975, $0.73/h) makes the
   other 600k (seeds 563/564) in four parts; a training-only run on all stored parts plus s601 then gives the
-  network. Result pending (see STATUS).
+  network. **Result** (`o2-g2arm-1` + `o2-g2arm-2`, `o2-g2full-1`; the label run `-2` died on a sidecar race after 4 of 5 parts, fixed
+  in the trainer, `test_hybrid_train`): the network was trained on the 420,000 stored G2 labels (360k random + 60k rules-v1;
+  `docs/m3-hybrid/o2-stagea-netcmp-g75.json`, same test set as above, 16 min, $0.23 on an EPYC 7B12 + RTX 3090):
+
+| arm | labels | SD | paired change in squared error vs `p60` | largest team bias | sibling regret |
+|---|---|---|---|---|---|
+| `e03` | exact 0.3M | 4.303 | +8.71 +-0.37 | 0.412 | 0.324 |
+| `g75` (partial) | **G2 0.42M** | **4.152** | +7.43 +-0.37 | 0.161 | 0.388 |
+| `e075` | exact 0.75M | 3.931 | +5.65 +-0.33 | 0.180 | 0.327 |
+| `p15` | plain 1.5M | 3.668 | +3.64 +-0.29 | 0.116 | 0.295 |
+| `p60` | plain 6M | 3.132 | reference | 0.126 | 0.247 |
+
+  G2 0.42M sits exactly where exact labels of the same count would (log-interpolating `e03` and `e075` gives 4.16): G2
+  labels are as good as exact ones per label, not better, at about half the cost of exact (3.7 against 7.3 thread-s) and 18 times
+  the cost of plain. At equal money plain volume wins by a wide margin (6M plain about $0.4 of labels against 0.42M G2 about
+  $3). **Verdict: no niche for G2 labels as a bulk source** (the 2026-10-20 note stands); plain volume is the lever.
 - **Limits.** One seed per arm; the test set is random-play positions, not the positions trick-1 search reaches;
   no trick-1 decision-level number exists, so O_2 can only be audit-clean on exact trick-2 positions.
 - **Tools made.** `fortyone_nn.netcmp`, `python/tools/o2watch.py` (progress, speed, ETA from R2 heartbeats),
