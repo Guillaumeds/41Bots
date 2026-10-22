@@ -60,5 +60,36 @@ class HybridTrainTest(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(out, "float.safetensors")))
 
 
+class SidecarRaceTest(unittest.TestCase):
+    def test_sidecar_appearing_late_is_waited_for(self):
+        import threading
+        import time
+
+        with tempfile.TemporaryDirectory() as d:
+            path = synthetic_shard(os.path.join(d, "h.npy"), 100, 4)
+            a = np.load(path)
+            other = np.roll(a["outcomes"], 1, axis=1)[np.arange(len(a)), a["label"]]
+            mix = (a["value"] // np.uint64(2)) + (other // np.uint64(2))
+            mix[:, 0] += np.uint64(ONE) - mix.sum(axis=1, dtype=np.uint64)
+            a["value"] = mix
+            np.save(path, a)
+            sh = load_shard(path)
+
+            def late():
+                time.sleep(1.0)
+                with open(path + ".json", "w") as f:
+                    json.dump({"label_source": "hybrid"}, f)
+
+            t = threading.Thread(target=late)
+            t.start()
+            tricks = train.check_shards_waiting_for_sidecar(sh, path, 1, wait_s=10, poll_s=0.1)
+            t.join()
+            self.assertEqual(tricks, {4})
+            # an exact-looking mixture with no sidecar ever is refused after the wait
+            os.remove(path + ".json")
+            with self.assertRaises(ValueError):
+                train.check_shards_waiting_for_sidecar(sh, path, 1, wait_s=0.5, poll_s=0.1)
+
+
 if __name__ == "__main__":
     unittest.main()

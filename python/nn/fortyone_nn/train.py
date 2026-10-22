@@ -1556,6 +1556,25 @@ def weights_record(names, sizes, shas):
     return rec
 
 
+def check_shards_waiting_for_sidecar(sh, path, threads, wait_s=30.0, poll_s=0.5):
+    """``check_shards`` of one streamed shard. A hybrid shard's sidecar (``label_source``) can appear
+    a moment after the shard itself, and without it the shard would be read as exact and refused for a
+    target that is not one outcome's money vector (found 2026-10-22: ``o2-g2arm-2`` died on its fourth
+    shard). On that one refusal, wait up to ``wait_s`` for the sidecar and check again; a shard that
+    is exact (or never gets a sidecar) is refused as before."""
+    try:
+        return check_shards([sh], threads=threads, exact=[not is_hybrid_shard(path)])
+    except ValueError as e:
+        if "money vector is not the target" not in str(e) or is_hybrid_shard(path):
+            raise
+        deadline = time.time() + wait_s
+        while time.time() < deadline:
+            time.sleep(poll_s)
+            if os.path.exists(str(path) + ".json"):
+                return check_shards([sh], threads=threads, exact=[not is_hybrid_shard(path)])
+        raise
+
+
 def load_part(path, threads, store_for=None, fraction=1.0, ties=False):
     """One training shard for the streamed data: checked (``check_shards``), converted and hashed,
     on ``threads`` threads. Converted into memory (``load_compact``: ``part["comp"]``), or, when
@@ -1563,7 +1582,7 @@ def load_part(path, threads, store_for=None, fraction=1.0, ties=False):
     never all in memory). ``fraction``: ``--train-fraction`` (its first rows only)."""
     full = load_shard(path)
     sh = prefix_shard(full, fraction)
-    tricks = check_shards([sh], threads=threads, exact=[not is_hybrid_shard(path)])
+    tricks = check_shards_waiting_for_sidecar(sh, path, threads)
     w, rw, rsha = data_weights(path, len(full), len(sh))
     part = {"path": path, "name": os.path.basename(path), "rows": int(len(sh)), "rows_in_file": int(len(full)),
             "tricks": tricks,
