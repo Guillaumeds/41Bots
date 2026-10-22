@@ -1,26 +1,24 @@
 {
  "format": 2,
- "run_id": "o2-vol-2",
+ "run_id": "o2-vol-3",
  "run_seed": 1,
  "threads": null,
  "benchmark_seconds": 0,
  "upload_every_s": 300,
  "heartbeat_every_s": 30,
- "note": "O_2 Stage B volume, relaunch (o2-vol-1 never found a machine and its streamed label parts hit the trainer's sidecar race that killed o2-g2arm-2): 22M plain hybrid labels as ten separate stored streams of 2.2M (1.6M random + 0.4M rules-v1 + 0.2M harvested), each with a throwaway tiny network, no streaming training beside the labels. Stage A (D6): plain 6M beat exact 1.5M by a wide margin and volume had not flattened. The real 2048-1024-256 network is trained later from the stored parts (label_inputs) so it can be repeated or varied cheaply on a GPU box. A short smoke stream (harvest path at trick 2 with hybrid labels, never run before) comes first.",
+ "note": "o2-vol-3 = o2-vol-2 made CPU-only (the tiny by-product network trains on the CPU) because no GPU machine with 150+ threads under $1.20/h turned up in 50 minutes (owner 2026-10-22 night: take risks). O_2 Stage B volume, relaunch (o2-vol-1 never found a machine and its streamed label parts hit the trainer's sidecar race that killed o2-g2arm-2): 22M plain hybrid labels as ten separate stored streams of 2.2M (1.6M random + 0.4M rules-v1 + 0.2M harvested), each with a throwaway tiny network, no streaming training beside the labels. Stage A (D6): plain 6M beat exact 1.5M by a wide margin and volume had not flattened. The real 2048-1024-256 network is trained later from the stored parts (label_inputs) so it can be repeated or varied cheaply on a GPU box. A short smoke stream (harvest path at trick 2 with hybrid labels, never run before) comes first.",
  "machine": {
-  "gpus": 1,
-  "min_gpu_ram_gb": 8,
   "min_cores": 150,
   "min_ram_gb": 64,
   "min_inet_down": 100,
-  "max_dph": 1.2,
+  "max_dph": 1.3,
   "price_steps": [
    0.6,
    0.8,
    1.0,
-   1.2
+   1.3
   ],
-  "wait_for_offer_min": 240,
+  "wait_for_offer_min": 360,
   "disk_gb": 150
  },
  "inputs": {
@@ -45,7 +43,7 @@
     "lr": 0.001,
     "train_seed": 1,
     "max_minutes": 0,
-    "device": "cuda",
+    "device": "cpu",
     "overlap": false,
     "table": {
      "hands": 1000000,
@@ -84,7 +82,7 @@
     "lr": 0.001,
     "train_seed": 1,
     "max_minutes": 0,
-    "device": "cuda",
+    "device": "cpu",
     "overlap": false,
     "table": {
      "hands": 1000000,
@@ -124,7 +122,7 @@
     "lr": 0.001,
     "train_seed": 1,
     "max_minutes": 0,
-    "device": "cuda",
+    "device": "cpu",
     "overlap": false,
     "table": {
      "hands": 1000000,
@@ -164,7 +162,7 @@
     "lr": 0.001,
     "train_seed": 1,
     "max_minutes": 0,
-    "device": "cuda",
+    "device": "cpu",
     "overlap": false,
     "table": {
      "hands": 1000000,
@@ -204,7 +202,7 @@
     "lr": 0.001,
     "train_seed": 1,
     "max_minutes": 0,
-    "device": "cuda",
+    "device": "cpu",
     "overlap": false,
     "table": {
      "hands": 1000000,
@@ -244,7 +242,7 @@
     "lr": 0.001,
     "train_seed": 1,
     "max_minutes": 0,
-    "device": "cuda",
+    "device": "cpu",
     "overlap": false,
     "table": {
      "hands": 1000000,
@@ -284,7 +282,7 @@
     "lr": 0.001,
     "train_seed": 1,
     "max_minutes": 0,
-    "device": "cuda",
+    "device": "cpu",
     "overlap": false,
     "table": {
      "hands": 1000000,
@@ -324,7 +322,7 @@
     "lr": 0.001,
     "train_seed": 1,
     "max_minutes": 0,
-    "device": "cuda",
+    "device": "cpu",
     "overlap": false,
     "table": {
      "hands": 1000000,
@@ -364,7 +362,7 @@
     "lr": 0.001,
     "train_seed": 1,
     "max_minutes": 0,
-    "device": "cuda",
+    "device": "cpu",
     "overlap": false,
     "table": {
      "hands": 1000000,
@@ -404,7 +402,7 @@
     "lr": 0.001,
     "train_seed": 1,
     "max_minutes": 0,
-    "device": "cuda",
+    "device": "cpu",
     "overlap": false,
     "table": {
      "hands": 1000000,
@@ -444,7 +442,7 @@
     "lr": 0.001,
     "train_seed": 1,
     "max_minutes": 0,
-    "device": "cuda",
+    "device": "cpu",
     "overlap": false,
     "table": {
      "hands": 1000000,
