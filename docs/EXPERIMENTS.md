@@ -956,7 +956,7 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 - **Sources.** `tools/shortlist_time.py`, `crates/wasm/src/bin/shortlist_cost.rs`,
   `crates/wasm/tests/api.rs`, E8.
 
-### E12. S2 teacher A/B: plain H_3 against H_3 + G2 (session 1, started 2026-10-22; result open)
+### E12. S2 teacher A/B: plain H_3 against H_3 + G2 (session 1, started 2026-10-22; plain arm done, G2 arm open)
 - **Question.** Does a cleaner teacher (the same PIMC at trick 2 over 64 deals, but with G2's learned exact
   leaves) give a better trick-2 student than the plain H_3 teacher? Also: does the decision-aware loss
   (`rank_weight`) help, and how large is the retraining noise?
@@ -972,12 +972,33 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   student's softmax over the candidates' own-pair value divided by T (`fortyone_nn.student --rank-weight W
   --rank-temperature T`; W = 0 is the old loss bit for bit; `--stop-on decision` stops on the validation
   decision loss); tests in `python/nn/tests/test_student.py` and `crates/runner/src/student_train/tests.rs`.
-- **Result.** Open. The G2 labels are not finished (10,000 of 250,000 decisions stored, parts 0 and 1 of
-  5,000), so no student has been trained for the A/B. The throughput of the labelling is E13.
-- **Cost.** Spent on the G2 labelling so far about $1.8 (E13); budget $30 for the labelling. Training and
-  judging not started (estimate $2-5 plus the golden check, which takes seconds on the build VM).
-- **Limits.** The A/B is not yet run; the G2 cost per decision is now measured (E13) but only on one machine
-  type.
+- **Result (plain arm and controls; the G2 arm is still open).** Run `student-t2-plain-1`, one GPU (AMD EPYC 7502,
+  64 threads, RTX 5070 Ti, $0.325/h), 9 networks in about 45 minutes. Loss on the exact golden set, % of the money
+  chance (95% upper bound in brackets; top-3 = the teacher's perfect pick among the student's three best cards):
+
+| network | decisions | alone | seat 1 | top-3 |
+|---|---|---|---|---|
+| existing S2 (stored, plain H_3, 64 deals) | 1,000,000 | 0.0733 [0.0876] | 0.179 | 0.0073 [0.0130] |
+| plain, 64 deals, seed 1 / 2 / 3 | 250,000 | 0.1217 / 0.1386 / 0.0980 (mean 0.1194, SD 0.021) | 0.147 / 0.182 / 0.155 | 0.0077 / 0.0139 / 0.0085 |
+| plain, 320 deals, seed 1 | 250,000 | 0.0936 [0.1089] | 0.140 | 0.0083 |
+| plain, 64 deals, seed 1, 100,000 / 50,000 | 100,000 / 50,000 | 0.1314 / 0.2320 | 0.168 / 0.252 | 0.0087 / 0.0150 |
+| rank loss W=1, T=0.01, seed 1 | 250,000 | 0.0951 [0.1319] | 0.126 | 0.0235 [0.0564] |
+| rank loss W=1, T=0.003, seed 1 | 250,000 | 0.0692 [0.0830] | 0.090 | 0.0070 [0.0125] |
+| rank loss W=1, T=0.01, stop on decision loss, seed 1 | 250,000 | **0.0599 [0.0709]** | 0.112 | **0.0061 [0.0094]** |
+
+  Retraining noise at the same data and settings: 0.098 to 0.139 alone (SD 0.021). Plain at 320 deals (0.094, one
+  seed) lies inside it. The decision-aware loss with T = 0.003, or with stopping on the validation decision loss, is
+  0.05-0.06 below the plain mean (2.4 and 2.9 SD of that noise, one seed each) and, from 250,000 decisions, below the
+  existing S2 trained on four times the data, with the leader seat (where S2 loses most) at 0.09-0.11 against 0.179;
+  W=1, T=0.01 without the stop rule has the best top-3 pick worse (0.0235). The same ordering holds on the runner's
+  fixed 4,096-decision test set (plain seed 1 0.092, rank T=0.01 0.067). The existing S2 reproduced its recorded
+  0.0733 on this check. The G2 arm is not run: its labels are 10,000 of 250,000 decisions (E13).
+- **Cost.** The plain arm about $0.25 (45 minutes at $0.325/h); the golden checks took seconds each on the build VM. The G2
+  labelling so far about $1.8 (E13); budget $30.
+- **Limits.** One seed for every rank variant and for plain at 320 deals and the learning-curve points; the noise (SD 0.021 from
+  three plain seeds) is as large as the plain-320 difference; the rank settings (W, T, stop rule) were not searched, only
+  three tried; the 250,000-decision students are judged against the existing 1,000,000-decision S2; the G2 arm (the question
+  of this entry) is not yet run.
 - **Sources.** `docs/vast/student-t2-gv2-250k.manifest.json`, `docs/m3-hybrid/path-forward.md` section 6
   session 1, `python/nn/fortyone_nn/student.py`, R2 `runs/student-t2-gv2-250k-{4,6}/out/rules/`.
 
