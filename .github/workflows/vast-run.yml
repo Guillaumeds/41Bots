@@ -107,8 +107,8 @@ on:
       offer_dph:
         description: "With offer_id (optional): the price per hour you saw on vast.ai; a warning if vast reports another"
         default: ""
-      offer_cores:
-        description: "With offer_id (optional): the CPU cores you saw on vast.ai (e.g. 384); a warning if vast reports another"
+      instance_id:
+        description: "Take over an instance you already rented by hand on vast.ai (its Instance ID) instead of renting one: the container is recreated with this run's image and start command; its disk must be at least disk_gb. The machine needs (min_cores, GPU, RAM) are checked against it; no replacement is rented if it fails (replaced offer_cores, 2026-10-22: the 25-input limit)"
         default: ""
       resume_from:
         description: "Format 1 only: the run id whose out/ (or partial/out/) this run continues from (search_measure chunks resume world by world; refused if the settings differ). Put into the manifest unless it already has resume_from."
@@ -160,7 +160,7 @@ jobs:
           MARKET_CHECK: ${{ inputs.market_check }}
           OFFER_ID: ${{ inputs.offer_id }}
           OFFER_DPH: ${{ inputs.offer_dph }}
-          OFFER_CORES: ${{ inputs.offer_cores }}
+          INSTANCE_ID: ${{ inputs.instance_id }}
           RESUME_FROM: ${{ inputs.resume_from }}
         run: |
           set -euo pipefail
@@ -171,7 +171,10 @@ jobs:
           # --offer-id: the one offer the owner named, checked by id (no other search); blank: the normal search.
           OFFER_ARGS=""
           if [ -n "$OFFER_ID" ]; then
-            OFFER_ARGS="--offer-id $OFFER_ID ${OFFER_DPH:+--offer-dph $OFFER_DPH} ${OFFER_CORES:+--offer-cores $OFFER_CORES}"
+            OFFER_ARGS="--offer-id $OFFER_ID ${OFFER_DPH:+--offer-dph $OFFER_DPH}"
+          fi
+          if [ -n "$INSTANCE_ID" ]; then
+            OFFER_ARGS="--instance-id $INSTANCE_ID"
           fi
           if [ "$DRY_RUN" = "true" ]; then
             # Prints the offer that would be rented (the named one with offer_id, else the search's choice); rents nothing.
