@@ -222,6 +222,7 @@ from .formats import (
     ROW_WEIGHTS_SUFFIX,
     GROUPS_SUFFIX,
     VALUE_FAULTS,
+    is_hybrid_shard,
     load_groups,
     load_row_weights,
     load_shard,
@@ -339,15 +340,17 @@ def row_blocks(shards, block):
     return out
 
 
-def check_shards(shards, block=LOAD_BLOCK, threads=1):
+def check_shards(shards, block=LOAD_BLOCK, threads=1, exact=None):
     """``check_values`` of each shard in turn (raising the error it raises first, from the first
     shard that has one) and the set of tricks the shards hold, worked out a block of rows at a
-    time on ``threads`` threads."""
+    time on ``threads`` threads. ``exact``: per shard, False for a hybrid-labelled training shard
+    (``value_fault``); default all exact."""
+    exact = exact if exact is not None else [True] * len(shards)
 
     def one(job):
         k, j, _ = job
         a = shards[k][j : j + block]
-        return value_fault(a), set(np.unique(a["trick"]).tolist())
+        return value_fault(a, exact[k]), set(np.unique(a["trick"]).tolist())
 
     jobs = row_blocks(shards, block)
     res = on_threads(one, jobs, threads)
@@ -1560,7 +1563,7 @@ def load_part(path, threads, store_for=None, fraction=1.0, ties=False):
     never all in memory). ``fraction``: ``--train-fraction`` (its first rows only)."""
     full = load_shard(path)
     sh = prefix_shard(full, fraction)
-    tricks = check_shards([sh], threads=threads)
+    tricks = check_shards([sh], threads=threads, exact=[not is_hybrid_shard(path)])
     w, rw, rsha = data_weights(path, len(full), len(sh))
     part = {"path": path, "name": os.path.basename(path), "rows": int(len(sh)), "rows_in_file": int(len(full)),
             "tricks": tricks,
@@ -2206,7 +2209,8 @@ def _main(argv, stack):
         hashing = ThreadPoolExecutor(len(args.train) + 1)
         train_sha = [hashing.submit(sha256_file, p) for p in args.train]
         val_sha = hashing.submit(sha256_file, args.val)
-        tricks = check_shards(shards + [val], threads=load_threads)
+        tricks = check_shards(shards + [val], threads=load_threads,
+                              exact=[not is_hybrid_shard(p) for p in args.train] + [True])
         if len(tricks) != 1:
             raise SystemExit(f"shards hold tricks {sorted(tricks)}: one frontier trick per network")
         trick = tricks.pop()

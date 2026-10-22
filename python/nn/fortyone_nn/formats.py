@@ -227,10 +227,12 @@ VALUE_FAULTS = (
 )
 
 
-def value_fault(a):
+def value_fault(a, exact=True):
     """The first of ``check_values``' checks (an index into ``VALUE_FAULTS``) that rows ``a`` fail,
     or None. Every check is row by row, so the first fault of a whole array is the smallest of its
-    blocks' first faults."""
+    blocks' first faults. ``exact=False`` (a hybrid-labelled training shard, ``is_hybrid_shard``):
+    the target is the hybrid's mixture of endings, so no outcome need have exactly its money vector
+    and the last check is skipped; the sum, the vocabulary and the possible-outcome checks stay."""
     s = a["value"].astype(np.uint64).sum(axis=1, dtype=np.uint64)
     if not np.all(s == np.uint64(ONE)):
         return 0
@@ -241,9 +243,20 @@ def value_fault(a):
     rows = np.arange(len(a))
     if not np.all(mask_bits(a["mask"], v)[rows, lab]):
         return 2
-    if not np.array_equal(np.asarray(a["outcomes"])[rows, lab], np.asarray(a["value"])):
+    if exact and not np.array_equal(np.asarray(a["outcomes"])[rows, lab], np.asarray(a["value"])):
         return 3
     return None
+
+
+def is_hybrid_shard(path):
+    """True when the sidecar ``PATH.json`` says ``label_source`` ``"hybrid"`` (labels made by the
+    hybrid H_{k+1}, ``docs/m3-hybrid/audit-loop.md`` section 12); false for exact shards and shards
+    without a sidecar."""
+    try:
+        with open(str(path) + ".json") as f:
+            return json.load(f).get("label_source") == "hybrid"
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def check_values(a):
