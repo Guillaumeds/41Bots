@@ -10,3 +10,7 @@
 *.zst binary
 *.safetensors binary
 *.onnx binary
+*.jsonl text eol=lf
+*.ckpt binary
+# Test fixtures whose SHA-256 a test checks: never converted (a Windows checkout would change it).
+crates/search/testdata/** -text
