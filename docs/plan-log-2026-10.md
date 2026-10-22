@@ -705,7 +705,7 @@ Trick-2 default (exact-few vs rollout) decision; belief policy-likelihood arm (Â
   checks the container's count (`usable_cores`) before the benchmark, so the run was stopped correctly.
 - Speed of this machine: unknown. Not added to `docs/vast/speed-factors.json`.
 
-## 2026-10-22: specialist S (run specialist-s2): trained, not yet tested in play
+## 2026-10-22: specialist S (run specialist-s2): trained (tested in play in the entries below)
 - Filter (`search risk-filter`, threshold 277338260 = the play rule's cut, O_3 value and G2 score):
   base-random 11,077,690 of 25,600,000 rows (43.3%); base-rules 2,235,652 of 6,400,000 (34.9%);
   base-harvest 3,162,386 of 8,000,000 (39.5%). Total training rows 16,475,728. Held-out: 43,681 of
@@ -761,3 +761,48 @@ Trick-2 default (exact-few vs rollout) decision; belief policy-likelihood arm (Â
 - Reading: on the rows G2 flags, S is no better than O_3 (slightly worse on each figure). S has learned
   those positions about as well as O_3 already has. That does not support training S to 40M rows: more
   data for S alone would need to beat O_3 to matter, and it is at O_3's level now.
+
+## 2026-10-21/22: session summary: the decisions and the reasoning (owner and assistant)
+Full results: `docs/m3-hybrid/o3-rounds.md` ("Results"), `docs/m3-hybrid/specialist.md`; the dated
+entries above hold the raw numbers; the chronology is in `docs/history/STATUS-history.md`.
+
+**Why this work.** O_3 alone is at 0.0068% (seat 1 0.0201%), O_3 + G2 with exact solving at 0.0008%
+(seat 1 0.0022%). O_2's training labels (exact through trick 2, then O_3, never G2: G2 makes labels too
+slow) and the bronze set (O_2's test set) use O_3 alone, so O_3 alone has to come close to O_3 + G2
+(target 0.0025% overall and at every seat).
+
+**Decisions (owner) and their reasons.**
+- G2 chooses the new training positions; rows kept in proportion to frequency x risk^Î±, Î± = 1, plus a
+  20% plain floor of the new rows. Reason for Î± = 1 (over the 0.5 first proposed): the gap between O_3
+  alone and O_3 + G2 is exactly O_3's error on the positions G2 would solve, and G2's riskiest 10%
+  hold about 84% of it. The floor (defensive importance sampling) keeps a wrong predictor from
+  starving any kind of position.
+- Amounts 2M, 4M, 8M (nested) per round; `risk_tricks` "2" and `risk_cap` 1000 from measurements
+  (a trick-1 decision reaches about 600,000 trick-3 positions, a trick-2 decision about 700; a low cap
+  made the mix 56% instead of 86% in the risky band).
+- Delete nothing expensive to remake in R2 (inventory: 236 GB, inputs 226 GB); old branches become
+  `archive/*` tags; `main` is the one line; STATUS holds only the present.
+- After round 2 the owner proposed the **specialist S**: train a network only on G2's risky areas
+  (from the existing 40M base, G2 areas with G2's own distribution) and use it in play instead of
+  the exact solve, G2 deciding which network is called. "Run both in parallel" for the routed check.
+- The owner asked whether pushing S to 40M rows was worth it, and whether a 20M-row O_3 existed for
+  a size comparison: it does not (the basecurve runs were cancelled at the start on 2026-10-19).
+
+**What the assistant concluded.** Three different levers (G2-chosen extra data, a bigger network from
+scratch, a specialist) end at O_3's level; the targeted data is not the missing ingredient. What would
+separate data from capacity is the never-run 20M-versus-40M curve and the unread 80M-base result.
+This is a recommendation, not a measured fact.
+
+**Process lessons (assistant).** Test every manifest through the runner's own parser before renting
+(`manifests_resolve`): three launches failed on a manifest key, an unregistered kind and a reused
+run id; only the unregistered kind cost money ($0.68, the machine had to boot first). A listed thread count is not the container's; the launcher's `usable_cores` check is the
+authority. Scheduled reminders fire after the work they asked for is done; check what is already done
+before acting on one (a stale reminder asked to dispatch the golden run a second time).
+
+**Launch log, 2026-10-22 (all refusals cost nothing unless noted).** specialist-s1 on offer 31231107
+(Xeon Phi): refused by the launcher's chip rule. specialist-s1 on offer 57067521: refused (manifest
+`max_dph` 0.50). specialist-s1 on machine 154756: rented, refused by the machine's manifest check
+(kind not registered; $0.68). specialist-s2: refused once (run name reused), then rented and
+finished. speedtest-rtxpro6000-1: refused (manifest key), then rented and stopped (46 usable threads).
+speedtest-57070744 and -57070738: rented, stopped (46 usable threads). speedtest-55530460: offer gone.
+golden-routed-s2 and net-error-o3-val-1: rented and finished.

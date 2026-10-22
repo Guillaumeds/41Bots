@@ -2,46 +2,44 @@
 
 **Current checkpoint: M3 (in progress)** (PLAN §13, as revised on 2026-10-13): PIMC bots, the exact early-trick yardstick and its N-curves, the trick-1 runs on rented machines, the gate against rules-v1. M0 (engine, reference, RNG, CI), M1 (equity table, arena, launcher) and M2 (solver spike) are done; see `docs/history/STATUS-history.md`.
 
-## START HERE (2026-10-22): O3G2 rounds 1-2 and the specialist test done; results in `docs/RESEARCH.md`
+## START HERE (2026-10-22): more training data does not move O_3; choose the next lever
 
-**Decision (owner, 2026-10-21):** before O_2, push O_3 *alone* close to O_3 + G2, because O_2's
-training labels (exact through trick 2, then O_3, no G2) and the bronze set (O_2's test set: exact
-through tricks 1-2, then O_3, G2 only if cheap by then) both use O_3 alone. Target: O_3 alone at
-most 0.0025% (95% bound) overall and at every seat (today 0.0068%, seat 1 0.0201%; with G2 0.0008%,
-seat 1 0.0022%). Method: **O3G2 rounds**, `docs/m3-hybrid/o3-rounds.md` (read it first): G2 chooses
-the new training positions (frequency x risk^α, α = 1, 20% plain), up to three candidates a round
-(nested amounts, e.g. 2M, 4M, 8M), the winner by the additive adoption rule on the golden set, a
-label check of O_3's trick-2 labels, the next G2 on the winner, everything stored in R2
-(`rounds/<id>/round.json`). The Copilot work of 2026-10-19/20 was discarded; this starts from
-m3-hybrid 3935df4.
+**Where we are.** O_3 f5766a is still the adopted trick-3 network: 0.0068% alone (seat 1 0.0201%),
+0.0008% with G2 and exact solving (seat 1 0.0022%) on the stored trick-2 golden set. The goal
+(owner, 2026-10-21) is O_3 *alone* at most 0.0025% overall and at every seat, because O_2's training
+labels and the bronze set use O_3 alone. Three attempts on 2026-10-21/22 did not move it (full
+record: `docs/m3-hybrid/o3-rounds.md` "Results" and `docs/m3-hybrid/specialist.md`):
+1. **O3G2 rounds 1 and 2** (extra G2-chosen rows, +2M/+4M/+8M, additive): 0.0069-0.0080%, all
+   within retrain noise of 0.0068%; round 2's wide network from scratch was worse (0.0079%, seat 1
+   0.0325%). Round 2's rule-winner c2 (0.0070%) is stored but not adopted as O_3.
+2. **Specialist S** (a network trained only on the 16.5M base rows G2 flags): on its own rows S is
+   at O_3's level (SD 3.03% against 2.94%); routed in play it scored 0.0079%, against 0.0008% for
+   the exact solve. Rejected for now.
+3. Nothing is running: no rented machine was open at the last check (2026-10-22 07:05 UTC). About
+   $6 went on rentals from round 1 attempt 3 onward (rounds $3.2, specialist training $0.55, routed
+   check $1, the three stopped speedtests and the error measurement about $0.5, the refused start $0.7).
 
-**Built (merged into `main` 2026-10-21; `main` is the single current line, old branches are
-`archive/*` tags):** `search risk-profile` and `search labels
---harvest-risk` (`crates/search/src/risk_harvest.rs`); the round in `hybrid_rung`
-(`crates/runner/src/hybrid/round.rs`); `fortyone_nn.labelcmp`; `launch.py round-manifest` and
-`--instance-id` (take over a machine rented by hand: `vastai update instance`; its disk must
-already be about 250 GB); `.github/workflows/o3-round.yml`; round 1's manifest
-`docs/vast/o3-round-1.manifest.json`. All tests pass (fmt, clippy, workspace, Python).
+**Next, in order (owner chooses):**
+1. Free reads still owed (r2-fetch, no rental): the result of `o3-base80-1` (O_3 on an 80M base) and
+   the optimizer's-curse / ensemble reruns (`curse-ensemble.md`). They say whether O_3 is limited by data
+   or by capacity.
+2. The data-versus-capacity test that never ran: `o3-basecurve-50/100` (O_3 on 20M against 40M rows,
+   golden set) were cancelled at the start on 2026-10-19; the manifests exist, untested since.
+3. A 2-4-network ensemble of O_3 for building the bronze set only (offline, so 2-4x network time is
+   acceptable), judged by the same golden check.
+4. A round 3 only if a new lever appears (it would start from round 2's c2:
+   `rounds/o3r-2/round.json`). After about three rounds, or before claiming a number: a fresh golden
+   set (seed 2).
+5. Then the trick-1 check of O_3 alone against O_3 + G2 on about 100 trick-1 decisions (decides
+   whether G2 is used for the bronze set).
 
-**Results since (all in `docs/RESEARCH.md`, the collected research record):**
-- O3G2 round 1 (`o3r-1-3`, $1.14) kept f5766a: no candidate adopted (best 0.0071%). Round 2
-  (`o3r-2-1`, $2.10) adopted c2 (1057e9e9…, 0.0070%, seat 1 0.0223%: within noise of f5766a); its
-  4096-wide scratch candidate was worse (0.0079%). No candidate came near the 0.0025% target
-  (RESEARCH C12). The first round-1 attempt `o3r-1-1` lost its machine ($0.45).
-- Specialist S (2026-10-22): no better than O_3 on the flagged positions; the routed check fails
-  (RESEARCH C13, `m3-hybrid/specialist.md`).
-- Free reads written up 2026-10-22: O_3 at 80M base (C4), the optimizer's-curse test (C7), the
-  ensemble (C8, never measured), the additive loop (C3), the O_2 error predictor (D3), lead-4 (B4).
-
-**Running:** nothing known (every run above wrote DONE; check `vast-status.yml` before renting).
-
-**Next, in order (as planned on 2026-10-21; rounds 1-2 are done):**
-1. Round 3 would start from round 2's record (`from=o3r-2`; its `next` names init_net 1057e9e9…,
-   G2 5f7e6792…, dataset ea682abe…). Whether to run it is the owner's call on the C12 results.
-2. Before a round: fetch the base while the first parts are labelled (about 10 of the 15 fetch
-   minutes saved a round).
-3. After about three rounds: a fresh golden set (seed 2) to confirm; then the trick-1 check of O_3
-   alone against O_3 + G2 on about 100 trick-1 decisions (decides G2 for the bronze set).
+**Built and merged into `main` (the single current line; old branches are `archive/*` tags):**
+`search risk-profile`, `search labels --harvest-risk`, `search risk-filter`, `search net-error`,
+the `s:NET` expert in `search::exact_leaves`; runner kinds `hybrid_rung` with `round`
+(`crates/runner/src/hybrid/round.rs`), `specialist`, `net_error`; `fortyone_nn.labelcmp`;
+`launch.py round-manifest` and `--instance-id`; workflows `o3-round.yml` (now with
+`min_reliability`), `store-input.yml`, `r2-peek.yml` (now with `show`), `repo-archive.yml`,
+`r2-inventory.yml`. Latest released binaries: `2c0774db7b576dccd405240746065cd6f39766fd`.
 
 ### The goal and the chain (owner)
 One objective: the chance of the money. Target: about 0.01% decision loss even at the hardest trick-1
@@ -63,7 +61,6 @@ The owner wants the teachers and their deal counts decided last.
 | what | key | notes |
 |---|---|---|
 | O_3 adopted (2048-1024-256) | f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad | trained on 40M trick-3 positions |
-| O3G2 round-2 winner (2048-1024-256) | 1057e9e949f04f09e59e4ef052b564694f1cc2140fbbd81a146188e46342d593 | c2 of `o3r-2`; float 8a2f8ce6…; its G2 5f7e6792a70b4ecf724896edea1a7d19fd8b80e592e6d623a5f450b54829ffe6 |
 | O_3 leaf-risk model (G v2) | 20c41678c64681855003e5b8660e0a2e1fb9e8d552f7d898dd956055c767a9d5 | `data/leafrisk/leafrisk-o3-v1.json`; threshold t=277338260 adopted |
 | O_2 provisional (2048-1024-256) | 505a0c7c65147ffa9565e06059f47664ea9f1bfdf0c5ea2f8d392b0e6e1337b0 | 1.5M exact labels; position error SD 3.6% (O_3: 1.85%) |
 | trick-2 golden set: decisions / worlds | 635e9aef196c816380f3f15c05ede90b38b875fa4817061a57e6d39550065ab0 / 6ddc59b191e1fd534f260f9dfe103f742d6026768ca74acdbbb4fd430eb8265e | 2,000 decisions x 320 exact worlds, seed 1 |
@@ -75,15 +72,19 @@ The owner wants the teachers and their deal counts decided last.
 | trick-2 student (512-256, 1M lessons, plain H_3 teacher) | 954223e2f56ecade906ba28ad2ea07ff70fee70b841e0743d4c911217afb6ce6 | see below |
 | equity table v0 | sha256 64740dab7845f0502c93ce195d721e1ffb8aa6ab141739ef43f754690de16808 | rebuilt by every run from `table: {hands: 1000000, seed: 1}` |
 | O3G2 round records | `rounds/<id>/round.json`, `report.txt`, `profile.json` | written by each round (docs/m3-hybrid/o3-rounds.md) |
+| round 1 result (`o3r-1`) | init_net f5766aa9 (unchanged), G2 20c41678 (unchanged), dataset 8336ccf3ce45dba40fae05319cbb3698d128d0509cafa0add799bf70e3175daa | winner: the incumbent |
+| round 2 winner c2 (`o3r-2`, not adopted as O_3) | init_net 1057e9e949f04f09e59e4ef052b564694f1cc2140fbbd81a146188e46342d593, G2 5f7e6792a70b4ecf724896edea1a7d19fd8b80e592e6d623a5f450b54829ffe6, dataset ea682abeeaab4ca3c60123e414e825a30f07411439e9802be79073d0b7b2b0d1 | 0.0070% against O_3's 0.0068%: noise |
+| specialist S int / float | d30ef4963658bc3fab186b71eeb69e766a38780d05637d3bda74d7e7076d590c / f5f6768da729fffd55116b4597be7203cb90de3444272f3ca7c0d10908c1055a | `docs/m3-hybrid/specialist.md`; the int file is in `inputs/sha256/` (store-input.yml) |
+| specialist run output | `runs/specialist-s2/` (record.json, networks) | the flagged shards were not stored (about 23 GB) |
 
 ### How to run things (GitHub Actions, no vast key on the VM)
-- **Launch:** workflow `vast-run.yml` on `m3-hybrid` with inputs: `manifest` (the JSON inline, one
+- **Launch:** workflow `vast-run.yml` on `main` with inputs: `manifest` (the JSON inline, one
   line), `min_cores`, `min_ram_gb`, `disk_gb`, `cpu_only` ("true" for CPU jobs), `gpus`, `min_gpu_ram_gb`,
   `max_dollars` (the cap; the launcher stops and destroys at it), `any_host` ("true"), optionally
   `offer_id` (an owner-found offer: the `Type #` number) or `cpu_match` (e.g. "7B12"), `low_cpu_pct`
   ("1" for jobs with GPU-training or other single-thread phases, else the idle watchdog kills them),
-  `bin_sha` (a commit with released binaries: **6c7acf50709117d224dda5363d516f9b367cc399** is the
-  latest; dispatch `release-binaries.yml` on `m3-hybrid` for a newer commit and wait for
+  `bin_sha` (a commit with released binaries: **2c0774db7b576dccd405240746065cd6f39766fd** is the
+  latest; dispatch `release-binaries.yml` on `main` for a newer commit and wait for
   `bin/<sha>/manifest.json` in R2), `image` **ghcr.io/guillaumeds/41bots-base:20261017-bc692e446939**,
   `dry_run` **"false"** (the default is true!). A Blackwell GPU (RTX 50xx) needs `"blackwell": true` in
   the manifest's `machine`.
@@ -93,15 +94,15 @@ The owner wants the teachers and their deal counts decided last.
   destroys the machine) or `vast-stop.yml` (run_id, instance_id); `vast-status.yml` lists every
   instance on the account. Confirm nothing is left billing.
 - **From a laptop (no R2 or vast keys there):** everything goes through GitHub Actions with the `gh` CLI:
-  `gh workflow run vast-run.yml --ref m3-hybrid -f manifest="$(jq -c . docs/vast/NAME.manifest.json)"
+  `gh workflow run vast-run.yml --ref main -f manifest="$(jq -c . docs/vast/NAME.manifest.json)"
   -f min_cores=190 -f min_ram_gb=64 -f disk_gb=60 -f cpu_only=true -f max_dollars=3 -f any_host=true
-  -f bin_sha=6c7acf50709117d224dda5363d516f9b367cc399 -f image=ghcr.io/guillaumeds/41bots-base:20261017-bc692e446939
+  -f bin_sha=2c0774db7b576dccd405240746065cd6f39766fd -f image=ghcr.io/guillaumeds/41bots-base:20261017-bc692e446939
   -f dry_run=false` (GPU jobs: `-f cpu_only=false -f gpus=1 -f min_gpu_ram_gb=8 -f low_cpu_pct=1`);
   `gh run list --workflow vast-run.yml`, `gh run view <id> --log` (the launcher's log shows the machine,
   price and progress lines), `gh run cancel <id>` (stop and destroy); `gh workflow run vast-status.yml`
   (every instance on the account); `gh workflow run r2-fetch.yml -f run_id=<run>` then
   `gh run download <id>` for a run's files (results bundles `out/*.tar.zst`, unpack with Python 3.14
-  `compression.zstd`); `gh workflow run release-binaries.yml --ref m3-hybrid` for new binaries.
+  `compression.zstd`); `gh workflow run release-binaries.yml --ref main` for new binaries.
 - **With keys on the laptop (`.env`, git-ignored; names in `.env.example`):** install the `aws` CLI
   and `vastai` (pip), load the file (`set -a; source .env; set +a`), then from `python/launcher`:
   `uv run python -c "import launch; print(launch.latest_heartbeat('RUN'))"`, `launch.r2_list('runs/RUN/')`,
@@ -116,13 +117,28 @@ The owner wants the teachers and their deal counts decided last.
   with `label_parts` above 1; vast offer numbers change after a machine is released (use `cpu_match`);
   a label part is stored only when complete (size parts to about an hour); the vast balance hitting zero
   stops every machine at once.
-- **Peek at a running round without SSH or R2 keys:** `r2-peek.yml` (run_id, e.g. `o3r-1-1`) prints
-  the run's files and its latest heartbeat (step, rows, dollars) in the job log.
+- **Peek at a running round without SSH or R2 keys:** `r2-peek.yml` (run_id, e.g. `o3r-1-1`; optional
+  `show`: small files to print, e.g. `report.json DONE FAILED`) prints the run's files, its latest
+  heartbeat (step, rows, dollars) and those files in the job log. A run's big results are inside
+  `out/<stream>/*.tar.zst`: `r2-fetch.yml`, then `gh run download <fetch run id> -R Guillaumeds/41Bots
+  -n run-<run_id>` and unpack with Python `zstandard`.
+- **Store a trained network as a manifest input:** `store-input.yml` (the r2-fetch run id, artifact
+  name, the member path, the expected SHA-256) puts it in `inputs/sha256/<hex>`.
+- **Launch pitfalls met 2026-10-22 (each is a refusal before anything is rented, unless said):**
+  a run id cannot be reused (a failed attempt leaves `runs/<id>/` in R2; give each attempt a new id);
+  a manifest `machine` block takes only gpus, min_gpu_ram_gb, min_compute_cap, min_cores, min_ram_gb,
+  disk_gb, min_inet_down, min_inet_up, max_dph, wait_for_offer_min, offer_poll_s, price_steps,
+  tries_per_step, gpu_names, blackwell (and `max_dph` there caps a named offer: a stray $0.50 refused
+  a $1.34 machine); the launcher never rents Xeon Phi chips; an offer id can vanish between listing
+  and renting; an unknown runner kind is refused by the machine's runner only after the machine has
+  booted (`specialist-s1` had loaded for 29 minutes, $0.68, before it said so) (register new kinds in `sched.rs` `KINDS`, `v2.rs`, `mem.rs`, `main.rs` and the manifest
+  test); **a machine can list 384 threads and give the container 46** (every AMD EPYC 9B45 /
+  RTX PRO 6000 offer tried on 2026-10-22: the launcher rents, sees `usable_cores`, stops it after
+  about 5 minutes for about $0.12): prefer the EPYC 9B14 (184 usable of 192) that ran everything else.
 - **Repository and storage housekeeping:** `repo-archive.yml` (old branches become `archive/<name>`
   tags; dry run by default), `r2-inventory.yml` (read-only list of the bucket).
 
 ## Where the history is
-- `docs/RESEARCH.md`: the collected research record (every experiment's method, result, cost, limits).
 - `docs/README.md`: one line per experiment and document (what it was, the result, adopted or not).
 - `docs/history/STATUS-history.md`: every dated status entry from 2026-10-13 to 2026-10-20.
 - Archived branches: `git tag -l 'archive/*'`; `git checkout archive/<name>` restores any of them.

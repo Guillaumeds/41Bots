@@ -1,5 +1,8 @@
 # O3G2 rounds: G2 chooses O_3's next training positions (built 2026-10-21)
 
+**Status (2026-10-22): two rounds run; neither improved O_3.** O_3 f5766a stays the adopted network.
+Results, the lessons from the launches and the reading are in "Results" below.
+
 ## Why (owner, 2026-10-21)
 O_3 (the trick-3 network) with G2 (the predictor of where O_3 is wrong; those positions are solved
 exactly) plays trick-2 decisions at 0.0005% mean, 0.0008% 95% bound, seat 1 0.0022% on the
@@ -150,6 +153,66 @@ stored, `upload_shards` true, exact labels, no audit loop. Fixed values for ever
 - Real binaries on the build VM: `search risk-profile` and a risk-guided `search labels` with a
   random network (the measurements above).
 
+## Results
+
+### Round 1 (`o3r-1`, run `o3r-1-3`, 2026-10-21): from the seed, three additive candidates
+Machine: AMD EPYC 9B14 (184 usable threads), RTX 5090 32 GB, $1.34/h, 51 minutes, about $1.14.
+New rows 2M, 4M, 8M (nested), risk power 1, plain floor 0.2. The mix made: 57.8% of the new rows
+in the riskiest 2 of the 20 bands (aimed at: 63.3%).
+
+| network | new rows | 95% bound (all) | seat 1 | adopted? |
+|---|---|---|---|---|
+| incumbent O_3 f5766a | none | 0.0068% | 0.0201% | stays |
+| c1 | +2M | 0.0071% | 0.0227% | no: team 0's bias 0.0121% over 0.0100% |
+| c2 | +4M | 0.0080% | 0.0288% | no: positions 1-2 bound 0.0169% over 0.0122% + 0.0020% |
+| c3 | +8M | 0.0073% | 0.0229% | no: team 0's bias 0.0111% over 0.0100% |
+
+Label check (the exact trick-2 validation rows labelled by each network, as O_2's labels would be):
+RMS error 2.113% (incumbent), 2.123% / 2.094% / 2.105% (c1, c2, c3); largest team bias 0.013-0.016%.
+Winner: the incumbent. The new rows (8M) are stored and used by round 2.
+
+### Round 2 (`o3r-2`, run `o3r-2-1`, 2026-10-22): c1, c2 additive, c3 a wider network from scratch
+Same machine type, 91 minutes, about $2.04. 58.7% of the new rows in the riskiest 2 bands (aimed
+at 62.1%). c3 = 4096-2048-1024-256 from scratch on the base plus 8M new rows (40 epochs, lr 0.001).
+
+| network | new rows | 95% bound (all) | seat 1 | adopted? |
+|---|---|---|---|---|
+| incumbent O_3 f5766a | none | 0.0068% | 0.0201% | |
+| c1 | +2M | 0.0069% | 0.0233% | no: team 0's bias 0.0100%, at the limit |
+| c2 | +4M | 0.0070% | 0.0223% | **yes** by the rule (passes every pass the incumbent had, within the 0.002-point tolerance) |
+| c3 wide, from scratch | +8M | 0.0079% | 0.0325% | no: positions 1-2 bound 0.0182%; team 0 bias 0.0155%, team 1 0.0109% |
+
+Label check: RMS 2.112% (c1), 2.104% (c2), 2.258% (c3, the wide network is worse; its bias is lower,
+0.0082%). The wide network took about 3.3 times a candidate's compute. The round chose c2
+(`init_net inputs/sha256/1057e9e949f04f09e59e4ef052b564694f1cc2140fbbd81a146188e46342d593`, its G2
+`5f7e6792a70b4ecf724896edea1a7d19fd8b80e592e6d623a5f450b54829ffe6`, dataset
+`ea682abeeaab4ca3c60123e414e825a30f07411439e9802be79073d0b7b2b0d1`) as the start of round 3, but
+**c2 is not better than O_3**: 0.0070% against 0.0068% is inside the ±0.002-point noise of a retrain.
+Nothing was switched to c2.
+
+### Reading (2026-10-22)
+- Targeted extra data (G2-chosen rows, up to +8M on a 40M base) did not move the golden bound, and
+  the candidates landed within noise of each other. A bigger network from scratch was clearly worse
+  here. The 95% bound did not move toward the 0.0025% target.
+- Together with the specialist test (`specialist.md`: a network trained only on G2's risky
+  positions is no better than O_3 on them) three independent attempts all end at O_3's level.
+- Not tried: the 20M-versus-40M base curve (prepared 2026-10-19, never ran) and the 80M base
+  (`o3-base80-1`, result never written down), which would say whether the limit is data or capacity;
+  a 2-4-network ensemble of O_3 for building the bronze set only (`curse-ensemble.md`, its stored
+  result also unread).
+
+### Launch lessons (each cost a rental or a retry)
+- **A 36 GB shard downloaded on one stream exceeded the 30-minute limit** on a Thailand machine
+  (`o3r-1-1`): downloads over 64 MiB now use 16 streams and the limit is 3 hours (commit ffbe660).
+- **A named offer id can vanish before it is rented** (offer 36863856 did, 2026-10-21): the launcher
+  refuses it and rents nothing; send a current listing. Attempt `o3r-1-2` (offer 35971321) rented
+  nothing either; its cause was not looked up.
+- **`vastai update instance` alone does not restart the container**: `recycle instance` applies it.
+- **A host below the 90% reliability floor needs `min_reliability`** (the o3-round workflow got that
+  input on 2026-10-22; 86% was accepted for round 1 on the owner's word).
+- **A run id cannot be reused**: a failed attempt leaves `runs/<id>/` in R2 and the launcher refuses
+  the same id; give each attempt a new id (`attempt` in the manifest builder).
+
 ## Honest risks
 - Untargeted extra harvest did not help O_3 before, and retraining alone moves the golden bound by
   about ±0.002 points: a round can end "incumbent kept". The race-for-the-money positions improved
@@ -158,16 +221,6 @@ stored, `upload_shards` true, exact labels, no audit loop. Fixed values for ever
 - Picking winners on one golden set round after round slowly flatters them: after about three
   rounds, or before claiming a final number, confirm on a fresh golden set (seed 2; about 1.5 hours
   on 190 threads, $0.5–1).
-- Not yet run on a rented machine: the first launch should be a small rehearsal (e.g. amounts
-  `20k,40k`, cap $1) before a full round.
-
-## Results of rounds 1 and 2 (2026-10-21; write-up `docs/RESEARCH.md` C12)
-| round | candidate | new rows | golden 95% bound | seat 1 | own bias | adopted |
-|---|---|---|---|---|---|---|
-| — | incumbent f5766a | — | 0.0068% | 0.0201% | −0.0085% | — |
-| o3r-1 | c1 / c2 / c3 additive | 2M / 4M / 8M | 0.0071 / 0.0080 / 0.0073% | 0.0227 / 0.0288 / 0.0229% | −0.0121 / −0.0098 / −0.0111% | none (incumbent kept) |
-| o3r-2 | c1 / c2 additive | 2M / 4M | 0.0069 / 0.0070% | 0.0233 / 0.0223% | −0.0100 / −0.0085% | c2 (1057e9e9…) |
-| o3r-2 | c3 scratch 4096-2048-1024-256 | 8M | 0.0079% | 0.0325% | −0.0155% | no |
-
-Mix made: 57.8% (round 1) and 58.7% (round 2) of new rows in the riskiest 2 of 20 bands (aimed 63.3%
-and 62.1%). Records: R2 `rounds/o3r-1/`, `rounds/o3r-2/`.
+- A full round runs in 1 to 1.5 hours and $1-2 on a 184-thread machine with an RTX 5090 (rounds 1
+  and 2), faster than the 3-5 hours first estimated. The base is fetched while the first parts are
+  labelled; the golden checks are the long part.
