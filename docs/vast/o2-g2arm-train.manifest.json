@@ -1,0 +1,97 @@
+{
+ "format": 2,
+ "run_id": "o2-g2full-1",
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "O_2 Stage A arm 'g75' (partial): the 2048-1024-256 network (seed 1, outcome head, early stopping on the exact s601 shard) on the 420,000 stored G2 hybrid labels (360k random + 60k rules-v1: parts of o2-g2arm-1 and o2-g2arm-2; the label run died on a sidecar race before parts 3-4, rules p2 was uploaded without its sidecar and is left out). Compare with arms e03/e075/p15/p60 on the 250k exact test set with fortyone_nn.netcmp.",
+ "machine": {
+  "gpus": 1,
+  "min_gpu_ram_gb": 8,
+  "min_cores": 120,
+  "min_ram_gb": 32,
+  "min_inet_down": 100,
+  "max_dph": 1.7,
+  "disk_gb": 80
+ },
+ "inputs": {},
+ "streams": [
+  {
+   "name": "g75full",
+   "priority": 1,
+   "kind": "hybrid_rung",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "cut": 2,
+    "check": false,
+    "widths": "2048,1024,256",
+    "head": "outcome",
+    "epochs": 40,
+    "patience": 6,
+    "batch": 1024,
+    "lr": 0.001,
+    "train_seed": 1,
+    "max_minutes": 0,
+    "device": "cuda",
+    "overlap": false,
+    "upload_shards": false,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    },
+    "label_inputs": [
+     {
+      "label_source": "hybrid",
+      "rows": 120000,
+      "seed": 56101,
+      "set": "random",
+      "shard": "inputs/sha256/4187ab3bcdb3a5851fce7954dad808df8146d3bb2471f92c7db0427bcb84e9e8",
+      "sidecar": "inputs/sha256/999104e41ec36a98acb06a662535768ef88034a20e3976037f585bab20f21b92"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 120000,
+      "seed": 56301,
+      "set": "random",
+      "shard": "inputs/sha256/e53ee7e1d2992fd5aeb407fee1cc509945e3b65dc8bab28d272133b95a4c6638",
+      "sidecar": "inputs/sha256/4d889cea671c629d2052a51347e275709a7333ed99f375057afafd6657facfa4"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 120000,
+      "seed": 56302,
+      "set": "random",
+      "shard": "inputs/sha256/ddeee3507a6b4f561eb5c5144b7c3401251d9521aac09163dedd6b775b129502",
+      "sidecar": "inputs/sha256/82b4f57cddd3f798ba9733dfddde19399fc89d2bcae2915077793f828e419d3b"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 30000,
+      "seed": 56201,
+      "set": "rules",
+      "shard": "inputs/sha256/621bc5dfba627e5da07fa66099f47b5617bce8bf86a0488058b82b0e647adbb1",
+      "sidecar": "inputs/sha256/f46d61f0028ce22ba423c2180b23da9d91c54b9b4363a4e6987f39eeb45cca7a"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 30000,
+      "seed": 56401,
+      "set": "rules",
+      "shard": "inputs/sha256/8ff730f00add84d86a75420a138ea61e2e3c62f2a30becb806c20ca0512e19fc",
+      "sidecar": "inputs/sha256/a1a7bcf203142838486121fdf18af4077a73910591449b03fa6a914726bdfcb4"
+     },
+     {
+      "rows": 50000,
+      "seed": 601,
+      "set": "val",
+      "shard": "inputs/sha256/38de48356209cbec0f9ce41ceba28e6d5df52428abc0c866d443f9eb57964327",
+      "sidecar": "inputs/sha256/8833775c975aa4a5aedd806aac541363def78810db292d0bdd8fb15773989f93"
+     }
+    ]
+   }
+  }
+ ]
+}

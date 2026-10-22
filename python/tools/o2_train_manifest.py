@@ -36,7 +36,7 @@ def stored_entries():
     return out
 
 
-def build(run_id):
+def build(run_id, partial=False):
     ent = stored_entries()
     train = [e for _, e in ent if e["set"] in ("random", "rules")]
     val = [e for run, e in ent if e["set"] == "val" and run == "o2-g2arm-1"]
@@ -44,7 +44,7 @@ def build(run_id):
     rul = sum(e["rows"] for e in train if e["set"] == "rules")
     if len(val) != 1 or val[0]["seed"] != 601:
         sys.exit("the s601 validation shard of o2-g2arm-1 is missing")
-    if (rnd, rul) != (600_000, 150_000):
+    if not partial and (rnd, rul) != (600_000, 150_000):
         sys.exit(f"stored G2 labels: {rnd} random + {rul} rules-v1 rows; need 600,000 + 150,000 (the label runs are not done)")
     train.sort(key=lambda e: (e["set"], e["seed"]))
     params = dict(threads="all", cut=2, check=False, widths="2048,1024,256", head="outcome", epochs=40, patience=6, batch=1024,
@@ -64,8 +64,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=os.path.join(os.path.dirname(os.path.dirname(HERE)), "docs", "vast", "o2-g2arm-train.manifest.json"))
     ap.add_argument("--run-id", default="o2-g2full-1")
+    ap.add_argument("--allow-partial", action="store_true", help="train on whatever G2 parts are stored (a label run died or was cut)")
     a = ap.parse_args()
-    m = build(a.run_id)
+    m = build(a.run_id, a.allow_partial)
     with open(a.out, "w") as f:
         json.dump(m, f, indent=1)
     p = m["streams"][0]["params"]["label_inputs"]
