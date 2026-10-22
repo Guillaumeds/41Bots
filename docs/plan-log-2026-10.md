@@ -743,3 +743,21 @@ Trick-2 default (exact-few vs rollout) decision; belief policy-likelihood arm (Â
 - Conclusion: S does not replace the exact solve on flagged positions. It gives back O_3's level there,
   with worse bias. Before any 40M run of S: measure O_3's error on the same 43,681 held-out flagged
   rows (S's own held-out error is in the 2026-10-22 entry above). Not yet done.
+
+## 2026-10-22: O_3's error on the same held-out flagged rows as S (run net-error-o3-val-1)
+- `search net-error` (new): the network's value (rotated into the encoder's order, as the risk inputs are)
+  minus the exact value, per team, on the 100,000 validation rows (s401) and on the 43,681 of them G2
+  flags at t=277338260 (the same rows as S's held-out set). Machine: 184 threads, about $0.10.
+- Result, flagged rows (O_3 int f5766a; S float from specialist-s2 in brackets):
+  - SD over rows x teams: **2.94%** [S 3.03%]
+  - mean |error|: **1.08%** [S 1.09%]
+  - 99.9th percentile |error|: **31.2%** [S 34.0%]
+  - largest |error|: 99.9% [S 99.9%]
+  - team biases: at most 0.033% [S at most 0.027%]
+  - SD by race class, 0 to 4: 1.6%, 1.6%, 3.3%, 2.0%, 5.0% [S: 1.6%, 1.6%, 3.1%, 2.2%, 5.1%]
+- Over all 100,000 validation rows: SD 1.96%, mean |error| 0.49%, 99.9th percentile 24.2%.
+- Caveats: S's numbers come from the trainer's own report (its exact definitions may differ slightly);
+  O_3's outcome accuracy was not measured, so the trainer's accuracy (75.1% for S) has no O_3 twin yet.
+- Reading: on the rows G2 flags, S is no better than O_3 (slightly worse on each figure). S has learned
+  those positions about as well as O_3 already has. That does not support training S to 40M rows: more
+  data for S alone would need to beat O_3 to matter, and it is at O_3's level now.
