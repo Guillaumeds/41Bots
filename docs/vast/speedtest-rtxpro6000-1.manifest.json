@@ -1,0 +1,30 @@
+{
+ "format": 2,
+ "run_id": "speedtest-rtxpro6000-1",
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "Speedtest (owner, 2026-10-22): the benchmark chunk measures matches per second with every thread busy (difftest batches) on the rented machine: the actual thread speed, to compare with the speed table (docs/vast/speed-factors.json). Machine: RTX PRO 6000 offer 57070691 (EPYC 9B45, 384 threads).",
+ "machine": {
+  "gpus": 0,
+  "cpu_only": true,
+  "min_cores": 190,
+  "min_ram_gb": 60,
+  "min_inet_down": 100,
+  "max_dph": 1.7,
+  "disk_gb": 40
+ },
+ "streams": [
+  {
+   "name": "speedtest",
+   "priority": 1,
+   "kind": "benchmark",
+   "chunks": 1,
+   "params": {
+    "seconds": 300
+   }
+  }
+ ]
+}
