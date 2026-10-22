@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "run_id": "student-t2-gv2-250k-1",
+  "run_id": "student-t2-gv2-250k-2",
   "run_seed": 1,
   "threads": null,
   "benchmark_seconds": 0,
@@ -10,7 +10,8 @@
   "machine": {
     "min_cores": 190,
     "min_ram_gb": 48,
-    "disk_gb": 60
+    "disk_gb": 60,
+    "max_dph": 2.1
   },
   "inputs": {
     "o3": "sha256:f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
