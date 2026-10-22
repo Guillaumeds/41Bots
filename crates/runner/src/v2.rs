@@ -1576,12 +1576,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/vast");
         for (file, kinds) in [
             ("student-t2-gv2.manifest.json", 2),
-            ("student-t2-gv2-250k-a.manifest.json", 1),
-            ("student-t2-gv2-250k-b.manifest.json", 1),
-            ("student-t2-gv2-250k-c.manifest.json", 1),
-            ("student-t2-gv2-250k-d.manifest.json", 1),
-            ("student-t2-gv2-250k-e.manifest.json", 2),
-            ("student-t2-gv2-250k-f.manifest.json", 1),
+            ("student-t2-gv2-250k.manifest.json", 2),
             ("student-t2-base.manifest.json", 3),
             ("m3-hybrid-t2-hlabels.manifest.json", 1),
             ("o3-learnedleaf.manifest.json", 1),
