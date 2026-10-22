@@ -1579,6 +1579,7 @@ mod tests {
             ("o2-gv2-labels.manifest.json", 1),
             ("o2-labeltest.manifest.json", 2),
             ("o3-round-1.manifest.json", 1),
+            ("specialist-s1.manifest.json", 1),
         ] {
             let v: Value = serde_json::from_str(&fs::read_to_string(root.join(file)).expect(file))
                 .expect(file);
@@ -1636,6 +1637,9 @@ mod tests {
                     }
                     "leafrisk" => {
                         crate::leafrisk::parse(&p).unwrap_or_else(|e| panic!("{what}: {e}"));
+                    }
+                    "specialist" => {
+                        crate::specialist::parse(&p).unwrap_or_else(|e| panic!("{what}: {e}"));
                     }
                     k => panic!("{what}: kind {k} not covered"),
                 }

@@ -34,7 +34,7 @@ use crate::remote::{input_key, put_input};
 use crate::spike::build_table_from;
 
 /// The settings a `specialist` chunk takes; any other key is refused.
-pub(crate) const KEYS: [&str; 13] = [
+pub(crate) const KEYS: [&str; 14] = [
     "trick",
     "net_input",
     "risk_input",
@@ -48,6 +48,7 @@ pub(crate) const KEYS: [&str; 13] = [
     "seed",
     "threads",
     "device",
+    "table",
 ];
 
 /// One stored shard to filter, and its role.
@@ -170,6 +171,14 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         },
         device,
     })
+}
+
+/// The manifest inputs a specialist names: its network, its G2 model and every shard.
+pub(crate) fn input_names(p: &Value) -> Result<Vec<String>, String> {
+    let q = parse(p)?;
+    let mut names = vec![q.net_input, q.risk_input];
+    names.extend(q.shards.into_iter().map(|s| s.input));
+    Ok(names)
 }
 
 /// Adds the local paths of the network, the G2 model and every shard (`shard_paths`) from the
