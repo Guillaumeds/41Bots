@@ -52,11 +52,16 @@ small capped anchor), 4 S1, 5 ship and the improvements. The solver half of the 
    needs only 5-10% searched. Verdict: do not build the margin router; a risk model needs better
    signals (a second student's disagreement, a G2-style predictor) and a test.
 3. *Root-restricted solve:* built through `exact_world` and the app API (`shortlist`, tested, values
-   identical). Measured **0.64x (2 cards) / 0.70x (3 cards)** of the time at trick 2: a 1.4-1.55x
-   speed-up. With result 1 it is worth about 40% more deals, nothing more. Trick 1 not measured.
-   Consequence for the app: the leader needs 368 ms a deal in WebAssembly, so about 19-27 deals in 7 s
-   on the VM and fewer on a phone, at or below the break-even exactly where S2 loses most: the lever
-   there is the cost of a deal (WebAssembly network kernel), not the shortlist.
+   identical). Cost is **proportional to the cards kept** (nodes and network calls, 4-card trick-2
+   decisions: 1 card 0.24, 2 cards 0.49, 3 cards 0.80 of the full solve). The first timing read
+   0.64 / 0.70 only because it mixed in 3-candidate positions. The catch is that trick-2 decisions
+   have only 2-4 candidates (mean 3.3), so top-3 drops at most one card (1.25x on the 54% of decisions
+   with 4 cards) and top-2 about half (about 40% less work on average). This also explains result 1:
+   top-3 barely differs from searching all cards; top-2 is the real shortlist at trick 2 (it wins at 10-25
+   deals, loses at 100). Trick 1 (5-card hands) not measured.
+   Consequence for the app: the leader needs 368 ms a deal in WebAssembly, so about 19 deals in 7 s on
+   the VM (about 35 with top-2) and fewer on a phone, at or below the break-even exactly where S2
+   loses most: the lever there is the cost of a deal (WebAssembly network kernel) and top-2.
    Next: session 1 (S2 A/B tests) is unaffected; the open question for the app is the cost per leader deal.
 
 **Records:** `docs/EXPERIMENTS.md` (every experiment and its result), `docs/RESEARCH.md` (the outside
