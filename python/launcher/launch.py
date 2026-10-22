@@ -2364,7 +2364,9 @@ def take_check(a, info: dict | None) -> tuple[dict | None, list[str]]:
     cores = float(info.get("cpu_cores_effective") or 0)
     if cores + 0.5 < float(a.min_cores or 0):
         why.append(f"it has {cores:.0f} threads, the run asks for {a.min_cores} (min_cores)")
-    if str(info.get("actual_status")) in ("exited", "offline", "destroyed"):
+    # A machine the owner stopped (exited) is started again by the takeover (take_instance); one that is
+    # offline or gone cannot be.
+    if str(info.get("actual_status")) in ("offline", "destroyed"):
         why.append(f"it is {info.get('actual_status')}")
     best = dict(info)
     best["id"] = info.get("id", a.instance_id)
@@ -2396,18 +2398,21 @@ def take_instance(a, run_id: str, best: dict) -> int | None:
         return None
     # `update instance` stores the new image, environment and start command but leaves the running
     # container as it was (seen 2026-10-21 on instance 57085233: the old image kept running, idle);
-    # `recycle instance` rebuilds the container in place from the stored settings.
+    # `recycle instance` rebuilds the container in place from the stored settings. A stopped instance
+    # (the owner stopped it to keep the machine) is started instead: it boots from the stored settings.
+    stopped = str(best.get("actual_status")) == "exited"
     try:
-        res = vast("recycle", "instance", str(iid), raw=False, timeout=None)
+        res = vast("start" if stopped else "recycle", "instance", str(iid), raw=False, timeout=None)
     except RuntimeError as e:
-        log(f"::error::vast refused to recycle instance {iid} after its update: {e}")
+        log(f"::error::vast refused to {'start' if stopped else 'recycle'} instance {iid} after its update: {e}"
+            f"{' (a stopped instance can only start while its machine has a free slot)' if stopped else ''}")
         return None
     with contextlib.suppress(RuntimeError):
         vast("label", "instance", str(iid), f"41bots-{run_id}", raw=False)
     with contextlib.suppress(RuntimeError):
         r2_delete(f"keep/{iid}.json")  # no longer kept: this run owns it
-    log(f"took over instance {iid} for run {run_id}: its container is recreated with {a.image}; the run "
-        f"then watches, stops and destroys it like one it rented")
+    log(f"took over instance {iid} for run {run_id}: its container is {'started' if stopped else 'recreated'} with "
+        f"{a.image}; the run then watches, stops and destroys it like one it rented")
     if a.state_file:
         with open(a.state_file, "w") as fh:
             fh.write(str(iid))

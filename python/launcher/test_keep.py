@@ -40,6 +40,7 @@ class KWorld(tl.World):
         self.preset: dict[int, dict] = {}  # `show instance` of instances that exist before the run
         self.calls: list[tuple] = []  # update / recycle / label calls
         self.takeover_script = "done:2"
+        self.start_fails = False
 
     def add_machine(self, iid: int, label: str, script: str = "idle:0", **info) -> None:
         self.instances[iid] = {"alive": True, "polls": 0, "script": script, "offer": 0, "created": self.t, "label": label}
@@ -51,12 +52,22 @@ class KWorld(tl.World):
         cmd = args[:2]
         if cmd == ("show", "instance") and int(args[2]) in self.preset:
             inst = self.instances[int(args[2])]
+            if self.preset[int(args[2])].get("actual_status") == "exited":
+                return dict(self.preset[int(args[2])])  # stopped by its owner: the record keeps its details
             if not inst["alive"]:
                 return {"actual_status": "exited", "intended_status": "stopped"}
             return dict(self.preset[int(args[2])])
         if cmd == ("update", "instance"):
             self.calls.append(("update", int(args[2]), args[args.index("--env") + 1], args[args.index("--image") + 1]))
             return {"success": True}
+        if cmd == ("start", "instance"):
+            iid = int(args[2])
+            self.calls.append(("start", iid))
+            if self.start_fails:
+                raise RuntimeError("vastai start instance failed: no resources: the machine's GPU is taken")
+            self.instances[iid].update(alive=True, polls=0, script=self.takeover_script, created=self.t)
+            self.preset[iid]["actual_status"] = "running"
+            return ""
         if cmd == ("recycle", "instance"):
             iid = int(args[2])
             self.calls.append(("recycle", iid))
@@ -275,6 +286,33 @@ class TakeoverTest(KeepTestBase):
         w.instances[500]["alive"] = False
         with self.assertRaises(SystemExit):
             self.take(w)
+
+    def test_a_stopped_machine_is_updated_then_started_not_recycled(self):
+        w = KWorld([], [])
+        w.add_machine(500, "", actual_status="exited", intended_status="stopped")
+        w.instances[500]["alive"] = False
+        code, report = self.take(w)
+        self.assertEqual(code, 0)
+        self.assertEqual([c[0] for c in w.calls], ["update", "start", "label"])
+        self.assertEqual(report["instance_id"], 500)
+        self.assertIn("started", self.log)
+
+    def test_a_stopped_machine_that_cannot_start_ends_the_run_without_renting_another(self):
+        w = KWorld([tl.offer(1, 11, 1.0)], ["done:2"])
+        w.add_machine(500, "", actual_status="exited", intended_status="stopped")
+        w.instances[500]["alive"] = False
+        w.start_fails = True
+        code, report = self.take(w)
+        self.assertEqual(w.created_on, [])
+        self.assertNotEqual(code, 0)
+        self.assertIn("free slot", self.log)
+
+    def test_an_offline_machine_is_refused(self):
+        w = KWorld([], [])
+        w.add_machine(500, "", actual_status="offline")
+        with self.assertRaises(SystemExit):
+            self.take(w)
+        self.assertEqual(w.calls, [])
 
     def test_a_machine_that_is_taken_over_can_be_kept_again(self):
         w = KWorld([], [])
