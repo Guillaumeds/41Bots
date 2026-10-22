@@ -82,7 +82,7 @@ Old branches are tags (`git tag -l 'archive/*'`; `git checkout archive/<name>` r
 | root-restricted solve (`shortlist` in the app API) | search only the shortlisted cards | **built and exact** (session 0c, E11): cost proportional to the cards kept (4-card trick-2 decisions: 2 kept 0.49, 3 kept 0.80 of the nodes); trick 2 has only 2-4 candidates, so little to drop |
 | run `student-t2-gv2-250k-{3,4,6}` | S2 teacher A/B: plain H_3 against H_3 + G2 (session 1) | **open** (E12): trainer rank loss and runner point options built; 10,000 of 250,000 G2 labels stored |
 | same runs | throughput of the G2 teacher on rented machines | **done** (E13): 7,900 decisions an hour, $92 per million at $0.723/h on a 245-thread EPYC 7B12; two idle-CPU bugs found and fixed |
-| `machine.keep` / `machine.instance_id` (`launch.py`, `test_keep.py`) | leave a machine up after a run and take it over, a stopped one included | **built and tried** (E14) on a $0.04/h spare machine; takeover of a stopped instance tested on the fake vast only |
+| `machine.keep` / `machine.instance_id` (`launch.py`, `test_keep.py`) | leave a machine up after a run and take it over, a stopped one included | keep **works**; takeover **fails on vast** (E14: the recycled container boots the old environment; cause under investigation); a failed takeover now keeps the machine |
 
 ## History
 - `history/STATUS-history.md`: every dated status entry, 2026-10-13 to 22.

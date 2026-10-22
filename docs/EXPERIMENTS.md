@@ -1029,14 +1029,18 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   `difftest` jobs: run `keep-trial-1` with `keep: true`, then `keep-trial-2` with `instance_id` of that machine.
 - **Result.** `keep-trial-1` ended DONE after 20.5 minutes (mostly the image pull on a 278 Mbps link), $0.014:
   its machine stayed up (instance 57255649 running afterwards), `keep/57255649.json`, `runs/keep-trial-1/KEPT.json`
-  and the warning were written. `keep-trial-2` took the same machine over: the instance was relabelled
-  `41bots-keep-trial-2`, its keep record deleted, and the run was still going when this was written (its end is
-  not recorded here). Starting a stopped instance is tested against the fake vast only. A first plan to take
-  over a live G2 run's machine was refused by the guard and not tried: recycling it would have let the old
-  launcher destroy it, and cancelling that run's workflow destroys its machine (it did, instance 57253570).
+  and the warning were written. **`keep-trial-2` (the takeover of that machine) failed:** the instance was
+  updated, recycled and relabelled `41bots-keep-trial-2` and its keep record deleted, but the recycled container
+  booted the **old** environment (its log: `boot: run keep-trial-1 ... runner: run keep-trial-1`, re-running the
+  first job and failing to upload over its immutable files), so no heartbeat came for `keep-trial-2`; after 15
+  minutes the launcher destroyed the machine ($0.013). The same takeover method (`vastai update instance --env`
+  then `recycle instance`, built for `o3-round.yml`, `--instance-id`) had also failed on 2026-10-21 (`o3r-1-1`,
+  cause then not found); so the stored environment is not what the recycled container receives. Cause under
+  investigation (trial 3). Afterwards added: a taken-over machine that never starts is kept and recorded, never
+  destroyed (tested against the fake vast). Starting a *stopped* instance is tested against the fake vast only.
 - **Cost.** About $0.05 for the trial machine.
-- **Limits.** One spare machine type; the takeover of a stopped instance and of a machine with a different disk
-  size are not tried on vast; a boot failure (missing manifest, bad binary hash) still destroys the machine because
+- **Limits.** One spare machine type; **the takeover itself does not yet work on vast** (above); the takeover of a stopped
+  instance and of a machine with a different disk size are not tried; a boot failure (missing manifest, bad binary hash) still destroys the machine because
   the image's boot script does (an image change would be needed); the runner image and run workflow were not
   changed beyond the manifest keys and the cancel steps in `vast-run.yml`.
 - **Sources.** `python/launcher/launch.py`, `cleanup.py`, `test_keep.py`, `monitor_run.py`, `.github/workflows/vast-run.yml`,
