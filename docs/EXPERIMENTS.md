@@ -828,9 +828,11 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   deal was **not finished when stopped** (one run at 590 s, another at its background limit, up to 50
   minutes, of one thread); D4 records 10-30 thread-minutes for a leader world on the build VM.
 - **Limits.** 4 positions a place; the stand-in O_3; the trick-1 timing is one decision and a lower
-  bound; a root-restricted solver does not exist, so its saving is unmeasured (the search barely
-  prunes, 106 of 81,000 nodes at trick 3, `ENGINEERING-2026-10-17.md`, so cost should follow the number
-  of root cards kept, an estimate).
+  bound. A root-restricted solver was then built (`FastOptions::root_keep`,
+  `crates/solver/tests/root_keep.rs`): on 20 tricks 3-5 test positions one root card cost 509,266
+  nodes against 1,353,126 for all cards, kept cards keep byte-identical values; its saving at tricks 1-2
+  with a network at the leaves is not yet measured (the search barely prunes, 106 of 81,000 nodes at
+  trick 3, `ENGINEERING-2026-10-17.md`, so cost should follow the number of root cards kept).
 - **Sources.** `docs/m3-hybrid/path-forward.md`.
 
 ---

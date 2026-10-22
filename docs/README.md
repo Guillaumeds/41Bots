@@ -76,7 +76,7 @@ Old branches are tags (`git tag -l 'archive/*'`; `git checkout archive/<name>` r
 | `STUDENT.md` §13 | deals per decision | **adopted**: 64 deals (E3) |
 | `STUDENT.md` §14 | split-half ruler, top-k shortlist | **done**: top-3 shortlist about 0.005-0.012% (E4-E5) |
 | run `student-t1-cost-2` | trick-1 teacher cost | **done**: about 12,500 decisions an hour on 256 threads (E6) |
-| `m3-hybrid/path-forward.md` | **proposed path** from the O3G2 rounds to shipped students: free reads, S2 A/B, O_2 label test, trick-1 yardsticks (copper, playout), S1, then improvements | **open**: proposal for the owner (2026-10-22); E8 is its first measurement |
+| `m3-hybrid/path-forward.md` | **proposed path** from the O3G2 rounds to shipped students: free reads, S2 A/B, O_2 label test, trick-1 yardsticks (copper, playout), S1, then improvements | **open**: path approved in outline (2026-10-22); section 6 holds a brief for each of the six sessions; E8 is its first measurement |
 
 ## History
 - `history/STATUS-history.md`: every dated status entry, 2026-10-13 to 22.

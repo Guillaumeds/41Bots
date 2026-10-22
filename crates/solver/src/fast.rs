@@ -97,6 +97,13 @@ pub struct FastOptions {
     pub order: TieOrder,
     /// Give up after this many milliseconds (checked every 4096 nodes); `None` = no limit.
     pub time_cap_ms: Option<u64>,
+    /// The root cards to value (a shortlist): only the groups of equivalent root cards holding a
+    /// card of this set are searched, the others are left out of `children` and of the choice.
+    /// `0` = every root card (the default; exactly the solver without this field). The values of
+    /// the cards searched are the same as in a full solve (each root card is searched on its own,
+    /// the root passes no bound); only the table is shared with fewer siblings, so the counters
+    /// differ.
+    pub root_keep: Bits,
 }
 
 impl Default for FastOptions {
@@ -109,6 +116,7 @@ impl Default for FastOptions {
             prune: true,
             order: TieOrder::Ascending,
             time_cap_ms: None,
+            root_keep: 0,
         }
     }
 }
@@ -1155,7 +1163,7 @@ fn root_groups(pos: &Position, classes: &Classes, opts: FastOptions) -> Vec<Bits
     groups[..ng]
         .iter()
         .map(|&g| g & legal)
-        .filter(|&l| l != 0)
+        .filter(|&l| l != 0 && (opts.root_keep == 0 || l & opts.root_keep != 0))
         .collect()
 }
 

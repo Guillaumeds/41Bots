@@ -360,9 +360,11 @@ fn solve(
     mem: &mut SolveMem,
     run: &mut WorldSolve,
     cut: Option<FrontierCut>,
+    root_keep: engine::cards::Bits,
 ) -> Option<Vec<(Card, MoneyChance)>> {
     let opts = FastOptions {
         tt_mb: cfg.tt_mb,
+        root_keep,
         ..FastOptions::default()
     };
     let leaf = DynLeaf(ctx.leaf);
@@ -411,7 +413,12 @@ pub fn exact_world(
                 // One solve values every root card.
                 let (pos, mctx, robber) = solver_position(m, ctx.rules, cfg.rules_robber_burn);
                 run.robber = robber;
-                let ch = solve(&pos, mctx, ctx, cfg, par, mem, run, cut)?;
+                // Only the candidates' root cards are searched (a shortlist searches fewer; all
+                // the legal cards, the usual case, is the full solve, byte for byte).
+                let keep = cands
+                    .iter()
+                    .fold(0, |m, &(a, _)| m | engine::cards::bit(a.card()));
+                let ch = solve(&pos, mctx, ctx, cfg, par, mem, run, cut, keep)?;
                 for (j, &(a, _)) in cands.iter().enumerate() {
                     out[j] = pick(&ch, a.card());
                 }
@@ -424,7 +431,7 @@ pub fn exact_world(
                 let (pos, mctx, robber) = solver_position(&mm, ctx.rules, cfg.rules_robber_burn);
                 debug_assert!(robber.is_none(), "one rob per trick 1 after a Joker's");
                 run.robber = robber;
-                let ch = solve(&pos, mctx, ctx, cfg, par, mem, run, cut)?;
+                let ch = solve(&pos, mctx, ctx, cfg, par, mem, run, cut, 0)?;
                 while i < cands.len() && cands[i].0 == Action::Burn(b) {
                     out[i] = pick(&ch, cands[i].1.expect("joint"));
                     i += 1;

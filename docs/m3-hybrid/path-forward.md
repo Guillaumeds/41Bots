@@ -45,7 +45,11 @@ Costs are rental dollars; "estimate" means not measured.
   leaf error. Decides whether shortlist + search beats the student alone at app deal counts.
 - 0b. **How concentrated is the student's loss per decision** (the router's feasibility), from the same
   golden check's per-decision losses.
-- 0c. **Root-restricted solve**: design and measure (kept cards must keep byte-identical values).
+- 0c. **Root-restricted solve.** The solver half is **built and on `main`** (`FastOptions::root_keep`,
+  `crates/solver/tests/root_keep.rs`): kept cards keep byte-identical values, one root card cost 509,266
+  nodes against 1,353,126 for all cards over 20 tricks 3-5 positions. What is left: wire it through
+  `search::pimc::exact_world` and the WASM API, then measure the saving at trick 2 and trick 1 (see
+  section 6, session 0).
 
 **Step 1: S2.** (owner's step 1: "train S2 on O3G2")
 - Cost of the teacher: H_3 + G2 is about 24 times a plain H_3 world (586 against 24 thread-ms on a 9B14,
@@ -124,3 +128,104 @@ Costs are rental dollars; "estimate" means not measured.
 - Approve the O_2 label test at equal money (plain volume against exact), then the volume.
 - Trick-1 yardsticks: copper (cheap) + playout yardstick pilot + a capped small anchor, instead of any
   full silver/bronze set.
+
+## 6. Session briefs: one new session and branch per step
+How to work (owner, 2026-10-22): each step below is started in its own session on its own branch from
+`main`, and pushes back to `main` when done. Every session reads `CLAUDE.md`, `docs/STATUS.md` and this
+page first. Before a commit: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace`. Results go into `docs/EXPERIMENTS.md` (a new entry), `docs/README.md` (one
+line) and `docs/STATUS.md` (the present state). Costs: the build VM is for building and tests; anything
+over about 5 minutes runs on vast.ai (`vast-run.yml`, see STATUS "How to run things").
+
+**Getting stored inputs onto the VM.** Workflow `input-fetch.yml` (inputs: space-separated SHA-256 keys)
+copies `inputs/sha256/<hex>` out of R2 into an artifact, hash-checked: `gh workflow run input-fetch.yml
+-f keys="..."`, then `gh run download <run id> -n inputs -D <dir>`. Keys used by step 0 (all small):
+the golden decisions `635e9aef196c816380f3f15c05ede90b38b875fa4817061a57e6d39550065ab0` (1.2 MB), the
+golden worlds `6ddc59b191e1fd534f260f9dfe103f742d6026768ca74acdbbb4fd430eb8265e` (92 MB), the trick-2
+student S2 `954223e2f56ecade906ba28ad2ea07ff70fee70b841e0743d4c911217afb6ce6` (7 MB), O_3
+`f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad` (17 MB). The equity table is rebuilt
+locally in 7 s: `equity build --model data/equity/model-rules-v1-1M-seed1.json --out equity.npy` (its
+SHA-256 must be `64740dab...`, `data/equity/equity-v0-rules-v1.sha256`).
+
+### Session 0: the free checks (no rental)
+Goal: the three questions of section 3, step 0, answered on the build VM and recorded.
+- **0a Shortlist + search at the app's deal counts.** Extend `search student-check` (golden form:
+  `--golden-decisions D --golden-worlds W --trick 2`, `crates/search/src/bin/search.rs`, `student_check`)
+  with `--sub-deals 10,25,50,100 --sub-repeats R --sub-seed S`. For each decision and each repeat, draw N
+  of the 320 exact worlds with `engine::rng::Rng::derive` (seed, decision index, N, repeat) and shuffle;
+  pick on the N worlds and **score on the other 320-N** (no winner's curse; best of the complement less the
+  pick's value on the complement). Variants per N: the student alone (its choice, scored the same way),
+  search over all cards, top-2 and top-3 of the student (`search::curves::top_k_choice`; helpers
+  `curves::choose_among`, `curves::totals_over`). Report per place (seat 1 = leader) and per score stratum with the
+  existing `student::check::report_measure` bootstrap (1,000 replicates, seed 1). Use the real O_3 and S2
+  above. Unit tests on tiny synthetic rows (the same draws for any thread count; N = all worlds reduces
+  to the existing top-k loss).
+  Question answered: at 25-100 deals does top-3 + search beat S2 alone (0.073%, seat 1 0.18%), and at what N?
+  Known context: plain PIMC loses about 0.01% x (243/N)^0.738 at trick 2 (A6).
+- **0b Concentration and the router.** From the same pass: the share of S2's total loss held by its worst
+  1, 5, 10, 20, 40% of decisions; the share of decisions where S2's top card is the teacher's best; and a
+  **router table**: sort decisions by S2's own margin (top-1 minus top-2 value for the decider's team),
+  search the lowest f% (top-3 + N deals, as 0a) and keep S2's card for the rest, f = 0, 5, 10, 20, 30,
+  50, 75, 100%, with 95% bounds. An oracle router (sorted by true loss) as the upper bound. Question
+  answered: can the app spend its 7 s only where S2 is likely wrong?
+- **0c Root-restricted solve, finish and measure.** Solver half done (see step 0c above). Remaining: pass
+  the candidate cards' mask from `search::pimc::exact_world` (`root_keep` is `0` for burns and other
+  non-Play candidates, and equals the full solve when all legal cards are candidates; assert
+  byte-identical results for the full list in a test), add an optional `shortlist` request field to
+  `crates/wasm` (a contract change: update `docs/WASM-API.md` and the contract test, the engine's
+  `engine.wasm` hash), and measure ms a deal at trick 2 (by place) for 2 and 3 kept cards with the real
+  O_3 through `engine-native time` (the E8 method, without the local patch). Expected: about the share of
+  root cards kept; at trick 1 measure with whatever O_2 exists.
+- **Deliverables:** the tool, its tests, an EXPERIMENTS entry with the tables, and a verdict line in
+  STATUS (which of the router design and the final-pick design to build).
+
+### Session 1: S2 (A/B tests)
+- Teacher A/B: 250k trick-2 decisions at 64 deals with plain H_3 against with G2 (`student_teacher`
+  runner chunk; `docs/vast/student-t2-gv2.manifest.json` is the G2 form, its first run failed on a runner
+  bug fixed in 6c7acf5; the plain form is `student-t2-base`), same 512-256 network and seed, judged on
+  the exact golden set (alone and top-3, 95% bounds) with `student-check`. Estimated $5-10 plus
+  training.
+- Decision-aware loss: `rank_weight` and `rank_temperature` in `python/nn/fortyone_nn/student.py`, A/B at
+  equal data (about $0.5), stop on the validation decision loss.
+- The student audit loop stays low priority.
+- Record in EXPERIMENTS (Part E).
+
+### Session 2: O_2
+- The label test at equal money: plain hybrid labels (`label_source: hybrid`, `label_exact_leaves:
+  none`, about 0.1 thread-s each) against exact labels (11.3 thread-s each) for the same dollars, judged
+  on the exact validation shards s601, s602, s603 (keys in STATUS) for value SD and team bias, bias
+  first. `o2-labeltest-1` was cancelled at 8 minutes; its manifest exists.
+- Then volume (O_3 had 40M positions; O_2 has 1.5M) and the audit loop as for O_3, standard 0.01%
+  (`docs/m3-hybrid/audit-loop.md`, `rung3.md`). O_2 is judged on exact trick-2 positions, never on
+  copper.
+- Decision to record: the label source and the volume.
+
+### Session 3: trick-1 yardsticks (after O_2 exists)
+- Copper: about 2,000 trick-1 decisions labelled by H_2 + the adopted O_2 at 128 deals
+  (`search teacher --trick 1`, runner kind `student_teacher`; measured rate 12,489 decisions an hour on
+  256 threads at 64 deals, E6).
+- Playout yardstick: design and a pilot (see section 3, step 3); the fixed finishing players are S2 or
+  H_3 and then exact.
+- A small capped silver/bronze anchor (a few dozen decisions x a few dozen worlds; `docs/m3-hybrid/silver.md`),
+  with a dollar cap; the first silver attempt was stopped at about $100 for about 10%.
+- No trick-1 golden set (owner, 2026-10-16).
+
+### Session 4: S1
+- Teacher labels H_2 + O_2 at 64 deals with racing (extra deals for close calls) and, once session 0
+  has it, the restricted solve; about $84 a million decisions at the E6 rate; learning-curve point at
+  250k, then 1M. Judge on copper, the playout yardstick and the anchor. Same loss options as session 1.
+
+### Session 5: ship, then the improvements
+- Ship S1 and S2 alone (`method: "student"`, `docs/WASM-API.md`).
+- Then in order: the restricted solve and the router (session 0's verdict), the pros' disagreement set,
+  self-play on thin slices judged by the playout yardstick, public matches. Each starts with a design
+  note on this page and a cost estimate for the owner.
+
+### Notes for every session
+- Two parts are the assistant's ideas, not published recipes: the **router** and the **playout
+  yardstick**. By the project's rule (PLAN §9) duplicate tournaments decide between proven options; flag
+  both as proposals in any result.
+- Trick-1 time budget: 7 s a decision in the app; a trick-1 deal is about 5x the native time in
+  WebAssembly (E8), so the leaf network and the restricted solve decide whether trick 1 fits.
+- Machines: `docs/VAST-MACHINES.md` (measured cost per unit of work). Read `usable_cores` in the first
+  heartbeat before trusting a machine's listed threads.

@@ -34,8 +34,12 @@ record: `docs/m3-hybrid/o3-rounds.md` "Results" and `docs/m3-hybrid/specialist.m
 5. Then the trick-1 check of O_3 alone against O_3 + G2 on about 100 trick-1 decisions (decides
    whether G2 is used for the bronze set).
 
-**Proposed path from here (2026-10-22, owner to approve):** `docs/m3-hybrid/path-forward.md` (free reads on the
-build VM first, then the S2 teacher A/B, the O_2 label test at equal money, trick-1 yardsticks, S1).
+**Path from here (2026-10-22, owner starts one new session and branch per step, each pushes to `main` when done):**
+`docs/m3-hybrid/path-forward.md`, section 6 has a brief per session: 0 the free checks (shortlist + search at
+the app's deal counts, concentration of S2's loss and the router, the root-restricted solve), 1 S2 A/B tests,
+2 O_2 (label test at equal money, volume, audit loop), 3 trick-1 yardsticks (copper, playout yardstick, a
+small capped anchor), 4 S1, 5 ship and the improvements. The solver half of the root-restricted solve
+(`FastOptions::root_keep`) is already on `main`.
 
 **Records:** `docs/EXPERIMENTS.md` (every experiment and its result), `docs/RESEARCH.md` (the outside
 research), `docs/README.md` (index).
@@ -130,6 +134,9 @@ The owner wants the teachers and their deal counts decided last.
   heartbeat (step, rows, dollars) and those files in the job log. A run's big results are inside
   `out/<stream>/*.tar.zst`: `r2-fetch.yml`, then `gh run download <fetch run id> -R Guillaumeds/41Bots
   -n run-<run_id>` and unpack with Python `zstandard`.
+- **Get stored inputs onto the VM:** `input-fetch.yml` (`keys`: SHA-256 keys, space-separated) copies
+  `inputs/sha256/<hex>` into an artifact (hash-checked); `gh run download <run id> -n inputs -D <dir>`.
+  The golden set, S2 and O_3 are small enough (1.2 MB, 92 MB, 7 MB, 17 MB).
 - **Store a trained network as a manifest input:** `store-input.yml` (the r2-fetch run id, artifact
   name, the member path, the expected SHA-256) puts it in `inputs/sha256/<hex>`.
 - **Launch pitfalls met 2026-10-22 (each is a refusal before anything is rented, unless said):**
