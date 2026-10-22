@@ -729,3 +729,17 @@ Trick-2 default (exact-few vs rollout) decision; belief policy-likelihood arm (Â
   stopped each after about 5 minutes (about $0.11-0.14 each). No benchmark ran.
 - Offer 55530460 (Threadripper PRO 7995WX, 192 threads, verified, $1.59/h): not on offer when the
   run started; nothing rented.
+
+## 2026-10-22: routed golden check of specialist S (run golden-routed-s2), finished
+- Machine: 9B14 (instance 57167674, machine 154756, 184 usable threads, $1.35/h), about 41 minutes, about $1.
+- Golden set: 2,000 trick-2 decisions x 320 exact worlds (635e9aef / 6ddc59b1). Three checks, same run:
+  - O_3 alone (none): mean 0.0056%, 95% bound 0.0068%, seat 1 (pos 1) 0.0201%. Matches the stored record.
+  - G2 with exact solving (learned, t=277338260): mean 0.0005%, 95% bound **0.0008%**, seat 1 0.0022%. PASS.
+  - Routed (G2 flags, S answers the flagged leaves, O_3 the rest): mean 0.0064%, 95% bound 0.0079%,
+    seat 1 0.0216%; own-team bias 0.0179% (fails the 0.01% limit; positions 1-2: 0.0411%). FAIL.
+- Paired: routed vs learned, +0.0059 points (interval +0.0044 to +0.0075): clearly worse.
+  Routed vs O_3 alone, +0.0008 points (interval -0.0006 to +0.0024): no measurable difference.
+- Speed: routed 43 ms a world vs 586 ms for the exact-leaves check (14x faster); 1.8x O_3 alone.
+- Conclusion: S does not replace the exact solve on flagged positions. It gives back O_3's level there,
+  with worse bias. Before any 40M run of S: measure O_3's error on the same 43,681 held-out flagged
+  rows (S's own held-out error is in the 2026-10-22 entry above). Not yet done.
