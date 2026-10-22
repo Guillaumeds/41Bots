@@ -704,3 +704,28 @@ Trick-2 default (exact-few vs rollout) decision; belief policy-likelihood arm (Â
 - Lesson: the listed thread count is not the container's usable count on this host. The launcher
   checks the container's count (`usable_cores`) before the benchmark, so the run was stopped correctly.
 - Speed of this machine: unknown. Not added to `docs/vast/speed-factors.json`.
+
+## 2026-10-22: specialist S (run specialist-s2): trained, not yet tested in play
+- Filter (`search risk-filter`, threshold 277338260 = the play rule's cut, O_3 value and G2 score):
+  base-random 11,077,690 of 25,600,000 rows (43.3%); base-rules 2,235,652 of 6,400,000 (34.9%);
+  base-harvest 3,162,386 of 8,000,000 (39.5%). Total training rows 16,475,728. Held-out: 43,681 of
+  100,000 validation rows (43.7%).
+- Training: from random weights, 2048-1024-256, 20 epochs, lr 0.001, batch 1024, on the GPU
+  (RTX 5090, cu130). 8.8 minutes of training; 16 minutes for the whole chunk.
+- Result on the held-out flagged rows (float network): outcome accuracy 75.1%; value error sd 3.03%,
+  mean |error| 1.09%, 99.9th percentile |error| 34.0%, max 99.9%; team biases all under 0.03%.
+  Worst class: "a team can win the match and another the game" (sd 5.1%).
+- Integer network (quantised, what play uses): on 20,000 rows, error sd 2.99%, mean |error| 1.10%,
+  p99.9 35.0%; agrees with the float network to 3e-8 sd. Stored in R2 (sha256 of int.safetensors
+  d30ef496...), float f5f6768d...
+- **Not yet known:** O_3's error on the same flagged rows (needed to compare), and the play result.
+  Next: the routed golden check (G2 sends flagged positions to S, O_3 answers the rest), against
+  the stored golden set, next to O_3 alone (0.0068%) and G2 with exact solving (0.0008%).
+- Cost of the training machine: about $0.55 (RTX 5090, $1.50/h, about 22 minutes).
+
+## 2026-10-22: speedtests of the EPYC 9B45 offers (no speed measured)
+- Offers 57070744, 57070738 (RTX PRO 6000 S, listed 384 threads, $1.46/h each), and the earlier
+  57070691 (same card): every container got **46 usable threads**, below the 190 floor; the launcher
+  stopped each after about 5 minutes (about $0.11-0.14 each). No benchmark ran.
+- Offer 55530460 (Threadripper PRO 7995WX, 192 threads, verified, $1.59/h): not on offer when the
+  run started; nothing rented.
