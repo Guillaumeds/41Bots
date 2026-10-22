@@ -176,6 +176,10 @@ jobs:
           if [ -n "$INSTANCE_ID" ]; then
             OFFER_ARGS="--instance-id $INSTANCE_ID"
           fi
+          if [ "$DRY_RUN" = "true" ] && [ -n "$INSTANCE_ID" ]; then
+            echo "dry run: would take over instance $INSTANCE_ID (the planner cannot read a rented instance; the real run checks its cores, RAM, GPU and disk first and refuses before running anything if it does not fit)"
+            exit 0
+          fi
           if [ "$DRY_RUN" = "true" ]; then
             # Prints the offer that would be rented (the named one with offer_id, else the search's choice); rents nothing.
             # The manifest's "machine" needs (GPUs, cores, disk) apply to the plan too.
