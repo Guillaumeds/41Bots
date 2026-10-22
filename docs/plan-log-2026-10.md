@@ -696,3 +696,11 @@ Trick-2 default (exact-few vs rollout) decision; belief policy-likelihood arm (Â
 - Phase 4: thread-seconds per world per layout in docs/vast from the two layout runs; world values byte-identical across layouts.
 - Phase 5: step 2 frontier counts per world; step 4 error tables on the trick-2 golden set and the trick-1 exact worlds, with the go/no-go thresholds applied; the exact anchor subset agrees with the hybrid within its stated error.
 - Every rental: cheap machine (~$1/h), hourly checks at most, the runner's own self-destroy at the end.
+
+## 2026-10-22: speedtest of offer 57070691 (RTX PRO 6000 S, AMD EPYC 9B45, listed 384 threads, $1.36/h)
+- Run `speedtest-rtxpro6000-1` (bin acc0f26, `benchmark` chunk, 300 s). Instance 57165309, machine 154394, verified: no.
+- **Result: no speed measured.** The launcher stopped it after 4.7 minutes, $0.11 spent: the container
+  got **46 usable threads** of the 384 listed, below the 190-thread floor. No benchmark was run.
+- Lesson: the listed thread count is not the container's usable count on this host. The launcher
+  checks the container's count (`usable_cores`) before the benchmark, so the run was stopped correctly.
+- Speed of this machine: unknown. Not added to `docs/vast/speed-factors.json`.
