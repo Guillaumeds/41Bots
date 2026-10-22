@@ -84,3 +84,13 @@ table the search's requests read; the solver's gather cap is 65,536 positions (w
 32 worlds the 4-network ensemble's passes over the weights fell from 108,708 to 7,384 (15 times fewer), the
 network evaluations from 1,430,124 to 1,431,056 (+0.07%), and every value and table stayed byte-identical. One
 network is unchanged.
+
+## Results (written 2026-10-22 from the runs' stored files; full write-up `docs/RESEARCH.md` C7, C8)
+- **Curse test** (`o3-curse-ensemble-1`, AMD EPYC 7B12, 256 threads, $0.30/h, run $0.19): realised
+  noise SD 1.46% (classes 0-4: 0.97 / 0.92 / 2.00 / 1.24 / 2.96%). Noise player against the noise-free
+  truth: decision loss mean 0.0157%, 95% bound 0.0182%, agreement 72.3%; own-team bias −0.33% (seat 1
+  −0.69%, seat 2 −0.41%, seat 3 −0.15%, seat 4 +0.09%, seat 5 −0.74%, seat 8 +0.00%), next team
+  +0.29%. Real H_3 against exact on the same decisions: 0.0056% / 0.0068%, own-team bias −0.0085%.
+  Files: R2 `runs/o3-curse-ensemble-1/partial/checks/000000/out/hybrid/checks/curse.txt`, `single.txt`.
+- **Ensemble:** no result. Both attempts (`o3-curse-ensemble-1` step 3, `o3-ensemble4-1` after the
+  speed fix) ran at about 10 worlds a second and were stopped (`STOP` files in R2).

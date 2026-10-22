@@ -306,3 +306,11 @@ decisions x 80 worlds, stored for reuse, then the check of plain O_2). Add check
 passes 0.01% at every seat against the silver set; note the silver's own error (O_3's) is in every
 number (`silver.md` §2), and an exact anchor on leader decisions (`m3-hybrid-t1-anchor`) measures it.
 Exact deferral of all leaves is itself exact and can serve as that anchor at seats 3-8 cheaply.
+
+**Result of `o2-leafrisk-1` (read 2026-10-22; write-up `docs/RESEARCH.md` D3).** Run on an AMD EPYC
+7B12 (256 threads, $0.30/h), 330 min, $1.63; 110 of 150 trees kept. Share of O_2's squared error left
+on the test split after solving a share of positions, learned order: 5% → 49.1%, 10% → 36.6%, 20% →
+23.9%, 40% → 11.6%, 50% → 7.7%, 75% → 1.4% (O_3's G v2 at 10%: 16.6%, at 40%: 2.2%). O_2's unsolved
+SD on these positions 3.28%. Learn-then-Test (CLT) thresholds: SD left 1.2% at 39.1% solved, 1.0% at
+49.3%, 0.5% at 75.5%. Files: R2 `runs/o2-leafrisk-1/out/leafrisk/` (`model.json`, `calibration.json`).
+The trick-1 decision test of O_2 G v2 has not run.

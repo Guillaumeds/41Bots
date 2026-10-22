@@ -115,3 +115,7 @@ fetch of the stored 40M 12.5 min; 115 s an epoch for 80M rows; 24 epochs; check 
 129 min in all): per run about 3 min boot, 12.5 min fetch, 4–6 min for the 6M sibling rows, about
 66 s an epoch for 46M rows × 25–35 epochs ≈ 30–40 min, 35 min check: **about 1.5 hours, $1.0 at
 $0.64/h (up to $2.6 at the $1.70 cap); both runs about $2–5.**
+
+## Status (2026-10-22)
+The rented A/B (`o3-sibrank-a`, `-b`) was never launched; no golden-set result exists. The only
+measurement is the build-VM A/B in §4. Write-up: `docs/RESEARCH.md` C9.

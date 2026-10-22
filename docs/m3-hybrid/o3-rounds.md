@@ -160,3 +160,14 @@ stored, `upload_shards` true, exact labels, no audit loop. Fixed values for ever
   on 190 threads, $0.5–1).
 - Not yet run on a rented machine: the first launch should be a small rehearsal (e.g. amounts
   `20k,40k`, cap $1) before a full round.
+
+## Results of rounds 1 and 2 (2026-10-21; write-up `docs/RESEARCH.md` C12)
+| round | candidate | new rows | golden 95% bound | seat 1 | own bias | adopted |
+|---|---|---|---|---|---|---|
+| — | incumbent f5766a | — | 0.0068% | 0.0201% | −0.0085% | — |
+| o3r-1 | c1 / c2 / c3 additive | 2M / 4M / 8M | 0.0071 / 0.0080 / 0.0073% | 0.0227 / 0.0288 / 0.0229% | −0.0121 / −0.0098 / −0.0111% | none (incumbent kept) |
+| o3r-2 | c1 / c2 additive | 2M / 4M | 0.0069 / 0.0070% | 0.0233 / 0.0223% | −0.0100 / −0.0085% | c2 (1057e9e9…) |
+| o3r-2 | c3 scratch 4096-2048-1024-256 | 8M | 0.0079% | 0.0325% | −0.0155% | no |
+
+Mix made: 57.8% (round 1) and 58.7% (round 2) of new rows in the riskiest 2 of 20 bands (aimed 63.3%
+and 62.1%). Records: R2 `rounds/o3r-1/`, `rounds/o3r-2/`.

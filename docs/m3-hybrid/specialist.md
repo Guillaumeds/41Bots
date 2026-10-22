@@ -76,3 +76,10 @@ score close to exact on those positions, and does the golden set show it?
   epochs, cuda). The routed golden check follows as its own manifest once S is stored.
 - Note: the harvest shard's row weights are not used by the filter (the flagged rows are kept
   whatever their weight). The first run's record says so.
+
+## Results (2026-10-22; details `docs/plan-log-2026-10.md`, write-up `docs/RESEARCH.md` C13)
+- S trained on 16,475,728 flagged rows (`specialist-s2`, $0.56): held-out flagged rows SD 3.03%; O_3 on
+  the same rows (`net-error-o3-val-1`) SD 2.94%.
+- Routed golden check (`golden-routed-s2`, $0.95): 0.0064% / 0.0079%, seat 1 0.0216%, own-team bias
+  0.0179%: fails; routed vs G2 exact +0.0059 points (+0.0044..+0.0075); routed vs O_3 alone +0.0008
+  (−0.0006..+0.0024).

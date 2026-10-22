@@ -2,7 +2,7 @@
 
 **Current checkpoint: M3 (in progress)** (PLAN §13, as revised on 2026-10-13): PIMC bots, the exact early-trick yardstick and its N-curves, the trick-1 runs on rented machines, the gate against rules-v1. M0 (engine, reference, RNG, CI), M1 (equity table, arena, launcher) and M2 (solver spike) are done; see `docs/history/STATUS-history.md`.
 
-## START HERE (2026-10-21): O3G2 round 1 running
+## START HERE (2026-10-22): O3G2 rounds 1-2 and the specialist test done; results in `docs/RESEARCH.md`
 
 **Decision (owner, 2026-10-21):** before O_2, push O_3 *alone* close to O_3 + G2, because O_2's
 training labels (exact through trick 2, then O_3, no G2) and the bronze set (O_2's test set: exact
@@ -23,21 +23,24 @@ m3-hybrid 3935df4.
 already be about 250 GB); `.github/workflows/o3-round.yml`; round 1's manifest
 `docs/vast/o3-round-1.manifest.json`. All tests pass (fmt, clippy, workspace, Python).
 
-**Running:** round 1, run `o3r-1-1` (started 2026-10-21 17:00 UTC; GitHub run 39639928333):
-amounts 2M, 4M, 8M (all additive), on instance 57085233 (AMD EPYC 7B12, 245 usable threads, RTX 3060
-12 GB, 250 GB disk, about $0.36/h, cap $3), taken over from a hand rental (`--instance-id`; vast's
-`update instance` needed a `recycle instance`, now in the launcher). Watch it with `r2-peek.yml`
-(run_id `o3r-1-1`); the result is `rounds/o3r-1/round.json` and `report.txt` in R2.
+**Results since (all in `docs/RESEARCH.md`, the collected research record):**
+- O3G2 round 1 (`o3r-1-3`, $1.14) kept f5766a: no candidate adopted (best 0.0071%). Round 2
+  (`o3r-2-1`, $2.10) adopted c2 (1057e9e9…, 0.0070%, seat 1 0.0223%: within noise of f5766a); its
+  4096-wide scratch candidate was worse (0.0079%). No candidate came near the 0.0025% target
+  (RESEARCH C12). The first round-1 attempt `o3r-1-1` lost its machine ($0.45).
+- Specialist S (2026-10-22): no better than O_3 on the flagged positions; the routed check fails
+  (RESEARCH C13, `m3-hybrid/specialist.md`).
+- Free reads written up 2026-10-22: O_3 at 80M base (C4), the optimizer's-curse test (C7), the
+  ensemble (C8, never measured), the additive loop (C3), the O_2 error predictor (D3), lead-4 (B4).
 
-**Next, in order:**
-1. Read round 1's report: the winner, the mix aimed at and made, the golden check of each
-   candidate against the incumbent and against O3G2, the label check. Round 2 from it
-   (`from=o3r-1`), with `scratch_last=4096,2048,1024,256` if data alone moved little.
-2. Before round 2: fetch the base while the first parts are labelled (about 10 of the 15 fetch
+**Running:** nothing known (every run above wrote DONE; check `vast-status.yml` before renting).
+
+**Next, in order (as planned on 2026-10-21; rounds 1-2 are done):**
+1. Round 3 would start from round 2's record (`from=o3r-2`; its `next` names init_net 1057e9e9…,
+   G2 5f7e6792…, dataset ea682abe…). Whether to run it is the owner's call on the C12 results.
+2. Before a round: fetch the base while the first parts are labelled (about 10 of the 15 fetch
    minutes saved a round).
-3. Free reads still owed: the results of `o3-base80-1` (O_3 at 80M base) and the ensemble rerun
-   were never written into the docs (`r2-fetch.yml`).
-4. After about three rounds: a fresh golden set (seed 2) to confirm; then the trick-1 check of O_3
+3. After about three rounds: a fresh golden set (seed 2) to confirm; then the trick-1 check of O_3
    alone against O_3 + G2 on about 100 trick-1 decisions (decides G2 for the bronze set).
 
 ### The goal and the chain (owner)
@@ -60,6 +63,7 @@ The owner wants the teachers and their deal counts decided last.
 | what | key | notes |
 |---|---|---|
 | O_3 adopted (2048-1024-256) | f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad | trained on 40M trick-3 positions |
+| O3G2 round-2 winner (2048-1024-256) | 1057e9e949f04f09e59e4ef052b564694f1cc2140fbbd81a146188e46342d593 | c2 of `o3r-2`; float 8a2f8ce6…; its G2 5f7e6792a70b4ecf724896edea1a7d19fd8b80e592e6d623a5f450b54829ffe6 |
 | O_3 leaf-risk model (G v2) | 20c41678c64681855003e5b8660e0a2e1fb9e8d552f7d898dd956055c767a9d5 | `data/leafrisk/leafrisk-o3-v1.json`; threshold t=277338260 adopted |
 | O_2 provisional (2048-1024-256) | 505a0c7c65147ffa9565e06059f47664ea9f1bfdf0c5ea2f8d392b0e6e1337b0 | 1.5M exact labels; position error SD 3.6% (O_3: 1.85%) |
 | trick-2 golden set: decisions / worlds | 635e9aef196c816380f3f15c05ede90b38b875fa4817061a57e6d39550065ab0 / 6ddc59b191e1fd534f260f9dfe103f742d6026768ca74acdbbb4fd430eb8265e | 2,000 decisions x 320 exact worlds, seed 1 |
@@ -118,6 +122,7 @@ The owner wants the teachers and their deal counts decided last.
   tags; dry run by default), `r2-inventory.yml` (read-only list of the bucket).
 
 ## Where the history is
+- `docs/RESEARCH.md`: the collected research record (every experiment's method, result, cost, limits).
 - `docs/README.md`: one line per experiment and document (what it was, the result, adopted or not).
 - `docs/history/STATUS-history.md`: every dated status entry from 2026-10-13 to 2026-10-20.
 - Archived branches: `git tag -l 'archive/*'`; `git checkout archive/<name>` restores any of them.
