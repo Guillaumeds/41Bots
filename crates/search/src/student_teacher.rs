@@ -515,7 +515,12 @@ pub fn teacher_records(
     ordered(
         job.threads,
         Some(job.count),
-        window_for(job.threads),
+        // A window of the whole part: a few decisions cost minutes (G2 teachers), and a window of
+        // 4 x threads + 16 let every worker run dry behind one of them (CPU use fell to a few
+        // percent for minutes on end, run student-t2-gv2-250k-4). A record is a few kilobytes, so
+        // holding a part's worth of finished ones costs nothing; the order and the bytes are the
+        // same for any window.
+        window_for(job.threads).max(job.count),
         SolveMem::new,
         |mem, k| {
             let r = make_record(job, job.first + k, starts, ctx, teacher, mem);
