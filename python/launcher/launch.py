@@ -2020,7 +2020,7 @@ def rent_and_watch(a, run_id: str, best: dict | None, resumable: bool, run_start
                             break
                         time.sleep(30)
                     log(f"instance {instance_id} {'destroyed itself (' + live.detail + ')' if self_destroyed else 'did NOT destroy itself (confirmed) within 90 s of ' + final}")
-                destroyed = (keep_machine(a, run_id, instance_id, dph, final, str(best.get("cpu_name") or ""))
+                destroyed = (keep_machine(a, run_id, instance_id, dph, final, str(best.get("cpu_name") or ""), reason)
                              if keep_now else destroy(instance_id))
         ended = time.time()
         attempts.append({"instance_id": instance_id, "offer_id": best["id"], "cpu_name": best.get("cpu_name"),
@@ -2196,14 +2196,20 @@ def keep_applies(a, final: str, reason: str) -> bool:
     """Whether the machine is left up: the run asked for it (machine.keep) and the runner ended the run by itself
     (DONE or FAILED). A machine the launcher had to stop (budget, time, low CPU, silence) or that never ran is
     destroyed as before."""
+    if getattr(a, "instance_id", None) and not final and start_failure_kind(reason):
+        # A taken-over machine whose container never started or never heartbeated is the owner's machine, not
+        # one this run rented: it is left up (and recorded), never destroyed for the failure (trial keep-trial-2,
+        # 2026-10-22: the recycled container booted the old run, and the launcher destroyed the machine).
+        return True
     return bool(getattr(a, "keep", False)) and final in ("DONE", "FAILED") and not getattr(a, "stopped", False) \
         and not reason.startswith("budget reached")
 
 
-def keep_machine(a, run_id: str, instance_id: int, dph: float, final: str, cpu_name: str = "") -> str:
+def keep_machine(a, run_id: str, instance_id: int, dph: float, final: str, cpu_name: str = "", reason: str = "") -> str:
     """Leaves the instance running (the runner parks: KEEP_MACHINE=1) and records it. The workflow's safety-net steps
     must not destroy it, so the state files go."""
-    write_keep(run_id, instance_id, dph, f"run {final}", float(a.keep_hours), cpu_name)
+    write_keep(run_id, instance_id, dph, f"run {final}" if final else f"takeover did not start: {reason[:160]}",
+               float(a.keep_hours), cpu_name)
     a.kept = True
     if a.state_file:
         for suffix in ("", ".run-id"):

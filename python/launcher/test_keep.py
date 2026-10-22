@@ -314,6 +314,25 @@ class TakeoverTest(KeepTestBase):
             self.take(w)
         self.assertEqual(w.calls, [])
 
+    def test_a_taken_over_machine_that_never_starts_is_kept_not_destroyed(self):
+        w = KWorld([], [])
+        w.add_machine(500, "")
+        w.takeover_script = "never:0"  # the recycled container never heartbeats
+        code, report = self.take(w)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(w.destroy_calls, 0)
+        self.assertTrue(w.instances[500]["alive"] and not w.instances[500].get("destroyed"))
+        rec = json.loads(w.store["keep/500.json"])
+        self.assertIn("takeover did not start", rec["why"])
+        self.assertEqual(report["destroy"], "kept")
+        self.assertIn("MACHINE KEPT RUNNING", self.log)
+
+    def test_a_machine_the_run_rented_that_never_starts_is_still_destroyed(self):
+        w = KWorld([tl.offer(1, 11, 1.0)], ["never:0"])
+        code, report = self.run_launch(w, self.manifest(keep=True))
+        self.assertNotIn("keep/100.json", w.store)
+        self.assertTrue(w.instances[100].get("destroyed"))
+
     def test_a_machine_that_is_taken_over_can_be_kept_again(self):
         w = KWorld([], [])
         w.keep = True
