@@ -1,5 +1,8 @@
 use super::*;
-use crate::bundle::{bundle_dir, sha256_hex};
+#[cfg(unix)]
+use crate::bundle::bundle_dir;
+use crate::bundle::sha256_hex;
+#[cfg(unix)]
 use crate::remote::DirRemote;
 
 fn run_entry(stream: &str, parts: u64) -> Value {
@@ -338,6 +341,7 @@ const ARG: &str = r#"arg() { n=$1; shift; while [ $# -gt 0 ]; do [ "$1" = "$n" ]
 /// A stored `student_teacher` run in `store`: per stream, its parts (decisions each), each part's
 /// two files in `inputs/sha256/` and its bundle (result.json and the `.inputs.json`) listed in
 /// `runs/<run>/merged.json`.
+#[cfg(unix)]
 fn stored_run(store: &Path, run: &str, streams: &[(&str, &str, &[u64])]) {
     let remote = DirRemote {
         root: store.to_path_buf(),

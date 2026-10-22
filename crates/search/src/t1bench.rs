@@ -1438,6 +1438,7 @@ pub fn proc_peak_rss_mb() -> Option<u64> {
 }
 
 #[cfg(test)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     use crate::measure::{build_decisions, collect_starts};
@@ -1661,6 +1662,9 @@ mod tests {
     /// tables: every thread searches in at least 99% of the samples after the ramp, nodes and
     /// worlds are counted, every solve stops at the window's end, and the windows agree on any
     /// world both finished. A plan that cannot fill the machine is caught by the guard.
+    // Linux only: the bench is a tool for rented Linux servers (it reads `/proc`), and a Windows CI
+    // runner starves the sampling thread behind the 64 busy workers (2 samples in 4 s, not 25).
+    #[cfg(target_os = "linux")]
     #[test]
     fn windows_keep_every_thread_busy() {
         let starts = collect_starts(400, 5);

@@ -2,6 +2,7 @@
 //! the risk profile, the nested parts, the candidates trained and checked, the winner, the next
 //! G2 and the record a next round starts from.
 
+#[cfg(unix)]
 use super::additive::{net_file_at, store};
 use super::*;
 

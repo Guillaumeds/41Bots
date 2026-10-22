@@ -587,7 +587,8 @@ mod tests {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert_eq!(
-            args.join(" "),
+            // Windows joins paths with a backslash; the expected text uses `/`.
+            args.join(" ").replace('\\', "/"),
             "hybrid-check --trick 1 --cut 3 --net /in/aa --equity /t/equity.npy --decisions /in/bb \
              --saved m3-t1-tables-1=/in/cc --saved m3-agree-t1-ab1=/in/ee --hard 0:3 --seed 1 \
              --threads 184 --tt-mb 64 --verify-pct 2.5 --verify-rule rules-v1 \

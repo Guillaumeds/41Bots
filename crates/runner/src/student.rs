@@ -510,6 +510,7 @@ mod tests {
                 "source": "rules", "net_input": "o3" })
     }
 
+    #[cfg(unix)]
     fn base_params() -> Value {
         base()
     }

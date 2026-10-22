@@ -1025,6 +1025,8 @@ mod tests {
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
                 .join(" ")
+                // Windows joins paths with a backslash; the expected text uses `/`.
+                .replace('\\', "/")
         };
         assert_eq!(
             args(check_command(Path::new("search"), &r, &q, 0, false, &run).expect("cmd")),

@@ -3361,7 +3361,9 @@ mod tests {
     /// The additive mode and stored label shards reused (`hybrid/tests/additive.rs`).
     mod additive;
 
-    /// Label shards shared as each is made (`hybrid/tests/shard_share.rs`).
+    /// Label shards shared as each is made (`hybrid/tests/shard_share.rs`); its fake programs are
+    /// shell scripts, so every test in it is Unix-only.
+    #[cfg(unix)]
     mod shard_share;
 
     /// The O3G2 round (`hybrid/tests/round.rs`).
@@ -5643,9 +5645,6 @@ esac
         }
     }
 
-    /// The golden set made beside the training: when either fails the other is stopped at once
-    /// and the chunk fails with the reason (nothing is left running).
-    #[cfg(unix)]
     /// The trainer is watched through its progress file (`train_stall_minutes`, here 0.02 min):
     /// a trainer whose file stops changing while it trains is killed with the reason and the
     /// chunk fails at once; one that waits for data beside the steps making it is not (the
@@ -5687,6 +5686,9 @@ esac
         }
     }
 
+    /// The golden set made beside the training: when either fails the other is stopped at once
+    /// and the chunk fails with the reason (nothing is left running).
+    #[cfg(unix)]
     #[test]
     fn golden_beside_training_fails_cleanly() {
         let f = fakes("overlapfail");
@@ -6011,6 +6013,7 @@ esac
     /// `upload_shards` on a store that refuses them (2026-10-17: a slow upload link killed the
     /// trick-2 mechanism test at this step): the chunk goes on and trains, warns, lists each shard
     /// as not uploaded in `shards.json`, and tries once more at its end.
+    #[cfg(unix)]
     #[test]
     fn a_failed_shard_upload_never_stops_the_chunk() {
         let f = fakes("shardfail");
@@ -6096,6 +6099,7 @@ esac
 
     /// A small integer network's weights file for frontier trick `trick` (the format `search`
     /// loads), for the tests that store a `harvest_net`.
+    #[cfg(unix)]
     fn tiny_net(trick: u8) -> Vec<u8> {
         nn::oracle::write_net(
             &nn::synthetic::random_net(7, &[8], 4, 50),
@@ -7209,10 +7213,12 @@ esac
     }
 
     /// Two confirmed groups, as the auditor writes them.
+    #[cfg(unix)]
     const GROUPS_TWO: &str = r#"[{"name": "g-one", "conditions": [{"feature": 801, "op": "==", "value": 1}], "weight": 0.05, "bias": [0.004, -0.001, 0.0, -0.003], "sd": 0.03},
         {"name": "g-two", "conditions": [{"feature": 845, "op": "<=", "value": -3145728}], "weight": 0.01, "bias": [0.001, 0.0, 0.0, -0.001], "sd": 0.02}]"#;
 
     /// One confirmed group, as the auditor writes it.
+    #[cfg(unix)]
     const GROUP_ONE: &str = r#"[{"name": "g-one", "conditions": [{"feature": 801, "op": "==", "value": 1}], "weight": 0.05, "bias": [0.004, -0.001, 0.0, -0.003], "sd": 0.03}]"#;
 
     #[cfg(unix)]
