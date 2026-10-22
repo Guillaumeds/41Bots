@@ -291,6 +291,34 @@ fn the_spread_order_interleaves_in_proportion_and_sizes_are_prefixes() {
     );
 }
 
+/// The plain arm of the S2 teacher A/B (E12): nine distinct points, every one inside the base run's 250,000
+/// decisions, the baseline and its controls named as expected.
+#[test]
+fn the_plain_arm_manifest_has_its_points() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/vast");
+    let v: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("student-t2-plain-arm.manifest.json")).expect("read"),
+    )
+    .expect("JSON");
+    let q = parse(&v["streams"][0]["params"]).expect("parses");
+    let names: Vec<String> = q.points.iter().map(Point::name).collect();
+    assert_eq!(
+        names,
+        [
+            "n250000-w512x256-d64-s1",
+            "n250000-w512x256-d64-s2",
+            "n250000-w512x256-d64-s3",
+            "n250000-w512x256-d320-s1",
+            "n250000-w512x256-d64-s1-r1000t10000",
+            "n250000-w512x256-d64-s1-r1000t3000",
+            "n250000-w512x256-d64-s1-r1000t10000-sd",
+            "n100000-w512x256-d64-s1",
+            "n50000-w512x256-d64-s1",
+        ]
+    );
+    assert_eq!(q.points.iter().map(|p| p.size).max(), Some(250_000));
+}
+
 /// The manifests in docs/vast parse, and a student_train stream is one chunk.
 #[test]
 fn the_manifests_parse() {
@@ -300,6 +328,7 @@ fn the_manifests_parse() {
         "student-t2-curve-mech.manifest.json",
         "student-t2-dealtest.manifest.json",
         "student-t2-dealtest-mech.manifest.json",
+        "student-t2-plain-arm.manifest.json",
     ] {
         let text = fs::read_to_string(root.join(name)).expect(name);
         let v: Value = serde_json::from_str(&text).expect(name);

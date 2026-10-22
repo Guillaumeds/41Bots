@@ -1,12 +1,12 @@
 {
   "format": 2,
-  "run_id": "student-t2-gv2-250k-6",
+  "run_id": "student-t2-gv2-250k-7",
   "run_seed": 1,
   "threads": null,
   "benchmark_seconds": 0,
   "upload_every_s": 300,
   "heartbeat_every_s": 30,
-  "note": "Session 1 (S2 teacher A/B, owner 2026-10-22): the first 250,000 decisions of the stored student data (rules seed 401 decisions 0-199,999 and mixed seed 402 decisions 0-49,999) valued by PIMC over 64 deals with H_3 (O_3 f5766a) plus the adopted learned exact leaves (G v2, t=277338260). Same positions and deals as the plain arm (student-t2-base-1, cut to 64 deals): checked on the build VM that a part of 1,000 decisions holds exactly the same records as the same decisions inside a part of 5,000 (only the offset into the values file differs). Parts of 5,000 decisions (50 chunks, about 45-50 minutes each: run -3 with parts of 1,000 was stopped by the idle watchdog at 58% average CPU because the heaviest decisions form a tail of 8+ minutes on single threads) so a lost machine loses at most one part; a replacement rental resumes from the done list. docs/m3-hybrid/path-forward.md section 6 session 1; docs/EXPERIMENTS.md E12. Run -5 (2026-10-22): same settings with binaries 258ef77 (workers run ahead by the whole part; run -4's CPU fell to 5-40% behind slow G2 decisions). Run -6: rules part 0 skipped (already stored by run -4, 5,000 decisions, old binaries; same bytes).",
+  "note": "Session 1 (S2 teacher A/B, owner 2026-10-22): the first 250,000 decisions of the stored student data (rules seed 401 decisions 0-199,999 and mixed seed 402 decisions 0-49,999) valued by PIMC over 64 deals with H_3 (O_3 f5766a) plus the adopted learned exact leaves (G v2, t=277338260). Same positions and deals as the plain arm (student-t2-base-1, cut to 64 deals): checked on the build VM that a part of 1,000 decisions holds exactly the same records as the same decisions inside a part of 5,000 (only the offset into the values file differs). Parts of 5,000 decisions (50 chunks, about 45-50 minutes each: run -3 with parts of 1,000 was stopped by the idle watchdog at 58% average CPU because the heaviest decisions form a tail of 8+ minutes on single threads) so a lost machine loses at most one part; a replacement rental resumes from the done list. docs/m3-hybrid/path-forward.md section 6 session 1; docs/EXPERIMENTS.md E12. Run -5 (2026-10-22): same settings with binaries 258ef77 (workers run ahead by the whole part; run -4's CPU fell to 5-40% behind slow G2 decisions). Run -7 (2026-10-22): rules parts 0 and 1 skipped (stored by runs -4 and -6, same bytes), binaries c6d8c08 with both throughput fixes (writer window = the whole part; a decision's deals in blocks of 8).",
   "machine": {
     "min_cores": 190,
     "min_ram_gb": 48,
@@ -47,7 +47,8 @@
           "seed": 1
         },
         "skip_parts": [
-          0
+          0,
+          1
         ]
       }
     },
