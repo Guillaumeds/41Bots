@@ -1,0 +1,110 @@
+{
+ "format": 2,
+ "run_id": "o2-vol-1",
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "O_2 Stage B volume (owner 2026-10-22 night, fully autonomous): plain hybrid trick-2 labels (exact through trick 2, O_3 f5766a after), 22M positions: 16M random play + 4M rules-v1 + 2M harvested (positions the H_2 search reaches, driven by the provisional O_2), in ten stored parts, with only a throwaway tiny network trained here. Stage A (D6): plain 6M beat exact 1.5M by a wide margin and volume had not flattened. The real 2048-1024-256 network is trained later from the stored parts (label_inputs) so it can be repeated or varied cheaply on a GPU box. A short smoke stream (harvest path at trick 2 with hybrid labels, never run before) comes first.",
+ "machine": {
+  "gpus": 1,
+  "min_gpu_ram_gb": 8,
+  "min_cores": 190,
+  "min_ram_gb": 64,
+  "min_inet_down": 100,
+  "max_dph": 1.0,
+  "price_steps": [
+   0.5,
+   0.8,
+   1.0
+  ],
+  "wait_for_offer_min": 240,
+  "disk_gb": 150
+ },
+ "inputs": {
+  "o3": "sha256:f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
+  "o2": "sha256:505a0c7c65147ffa9565e06059f47664ea9f1bfdf0c5ea2f8d392b0e6e1337b0"
+ },
+ "streams": [
+  {
+   "name": "smoke",
+   "priority": 1,
+   "kind": "hybrid_rung",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "cut": 2,
+    "check": false,
+    "widths": "256,64",
+    "head": "outcome",
+    "epochs": 1,
+    "patience": 1,
+    "batch": 1024,
+    "lr": 0.001,
+    "train_seed": 1,
+    "max_minutes": 0,
+    "device": "cuda",
+    "overlap": false,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    },
+    "upload_shards": true,
+    "label_source": "hybrid",
+    "label_net": "inputs/sha256/f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
+    "label_exact_leaves": "none",
+    "hybrid_exact_share": 0,
+    "labels_random": 20000,
+    "labels_random_seed": 7799,
+    "labels_rules": 0,
+    "labels_harvest": 2000,
+    "labels_harvest_seed": 7797,
+    "harvest_net": "inputs/sha256/505a0c7c65147ffa9565e06059f47664ea9f1bfdf0c5ea2f8d392b0e6e1337b0",
+    "val_count": 500,
+    "val_seed": 7798,
+    "label_parts": 1
+   }
+  },
+  {
+   "name": "vol",
+   "priority": 2,
+   "kind": "hybrid_rung",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "cut": 2,
+    "check": false,
+    "widths": "256,64",
+    "head": "outcome",
+    "epochs": 1,
+    "patience": 1,
+    "batch": 1024,
+    "lr": 0.001,
+    "train_seed": 1,
+    "max_minutes": 0,
+    "device": "cuda",
+    "overlap": false,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    },
+    "upload_shards": true,
+    "label_source": "hybrid",
+    "label_net": "inputs/sha256/f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
+    "label_exact_leaves": "none",
+    "hybrid_exact_share": 0,
+    "labels_random": 16000000,
+    "labels_random_seed": 571,
+    "labels_rules": 4000000,
+    "labels_rules_seed": 572,
+    "labels_harvest": 2000000,
+    "labels_harvest_seed": 573,
+    "harvest_net": "inputs/sha256/505a0c7c65147ffa9565e06059f47664ea9f1bfdf0c5ea2f8d392b0e6e1337b0",
+    "val_count": 2000,
+    "val_seed": 7702,
+    "label_parts": 10
+   }
+  }
+ ]
+}

@@ -1586,6 +1586,7 @@ mod tests {
             ("g2-labelcheck.manifest.json", 3),
             ("o2-g2arm.manifest.json", 1),
             ("o2-g2arm-2.manifest.json", 1),
+            ("o2-vol.manifest.json", 2),
             ("o3-round-1.manifest.json", 1),
             ("specialist-s1.manifest.json", 1),
             ("golden-routed-s2.manifest.json", 1),
