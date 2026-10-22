@@ -1,0 +1,68 @@
+name: store-input
+
+# Stores one trained network from a finished run's artifact (the r2-fetch artifact of that run) in
+# R2 as inputs/sha256/<hex>, so a manifest can name it. Checks the file's SHA-256 against the
+# expected value first; nothing is stored on a mismatch. Read-only on the run; writes only the
+# input object.
+
+on:
+  workflow_dispatch:
+    inputs:
+      fetch_run_id:
+        description: "GitHub run id of the r2-fetch run that holds the artifact"
+        required: true
+      artifact:
+        description: "Artifact name (e.g. run-specialist-s2)"
+        required: true
+      member:
+        description: "Path inside the run's out/ archive (e.g. specialist/int.safetensors)"
+        default: "specialist/int.safetensors"
+      expect_sha:
+        description: "Expected SHA-256 of the file (hex)"
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  store:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      R2_ACCESS_KEY_ID: ${{ vars.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+      R2_S3_ENDPOINT: ${{ vars.R2_S3_ENDPOINT }}
+      FETCH_RUN: ${{ inputs.fetch_run_id }}
+      ARTIFACT: ${{ inputs.artifact }}
+      MEMBER: ${{ inputs.member }}
+      EXPECT: ${{ inputs.expect_sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install zstandard
+        run: pip install --quiet zstandard
+      - name: Download the artifact
+        run: gh run download "$FETCH_RUN" -R "$GITHUB_REPOSITORY" -n "$ARTIFACT" -D fetched
+      - name: Extract the file and check its hash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, hashlib, io, os, sys, tarfile, zstandard
+          archives = glob.glob("fetched/out/*/*.tar.zst")
+          if len(archives) != 1:
+              sys.exit(f"expected one out/ archive, found {archives}")
+          data = zstandard.ZstdDecompressor().stream_reader(open(archives[0], "rb")).read()
+          member = tarfile.open(fileobj=io.BytesIO(data)).extractfile(os.environ["MEMBER"])
+          blob = member.read()
+          got = hashlib.sha256(blob).hexdigest()
+          if got != os.environ["EXPECT"]:
+              sys.exit(f"sha256 {got} is not the expected {os.environ['EXPECT']}")
+          open("net.safetensors", "wb").write(blob)
+          print(f"checked {len(blob)} bytes, sha256 {got}")
+          PY
+      - name: Store it in R2
+        run: |
+          set -euo pipefail
+          python3 python/launcher/launch.py put-input net.safetensors | tee -a "$GITHUB_STEP_SUMMARY"
