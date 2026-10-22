@@ -2,6 +2,16 @@
 
 **Current checkpoint: M3 (in progress)** (PLAN §13, as revised on 2026-10-13): PIMC bots, the exact early-trick yardstick and its N-curves, the trick-1 runs on rented machines, the gate against rules-v1. M0 (engine, reference, RNG, CI), M1 (equity table, arena, launcher) and M2 (solver spike) are done; see `docs/history/STATUS-history.md`.
 
+## O_2 Stage A (2026-10-22): plain labels win; G2 arm and volume next
+Results in EXPERIMENTS D6 (`docs/m3-hybrid/o2-stagea-netcmp.json`): on the 250k exact test set plain 1.5M ties exact 1.5M
+(SD 3.67% against 3.64%) and plain 6M is clearly better (3.13%), at about 1/30 of the label cost. The G2 label check:
+RMS 0.48% from exact against plain 2.15%, at 3.7 against 0.21 thread-s a label. **Running:** `o2-g2arm-2` (instance 57260975,
+the owner's EPYC 7B12, $0.73/h, 49.9 labels/s) makes 600k G2 labels in four parts, ETA about 23:50 Irish; part 1
+(150k) is stored from `o2-g2arm-1`. **Next:** the training-only run on all 750k G2 labels plus s601 (label_inputs, about $1)
+-> compare with `p60` by `netcmp`; then volume (plain 40M, about $9) and the Stage B audit loop. **To do before Stage B:**
+reused validation with label_parts (path-forward.md, Session 2). Takeover of a hand-rented machine works
+(`vast-run.yml` `instance_id`, disk at least 80 GB).
+
 ## START HERE (2026-10-22): more training data does not move O_3; choose the next lever
 
 **Where we are.** O_3 f5766a is still the adopted trick-3 network: 0.0068% alone (seat 1 0.0201%),

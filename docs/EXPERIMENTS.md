@@ -745,6 +745,46 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   0.12-0.48% on the worst set, team biases 0.32-0.59%. These are the only trick-1 decision-level
   numbers measured against exact values.
 
+### D6. O_2 label source and volume, Stage A (runs `o2-stagea-full-1/-2`, `g2-labelcheck-1`, `o2-g2arm-1/-2`, 2026-10-22)
+- **Question.** Which labels train O_2 best per dollar: exact, plain hybrid (exact through trick 2, O_3 f5766a
+  after) or G2 hybrid (plain plus the learned exact leaves)? Judged on a new exact test set, never trained on.
+- **Method.** Same network everywhere (2048-1024-256, outcome head, seed 1, early stopping on the exact s601
+  shard), 80/20 random/rules-v1 positions. Arms: exact 0.3M (`e03`), 0.75M (`e075`), 1.5M (`e15`) from the stored
+  s511+s512 shards (`train_fraction`); plain 1.5M (`p15`, seeds 541/542) and 6M (`p60`, seeds 545/546). Test set:
+  250,000 exact trick-2 positions in ten parts (val seeds 604-613, stored; keys in each step's `worker.log`),
+  scored with `fortyone_nn.netcmp` (paired differences, 95% bounds, normal approximation, rows independent), plus
+  4,479 exact sibling groups (15,000 positions, seed 7604, shard 5734d7f0) for the mover's mean regret.
+  Machine: AMD Threadripper PRO 7995WX (184 threads, $1.27/h), 262 min, $4.73 (the first attempt, `-1`, lost $1.21:
+  the trainer refused hybrid-labelled shards; fixed, `test_hybrid_train`).
+- **Result** (error of the money chance, percent; `docs/m3-hybrid/o2-stagea-netcmp.json`):
+
+| arm | labels | SD | paired change in squared error vs `e15` | largest team bias | sibling regret (95%) |
+|---|---|---|---|---|---|
+| `e03` | exact 0.3M | 4.303 | +5.27 +-0.33 | 0.412 | 0.324 +-0.055 |
+| `e075` | exact 0.75M | 3.931 | +2.20 +-0.30 | 0.180 | 0.327 +-0.056 |
+| `e15` | exact 1.5M | 3.640 | reference | 0.210 | 0.295 +-0.056 |
+| `p15` | plain 1.5M | 3.668 | +0.20 +-0.29 (tie) | 0.116 | 0.295 +-0.055 |
+| `p60` | plain 6M | 3.132 | -3.44 +-0.30 | 0.126 | 0.247 +-0.051 |
+
+  Standard error of a team bias about 0.01%. Sibling-regret differences between arms are inside the noise.
+- **Reading.** At equal volume plain labels tie exact ones; at equal money (6M plain about $0.4 against 1.5M exact
+  about $12) plain wins clearly; volume has not flattened (SD 3.67 to 3.13 for 4x data; extrapolated 40M about
+  2.5%, not measured). Every network's own team bias (0.1-0.2%) is far above the plain labels' 0.013-0.017%.
+  O_2's best SD 3.13% is far from O_3's 1.85%.
+- **Label check** (`g2-labelcheck-1`, EPYC 7663 215 threads, $0.51): the same 10,000 positions labelled three ways.
+  RMS error against exact: plain 2.145% (largest bias 0.0155%, 16% of rows identical to exact), G2 0.479% (bias
+  0.0063%, 55% identical). Speed measured on 215 threads: exact 341.6 s (7.3 thread-s a label), G2 172.4 s (3.7),
+  plain 9.7 s (0.21). Wider-machine speeds: plain 1,607 labels/s on the 7995WX (40M plain labels about 7 h, about
+  $9, not the $2.7 once estimated); G2 about 50 labels/s on an EPYC 7B12 (245 threads).
+- **G2 arm** (0.75M G2 labels, same recipe): `o2-g2arm-1` (EPYC 7663, $1.60/h) made part 1 (120k random + 30k rules,
+  seeds 561/562) and was stopped; `o2-g2arm-2` (EPYC 7B12 taken over by hand, instance 57260975, $0.73/h) makes the
+  other 600k (seeds 563/564) in four parts; a training-only run on all stored parts plus s601 then gives the
+  network. Result pending (see STATUS).
+- **Limits.** One seed per arm; the test set is random-play positions, not the positions trick-1 search reaches;
+  no trick-1 decision-level number exists, so O_2 can only be audit-clean on exact trick-2 positions.
+- **Tools made.** `fortyone_nn.netcmp`, `python/tools/o2watch.py` (progress, speed, ETA from R2 heartbeats),
+  `vast-run.yml` input `instance_id` (take over a machine rented by hand; the instance needs the run's disk, 80 GB).
+
 ---
 
 ## Part E. Students (small networks for the app's tricks 1-2)

@@ -67,6 +67,7 @@ Old branches are tags (`git tag -l 'archive/*'`; `git checkout archive/<name>` r
 | `m3-hybrid/audit-loop.md` §12 | trick-2 labels from O_3 (TreeStrap) | **adopted** in design; the label test never ran (D2) |
 | STATUS history 2026-10-20 | O_2 on G v2 labels | **rejected**: only 1.2× cheaper than exact (D2) |
 | `m3-hybrid/learned-leaves.md` "O_2 G v2" | O_2's error predictor | predictor **done**; trick-1 test **not run** (D3) |
+| `m3-hybrid/o2-stagea-netcmp.json` | O_2 Stage A: scores of five networks on the 250k exact test set (EXPERIMENTS D6) | **result: plain labels tie exact at equal volume and win at equal money; volume is the lever**; G2 arm pending |
 | `m3-hybrid/silver.md` | trick-1 reference (exact through trick 2, then O_3) | built, **incomplete**: no silver set exists (D4) |
 
 ## Students (fast networks for the app)
