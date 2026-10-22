@@ -93,7 +93,7 @@ use crate::sched::{
 };
 use crate::stop;
 use crate::{
-    CpuSampler, Ctx, default_threads, hardware, run_kind, self_destroy, sibling, unix_now,
+    CpuSampler, Ctx, default_threads, end_machine, hardware, run_kind, sibling, unix_now,
     utc_string,
 };
 
@@ -585,7 +585,7 @@ pub fn run(manifest: &Value, work: &Path) -> ExitCode {
         Err(e) => eprintln!("runner: FAILED: {e}"),
     }
     if std::env::var("RUNNER_NO_DESTROY").is_err() {
-        self_destroy();
+        end_machine();
     }
     if ok && uploaded.is_ok() {
         ExitCode::SUCCESS

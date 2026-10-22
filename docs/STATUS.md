@@ -157,6 +157,26 @@ The owner wants the teachers and their deal counts decided last.
   The golden set, S2 and O_3 are small enough (1.2 MB, 92 MB, 7 MB, 17 MB).
 - **Store a trained network as a manifest input:** `store-input.yml` (the r2-fetch run id, artifact
   name, the member path, the expected SHA-256) puts it in `inputs/sha256/<hex>`.
+- **Deploy onto a kept machine, and keep a machine after a run (owner, 2026-10-22; built in session 1, `python/launcher/test_keep.py`).**
+  Both are keys of the manifest's `machine` object, so the `vast-run.yml` call is the usual one (no new input):
+  - `"keep": true` (and `"keep_hours"`, default 6, at most 72): when the run ends by itself (DONE or FAILED) the runner
+    **parks** instead of destroying its instance (`KEEP_MACHINE=1`, `crates/runner` `end_machine`) and the launcher
+    leaves it running, writes `keep/<instance>.json` (for the cleanup) and `runs/<run>/KEPT.json`, and prints a
+    `::warning::MACHINE KEPT RUNNING, ACTION NEEDED ...` line and a job-summary banner. A **cancelled** workflow keeps
+    it too (`stop --keep`). Not kept: a budget stop, a launcher-forced stop (low CPU, silence, time), a machine that
+    died, and a boot failure (the image's boot script still destroys it: image change needed). The idle machine bills
+    until it is taken over or destroyed; **`vast-cleanup` destroys it at `keep_until_utc`** (+5 min) and deletes the
+    record of a vanished machine.
+  - `"instance_id": N`: take that instance over instead of renting one (`launch.py` `take_instance`: `vastai update
+    instance` with this run's image, environment and binaries, then `recycle instance`, which rebuilds the container in
+    place; the disk and machine stay; the instance is relabelled `41bots-<run>` and its `keep/` record deleted). Use a
+    **new run id** (a used one is refused). Needs a disk of at least `disk_gb` and the threads asked. **Refused (nothing
+    changed):** another run's machine that heartbeated in the last 15 minutes and has no DONE/FAILED (cancel it with
+    `keep` first, or wait), a machine another run started under an hour ago, a label that is not `41bots-...`; allowed:
+    a kept machine, the machine of an ended run, an unlabelled one rented by hand.
+  - **After a run with `keep`, the session must act** (deploy the next job with `instance_id`, or destroy it with
+    `vast-stop.yml`): `monitor_run.py RUN` prints a banner when `runs/RUN/KEPT.json` exists and `monitor_run.py x --kept`
+    lists every kept machine. Arm a `send_later` for the run's end when launching with `keep`.
 - **Launch pitfalls met 2026-10-22 (each is a refusal before anything is rented, unless said):**
   a run id cannot be reused (a failed attempt leaves `runs/<id>/` in R2; give each attempt a new id);
   a manifest `machine` block takes only gpus, min_gpu_ram_gb, min_compute_cap, min_cores, min_ram_gb,

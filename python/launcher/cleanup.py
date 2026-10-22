@@ -24,6 +24,10 @@ destroyed only when one of these holds:
   upload what it finished (runs/<run>/STOP), then destroyed if still alive 15 minutes later;
 - --all (the workflow's "all" input).
 
+A kept machine (keep/<instance>.json, written by a launcher run with machine.keep, `launch.py` keep_machine) is
+left alone, whatever its run's markers say, until the record's keep_until_utc plus 5 minutes; then it is destroyed
+(an idle machine bills for nothing). A takeover deletes the record. A record whose machine is gone is deleted.
+
 Machines without the 41bots- label are never touched. Before any destroy (except --all) the
 machine is read again from vast (`show instance`) and the decision re-made on the fresh record;
 if vast cannot be read, nothing is destroyed this round (a healthy machine is never destroyed on
@@ -90,6 +94,25 @@ def cpu_pct(inst: dict) -> float | None:
     except (TypeError, ValueError):
         return None
     return None if v < 0 else min(v, 100.0)
+
+
+KEEP_GRACE_S = 5 * 60
+
+
+def decide_kept(inst: dict, rec: dict, now: float, everything: bool = False) -> tuple[str, str]:
+    """("keep" | "destroy", why) for a machine with a keep record: left up for the next worker until its
+    keep_until_utc (plus a grace), destroyed after, or at once when it is dead or the record cannot be read."""
+    if everything:
+        return "destroy", "the 'all' option"
+    status = inst.get("actual_status")
+    if status in DEAD_STATES:
+        return "destroy", f"kept machine, but vast shows it {status}"
+    until = parse_time(rec.get("keep_until_utc"))
+    if until is None:
+        return "destroy", "its keep record has no readable keep_until_utc"
+    if now > until + KEEP_GRACE_S:
+        return "destroy", f"kept machine idle past its keep time {rec.get('keep_until_utc')} (run {rec.get('run_id')})"
+    return "keep", f"kept for the next worker until {rec.get('keep_until_utc')} (run {rec.get('run_id')})"
 
 
 def decide(inst: dict, state: dict, now: float, everything: bool = False) -> tuple[str, str]:
@@ -339,7 +362,12 @@ def sweep(r2, instances: list[dict], now: float, everything: bool, dry_run: bool
         run_id = label[len(LABEL):]
         live_ids.add(int(inst["id"]))
         state = run_state(r2, run_id)
-        action, why = decide(inst, state, now, everything)
+        kept = get_json(r2, f"keep/{inst['id']}.json")
+
+        def decide_now(i: dict) -> tuple[str, str]:
+            return decide_kept(i, kept, now, everything) if kept else decide(i, state, now, everything)
+
+        action, why = decide_now(inst)
         if action == "destroy" and not everything and not dry_run:
             # Never on one reading: read the machine again and decide on the fresh record; if
             # vast cannot be read, leave it until the next round.
@@ -347,7 +375,7 @@ def sweep(r2, instances: list[dict], now: float, everything: bool, dry_run: bool
             if fresh is None:
                 action, why = "keep", f"would destroy ({why}) but vast could not be read again; left for the next round"
             else:
-                again, why2 = decide({**inst, **fresh}, state, now)
+                again, why2 = decide_now({**inst, **fresh})
                 if again != "destroy":
                     action, why = again, f"on a second reading {why2} (the first said: {why})"
         rows.append((inst["id"], run_id, inst.get("actual_status"), action, why))
@@ -358,6 +386,15 @@ def sweep(r2, instances: list[dict], now: float, everything: bool, dry_run: bool
             r2.put(f"runs/{run_id}/STOP", json.dumps({"reason": f"cleanup: {why}", "utc": utc(now)}).encode())
         elif destroy(inst["id"]):
             destroyed[run_id] = why
+    # Keep records whose machine is gone (destroyed by hand, taken over under another label): delete them.
+    for key, _ in r2.list("keep/"):
+        rec = get_json(r2, key)
+        iid = int(rec.get("instance_id") or 0)
+        if iid and iid not in live_ids and not dry_run:
+            fresh = instance_now(iid)
+            if fresh is None or fresh.get("actual_status") in DEAD_STATES + (None, "destroyed"):
+                log(f"keep record {key}: instance {iid} is gone; deleted")
+                r2.delete(key)
     # Handed-over runs: record how each ended once its machine is gone.
     for key, _ in r2.list("watch/"):
         run_id = key[len("watch/"):].removesuffix(".json")

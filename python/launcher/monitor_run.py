@@ -2,6 +2,9 @@
 
     R2_S3_ENDPOINT=$R2_ENDPOINT python monitor_run.py RUN_ID [--total-decisions N] [--part-size N]
 
+A machine the run left running (machine.keep: runs/RUN/KEPT.json) is announced first, loudly: it bills until it is
+taken over or destroyed and someone must act. `--kept` lists every kept machine (keep/*.json).
+
 Prints the latest heartbeat's step, usable threads, elapsed time and dollars, the parts stored so far
 (`runs/RUN/out/<stream>/*.tar.zst`), the measured speed (decisions an hour, from parts finished) and
 the ETA and projected cost at that speed. Read-only.
@@ -20,7 +23,19 @@ def main():
     ap.add_argument("run")
     ap.add_argument("--total-decisions", type=int, default=250_000)
     ap.add_argument("--part-size", type=int, default=1000)
+    ap.add_argument("--kept", action="store_true", help="list every kept machine (keep/*.json) and exit")
     a = ap.parse_args()
+    if a.kept:
+        recs = [json.loads(launch.r2_get(k) or b"{}") for k in launch.r2_list("keep/") if k.endswith(".json")]
+        for r in recs:
+            print(launch.keep_notice(r))
+        print(f"{len(recs)} kept machine(s)")
+        return
+    kept = launch.r2_get(f"runs/{a.run}/KEPT.json")
+    if kept:
+        print("!" * 100)
+        print(launch.keep_notice(json.loads(kept)))
+        print("!" * 100)
     _, hb = launch.latest_heartbeat(a.run)
     if not hb:
         print("no heartbeat yet")

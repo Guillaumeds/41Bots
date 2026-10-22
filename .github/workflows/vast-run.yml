@@ -26,6 +26,11 @@ name: vast-run
 # and a manifest's "machine" object can set them for one run: min_inet_down (Mbps; 0 = no filter), max_dph,
 # wait_for_offer_min, offer_poll_s, price_steps, tries_per_step, gpu_names (a list of GPU model names as vast reports
 # them in an offer's gpu_name, like ["RTX 4090", "RTX 5090"]: no other model is rented; launch.py --gpu-names).
+# Kept machines and takeover (owner, 2026-10-22): a manifest's machine object may say "keep": true (the machine is left
+# running when the run ends or the workflow is cancelled; "keep_hours", default 6, is how long it may idle before
+# vast-cleanup destroys it; the log, the job summary and runs/<run>/KEPT.json say so loudly) and "instance_id": N
+# (take over that instance instead of renting: its container is recreated with this run's image, environment and
+# binaries; refused for another run's live machine). docs/STATUS.md, "Deploy onto a kept machine".
 # Looking for a machine (owner, 2026-10-16): at least 190 threads (min_cores), at most $1.70/h; when none matches the launcher
 # waits instead of failing, up to 2 hours, searching every minute at $1.20/h, then $1.45/h, then $1.70/h (3 tries each), and a
 # replacement search after a start failure does the same with the same floors. The wait and the price steps are launch.py
@@ -204,9 +209,13 @@ jobs:
       - name: Cancelled - ask the run to stop and wait (at most 5 minutes) for it to upload what it finished
         if: cancelled() && hashFiles('instance-id.txt.run-id') != ''
         shell: bash
-        run: python3 python/launcher/launch.py stop "$(cat instance-id.txt.run-id)" --instance "$(cat instance-id.txt)" --wait-s 300 --reason "workflow cancelled" || true
+        run: |
+          # A run with machine.keep leaves instance-id.txt.keep (its keep hours) when cancelled: the machine stays up.
+          KEEP=""
+          if [ -f instance-id.txt.keep ]; then KEEP="--keep --keep-hours $(cat instance-id.txt.keep)"; fi
+          python3 python/launcher/launch.py stop "$(cat instance-id.txt.run-id)" --instance "$(cat instance-id.txt)" --wait-s 300 --reason "workflow cancelled" $KEEP || true
       - name: Safety net - destroy the instance if the job was cancelled or failed
-        if: always() && hashFiles('instance-id.txt') != ''
+        if: always() && hashFiles('instance-id.txt') != '' && hashFiles('instance-id.txt.keep') == ''
         shell: bash
         run: python3 python/launcher/launch.py destroy "$(cat instance-id.txt)" || true
       - name: Safety net - delete the run's destroy-only API key if the launcher did not

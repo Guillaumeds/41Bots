@@ -423,7 +423,11 @@ def parse_gpu_names(text: str) -> list[str]:
 # The keys of a manifest's "machine" object (what the launcher rents for it).
 MACHINE_KEYS = ("gpus", "min_gpu_ram_gb", "min_compute_cap", "min_cores", "min_ram_gb", "disk_gb", "min_inet_down",
                 "min_inet_up",
-                "max_dph", "wait_for_offer_min", "offer_poll_s", "price_steps", "tries_per_step", "gpu_names", "blackwell")
+                "max_dph", "wait_for_offer_min", "offer_poll_s", "price_steps", "tries_per_step", "gpu_names", "blackwell",
+                "keep", "keep_hours", "instance_id")
+
+KEEP_HOURS = 6.0  # default machine.keep_hours: how long a kept machine may idle before the cleanup destroys it
+KEEP_HOURS_MAX = 72.0
 
 
 def apply_machine(a, manifest: dict) -> None:
@@ -457,8 +461,16 @@ def apply_machine(a, manifest: dict) -> None:
                      f"[\"RTX 4090\", \"RTX 5090\"] (got {names!r})")
     if "blackwell" in m and not isinstance(m["blackwell"], bool):
         sys.exit(f"launch: machine.blackwell must be true or false (got {m['blackwell']!r})")
+    if "keep" in m and not isinstance(m["keep"], bool):
+        sys.exit(f"launch: machine.keep must be true or false (got {m['keep']!r})")
+    if "instance_id" in m and (isinstance(m["instance_id"], bool) or not isinstance(m["instance_id"], int)
+                               or m["instance_id"] <= 0):
+        sys.exit(f"launch: machine.instance_id must be a vast instance number (got {m['instance_id']!r})")
+    if "keep_hours" in m and not (isinstance(m["keep_hours"], (int, float)) and not isinstance(m["keep_hours"], bool)
+                                  and 0 < m["keep_hours"] <= KEEP_HOURS_MAX):
+        sys.exit(f"launch: machine.keep_hours must be above 0 and at most {KEEP_HOURS_MAX:g} (got {m['keep_hours']!r})")
     for k, v in m.items():
-        if k in ("price_steps", "gpu_names", "blackwell"):
+        if k in ("price_steps", "gpu_names", "blackwell", "keep", "instance_id"):
             continue
         if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
             sys.exit(f"launch: machine.{k} must be a number, 0 or more (got {v!r})")
@@ -491,6 +503,14 @@ def apply_machine(a, manifest: dict) -> None:
     if "gpu_names" in m and getattr(a, "gpu_names", None) is None:
         a.gpu_names = list(names)
     a.allow_blackwell = allow_blackwell(a) or m.get("blackwell") is True
+    # Keep the machine after the run (never destroyed by this run; see keep_machine) and take over an
+    # instance (a standard deploy onto a machine kept or rented by hand): the command line wins.
+    if m.get("keep") is True:
+        a.keep = True
+    if "keep_hours" in m and getattr(a, "keep_hours", None) is None:
+        a.keep_hours = float(m["keep_hours"])
+    if "instance_id" in m and getattr(a, "instance_id", None) is None:
+        a.instance_id = int(m["instance_id"])
     if gpu_job(a) and a.cpu_only:
         log(f"the run needs {a.gpus} GPU(s): the GPU filters apply (--cpu-only is ignored)")
         a.cpu_only = False
@@ -944,6 +964,11 @@ def finalize_settings(a) -> None:
         sys.exit(f"launch: --offer-poll-s must be at least 1 second (got {a.offer_poll_s})")
     if float(a.wait_for_offer_min) < 0:
         sys.exit(f"launch: --wait-for-offer-min must be 0 (do not wait) or more (got {a.wait_for_offer_min})")
+    a.keep = bool(getattr(a, "keep", False))
+    kh = getattr(a, "keep_hours", None)
+    a.keep_hours = KEEP_HOURS if kh is None else float(kh)
+    if not 0 < a.keep_hours <= KEEP_HOURS_MAX:
+        sys.exit(f"launch: --keep-hours must be above 0 and at most {KEEP_HOURS_MAX:g} (got {a.keep_hours})")
     if getattr(a, "gpu_names", None):
         log(f"only these GPU models are rented: {', '.join(a.gpu_names)} (checked on every offer vast returns, a named offer included)")
 
@@ -1229,7 +1254,7 @@ def record_bad_machine(run_id: str, instance_id: int, best: dict, kind: str, det
 # ------------------------------------------------------------------ run
 
 def instance_env(run_id: str, ncpu: int, dph: float, bin_sha: str, image: str = "", destroy_key: str = "",
-                 offer: dict | None = None) -> str:
+                 offer: dict | None = None, keep: bool = False) -> str:
     kv = {
         "RUN_ID": run_id, "NCPU": str(ncpu), "DPH": f"{dph:.5f}", "BIN_SHA": bin_sha,
         "R2_BUCKET": os.environ["R2_BUCKET"], "R2_S3_ENDPOINT": os.environ["R2_S3_ENDPOINT"],
@@ -1244,6 +1269,9 @@ def instance_env(run_id: str, ncpu: int, dph: float, bin_sha: str, image: str = 
         kv["IMAGE"] = image
     if destroy_key:
         kv["VAST_DESTROY_KEY"] = destroy_key
+    if keep:
+        # The runner then parks at the end of the run instead of destroying its instance (crates/runner end_machine).
+        kv["KEEP_MACHINE"] = "1"
     # The offer, host and machine numbers, for the runner's machine-cost record (machines/<run>.json).
     for key, field in (("OFFER_ID", "id"), ("HOST_ID", "host_id"), ("MACHINE_ID", "machine_id")):
         if offer and offer.get(field) is not None:
@@ -1883,7 +1911,9 @@ def cmd_run(a) -> int:
         log("dry run: would upload manifest and create the instance:\n" + json.dumps(manifest, indent=2))
         return 0
     if getattr(a, "instance_id", None):
-        best, why = take_check(a, instance_status(int(a.instance_id)))
+        info = instance_status(int(a.instance_id))
+        best, why = take_check(a, info)
+        why += take_guard(run_id, int(a.instance_id), info)
         if why:
             sys.exit(f"launch: instance {a.instance_id} cannot take this run: " + "; ".join(why))
         log(f"instance {a.instance_id} (taken over): {describe(best)}")
@@ -1956,6 +1986,10 @@ def rent_and_watch(a, run_id: str, best: dict | None, resumable: bool, run_start
                 # machine and deletes the run's key. Here: only ask the runner to stop.
                 request_stop(run_id, reason)
                 a.handed_over = True
+                if getattr(a, "keep", False):
+                    # The workflow's cleanup step reads this: stop with --keep (the machine stays up).
+                    with open(f"{a.state_file}.keep", "w") as fh:
+                        fh.write(f"{a.keep_hours}")
                 raise
         finally:
             if not getattr(a, "handed_over", False):
@@ -1970,10 +2004,12 @@ def rent_and_watch(a, run_id: str, best: dict | None, resumable: bool, run_start
                         final = marker
                         reason = f"{reason}; stopped by the launcher, the runner uploaded what it finished ({marker})"
                         a.stopped = True
+                keep_now = keep_applies(a, final, reason)
                 if final != "DONE":
-                    log(f"last status before destroy: {redact(status_line(instance_status(instance_id)))}")
+                    log(f"last status {'(machine kept)' if keep_now else 'before destroy'}: "
+                        f"{redact(status_line(instance_status(instance_id)))}")
                     print_logs(instance_id)
-                if final:
+                if final and not keep_now:
                     # The runner destroys itself after uploading; give it a few readings over 90 s
                     # (gone only when confirmed, `Liveness`), then make sure.
                     self_destroyed = False
@@ -1984,7 +2020,8 @@ def rent_and_watch(a, run_id: str, best: dict | None, resumable: bool, run_start
                             break
                         time.sleep(30)
                     log(f"instance {instance_id} {'destroyed itself (' + live.detail + ')' if self_destroyed else 'did NOT destroy itself (confirmed) within 90 s of ' + final}")
-                destroyed = destroy(instance_id)
+                destroyed = (keep_machine(a, run_id, instance_id, dph, final, str(best.get("cpu_name") or ""))
+                             if keep_now else destroy(instance_id))
         ended = time.time()
         attempts.append({"instance_id": instance_id, "offer_id": best["id"], "cpu_name": best.get("cpu_name"),
                          "gpu_name": best.get("gpu_name"), "cores_effective": ncpu, "dph": dph,
@@ -2116,6 +2153,103 @@ def write_watch(a, run_id: str, instance_id: int, best: dict, dph: float, spent_
                json.dumps(watch_record(a, run_id, instance_id, best, dph, spent_before, created, False), indent=2).encode())
     except RuntimeError as e:
         log(f"::warning::could not write runs/{run_id}/watch.json: {e}")
+
+
+def keep_record(run_id: str, instance_id: int, dph: float, why: str, hours: float, cpu_name: str = "",
+                now: float | None = None) -> dict:
+    """keep/<instance>.json: a machine left running for the next worker, and until when it may idle."""
+    now = time.time() if now is None else now
+    until = now + hours * 3600
+    return {"instance_id": int(instance_id), "run_id": run_id, "dph": round(float(dph), 5), "why": why,
+            "cpu_name": cpu_name, "hours": hours,
+            "kept_utc": datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "keep_until_utc": datetime.fromtimestamp(until, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "next": (f"deploy the next job onto it: a manifest with \"machine\": {{\"instance_id\": {int(instance_id)}}} "
+                     f"through the vast-run workflow (docs/STATUS.md, 'Deploy onto a kept machine'), or destroy it "
+                     f"(vast-stop workflow). Until then it bills ${float(dph):.3f}/h; the vast-cleanup workflow "
+                     f"destroys it at keep_until_utc.")}
+
+
+def keep_notice(rec: dict) -> str:
+    return (f"MACHINE KEPT RUNNING, ACTION NEEDED: instance {rec['instance_id']} ({rec.get('cpu_name') or 'machine'}, "
+            f"${rec['dph']:.3f}/h) was left up after run {rec['run_id']} ({rec['why']}). It bills until it is taken over "
+            f"or destroyed; the cleanup destroys it at {rec['keep_until_utc']}. Next: {rec['next']}")
+
+
+def write_keep(run_id: str, instance_id: int, dph: float, why: str, hours: float, cpu_name: str = "") -> dict:
+    """Records a kept machine in R2 (keep/<instance>.json for the cleanup, runs/<run>/KEPT.json for whoever
+    watches the run) and says so loudly in the log and the job summary."""
+    rec = keep_record(run_id, instance_id, dph, why, hours, cpu_name)
+    body = json.dumps(rec, indent=2).encode()
+    r2_put(f"keep/{instance_id}.json", body)
+    r2_put(f"runs/{run_id}/KEPT.json", body)
+    note = keep_notice(rec)
+    log(f"::warning::{note}")
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with contextlib.suppress(OSError), open(summary, "a") as fh:
+            fh.write(f"## :warning: {note}\n")
+    return rec
+
+
+def keep_applies(a, final: str, reason: str) -> bool:
+    """Whether the machine is left up: the run asked for it (machine.keep) and the runner ended the run by itself
+    (DONE or FAILED). A machine the launcher had to stop (budget, time, low CPU, silence) or that never ran is
+    destroyed as before."""
+    return bool(getattr(a, "keep", False)) and final in ("DONE", "FAILED") and not getattr(a, "stopped", False) \
+        and not reason.startswith("budget reached")
+
+
+def keep_machine(a, run_id: str, instance_id: int, dph: float, final: str, cpu_name: str = "") -> str:
+    """Leaves the instance running (the runner parks: KEEP_MACHINE=1) and records it. The workflow's safety-net steps
+    must not destroy it, so the state files go."""
+    write_keep(run_id, instance_id, dph, f"run {final}", float(a.keep_hours), cpu_name)
+    a.kept = True
+    if a.state_file:
+        for suffix in ("", ".run-id"):
+            with contextlib.suppress(OSError):
+                os.remove(f"{a.state_file}{suffix}")
+    return "kept"
+
+
+STALE_HEARTBEAT_S = 15 * 60
+
+
+def take_guard(run_id: str, instance_id: int, info: dict | None, now: float | None = None) -> list[str]:
+    """Reasons a run must not take this instance over (empty: it may). Another session's live run (its label
+    41bots-<run>, heartbeating in the last 15 minutes, no DONE or FAILED) is never taken: cancel it with
+    `keep` first. A kept machine (keep/<id>.json), a machine of an ended run and an unlabelled one rented by hand
+    may be taken; a label that is not ours is refused."""
+    if not info:
+        return []
+    if r2_get(f"keep/{instance_id}.json") is not None:
+        return []
+    label = str(info.get("label") or "")
+    if not label:
+        return []
+    if not label.startswith("41bots-"):
+        return [f"its label {label!r} is not ours (41bots-<run>): it belongs to something else"]
+    owner = label[len("41bots-"):]
+    if owner == run_id:
+        return []
+    if any(r2_get(f"runs/{owner}/{m}") is not None for m in ("DONE", "FAILED")):
+        return []
+    now = time.time() if now is None else now
+    try:
+        _, hb = latest_heartbeat(owner)
+    except RuntimeError:
+        hb = None
+    if hb and hb.get("utc"):
+        try:
+            t = datetime.strptime(hb["utc"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            t = 0.0
+        if now - t <= STALE_HEARTBEAT_S:
+            return [f"run {owner} is still working on it (heartbeat {now - t:.0f} s ago, no DONE or FAILED): stop it "
+                    f"with the machine kept (machine.keep) or wait for its end"]
+    elif now - float(info.get("start_date") or 0) < 3600:
+        return [f"run {owner} started it less than an hour ago and has not heartbeated yet: it is probably booting"]
+    return []
 
 
 def hand_over(a, run_id: str, instance_id: int, best: dict, dph: float, spent_before: float, created: float) -> None:
@@ -2250,7 +2384,7 @@ def take_instance(a, run_id: str, best: dict) -> int | None:
     labelled for the run. Returns its id, or None when vast refuses."""
     iid = int(a.instance_id)
     env = instance_env(run_id, int(best["cpu_cores_effective"]), float(best["dph_total"]), a.bin_sha,
-                       a.image, getattr(a, "destroy_key", ""), offer=best)
+                       a.image, getattr(a, "destroy_key", ""), offer=best, keep=bool(getattr(a, "keep", False)))
     try:
         res = vast("update", "instance", str(iid), "--image", a.image, "--env", json.dumps(env_dict(env)),
                    "--onstart", TAKE_ONSTART, timeout=None)
@@ -2270,6 +2404,8 @@ def take_instance(a, run_id: str, best: dict) -> int | None:
         return None
     with contextlib.suppress(RuntimeError):
         vast("label", "instance", str(iid), f"41bots-{run_id}", raw=False)
+    with contextlib.suppress(RuntimeError):
+        r2_delete(f"keep/{iid}.json")  # no longer kept: this run owns it
     log(f"took over instance {iid} for run {run_id}: its container is recreated with {a.image}; the run "
         f"then watches, stops and destroys it like one it rented")
     if a.state_file:
@@ -2362,7 +2498,8 @@ def create_instance(a, best: dict, run_id: str, ncpu: int, dph: float) -> int | 
     # ssh/jupyter modes replace the image's ENTRYPOINT/CMD with their own init, so the boot script
     # never ran (run 38509301077). --entrypoint names the boot script; an empty --args (must be the
     # very last token) selects runtype "args". On-demand: never pass --bid_price.
-    env = instance_env(run_id, ncpu, dph, a.bin_sha, a.image, getattr(a, "destroy_key", ""), offer=best)
+    env = instance_env(run_id, ncpu, dph, a.bin_sha, a.image, getattr(a, "destroy_key", ""), offer=best,
+                       keep=bool(getattr(a, "keep", False)))
     res = vast("create", "instance", str(best["id"]), "--image", a.image, "--disk", str(a.disk_gb),
                "--env", env, "--label", f"41bots-{run_id}",
                "--entrypoint", BOOT_PATH, "--cancel-unavail", tail=("--args",), timeout=None)
@@ -2644,6 +2781,12 @@ def cmd_stop(a) -> int:
         log(f"::warning::could not write runs/{a.run_id}/{NO_REPLACE} ({e}): the run's launcher may rent a replacement")
     marker = stop_and_wait(a.run_id, a.reason, a.wait_s)
     log(f"run {a.run_id}: {marker or 'no marker'}")
+    if a.keep and a.instance and marker:
+        # The runner parks after its marker (KEEP_MACHINE=1): record the machine instead of destroying it.
+        info = instance_status(int(a.instance)) or {}
+        write_keep(a.run_id, int(a.instance), float(info.get("dph_total") or 0), f"run stopped ({a.reason})",
+                   float(a.keep_hours), str(info.get("cpu_name") or ""))
+        return 0
     if a.instance and destroy(int(a.instance)) != "verified":
         return 1
     return 0
@@ -2773,6 +2916,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "renting one: its container is recreated with this run's image and start command "
                         "(vastai update instance); its disk must already be --disk-gb or more. No replacement "
                         "is rented if it fails")
+    s.add_argument("--keep", action="store_true",
+                   help="leave the machine running when the run ends (DONE or FAILED): the runner parks instead of destroying "
+                        "itself and the launcher records it in keep/<instance>.json; a manifest's machine.keep does the same")
+    s.add_argument("--keep-hours", type=float, default=None,
+                   help=f"with --keep: how long the machine may idle before the vast-cleanup workflow destroys it "
+                        f"(default {KEEP_HOURS:g}, at most {KEEP_HOURS_MAX:g})")
     s.add_argument("--dry-run", action="store_true", help="choose the offer, but create nothing")
     s.add_argument("--no-destroy-key", action="store_true",
                    help="do not create the run's destroy-only key (machines are then destroyed by the launcher only)")
@@ -2804,6 +2953,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--instance", default="", help="the instance to destroy afterwards")
     s.add_argument("--wait-s", type=int, default=STOP_WAIT_S)
     s.add_argument("--reason", default="stopped by launch.py stop")
+    s.add_argument("--keep", action="store_true", help="after the run's marker, leave the instance running and record it "
+                   "(keep/<instance>.json) instead of destroying it")
+    s.add_argument("--keep-hours", type=float, default=KEEP_HOURS)
     s.set_defaults(fn=cmd_stop)
     s = sub.add_parser("delete-key", help="delete one API key by id (a run's destroy-only key)")
     s.add_argument("key_id")
