@@ -329,6 +329,7 @@ fn the_manifests_parse() {
         "student-t2-dealtest.manifest.json",
         "student-t2-dealtest-mech.manifest.json",
         "student-t2-plain-arm.manifest.json",
+        "student-t2-plain-2.manifest.json",
     ] {
         let text = fs::read_to_string(root.join(name)).expect(name);
         let v: Value = serde_json::from_str(&text).expect(name);
