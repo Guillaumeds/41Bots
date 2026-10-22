@@ -868,13 +868,15 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 - **Verdict.** Yes: at 25 deals top-3 + search is better than S2 alone (by 0.014 points, bound just
   above zero), clearly at 50 and 100, no at 10. It stays far above the "perfect pick" 0.0073% of E5,
   which needed all 320 worlds. The break-even lies between 10 and 25 deals a decision.
-- **Limits.** Exact world values: no leaf error, optimistic for any real search. The sample is drawn
+- **Limits.** Trick-2 decisions have only 2-4 candidates (mean 3.3; 2: 493, 3: 421, 4: 1,086), so top-3
+  differs from searching all cards in the 4-card decisions only, by one card (E11): the comparison of
+  top-3 with search-all is weak by construction, top-2 is the real shortlist. Exact world values: no leaf error, optimistic for any real search. The sample is drawn
   from 320 worlds without replacement (31% of them at N = 100), which lowers its variance by about
   17% against independent draws, so the 100-deal numbers are a little optimistic. The truth proxy
   (320-world means) is itself noisy (a 512-deal teacher's floor is 0.008%, E4). The stored golden set
   is trick 2 only. The phone cost is a separate matter: the leader's trick-2 deal is 368 ms in
   WebAssembly on the build VM (`WASM-API.md` §8), so 7 s on one thread is about 19 deals for the
-  leader (27 with a 3-card shortlist, E11), and a phone is 2-4 times slower: the leader may not reach
+  leader (about 35 with a top-2 shortlist, E11), and a phone is 2-4 times slower: the leader may not reach
   the break-even at all, exactly where the student loses most.
 - **Sources.** `docs/m3-hybrid/path-forward.md` section 3 step 0a.
 
@@ -921,19 +923,44 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   4 positions a place; native x86-64, one thread; real O_3 and the pinned equity table): value each
   position in full, then with a shortlist of its best 2 or 3 cards, assert that every shortlisted card
   has the same sums as the full run, and time both (best of 2).
-- **Result.** Values identical in every case. Time as a ratio of the full search: **trick 2, 2 cards
-  0.64, 3 cards 0.70** (summed over places); by place for 2 / 3 cards: leader 0.66 / 0.71, second 0.57 /
-  0.65, third 0.41, 4th-5th 0.57-0.76; seats 6-8 are too cheap to matter (about 0.1 ms a deal, ratio
-  0.85-1.08, within noise). Trick 3 (exact), 2 cards: 0.69 (leader 0.64). Absolute, leader at trick 2:
-  100 ms a deal falls to 66 (2 cards); 116 to 82 (3 cards).
-- **Verdict.** Exact, but a **1.4-1.55 times** speed-up, not the 2-3 times the share of cards kept
-  suggests: most of the work below the root is not specific to one root card. With E9 (a 3-card
-  shortlist is no more accurate than searching all cards at the same deals) the shortlist is worth
-  about 40% more deals in the same time, nothing more. Trick 1 was not measured (no bench request
-  exists for it and a trick-1 deal is minutes on this VM, E8).
-- **Limits.** 3-4 positions per place and trick; timings on a shared build VM (best of 2); the
-  shortlists were the true best cards, the cost depends on which cards are kept.
-- **Sources.** `tools/shortlist_time.py`, `crates/wasm/tests/api.rs`.
+- **Result of that first timing.** Values identical in every case. Time as a ratio of the full search:
+  **trick 2, 2 cards 0.64, 3 cards 0.70** (summed over places); leader 0.66 / 0.71. Trick 3 (exact),
+  2 cards: 0.69. This looked far from the share of cards kept; the breakdown below shows it was not.
+- **Why (breakdown, `shortlist_cost`, same day).** `crates/wasm/src/bin/shortlist_cost.rs`: trick-2
+  bench positions with at least 4 candidates (36 of 64 positions at 8 deals each, 144 deals), each
+  variant run as a request of its own (cold network memo, fresh table), counting solver nodes and
+  network (frontier) calls, with the setup no root card changes (belief preparation and drawing the
+  deals) timed apart. Kept cards: the best by mean over those deals. Ratio to the full solve:
+
+| cards kept | nodes | network calls | solve time |
+|---|---|---|---|
+| 1 | 0.24 | 0.25 | 0.25-0.29 |
+| 2 | 0.49 | 0.49 | 0.55-0.58 |
+| 3 | 0.80 | 0.80 | 0.86-0.90 |
+
+  (The two timing columns are two runs; nodes and calls are deterministic.) **The cost is proportional
+  to the cards kept.** The positions have only 2-4 candidate cards (trick 2: a hand of 4 cards): the
+  bench lists were [4,4,4,4] at the leader and 2-4 elsewhere, and the golden set has 493 decisions
+  with 2 candidates, 421 with 3 and 1,086 with 4 (mean 3.3). Of 4 cards, keeping 2 is half (measured
+  0.49) and keeping 3 is three quarters (0.80), so the largest possible gains are 4x, 2x and 1.33x; I had
+  expected "2-3x" for a 3-card shortlist, which cannot exist. The first timing mixed in positions with 3
+  candidates (where 2 kept is 0.67 of the cards and 3 kept is everything), which is why it read 0.64 / 0.70.
+  The setup is not the reason either: 0.02-0.3 ms a deal (belief preparation once per request, the deal
+  draw each), under 1% of a deal at seats 1-4 and 23% only at the 8th seat, where the whole solve is
+  0.5 ms. Only a shared-work effect is left, and it is small (1 card costs 0.24, not 0.25 of 4).
+- **Verdict (corrected).** The restricted solve works as designed: cost follows the cards kept, values
+  are exact. But at trick 2 there are few cards to drop: top-3 saves a quarter at most (a 1.25x speed-up
+  for the 54% of decisions with 4 cards, nothing for the rest), top-2 about half (2x for 4-card
+  decisions, 1.3x for 3-card ones, nothing for 2-card ones). On average over the golden mix, top-2
+  cuts the work by about 40%, top-3 by about 15%. Trick 1 (hands of 5) was not measured and has more
+  cards to drop.
+- **What this changes in E9.** The golden decisions have at most 4 candidates, so "top-3" removes at
+  most one card and only in 54% of decisions; that is why top-3 + search is hard to tell from
+  searching all cards. Top-2 is the real shortlist at trick 2, and it wins where deals are few (10-25)
+  and loses at 100.
+- **Limits.** 4 positions per place; timings on a shared build VM; trick 3 had no position with 4
+  candidates among the samples (2-3 each), so only trick 2 was broken down.
+- **Sources.** `tools/shortlist_time.py`, `crates/wasm/src/bin/shortlist_cost.rs`, `crates/wasm/tests/api.rs`.
 
 ---
 
