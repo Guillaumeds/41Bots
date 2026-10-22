@@ -18,6 +18,10 @@
 //! RUNNER_TEST_BIN_DIR=target/release cargo test --release -p runner --test resume_worlds -- --ignored --nocapture
 //! ```
 
+// The tests below run on Linux only (they need release binaries and `kill -9`); elsewhere their
+// helpers and imports are unused, which `-D warnings` in CI would turn into errors.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
