@@ -190,6 +190,8 @@ load (§A8).
   upload (run B); slow image pulls killing machines (fixed with a pull-aware timeout); a broken
   NVIDIA runtime rented twice (now remembered for 24 h); the vast balance reaching zero stopped every
   machine at once (2026-10-18).
+- **Every machine's measured cost per unit of work** (exact trick-2/3 solves, labels, H_3, teachers,
+  trick-1 benches): `VAST-MACHINES.md`, first section.
 - **Sources.** `VAST-MACHINES.md`, `vast/measured-*.json`, `history/STATUS-history.md`,
   `history/plan-log-2026-10.md` (2026-10-22 entries).
 
@@ -680,7 +682,9 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 - **Runs.** `o2-gv2-labels-2` (AMD EPYC 7B12) and `-3`: O_2 on 10M G v2 labels, stopped by the owner
   after about an hour (no part finished; $0.34 for -2); `-3` made a 5k exact validation shard (s603).
   `o2-labeltest-1` (plain hybrid vs exact labels at 600k, same exact validation) was cancelled after
-  8 min, before a result; it made a 20k exact validation shard (s602). STATUS-history records "O_2 on
+  8 min, before the exact-label part and before any training: it made the 600k plain hybrid labels
+  (358.6 s on an Intel engineering sample, 184 threads, $0.40/h: 9.1 labels per thread-second, the
+  shard not stored) and a 20k exact validation shard (s602). STATUS-history records "O_2 on
   G v2 labels: rejected" (2026-10-20) on the cost figure.
 - **Label quality measured instead** (C12's label check): O_3-based trick-2 labels against exact on
   50k positions: RMS error about 2.1%, largest team bias 0.013-0.017% (leader's team negative).
@@ -817,7 +821,7 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 | O_3 wider / deeper (`o3-size-*`) | never launched | manifests |
 | Sibling ranking A/B (`o3-sibrank-a/-b`) | never launched | build-VM A/B only (C9) |
 | Four-network ensemble | stopped twice for speed | single-network checks only (C8) |
-| Hybrid-label test (`o2-labeltest-1`) | cancelled at 8 min | 20k exact validation shard (s602) |
+| Hybrid-label test (`o2-labeltest-1`) | cancelled at 8 min | the hybrid labels' speed; 20k exact validation shard (s602) |
 | O_2 on G v2 labels (`o2-gv2-labels-2/-3`) | stopped by owner | 5k exact validation shard (s603) |
 | Trick-2 hybrid-label run (`m3-hybrid-t2-hlabels`) | never launched | manifest |
 | Silver set and exact anchor (D4) | incomplete / not run | a few hundred checkpointed worlds |
@@ -844,7 +848,7 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 | exact trick-3 label | about 9 ms (build VM) | A3 |
 | exact trick-2 label | 3.65 s build VM; 11.3 thread-s EPYC 7B12 | D2 |
 | G v2 trick-2 label | 2.0 s build VM; 9.3 thread-s EPYC 7B12 | D2 |
-| plain hybrid trick-2 label | 86 thread-ms build VM | D2 |
+| plain hybrid trick-2 label | 86 thread-ms build VM; 110 thread-ms (9.1 a thread-second) on an Intel engineering sample, 184 threads | D2 |
 | trick-2 teacher decision at 320 deals (H_3) | 4.7 thread-s build VM | E1 |
 | trick-1 teacher decision at 64 deals (H_2) | 12,489 decisions an hour on 256 EPYC 7B13 threads | E6 |
 | student request in WASM | 0.4-0.7 ms | E1 |

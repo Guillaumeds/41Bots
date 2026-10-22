@@ -28,7 +28,7 @@ Old branches are tags (`git tag -l 'archive/*'`; `git checkout archive/<name>` r
 | `M3-SPEC.md` | card tracker, world generator, PIMC teacher, runner | **done** (A5); its PIMC-suitability measurement (§6) and rules-v1 gate (§8.3) not run |
 | `M3-HYBRID-SPEC.md` | the hybrid yardstick: exact search to trick k, then a network O_k | **adopted** |
 | `ENGINEERING-2026-10-17.md`, `m3-hybrid/nn-speed.md`, `m3-hybrid/overlap.md` | answer-identical speed work | **adopted** (C14) |
-| `m3-hybrid/vast.md`, `VAST-MACHINES.md`, `vast/` | running on rented machines; machine measurements; run manifests | **adopted** (A8). `vast/*.manifest.json` are the runs' inputs and are checked by the runner's tests |
+| `m3-hybrid/vast.md`, `VAST-MACHINES.md`, `vast/` | running on rented machines; **measured cost per unit of work of every machine we rented** (`VAST-MACHINES.md`, first section); run manifests | **adopted** (A8). `vast/*.manifest.json` are the runs' inputs and are checked by the runner's tests |
 | `APP-ENGINE-CONTRACT.md`, `WASM-API.md` | the engine API for the app | **done** |
 | `STUDENT.md` | the student pipeline | **done** (E1) |
 

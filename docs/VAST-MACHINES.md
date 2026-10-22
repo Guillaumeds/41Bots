@@ -1,8 +1,160 @@
 # Choosing vast.ai machines for our CPU-heavy jobs
 
-Reference table and ranking, first written 2026-10-14 (market snapshot 13:02 UTC). Nothing was rented to make it: it combines a read-only look at the vast.ai market, published benchmark results and our own runs so far. Refresh it with one command (see "How to refresh").
+Measured speed and cost of every machine we have rented (first section, updated 2026-10-22), then the reference table and ranking first written 2026-10-14 (market snapshot 13:02 UTC) from published benchmark results, kept for chips we have not rented. Refresh it with one command (see "How to refresh").
 
-## The short answer
+## Measured cost per unit of work: every machine we have data for (updated 2026-10-22)
+
+**This section is the measured record.** Everything below it that ranks machines ("The short answer",
+Tables 1-2, "Rankings") is the 2026-10-14 estimate from published benchmarks, kept for chips we have
+never rented. Every figure here comes from our own runs' stored outputs in R2 (`runs/<run_id>/`:
+the check reports `hc*.txt` / `checks/*.txt`, `rung.json` label steps, teacher `result.json`,
+`out/t1bench/summary.txt`, `hardware/*.json`, the launcher's `report.json`); the run ids are given so
+each number can be re-read. All rates were taken with every usable thread busy. The price is the
+hourly rate the launcher recorded for that rental (prices move; the speed per thread of a chip does
+not). RAM is what the container saw. Cost per unit = price per hour ÷ (units per second per thread ×
+usable threads × 3,600).
+
+Four kinds of CPU work, measured separately because they stress a machine differently: exact
+solves at trick 2 and 3 (small tables, branchy integer search), exact trick-1 solves (tables of
+gigabytes, memory-bound), the network-at-the-leaves search H_3 (integer network maths), and the
+student teachers (search plus network over many deals).
+
+### 1. Exact trick-2 solves: the same 6,345 golden-set worlds on every machine (the cleanest comparison)
+Every golden check of O_3 re-solves the same 1% of the stored trick-2 golden set (2,000 decisions ×
+320 worlds; 6,345 worlds, 9,262,855 solver nodes a world on average) exactly, so these rows compare
+machines on identical work.
+
+| machine | usable threads | RAM GB | $/h | seconds per world per thread | million nodes/s per thread | $ per 1,000 worlds | runs |
+|---|---|---|---|---|---|---|---|
+| AMD EPYC 7B12 server chip | 245 | 132 | 0.30 | 2.49 | 3.7 | 0.0008 | o3-curse-ensemble-1, o3-ensemble4-1, o3-exactleaf-1, o3-learnedleaf-2 |
+| AMD Threadripper PRO 9995WX workstation chip | 184 | 197 | 0.64 | 1.00 | 9.3 | 0.0010 | o3-base80-1, m3-hybrid-t3-additive-2, m3-hybrid-t3-additive-mech-8 |
+| AMD EPYC 9B14 server chip | 184 | 132 | 1.34 | 1.17 | 7.9 | 0.0024 | o3r-1-3, o3r-2-1, golden-routed-s2 |
+| AMD EPYC 7B12 server chip, 122-thread rental | 122 | 132 | 0.67 | 1.62 | 5.7 | 0.0025 | o3-learnedleaf-1 |
+| AMD EPYC 7663 server chip | 215 | 264 | 1.60 | 1.49 | 6.2 | 0.0031 | m3-hybrid-t3-loop-1, m3-hybrid-t3-additive-mech-2 |
+| AMD engineering sample 100-000000894-04 | 208 | 264 | 1.67 | 1.72 | 5.4 | 0.0038 | m3-hybrid-t3-additive-mech-1 |
+
+Also measured, on a different set (the first trick-2 golden set, 400 decisions; 1,284 worlds, 9,786,559
+nodes a world): AMD Threadripper PRO 7995WX workstation chip (184 threads, 263 GB, $1.14/h) 1.29 s
+a world per thread, 7.6 million nodes/s per thread, $0.0022 per 1,000 worlds (m3-hybrid-t3-r1c,
+-t3-r2). The same 7B12 chip ran 2.49 s a world per thread on 245 threads and 1.62 s on 122: the
+second thread of each core adds work but each thread runs slower.
+
+### 2. Exact trick-3 solves
+The trick-3 golden sets' 1% recheck. Sets differ between rows (400 decisions: 1,284 worlds, 24,872
+nodes a world; 4,000 decisions: 12,719 worlds, 20,306 nodes a world). The 400-decision recheck lasts
+only seconds, so its rows are rough.
+
+| machine | usable threads | RAM GB | $/h | set | ms per world per thread | $ per million worlds | run |
+|---|---|---|---|---|---|---|---|
+| AMD EPYC 9654 server chip | 368 | 132 | 1.01 | 400 | 5.14 | 0.0039 | m3-hybrid-t4-audit-mech-1 |
+| AMD EPYC 7B13 server chip | 122 | 528 | 0.73 | 4,000 | 3.18 | 0.0053 | m3-hybrid-t4-loop-3 |
+| AMD EPYC 7B12 server chip | 122 | 132 | 0.67 | 4,000 | 3.75 | 0.0057 | m3-hybrid-t4-audit-mech-2 |
+| AMD Threadripper PRO 7995WX workstation chip | 184 | 263 | 1.14 | 400 | 4.33 | 0.0074 | m3-hybrid-harvest-2, -harvest-lead-3c |
+| AMD EPYC 7663 server chip | 215 | 264 | 1.60 | 400 | 4.03 | 0.0083 | m3-hybrid-harvest-lead-4 |
+| AMD EPYC 7B12 server chip | 122 | 132 | 0.67 | 400 | 6.00 | 0.0091 | m3-hybrid-lead-6b |
+| AMD EPYC 9654 server chip, 46-thread container | 46 | 124 | 0.70-0.75 | 400 | 2.45-2.58 | 0.0103-0.0117 | m3-hybrid-harvest-lead-1, -lead-2 |
+| AMD EPYC 7702P server chip | 122 | 198 | 0.77 | 400 | 6.25 | 0.0109 | m3-hybrid-lead-5c |
+| Intel Xeon Gold 6430 server chip | 122 | 528 | 1.87 | 4,000 | 2.95 | 0.0126 | m3-hybrid-t4-loop-1 |
+| AMD Ryzen 9 5950X desktop chip | 30 | 66 | 0.28 | 400 | 5.38 | 0.0140 | m3-hybrid-r1-c16m-2 |
+| Intel Xeon Gold 6448Y server chip | 122 | 264 | 1.07 | 400 | 6.02 | 0.0146 | m3-hybrid-lead-6a |
+| Intel Core i9-14900K desktop chip | 30 | 66 | 0.72 | 400 | 2.71 | 0.0182 | m3-hybrid-rung1b-1 |
+| Intel Xeon E5-2698 v4 server chip | 38 | 132 | 0.39 | 400 | 6.67 | 0.0189 | m3-hybrid-r1-b8m-2 |
+| AMD EPYC 7302P server chip | 30 | 99 | 0.51 | 400 | 4.70 | 0.0224 | m3-hybrid-r1-d16m-small |
+| AMD EPYC 9374F server chip | 30 | 41 | 1.68 | 400 | 2.10 | 0.0328 | m3-hybrid-r1-a4m-s2b |
+
+### 3. Exact training labels (rows per thread-second; long label steps only)
+Label generation is exact solving plus position generation. Only steps of minutes to hours are
+listed: trick-4 label steps last seconds and are dominated by start-up, so they are left out.
+
+| trick | machine | usable threads | RAM GB | $/h | rows/s per thread | $ per million labels | rows timed | run |
+|---|---|---|---|---|---|---|---|---|
+| 3 | AMD Threadripper PRO 9995WX workstation chip | 184 | 197 | 0.64 | 112-115 | 0.0085 | 32M random + rules | o3-base80-1 |
+| 3 | AMD Threadripper PRO 7995WX workstation chip | 184 | 263 | 1.14 | 86-90 | 0.019 | 16-32M random + rules | m3-hybrid-t3-r1c, -r2, -r3 |
+| 3 | AMD EPYC 7663 server chip | 215 | 264 | 1.60 | 73 | 0.028 | 0.2M | m3-hybrid-t3-additive-mech-2 |
+| 3 | AMD engineering sample 100-000000894-04 | 208 | 264 | 1.67 | 62 | 0.036 | 0.2M | m3-hybrid-t3-additive-mech-1 |
+| 3 | AMD Ryzen 9 5950X desktop chip | 30 | 66 | 0.28 | 92 | 0.028 | 0.4M | m3-hybrid-t3-smoke-1 |
+| 2, plain hybrid (exact trick 2, O_3 f5766a at trick 3) | Intel engineering sample ("Genuine Intel 0000") | 184 | 64 | 0.40 | 9.1 | 0.066 | 600k | o2-labeltest-1 |
+| 2 | AMD EPYC 7B12 server chip | 245 | 132 | 0.30 | 0.083 | 4.1 | 20k | o2-gv2-labels-2 |
+| 2 | AMD EPYC 7B12 server chip, H_2-harvested rows | 245 | 132 | 0.30 | 0.080 | 4.3 | 300k | o2-leafrisk-1 |
+| 2 | AMD Threadripper PRO 9995WX workstation chip | 184 | 197 | 0.60 | 0.19 | 4.7 | 5k | o2-gv2-labels-3 |
+| 2 | AMD EPYC 7742 server chip, 122-thread rental | 122 | 132 | 0.33 | 0.12 | 6.3 | 25k | m3-hybrid-t2-mech-5 |
+| 2 | AMD EPYC 7742 server chip | 245 | 264 | 0.72 | 0.10-0.11 | 7.6-8.0 | 1.5M | m3-hybrid-t2-loop-1 |
+| 2 | AMD EPYC 9654 server chip | 368 | 132 | 1.01 | 0.068 | 11.2 | 25k | m3-hybrid-t2-mech-6 |
+| 2 | AMD EPYC 7B12 server chip, 122-thread rental | 122 | 264 | 0.86 | 0.14 | 14.0 | 25k | m3-hybrid-t2-mech-1 |
+
+The trick-2 loop's second run (`m3-hybrid-t2-loop-2`) ran the same AMD EPYC 7742 machine type at
+$1.27/h, which puts the same rate at about $14 per million labels.
+
+### 4. H_3: exact search through trick 2, the network O_3 at trick 3 (same 2,000-decision golden set, O_3 f5766a)
+
+| machine | usable threads | $/h | thread-ms a world | µs per network evaluation | $ per 1,000 worlds | runs |
+|---|---|---|---|---|---|---|
+| AMD EPYC 7B12 server chip | 245 | 0.30 | 51 | 84 | 0.017 | o3-exactleaf-1, o3-learnedleaf-2, o3-curse-ensemble-1 |
+| AMD Threadripper PRO 9995WX workstation chip | 184 | 0.64 | 23-24 | 31-33 | 0.023 | m3-hybrid-t3-additive-2, -mech-8 (O_3 at 80M: 21) |
+| AMD EPYC 9B14 server chip | 184 | 1.34 | 23.5-24.3 | 41-42 | 0.048 | o3r-1-3, o3r-2-1, golden-routed-s2 |
+| AMD EPYC 7B12 server chip, 122-thread rental | 122 | 0.67 | 41 | 74 | 0.063 | o3-learnedleaf-1 |
+| AMD EPYC 7663 server chip | 215 | 1.60 | 47 | 71-74 | 0.097 | m3-hybrid-t3-loop-1, -additive-mech-2 |
+| AMD engineering sample 100-000000894-04 | 208 | 1.67 | 48 | 70 | 0.108 | m3-hybrid-t3-additive-mech-1 |
+
+H_3 with G2's exact leaves (t=277338260) cost 1,550 thread-ms a world on the 7B12 (245 threads) and
+586 on the 9B14; a 2048-2048-1024-256 network about twice the 2048-1024-256 one (95 against 47 ms on
+the 7663); the 4096-wide network 77.5 against 23.5 ms on the 9B14.
+
+### 5. Student teachers (PIMC over many deals; the deal count is part of the work)
+
+| teacher | machine | usable threads | $/h | deals | decisions an hour | thousand deal-searches per thread-hour | $ per million decisions | runs |
+|---|---|---|---|---|---|---|---|---|
+| trick 2, H_3 | AMD EPYC 9654 server chip | 368 | 1.01 | 320 | 107,000 | 93 | 9.4 | student-t2-base-1 |
+| trick 2, H_3 | AMD EPYC 9654 server chip | 368 | 1.01 | 1,024 (test set) | 30,400 | 85 | 33.2 | student-t2-base-1 |
+| trick 2, H_3 | AMD Threadripper PRO 7995WX workstation chip | 184 | 1.14 | 320 | 69,900 | 122 | 16.3 | student-t2-more-1 |
+| trick 2, H_3 | AMD EPYC 7K62 server chip | 184 | 0.86 | 64 | 181,000 | 63 | 4.7 | student-t2-more-2 |
+| trick 1, H_2 (provisional O_2) | AMD EPYC 7B13 server chip | 245 | 1.05 | 64 | 12,500 | 3.3 | 84 | student-t1-cost-2 |
+
+Per deal the 64-deal rows cost more than the 320-deal rows: each decision has a fixed cost (belief
+sampling, setup) shared over fewer deals.
+
+### 6. Exact trick-1 solves (the t1bench machine bench: one world per thread, every thread busy)
+Cost per 10^12 solver nodes in the fill window; the production schedule (worlds split over many
+threads with big tables) ran at 0.36-0.54 of the fill rate. Details per wave: `docs/history/STATUS-history.md`
+(2026-10-15) and "Measured on our runs" below; per-thread speeds also in `docs/vast/measured-speeds.json`.
+
+| machine | usable threads | RAM GB | $/h | million nodes/s per thread | $ per 10^12 nodes (fill) | runs |
+|---|---|---|---|---|---|---|
+| Intel engineering sample ("Genuine Intel 0000"; machine 147534) | 184 | 62 | 0.40 | 3.8 | 0.159 | t1bench-56828875-20261021d (stopped in its production window: 151 of 184 threads busy) |
+| AMD Threadripper PRO 9995WX workstation chip | 184 | 241 | 1.27 | 6.7 | 0.28-0.31 | t1bench-9995wx-w1, -w3 |
+| Intel Xeon E5-2695 v4 server chip | 69 | 504 | 0.41 | 3.0-3.1 | 0.53-0.54 | t1bench-e5-w2, -w3 |
+| Intel Xeon Gold 5220R server chip | 92 | 45 | 0.70 | 3.6 | 0.59 | t1bench-5220r-w3 |
+| AMD engineering sample 100-000000894-04 | 208 | 251 | 1.76 | 3.6 | 0.66 | t1bench-56041192-test |
+| AMD EPYC 9734 server chip | 215 | 125 | 3.34 | 5.2-5.5 | 0.83 | t1bench-9734-w2 |
+| AMD EPYC 9654P server chip | 184 | 251 | 2.94 | 5.3-5.6 | 0.84 | t1bench-9654p-w2 |
+| AMD EPYC 9754 server chip | 245 | 483 | 3.74 | 4.5-4.7 | 0.94 | t1bench-9754-w1 |
+| AMD EPYC 9554 server chip | 245 | 504 | 6.94 | 6.5-6.9 | 1.20 | t1bench-9554-w3 |
+| AMD Zen 5 engineering sample 100-000001535-05 | 491 | 1,133 | 13.66 | 5.2-5.4 | 1.50 | t1bench-turines-w3 |
+
+The Intel engineering sample also made the plain hybrid trick-2 labels of `o2-labeltest-1` (§3) and
+ran two discarded Copilot runs (184 threads, 64 GB, $0.40-0.46/h).
+
+### 7. Rented, but no speed measured
+- AMD EPYC 9B45 with an RTX PRO 6000 (listed 384 threads): every container got 46 usable threads;
+  stopped by the launcher (2026-10-17 `m3-hybrid-t2-mech-3/-7`; 2026-10-22 three speedtests).
+- Runs whose machines are recorded but whose timed steps were too short or failed: AMD EPYC 9V84
+  (m3-hybrid-harvest-lead-3), AMD Ryzen Threadripper 3990X (m3-hybrid-t4-loop-2), AMD EPYC 7K62 92-
+  thread (m3-hybrid-t3-r1b), AMD EPYC 7J13, Intel Xeon E5-2673 v3/v4 (M1 and early M3 runs), Intel
+  Xeon E5-2682 v4 (cu130-smoke-1), Intel Xeon Phi 7250 (m3-hybrid-t2-mech-4; the launcher now refuses
+  Xeon Phi), AMD EPYC 7713, 7W83, 9684X (discarded Copilot runs), AMD EPYC 7702 (student-t2-curve-mech-1,
+  GPU training only), AMD Ryzen 9 7950X (m3-hybrid-harvest-1), AMD EPYC 9354 (start failure).
+- The launcher's whole-rental figures for every run (machine, threads, $/h, minutes, $) are in each
+  run's `runs/<run_id>/report.json`.
+
+### Reading the tables
+- The same chip at a different price is a different row in cost: the speed per thread is the
+  property of the chip; the price is the property of the offer at that moment.
+- The same chip rented whole and as half a machine gives two rows (AMD EPYC 7B12: 245 threads at
+  $0.30/h and 122 threads at $0.67/h in §1): both the price and the speed per thread differ.
+- Measurements from short steps (seconds) and from containers given a fraction of the machine are
+  marked; the long-step rows (hours of labels, the 6,345-world rechecks) are the firmest.
+
+## The short answer (estimate of 2026-10-14, before our measurements; see the measured section above)
 
 - **The price on vast.ai is set by the graphics cards, not by the processor.** We do not use the graphics cards, so the bargains are machines with a big processor and a cheap card. Today the price of one hardware thread [one of the two "virtual cores" each physical core runs; vast.ai calls them "effective cores"] varies about 30-fold between offers, while the speed of one thread varies only about 3-fold between the processor types on offer. **So the price matters more than the processor model**, and the right machine changes from hour to hour. Always rank the live market; never rent a fixed model by habit.
 - **Cheapest work right now, for every job except exact trick-1 solves:** an AMD EPYC 9965 machine (768 threads, 503 GB, $2.40/h). By our estimate it does about 3 times more work per dollar than any other machine our launcher may rent, and it is also the fastest machine on offer, so the owner's rule (fastest within +20% of the cheapest) also picks it. Next: EPYC 7B13 (128 threads, $1.00/h), EPYC 9V74 (320 threads, $4.01/h).

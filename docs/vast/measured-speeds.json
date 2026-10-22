@@ -1,7 +1,7 @@
 {
  "format": "41bots-measured-speeds",
  "version": 1,
- "updated": "2026-10-15",
+ "updated": "2026-10-22",
  "about": "Exact trick-1 solver speed per usable hardware thread, measured by the t1bench machine bench (position-weighted mix, every thread busy), averaged over the listed runs. Used by python/tools/vast_watch to turn a market listing into an estimated cost per 10^12 solver nodes. Add a model here after each new bench run; 'family' means the number was measured on a sibling model and is applied to this one until it is measured itself.",
  "usable_thread_ratio": 0.958,
  "default_k_nodes_per_s_per_speed_unit": 4500000.0,
@@ -170,6 +170,22 @@
    "threads_measured": 92,
    "ram_gb_measured": 45,
    "production_over_fill_rate": 0.34
+  },
+  {
+   "name": "Intel engineering sample (cpuinfo 'Genuine Intel(R) 0000', machine 147534)",
+   "match": "Genuine Intel\\(R\\) 0000",
+   "confidence": "measured",
+   "per_thread_nodes_per_s": 3813588,
+   "runs": [
+    "t1bench-56828875-20261021d"
+   ],
+   "n": 1,
+   "spread_pct": null,
+   "tt_mb_during_measurement": 256,
+   "threads_measured": 184,
+   "ram_gb_measured": 62,
+   "production_over_fill_rate": null,
+   "note": "fill window complete (243 s, 701.7M nodes/s on 184 threads); the production window stopped after 31 s (151 of 184 threads busy), so no production rate"
   }
  ]
 }

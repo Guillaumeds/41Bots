@@ -82,6 +82,7 @@ The owner wants the teachers and their deal counts decided last.
 | specialist run output | `runs/specialist-s2/` (record.json, networks) | the flagged shards were not stored (about 23 GB) |
 
 ### How to run things (GitHub Actions, no vast key on the VM)
+- **Which machine:** measured cost per unit of work of every machine we have rented, by kind of work, is the first section of `docs/VAST-MACHINES.md` (updated 2026-10-22).
 - **Launch:** workflow `vast-run.yml` on `main` with inputs: `manifest` (the JSON inline, one
   line), `min_cores`, `min_ram_gb`, `disk_gb`, `cpu_only` ("true" for CPU jobs), `gpus`, `min_gpu_ram_gb`,
   `max_dollars` (the cap; the launcher stops and destroys at it), `any_host` ("true"), optionally
