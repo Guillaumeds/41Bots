@@ -34,6 +34,9 @@ record: `docs/m3-hybrid/o3-rounds.md` "Results" and `docs/m3-hybrid/specialist.m
 5. Then the trick-1 check of O_3 alone against O_3 + G2 on about 100 trick-1 decisions (decides
    whether G2 is used for the bronze set).
 
+**Proposed path from here (2026-10-22, owner to approve):** `docs/m3-hybrid/path-forward.md` (free reads on the
+build VM first, then the S2 teacher A/B, the O_2 label test at equal money, trick-1 yardsticks, S1).
+
 **Records:** `docs/EXPERIMENTS.md` (every experiment and its result), `docs/RESEARCH.md` (the outside
 research), `docs/README.md` (index).
 

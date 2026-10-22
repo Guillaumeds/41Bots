@@ -811,6 +811,28 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 - **Result.** No data produced: `-1` failed on a runner bug (fixed in 6c7acf5), `-2` was stopped by the
   idle watchdog during setup.
 
+### E8. Does a shortlist make the exact solve cheaper? And a trick-1 H_3 world (2026-10-22, build VM)
+- **Question.** If the student names 2 or 3 cards, does the search over them cost less per deal? What
+  does one trick-1 deal cost when the search is exact through tricks 1 and 2 and O_3 values trick 3?
+- **Method.** `engine-native time` on 32 trick-2 positions (4 per place, 16 deals each, one thread,
+  native x86-64), with the candidate list cut to the first or last 2 or 3 cards by a local, uncommitted
+  patch of `crates/wasm/src/api.rs`; the network was the 80M-base O_3 (`o3-base80-1`, same
+  2048-1024-256 shape, not the adopted f5766a, which is not on the VM), the equity table rebuilt from
+  `data/equity` (SHA-256 matches the pinned 64740dab). Separately `search teacher --trick 1 --deals 1
+  --threads 1` with that network (exact through tricks 1 and 2, then O_3) on one seed-7 decision.
+- **Result.** All cards, ms a deal by place 1-8: 82, 31, 7.3, 5.2, 2.8, 1.0, 0.6, 0.3 (the stored
+  `WASM-API.md` §8 native figures are 73, 25, 6.7, 5.0, 3.1, 1.2, 0.75, 0.38). With 2 or 3 cards the
+  same within noise (leader 76-83): the exact solver values every root card in one search
+  (`search::pimc::exact_world`, "one solve values every root card"), so the candidate list does not
+  change the cost. The candidate lists had 2-4 cards (leader 4 in all four samples). The trick-1 H_3
+  deal was **not finished when stopped** (one run at 590 s, another at its background limit, up to 50
+  minutes, of one thread); D4 records 10-30 thread-minutes for a leader world on the build VM.
+- **Limits.** 4 positions a place; the stand-in O_3; the trick-1 timing is one decision and a lower
+  bound; a root-restricted solver does not exist, so its saving is unmeasured (the search barely
+  prunes, 106 of 81,000 nodes at trick 3, `ENGINEERING-2026-10-17.md`, so cost should follow the number
+  of root cards kept, an estimate).
+- **Sources.** `docs/m3-hybrid/path-forward.md`.
+
 ---
 
 ## Part F. Runs and builds without a result, and work set aside
