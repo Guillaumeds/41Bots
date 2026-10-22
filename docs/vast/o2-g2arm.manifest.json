@@ -1,0 +1,62 @@
+{
+ "format": 2,
+ "run_id": "o2-g2arm-1",
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "O_2 stage A, arm 'g75': 0.75M G2 hybrid labels (exact through trick 2, O_3 f5766a after, the learned exact leaves G2 at t=277338260 on 43% of leaves), 80/20 random/rules-v1 (seeds 561/562), the same 2048-1024-256 network, seed 1 and early stopping on the exact s601 positions (regenerated, same seed) as arms e075/e15/p15. Owner 2026-10-22 after g2-labelcheck-1: G2 labels RMS 0.48% from exact against plain 2.15%, at about half the cost of exact. Five stored label parts of about 45 minutes, so a lost machine costs one part. Judged afterwards on the 250k exact test set with fortyone_nn.netcmp.",
+ "machine": {
+  "gpus": 1,
+  "min_gpu_ram_gb": 8,
+  "min_cores": 190,
+  "min_ram_gb": 64,
+  "min_inet_down": 100,
+  "max_dph": 1.7,
+  "disk_gb": 80
+ },
+ "inputs": {
+  "o3": "sha256:f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
+  "leafrisk_o3": "sha256:20c41678c64681855003e5b8660e0a2e1fb9e8d552f7d898dd956055c767a9d5"
+ },
+ "streams": [
+  {
+   "name": "g75",
+   "priority": 1,
+   "kind": "hybrid_rung",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "cut": 2,
+    "check": false,
+    "widths": "2048,1024,256",
+    "head": "outcome",
+    "epochs": 40,
+    "patience": 6,
+    "batch": 1024,
+    "lr": 0.001,
+    "train_seed": 1,
+    "max_minutes": 0,
+    "device": "cuda",
+    "overlap": false,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    },
+    "labels_random": 600000,
+    "labels_random_seed": 561,
+    "labels_rules": 150000,
+    "labels_rules_seed": 562,
+    "val_count": 50000,
+    "val_seed": 601,
+    "label_parts": 5,
+    "upload_shards": true,
+    "label_source": "hybrid",
+    "label_net": "inputs/sha256/f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
+    "hybrid_exact_share": 0,
+    "label_exact_leaves": "learned:inputs/sha256/20c41678c64681855003e5b8660e0a2e1fb9e8d552f7d898dd956055c767a9d5:t=277338260"
+   }
+  }
+ ]
+}
