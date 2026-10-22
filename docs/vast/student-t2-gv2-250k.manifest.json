@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "run_id": "student-t2-gv2-250k-2",
+  "run_id": "student-t2-gv2-250k-3",
   "run_seed": 1,
   "threads": null,
   "benchmark_seconds": 0,
@@ -11,7 +11,15 @@
     "min_cores": 190,
     "min_ram_gb": 48,
     "disk_gb": 60,
-    "max_dph": 2.1
+    "max_dph": 0.8,
+    "price_steps": [
+      0.4,
+      0.55,
+      0.8
+    ],
+    "tries_per_step": 3,
+    "offer_poll_s": 60,
+    "wait_for_offer_min": 240
   },
   "inputs": {
     "o3": "sha256:f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
