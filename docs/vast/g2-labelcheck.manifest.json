@@ -1,0 +1,133 @@
+{
+ "format": 2,
+ "run_id": "g2-labelcheck-1",
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "Owner 2026-10-22: do G2 labels (hybrid with the learned exact leaves) come closer to exact than plain hybrid labels (RMS 2.1% in D2)? And re-measure the label speeds, not trusting the documented ones. The same 10,000 random-play trick-2 positions (seed 8001) labelled exact, plain hybrid and G2; compare with fortyone_nn.labelcmp (exact vs each). The tiny by-product networks are thrown away. A pricier machine is allowed (short job).",
+ "machine": {
+  "gpus": 1,
+  "min_gpu_ram_gb": 8,
+  "min_cores": 190,
+  "min_ram_gb": 64,
+  "min_inet_down": 100,
+  "max_dph": 3.0,
+  "price_steps": [
+   1.45,
+   2.0,
+   3.0
+  ],
+  "wait_for_offer_min": 120,
+  "disk_gb": 60
+ },
+ "inputs": {
+  "o3": "sha256:f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
+  "leafrisk_o3": "sha256:20c41678c64681855003e5b8660e0a2e1fb9e8d552f7d898dd956055c767a9d5"
+ },
+ "streams": [
+  {
+   "name": "exact",
+   "priority": 1,
+   "kind": "hybrid_rung",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "cut": 2,
+    "check": false,
+    "widths": "256,64",
+    "head": "outcome",
+    "epochs": 1,
+    "patience": 1,
+    "batch": 1024,
+    "lr": 0.001,
+    "train_seed": 1,
+    "max_minutes": 0,
+    "device": "cuda",
+    "overlap": false,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    },
+    "upload_shards": true,
+    "label_parts": 1,
+    "labels_random": 10000,
+    "labels_random_seed": 8001,
+    "labels_rules": 0,
+    "val_count": 500,
+    "val_seed": 8100
+   }
+  },
+  {
+   "name": "plain",
+   "priority": 2,
+   "kind": "hybrid_rung",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "cut": 2,
+    "check": false,
+    "widths": "256,64",
+    "head": "outcome",
+    "epochs": 1,
+    "patience": 1,
+    "batch": 1024,
+    "lr": 0.001,
+    "train_seed": 1,
+    "max_minutes": 0,
+    "device": "cuda",
+    "overlap": false,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    },
+    "upload_shards": true,
+    "label_parts": 1,
+    "labels_random": 10000,
+    "labels_random_seed": 8001,
+    "labels_rules": 0,
+    "val_count": 500,
+    "val_seed": 8100,
+    "label_source": "hybrid",
+    "label_net": "inputs/sha256/f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
+    "label_exact_leaves": "none"
+   }
+  },
+  {
+   "name": "g2",
+   "priority": 3,
+   "kind": "hybrid_rung",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "cut": 2,
+    "check": false,
+    "widths": "256,64",
+    "head": "outcome",
+    "epochs": 1,
+    "patience": 1,
+    "batch": 1024,
+    "lr": 0.001,
+    "train_seed": 1,
+    "max_minutes": 0,
+    "device": "cuda",
+    "overlap": false,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    },
+    "upload_shards": true,
+    "label_parts": 1,
+    "labels_random": 10000,
+    "labels_random_seed": 8001,
+    "labels_rules": 0,
+    "val_count": 500,
+    "val_seed": 8100,
+    "label_source": "hybrid",
+    "label_net": "inputs/sha256/f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
+    "label_exact_leaves": "learned:inputs/sha256/20c41678c64681855003e5b8660e0a2e1fb9e8d552f7d898dd956055c767a9d5:t=277338260"
+   }
+  }
+ ]
+}

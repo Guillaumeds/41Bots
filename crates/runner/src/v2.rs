@@ -1583,6 +1583,7 @@ mod tests {
             ("o2-gv2-labels.manifest.json", 1),
             ("o2-labeltest.manifest.json", 2),
             ("o2-stagea-full-2.manifest.json", 15),
+            ("g2-labelcheck.manifest.json", 3),
             ("o3-round-1.manifest.json", 1),
             ("specialist-s1.manifest.json", 1),
             ("golden-routed-s2.manifest.json", 1),
