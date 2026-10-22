@@ -14,7 +14,7 @@
   "min_cores": 190,
   "min_ram_gb": 60,
   "min_inet_down": 100,
-  "max_dph": 0.5,
+  "max_dph": 1.7,
   "blackwell": true,
   "disk_gb": 260
  },
