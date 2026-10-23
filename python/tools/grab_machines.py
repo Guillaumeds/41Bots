@@ -51,6 +51,7 @@ def rentable_offer(machine_id):
 
 GENERIC_MAX_DPH = 1.20
 GENERIC_MIN_THREADS = 190
+GENERIC_GOOD_CPUS = ("EPYC", "Threadripper")  # a Xeon Phi 7250 (272 slow threads) was taken by the plain thread rule on 2026-10-23
 GENERIC_BAD_CPUS = ("9B45",)  # lists 384 threads, gave about 46 (docs/VAST-MACHINES.md)
 
 
@@ -69,6 +70,7 @@ def generic_offer(exclude_machines):
         return None
     ok = [o for o in offers if o.get("rentable") and o.get("machine_id") not in exclude_machines
           and o.get("cpu_cores_effective", 0) >= GENERIC_MIN_THREADS and o.get("dph_total", 9) <= GENERIC_MAX_DPH
+          and any(g in str(o.get("cpu_name")) for g in GENERIC_GOOD_CPUS)
           and not any(b in str(o.get("cpu_name")) for b in GENERIC_BAD_CPUS)]
     return min(ok, key=lambda o: o["dph_total"] / o["cpu_cores_effective"]) if ok else None
 
