@@ -1579,6 +1579,7 @@ mod tests {
             ("student-t2-gv2-250k.manifest.json", 2),
             ("student-t2-base.manifest.json", 3),
             ("m3-hybrid-t2-hlabels.manifest.json", 1),
+            ("o2-audit.manifest.json", 1),
             ("o3-learnedleaf.manifest.json", 1),
             ("o2-leafrisk.manifest.json", 1),
             ("o2-gv2-labels.manifest.json", 1),
