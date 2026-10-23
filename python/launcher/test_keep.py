@@ -86,6 +86,12 @@ class KWorld(tl.World):
         if self.keep and f"runs/{RUN}/DONE" in self.store and not inst.get("destroyed"):
             inst["alive"] = True  # parked: it does not destroy itself
 
+    def r2_put(self, key: str, data: bytes) -> None:
+        super().r2_put(key, data)
+        if key.startswith("claims/") and getattr(self, "steal_claim", False):
+            # another session writes its claim just after ours: the last writer wins
+            self.store[key] = json.dumps({"run_id": "other-run", "utc": stamp(self.t)}).encode()
+
     def heartbeat_of(self, run: str, t: float) -> None:
         self.store[f"runs/{run}/heartbeat/000001.json"] = json.dumps({"seq": 1, "utc": stamp(t)}).encode()
 
@@ -332,6 +338,47 @@ class TakeoverTest(KeepTestBase):
         code, report = self.run_launch(w, self.manifest(keep=True))
         self.assertNotIn("keep/100.json", w.store)
         self.assertTrue(w.instances[100].get("destroyed"))
+
+    def test_a_takeover_writes_its_claim(self):
+        w = KWorld([], [])
+        w.add_machine(500, "")
+        code, _ = self.take(w)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(w.store["claims/500.json"])["run_id"], RUN)
+
+    def test_a_fresh_claim_of_a_run_that_has_not_ended_blocks_a_second_takeover(self):
+        w = KWorld([], [])
+        w.add_machine(500, "")
+        w.store["claims/500.json"] = json.dumps({"run_id": "o2-audit-1", "utc": stamp(w.t - 240)}).encode()
+        with self.assertRaises(SystemExit) as e:
+            self.take(w)
+        self.assertIn("claimed it", str(e.exception))
+        self.assertEqual(w.calls, [])
+
+    def test_an_old_claim_or_one_of_an_ended_run_does_not_block(self):
+        for kind in ("old", "ended", "mine"):
+            w = KWorld([], [])
+            w.add_machine(500, "")
+            claim = {"run_id": "o2-audit-1", "utc": stamp(w.t - (3 * 3600 if kind == "old" else 60))}
+            if kind == "ended":
+                w.store["runs/o2-audit-1/DONE"] = b"{}"
+            if kind == "mine":
+                claim["run_id"] = RUN
+            w.store["claims/500.json"] = json.dumps(claim).encode()
+            code, _ = self.take(w)
+            self.assertEqual(code, 0, kind)
+
+    def test_the_last_claim_wins_and_the_loser_touches_nothing(self):
+        w = KWorld([], [])
+        w.add_machine(500, "")
+        w.steal_claim = True
+        code, report = self.take(w)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(w.calls, [])
+        self.assertEqual(w.destroy_calls, 0)
+        self.assertTrue(w.instances[500]["alive"])
+        self.assertIn("claimed it at the same time", self.log)
+        self.assertEqual(json.loads(w.store["claims/500.json"])["run_id"], "other-run")
 
     def test_a_machine_that_is_taken_over_can_be_kept_again(self):
         w = KWorld([], [])

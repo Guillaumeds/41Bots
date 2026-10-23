@@ -210,7 +210,9 @@ The owner wants the teachers and their deal counts decided last.
     so the new run never heartbeated (and `o3r-1-1` on 2026-10-21 failed alike). **What is established:** a takeover of a hand-rented machine
     worked once (O2 session; whether it was stopped or running is not recorded), one of a launcher-created kept machine failed once, and starting a
     *stopped* instance (update then start) is tested only against the fake vast. The cause of the difference is not found. A taken-over machine that
-    does not start is now kept, not destroyed.
+    does not start is now kept, not destroyed. **Two sessions must not take over one machine** (it happened on 2026-10-23: the later takeover
+    replaced the earlier's container): a takeover now writes `claims/<instance>.json` and refuses while another unfinished run's claim is under 45 minutes old
+    (E15); to stop a run whose machine another run now owns, use `gh run cancel --force` (a normal cancel destroys the instance it recorded).
   - `"instance_id": N`: take that instance over instead of renting one (`launch.py` `take_instance`: `vastai update
     instance` with this run's image, environment and binaries, then `recycle instance`, which rebuilds the container in
     place; the disk and machine stay; the instance is relabelled `41bots-<run>` and its `keep/` record deleted). Use a

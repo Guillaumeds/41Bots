@@ -2223,6 +2223,36 @@ def keep_machine(a, run_id: str, instance_id: int, dph: float, final: str, cpu_n
 
 
 STALE_HEARTBEAT_S = 15 * 60
+CLAIM_FRESH_S = 45 * 60  # a takeover claim (claims/<instance>.json) of a run that has not ended blocks another takeover for this long
+CLAIM_SETTLE_S = 8       # after writing its claim a takeover waits this long and reads it back: the last writer wins
+
+
+def claim_of(instance_id: int) -> dict | None:
+    raw = r2_get(f"claims/{instance_id}.json")
+    try:
+        c = json.loads(raw) if raw else None
+    except ValueError:
+        return None
+    return c if isinstance(c, dict) else None
+
+
+def claim_blocks(run_id: str, instance_id: int, now: float | None = None) -> str | None:
+    """Why another run's fresh claim stops `run_id` taking this instance over (None: no such claim). Two sessions took the
+    same kept machine within four minutes on 2026-10-23 and the second one's container replaced the first's."""
+    c = claim_of(instance_id)
+    if not c or c.get("run_id") in (None, run_id):
+        return None
+    if any(r2_get(f"runs/{c['run_id']}/{m}") is not None for m in ("DONE", "FAILED")):
+        return None
+    now = time.time() if now is None else now
+    try:
+        t = datetime.strptime(str(c.get("utc")), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return None
+    if now - t > CLAIM_FRESH_S:
+        return None
+    return (f"run {c['run_id']} claimed it {now - t:.0f} s ago and has not ended: two takeovers of one machine "
+            f"replace each other's container (wait for that run, or use another machine)")
 
 
 def take_guard(run_id: str, instance_id: int, info: dict | None, now: float | None = None) -> list[str]:
@@ -2232,6 +2262,9 @@ def take_guard(run_id: str, instance_id: int, info: dict | None, now: float | No
     may be taken; a label that is not ours is refused."""
     if not info:
         return []
+    claimed = claim_blocks(run_id, instance_id, now)
+    if claimed:
+        return [claimed]
     if r2_get(f"keep/{instance_id}.json") is not None:
         return []
     label = str(info.get("label") or "")
@@ -2395,6 +2428,19 @@ def take_instance(a, run_id: str, best: dict) -> int | None:
     container in place from them (`vastai recycle instance`; its disk and machine stay), and it is
     labelled for the run. Returns its id, or None when vast refuses."""
     iid = int(a.instance_id)
+    # The claim: write it, wait, read it back; the last writer wins and the others stand down before touching the machine.
+    blocked = claim_blocks(run_id, iid)
+    if blocked:
+        log(f"::error::not taking over instance {iid}: {blocked}")
+        return None
+    r2_put(f"claims/{iid}.json", json.dumps({"run_id": run_id, "utc": datetime.now(timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")}).encode())
+    time.sleep(CLAIM_SETTLE_S)
+    mine = claim_of(iid)
+    if not mine or mine.get("run_id") != run_id:
+        log(f"::error::not taking over instance {iid}: run {(mine or {}).get('run_id')} claimed it at the same time and "
+            f"keeps it (the last claim wins)")
+        return None
     env = instance_env(run_id, int(best["cpu_cores_effective"]), float(best["dph_total"]), a.bin_sha,
                        a.image, getattr(a, "destroy_key", ""), offer=best, keep=bool(getattr(a, "keep", False)))
     try:
