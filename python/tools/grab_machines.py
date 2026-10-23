@@ -24,6 +24,7 @@ import launch  # noqa: E402
 # machine id, what it is, the price cap ($/h) above which it is not taken
 WANTED = [
     (68507, "RTX 3060 + AMD EPYC 7B12 (256 threads, 129 GB), Thailand, verified: the O_2 audit-loop box (owner killed it by accident 2026-10-23)", 0.90),
+    (151960, "RTX A2000 + AMD EPYC 9654 (368 threads, 129 GB), British Columbia, verified: the O_2 label box, taken back once o2-vol40-1 ends and destroys it (fallback host of the audit loop)", 1.20),
     (144582, "RTX 5090 + AMD EPYC 7742 (256 threads, 258 GB), Hawaii, verified", 0.90),
     (138819, "RTX 3070 + AMD EPYC 7742 (256 threads, 258 GB), Taiwan, verified", 0.90),
     (43901, "RTX 3080 + AMD EPYC 7B12 (256 threads, 258 GB), Thailand, verified", 0.90),
