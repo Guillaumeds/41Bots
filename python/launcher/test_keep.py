@@ -380,6 +380,23 @@ class TakeoverTest(KeepTestBase):
         self.assertIn("claimed it at the same time", self.log)
         self.assertEqual(json.loads(w.store["claims/500.json"])["run_id"], "other-run")
 
+    def test_force_take_takes_another_live_runs_machine_and_says_so(self):
+        w = KWorld([], [])
+        w.add_machine(500, "41bots-other-run")
+        w.heartbeat_of("other-run", w.t - 30)
+        w.store["claims/500.json"] = json.dumps({"run_id": "other-run", "utc": stamp(w.t - 120)}).encode()
+        w.forbid_search = True
+        code, report = self.run_launch(w, self.manifest(instance_id=500, force_take=True))
+        self.assertEqual(code, 0)
+        self.assertEqual([c[0] for c in w.calls], ["update", "recycle", "label"])
+        self.assertIn("force_take", self.log)
+        self.assertEqual(json.loads(w.store["claims/500.json"])["run_id"], RUN)
+        w2 = KWorld([], [])  # the same takeover without the override is still refused
+        w2.add_machine(500, "41bots-other-run")
+        w2.heartbeat_of("other-run", w2.t - 30)
+        with self.assertRaises(SystemExit):
+            self.take(w2)
+
     def test_a_machine_that_is_taken_over_can_be_kept_again(self):
         w = KWorld([], [])
         w.keep = True
