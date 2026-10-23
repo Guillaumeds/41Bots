@@ -1212,6 +1212,11 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   takeover of a hand-rented machine has worked once and one of a launcher-created kept machine has failed once; the cause of the difference is
   not established (an untested guess: the kept machine's environment was fixed when the launcher created it). Afterwards added: a taken-over machine that never starts is kept and recorded, never
   destroyed (tested against the fake vast). Starting a *stopped* instance is tested against the fake vast only.
+  A second kind of failure, 2026-10-23: the S2 session (run `student-t2-seeds-1m-1`, 08:27:35 UTC) and the O_2 session (run `o2-audit-1`, 08:31:29 UTC) took over the same
+  kept machine (57338218) four minutes apart; the second takeover's container replaced the first's (`RUN_ID` was `o2-audit-1`, which heartbeated from 08:31:57), and the
+  first run, left without a container, would on a normal cancel have run `stop`, which destroys the instance. It was force-cancelled (`gh run cancel --force`, which
+  skips the cleanup steps); the machine, running the O_2 audit, was untouched. Added: a claim (`claims/<instance>.json`, written by `take_instance`, read back after 8 s,
+  the last writer wins; a fresh claim of a run that has not ended blocks a second takeover for 45 minutes, also in `take_guard`); four tests (`test_keep.py`).
 - **Cost.** About $0.05 for the trial machine.
 - **Limits.** One spare machine type; **a takeover of a launcher-created kept machine failed on vast** (above; one of a hand-rented machine was reported to work, stopped or running not recorded); a
   machine with a different disk size is not tried; a boot failure (missing manifest, bad binary hash) still destroys the machine because
