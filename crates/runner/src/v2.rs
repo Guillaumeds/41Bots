@@ -1590,6 +1590,7 @@ mod tests {
             ("o2-g2arm-train.manifest.json", 1),
             ("o2-volnet-5.manifest.json", 1),
             ("o2-volcap.manifest.json", 3),
+            ("o2-volnet-9.manifest.json", 1),
             ("o3-ladder.manifest.json", 5),
             ("o3-round-1.manifest.json", 1),
             ("specialist-s1.manifest.json", 1),
