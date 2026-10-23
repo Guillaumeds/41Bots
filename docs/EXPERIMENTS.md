@@ -1145,7 +1145,9 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 - **Limits.** Three seeds for the 1,000,000-decision network of T=0.01 (one for T=0.003); one seed for the stop rule alone, plain at 320 deals and the learning-curve points; the plain-320 difference
   (0.094 against 0.119) is within the noise; the weight and temperature were tried on a small grid (W = 1; T = 0.003 and 0.01) only; every network is judged
   on the same 2,000-decision golden set, which the training and the stop rule's validation split never touch; the labels are the plain H_3 teacher's
-  (noisy at 64 deals, E4); not yet run through the app's shortlist-plus-search path (E9) or exported to WASM.
+  (noisy at 64 deals, E4). Export check (2026-10-23, build VM, `WASM_STUDENT=<seed-1 network 3d1189e3...> tools/wasm_check.sh`, with the equity table and O_3): the 21
+  requests of the API check, seven of them `method: "student"` with this network, give the same bytes natively and as WebAssembly, and again when split into 2, 3, 4 and 7
+  shards; PASS. (The app-path check is E16.)
 - **Sources.** `python/nn/fortyone_nn/student.py`, `crates/runner/src/student_train.rs`, `docs/vast/student-t2-plain-arm.manifest.json`,
   `docs/vast/student-t2-plain-2.manifest.json`, R2 `runs/student-t2-plain-{1,2}/`, E2-E5.
 
