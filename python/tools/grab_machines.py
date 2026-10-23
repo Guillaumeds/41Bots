@@ -23,7 +23,6 @@ import launch  # noqa: E402
 
 # machine id, what it is, the price cap ($/h) above which it is not taken
 WANTED = [
-    (68507, "RTX 3060 + AMD EPYC 7B12 (256 threads, 129 GB), 590 Mbps, the o2-volcap machine, unverified", 0.90),
     (144582, "RTX 5090 + AMD EPYC 7742 (256 threads, 258 GB), Hawaii, verified", 0.90),
     (138819, "RTX 3070 + AMD EPYC 7742 (256 threads, 258 GB), Taiwan, verified", 0.90),
     (43901, "RTX 3080 + AMD EPYC 7B12 (256 threads, 258 GB), Thailand, verified", 0.90),

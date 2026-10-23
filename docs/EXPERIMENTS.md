@@ -840,6 +840,25 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   which is not affordable in rows or disk; capacity and the audit loop are the levers.
 - **Limits.** One seed; random-play test positions; the sibling-regret gain is inside the noise.
 
+### D9. O_2 capacity and seed noise on the 11M plain labels (run `o2-volcap-1`, 2026-10-23)
+- **Question.** Does a deeper or wider network help O_2 at fixed data, and how large is run-to-run noise?
+- **Method.** The 11M plain labels of D7 (first five streams of `o2-vol-3`) and s601 validation; outcome head, early stopping. Arms: seed 2 of 2048-1024-256;
+  deeper 2048-2048-1024-256; wider 4096-2048-1024-256. One RTX 3060 on an AMD EPYC 7B12 (256 threads, $0.328/h), about 5 h, $1.5. Scored on the same 250k exact
+  test set and 4,479 sibling groups as D6-D8 (`docs/m3-hybrid/o2-capacity-netcmp.json`, `o2-capacity-wide-netcmp.json`).
+- **Result.**
+
+| arm | best epoch | validation loss / accuracy | test SD | paired change in squared error vs `v11` | largest team bias | sibling regret (95%) |
+|---|---|---|---|---|---|---|
+| `v11` (2048-1024-256, seed 1) | 7 | 1.861 / 74.7% | 2.932 | reference | 0.054 | 0.199 +-0.038 |
+| seed 2 | 5 | 1.857 / 74.5% | 2.950 | +0.11 +-0.22 | 0.055 | 0.190 |
+| deeper | 8 | 1.829 / 76.7% | 2.791 | -0.80 +-0.23 | 0.084 | 0.202 |
+| wider | 8 | 1.845 / 76.2% | 2.830 | -0.59 +-0.22 | **0.018** | 0.219 |
+
+- **Reading.** Seed noise is about 0.02 in SD (seed 2 against seed 1 is inside the paired bound). Depth and width lower the value error somewhat (deeper about what 1.6x the data gives),
+  but sibling regret does not improve (0.202, 0.219 against 0.199; the 95% half-width is about 0.035) and the deeper network's bias is larger. The wider network has the smallest
+  bias. As for O_3 (C2: the 4-layer ladder step brought nothing at the decision level), capacity does not buy decisions here; volume and the audit loop come first.
+- **Limits.** One seed per shape; 11M rows only; larger capacity may pay at 40M rows (not tested); random-play test positions.
+
 ### D10. Calibration: what a network's error costs in decisions (run `o3-ladder-1`, 2026-10-23)
 - **Question.** No trick-1 golden set exists (owner, 2026-10-16), so how much trick-1 decision loss does O_2's current error
   imply? Method: the same question one trick later, where exact answers exist.
