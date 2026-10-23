@@ -956,7 +956,7 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 - **Sources.** `tools/shortlist_time.py`, `crates/wasm/src/bin/shortlist_cost.rs`,
   `crates/wasm/tests/api.rs`, E8.
 
-### E12. S2 teacher A/B: plain H_3 against H_3 + G2 (session 1, started 2026-10-22; plain arm and decision-aware loss done, G2 arm: early look at 50,000 decisions done, continuing)
+### E12. S2 teacher A/B: plain H_3 against H_3 + G2 (session 1, started 2026-10-22; decision-aware loss is the result; G2 labels no help at 50,000 decisions, G2 not pursued for S2 now)
 - **Question.** Does a cleaner teacher (the same PIMC at trick 2 over 64 deals, but with G2's learned exact
   leaves) give a better trick-2 student than the plain H_3 teacher? Also: does the decision-aware loss
   (`rank_weight`) help, and how large is the retraining noise?
@@ -1028,6 +1028,8 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   decision-aware loss **+0.024 (0.009)**, i.e. the G2-labelled network is worse by about 2.6 standard errors, and its top-3 pick is
   worse too (0.0132 against 0.0089). The decision-aware loss beats the plain loss on both label sets (0.122 against 0.243 on plain
   labels, 0.146 against 0.237 on G2 labels), as at 250,000 decisions.
+- **Outcome (owner, 2026-10-23).** The decision-aware loss is the result; the G2 labelling was cancelled at 60,000 decisions and G2 is not
+  pursued for S2 now (a second look at 100,000 decisions was planned and not made). The same loss is to be tried on S1 (trick 1) later.
 - **Cost.** The plain arm about $0.25 (45 minutes at $0.325/h); the golden checks took seconds each on the build VM. The G2
   labelling so far about $1.8 (E13); budget $30.
 - **Limits.** One seed for the 1,000,000-decision networks, the stop rule alone, plain at 320 deals and the learning-curve points; the
@@ -1040,7 +1042,7 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 - **Sources.** `docs/vast/student-t2-gv2-250k.manifest.json`, `docs/m3-hybrid/path-forward.md` section 6
   session 1, `python/nn/fortyone_nn/student.py`, R2 `runs/student-t2-gv2-250k-{4,6}/out/rules/`.
 
-### E13. Throughput of the G2 teacher on rented machines (runs `student-t2-gv2-250k-3`, `-4`, `-6`, 2026-10-22)
+### E13. Throughput of the G2 teacher on rented machines (runs `student-t2-gv2-250k-3`, `-4`, `-6`, `-8`, 2026-10-22/23)
 - **Question.** What does a trick-2 decision at 64 deals cost with G2, and does the teacher keep a 245-thread
   machine busy?
 - **Method.** Four rentals of the same manifest (`docs/vast/student-t2-gv2-250k.manifest.json`), each with
@@ -1057,8 +1059,10 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 | `-3` | 7B12, $0.708/h | 1,000 decisions | not finished in 28 min | 100% for 5 min, then falling to 2%; average 58% | stopped by the idle watchdog, $0.33, nothing stored |
 | `-4` | 7742, $0.735/h | part 0, 5,000 | 41 min | 100% swinging to 0-5% (ordered window of 4 x threads + 16) | part 0 stored; part 1 not finished in 28 min; cancelled, about $0.93 in all |
 | `-6` | 7B12, $0.723/h | part 1, 5,000 | 38 min | 100% for about 25 min, then one straggler decision at about 0.5% | part 1 stored; part 2 cancelled; about $0.55 in all |
+| `-8` | 7B12, $0.723/h, both fixes (binaries c6d8c08) | parts 2-12, 5,000 each | 28 min (median 1,683 s) | steady 100% | 12 parts stored (60,000 decisions) in 4.9 h, $3.49; cancelled at 02:47 UTC on 2026-10-23 by someone other than the assistant (stop and no-replacement markers) |
 
-  From `-6`: 5,000 decisions in 38 minutes on 245 threads is 112 thread-seconds a decision, 1.75 thread-seconds
+  From `-8` (both fixes): 5,000 decisions in 28 minutes on 245 threads, 10,700 decisions an hour, **$68 per million decisions** at $0.723/h
+  (the fixes cut a part from 38 to 28 minutes, 27%), so about $17 and 23 hours for 250,000. From `-6`: 5,000 decisions in 38 minutes on 245 threads is 112 thread-seconds a decision, 1.75 thread-seconds
   a deal (the docs' 1.55 on a 7B12 plus the idle tail): about 7,900 decisions an hour and $92 per million
   decisions at $0.723/h, so about $23 and 32 hours for 250,000. Causes found: (1) the ordered writer let workers
   run only 4 x threads + 16 decisions ahead, so one slow decision stalled every worker behind it (fixed:
@@ -1066,9 +1070,8 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   seats) leave the machine idle for the last 10-20 minutes of a part (fixed: a decision's deals are worked in
   blocks of 8 on any thread and joined, `DEAL_BLOCK`; records byte-identical, test
   `blocks_of_deals_join_into_the_whole_decisions_records` for 19, 8, 3 and 16 deals on 1-4 threads).
-- **Cost.** `-3` $0.33, `-4` about $0.93, `-6` about $0.55; about $1.8 spent, 10,000 decisions stored.
-- **Limits.** The block fix is tested for byte-identical records but not yet timed on a rented machine, so the
-  idle tail it removes is not measured; part times include about 1 minute of setup; one machine type (Zen 2)
+- **Cost.** `-3` $0.33, `-4` about $0.93, `-6` about $0.55, `-8` $3.49; about $5.3 spent, 60,000 decisions stored.
+- **Limits.** The block fix's effect is measured only together with the window fix (`-8` against `-6`: 28 against 38 minutes a part); part times include about 1 minute of setup; one machine type (Zen 2)
   measured; the estimate in E1/path-forward ($15-30 per million) was for a Zen 4 machine at $1.34/h.
 - **Sources.** R2 `runs/student-t2-gv2-250k-{3,4,6}/` (`report.json`, `heartbeat/`, `out/`), `crates/search/src/student_teacher.rs`,
   `crates/search/src/ordered.rs`, `docs/VAST-MACHINES.md` section 5.

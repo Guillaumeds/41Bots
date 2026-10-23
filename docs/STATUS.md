@@ -69,13 +69,18 @@ trainer's rank loss and the `student_train` point options; the G2 teacher run (`
 250,000 decisions, parts of 5,000) has stored 2 of 50 parts (R2 `runs/student-t2-gv2-250k-4/out/rules/000000-...`
 and `runs/student-t2-gv2-250k-6/out/rules/000000-,000001-...`; use `skip_parts`/`bundles`). Two throughput bugs
 found and fixed (ordered-writer window; a decision's 64 deals on one thread: now blocks of 8, byte-identical).
-**Plain arm and the decision-aware loss done (E12):** with `rank_weight` 1, `rank_temperature` 0.01 and `stop_on` decision the
-trick-2 student's golden-set loss halves: 0.0587% (3 seeds, SD 0.003) against 0.1195% for plain at 250,000 decisions, and at
-1,000,000 decisions 0.0389% alone, 0.080% at seat 1 (the existing S2: 0.0733% / 0.179%), top-3 pick 0.0030%. Integer network
-in R2 (E12). **Not yet in the app:** the new loss's 1M network is not adopted as S2 (needs the owner's decision and the
-`method: "student"` export check). **Early G2 look (E12, 50,000 decisions, 3 seeds):** G2 labels are not better than plain ones (plain loss -0.006 +/- 0.017) and are
-worse with the decision-aware loss (+0.024 +/- 0.009). The labelling (run `student-t2-gv2-250k-8`, 11+ of 50 parts, $0.72/h, about $15 in
-all) is still running for a second look at 100,000 decisions; stopping it saves about $10. **Next:** a loss search (weight, temperature) and 1M seeds are cheap follow-ups (about $0.4 each).
+**Session 1 result (S2 teacher A/B), 2026-10-23 (E12, E13):** the **decision-aware loss is the win** (`rank_weight` 1, `rank_temperature`
+0.01, `stop_on` decision): on the exact golden set the trick-2 student's loss halves, 0.0587% (3 seeds, SD 0.003) against 0.1195% for
+plain at 250,000 decisions, and at 1,000,000 decisions it reaches 0.0389% alone, 0.080% at seat 1 and 0.0030% for the top-3 pick
+(the existing S2: 0.0733%, 0.179%, 0.0073%). Its integer network is in R2 (key in E12). **G2 labels were no help at 50,000 decisions**
+(plain loss -0.006 +/- 0.017, decision-aware loss +0.024 +/- 0.009 worse, 3 seeds); the G2 labelling was cancelled at 60,000 decisions
+(12 parts, $3.49; 28 minutes a part after the two throughput fixes), and S2 goes on with the plain H_3 teacher (owner, 2026-10-23).
+**To check on S1 (trick 1) later:** the same loss, plain against decision-aware at 250,000 decisions, 3 seeds.
+**S2, next (owner chooses):** (1) a small loss search (weight 0.3/1/3, temperature 0.005/0.01/0.02/0.03, 3 seeds each, 250,000 decisions,
+about $0.5); (2) 1M seeds 2-3 of the best setting (about $0.5); (3) re-run the app-side checks with the new network: shortlist + search
+(E9) and the router (E10) on the golden set, free on the build VM; (4) the export check (`method: "student"`, native against WASM,
+`docs/WASM-API.md`) and the owner's decision to replace S2; (5) more plain-teacher data (the plain 64-deal teacher costs about $4-5 per
+million decisions): a 2M-decision point with the new loss.
 
 **Records:** `docs/EXPERIMENTS.md` (every experiment and its result), `docs/RESEARCH.md` (the outside
 research), `docs/README.md` (index).

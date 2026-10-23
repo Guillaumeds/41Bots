@@ -194,9 +194,8 @@ Goal: the three questions of section 3, step 0, answered on the build VM and rec
   equal data (about $0.5), stop on the validation decision loss.
 - The student audit loop stays low priority.
 - Record in EXPERIMENTS (Part E): E12 (the A/B, open), E13 (labelling throughput), E14 (keep and takeover).
-- Status 2026-10-22: the G2 labels are 10,000 of 250,000 decisions; resume with `skip_parts`/`bundles` from the
-  stored parts of `runs/student-t2-gv2-250k-4/` and `-6/`; a machine can be kept and taken over (STATUS, "Deploy
-  onto a kept machine").
+- Outcome 2026-10-23 (E12-E13): the decision-aware loss is the S2 win; G2 labels gave no gain at 50,000 decisions and the G2 labelling was
+  cancelled at 60,000 (12 parts stored: `runs/student-t2-gv2-250k-{4,6,8}/out/rules/`); S2 continues with the plain H_3 teacher.
 
 ### Session 2: O_2
 - The label test at equal money: plain hybrid labels (`label_source: hybrid`, `label_exact_leaves:
@@ -221,7 +220,9 @@ Goal: the three questions of section 3, step 0, answered on the build VM and rec
 ### Session 4: S1
 - Teacher labels H_2 + O_2 at 64 deals with racing (extra deals for close calls) and, once session 0
   has it, the restricted solve; about $84 a million decisions at the E6 rate; learning-curve point at
-  250k, then 1M. Judge on copper, the playout yardstick and the anchor. Same loss options as session 1.
+  250k, then 1M. Judge on copper, the playout yardstick and the anchor. **Same loss options as session 1: S2 found the decision-aware
+  loss (`rank_weight` 1, `rank_temperature` 0.01, `stop_on` decision) halves the golden-set loss (E12); test plain against that loss for
+  S1 at 250,000 decisions, 3 seeds, before spending on more data.**
 
 ### Session 5: ship, then the improvements
 - Ship S1 and S2 alone (`method: "student"`, `docs/WASM-API.md`).
