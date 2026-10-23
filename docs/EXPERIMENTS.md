@@ -1095,6 +1095,36 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 - **Sources.** `python/launcher/launch.py`, `cleanup.py`, `test_keep.py`, `monitor_run.py`, `.github/workflows/vast-run.yml`,
   R2 `runs/keep-trial-{1,2}/`.
 
+### E16. The new trick-2 student in the app's shortlist-plus-search path, and the router (`search student-check --sub-deals`, `tools/router_fit.py`, 2026-10-23, build VM)
+- **Question.** With the decision-aware network of E12 (1,000,000 decisions, `rank_weight` 1, `rank_temperature` 0.01, stop on decision loss), at how many
+  deals does "the student shortlists, a short search picks" beat the student alone (E9), and can the app find the decisions where the student loses and search only
+  those (E10)?
+- **Method.** As E9 and E10, with the new network (`3d1189e3...`, E12) and, as a check, the old S2 (954223e2) on the same settings: the 2,000-decision exact
+  golden set (320 exact worlds each), per decision and repeat (8, seed 1) a seeded shuffle of the worlds, the first N (10, 25, 50, 100) the sample, the method picks on
+  the sample and is scored on the other 320 - N worlds; methods: the student alone, search over all cards, top-2 and top-3 of the student searched; 95% bounds by
+  bootstrap over decisions. The router: `tools/router_fit.py` (gradient-boosted risk model on the student's own values, 5-fold cross-validation, 3 seeds).
+- **Result.** Loss in % of the money chance (corrected, on the golden check's scale); the old S2 reproduced E9's numbers (alone 0.0733; top-3 + search 0.1030 / 0.0596 / 0.0402 / 0.0293):
+
+| deals | new S2 alone | search all cards | top-2 + search | top-3 + search | old S2 top-3 + search |
+|---|---|---|---|---|---|
+| 10 | **0.0389** | 0.1165 | 0.0746 | 0.0983 | 0.1030 |
+| 25 | **0.0389** | 0.0623 | 0.0476 | 0.0554 | 0.0596 |
+| 50 | 0.0389 | 0.0389 | 0.0360 | 0.0360 | 0.0402 |
+| 100 | 0.0389 | 0.0265 | 0.0286 | **0.0258** | 0.0293 |
+
+  At seat 1 (the leader) the new S2 alone loses 0.0795 (the old: 0.1794); top-2 + search 0.1062 / 0.0739 / 0.0556 / 0.0489 and top-3 + search 0.1427 / 0.0916 /
+  0.0606 / 0.0499 at 10 / 25 / 50 / 100 deals; search over all cards 0.1996 / 0.1193 / 0.0782 / 0.0642. The loss is still concentrated: the worst 1 / 5 / 10 / 20% of
+  decisions hold 38.9 / 78.8 / 93.1 / 99.8% of it (old S2 38.8 / 75.1 / 90.9 / 99.1%); 465 of the 2,000 decisions lose anything. The risk model's cross-validated correlation
+  with the true loss is 0.055 (the student's margin: 0.037); its predicted-riskiest 10 / 20 / 50% of decisions hold 20.0 / 36.5 / 71.3% of the loss (the margin's lowest 10 / 20 / 50%: 8.1 /
+  17.3 / 49.6%). Router, loss when the f% predicted riskiest are searched (top-3 + N deals) and the rest keep the student's card: at 10 deals 0.0438 (5%) rising to 0.0983
+  (100%); at 25 deals 0.0400 (5%), 0.0419 (20%), 0.0554 (100%); at 50 deals 0.0366 (10%), 0.0356 (20%), **0.0338 (50%)**, 0.0360 (100%); at 100 deals 0.0331 (20%), 0.0284
+  (50%), 0.0258 (100%); the oracle router (sorted by true loss) 0.0145 at 10% at 50 deals and 0.0124 at 10% at 100 deals.
+- **Cost.** No rental; a few minutes on the build VM (the router fit about 10 minutes).
+- **Limits.** Exact world values: no leaf error, optimistic for any real search (E9); the sample is drawn without replacement from 320 worlds, which lowers its variance by
+  about 17% at 100 deals; the router was fitted on one network and one golden set with cross-validation, not on fresh decisions; its features are the student's values, place,
+  stratum and candidate count only; one seed of the network (E12); the phone's cost of a deal is separate (a leader deal is 368 ms in WebAssembly, `WASM-API.md` section 8).
+- **Sources.** `crates/search/src/shortlist.rs`, `tools/router_fit.py`, E9, E10, E12.
+
 ---
 
 ## Part F. Runs and builds without a result, and work set aside
