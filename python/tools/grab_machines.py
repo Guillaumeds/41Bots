@@ -99,7 +99,9 @@ def launch_hold(st, mid, o, now, a, lines, generic):
     r = subprocess.run(cmd, capture_output=True, text=True)
     lines.append("   " + (r.stdout + r.stderr).strip()[-200:])
     if r.returncode == 0:
-        st[str(mid)] = {"state": "launched", "run_id": run_id, "t": now, "offer": o["id"], "dph": o["dph_total"], "generic": generic}
+        gh_run = (r.stdout.strip().rsplit("/", 1) + [""])[-1] if "/runs/" in r.stdout else ""
+        st[str(mid)] = {"state": "launched", "run_id": run_id, "t": now, "offer": o["id"], "dph": o["dph_total"], "generic": generic,
+                        "gh_run": gh_run}
         save_state(st)
 
 
@@ -116,6 +118,13 @@ def main():
     now = time.time()
     held = [m for m, e in st.items() if e.get("state") in ("launched", "kept") and now - e["t"] < a.keep_hours * 3600 + 900]
     for mid, e in list(st.items()):
+        # a hold job whose workflow run already failed before any heartbeat (the offer was taken by another renter in the seconds
+        # between the check and the rent, seen 2026-10-23): forget it at once so the machine can be grabbed again
+        if e.get("state") == "launched" and e.get("gh_run") and now - e["t"] > 60:
+            r = subprocess.run(["gh", "run", "view", str(e["gh_run"]), "-R", "Guillaumeds/41Bots", "--json", "conclusion", "-q", ".conclusion"],
+                               capture_output=True, text=True)
+            if r.stdout.strip() == "failure" and launch.r2_get(f"runs/{e['run_id']}/heartbeat/000000.json") is None:
+                e["state"] = "failed"
         # a launch that ended without a KEPT record failed (the offer vanished, ...): forget it so it can be retried
         if e.get("state") == "launched" and now - e["t"] > 900:
             if launch.r2_get(f"runs/{e['run_id']}/KEPT.json") is not None:
