@@ -2231,7 +2231,7 @@ def keep_machine(a, run_id: str, instance_id: int, dph: float, final: str, cpu_n
                float(a.keep_hours), cpu_name)
     a.kept = True
     if a.state_file:
-        for suffix in ("", ".run-id"):
+        for suffix in ("", ".run-id", ".keep"):
             with contextlib.suppress(OSError):
                 os.remove(f"{a.state_file}{suffix}")
     return "kept"
@@ -2318,7 +2318,7 @@ def hand_over(a, run_id: str, instance_id: int, best: dict, dph: float, spent_be
     r2_put(f"watch/{run_id}.json", rec)
     a.handed_over = True
     if a.state_file:
-        for suffix in ("", ".run-id", ".destroy-key"):
+        for suffix in ("", ".run-id", ".destroy-key", ".keep"):
             with contextlib.suppress(OSError):
                 os.remove(f"{a.state_file}{suffix}")
     spent = spent_before + (time.time() - created) / 3600 * dph
