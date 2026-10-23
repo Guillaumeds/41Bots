@@ -6,7 +6,7 @@
   "benchmark_seconds": 0,
   "upload_every_s": 300,
   "heartbeat_every_s": 30,
-  "note": "S2 follow-up (owner 2026-10-23; docs/EXPERIMENTS.md E12): seeds 2 and 3 of the 1,000,000-decision network with the decision-aware loss (rank_weight 1, temperature 0.01, stop on decision loss), to confirm that seed 1's 0.0389% on the golden set is not a lucky run. Same inputs and settings as student-t2-plain-2. Taken over onto an existing machine (instance_id) and KEPT afterwards (keep: true, 6 hours).",
+  "note": "S2 follow-up (owner 2026-10-23; docs/EXPERIMENTS.md E12): seeds 2 and 3 of the 1,000,000-decision network with the decision-aware loss (rank_weight 1, temperature 0.01, stop on decision loss), to confirm that seed 1's 0.0389% on the golden set is not a lucky run. Same inputs and settings as student-t2-plain-2. Taken over onto the O_2 session's kept machine 57338218 (AMD EPYC 7742, RTX 3070 8 GB, 200 GB disk, run o2-volnet-9k DONE and kept) and KEPT afterwards (keep: true, 6 hours).",
   "machine": {
     "gpus": 1,
     "blackwell": true,
@@ -16,7 +16,7 @@
     "min_ram_gb": 64,
     "disk_gb": 40,
     "min_inet_down": 100,
-    "instance_id": 57318336,
+    "instance_id": 57338218,
     "keep": true,
     "keep_hours": 6
   },
