@@ -62,6 +62,7 @@ class World:
         self.destroy_calls = 0  # how many `destroy instance` calls were made
         self.queries: list[str] = []  # the query of every full search
         self.disks: list[str] = []  # the --disk of each created instance
+        self.create_calls: list[tuple] = []  # the full argument tuple (and tail) of each `create instance`
         self.listing_script: list[str] = []  # answers of the next `show instances` calls, one each: "empty" (a
         #                                      successfully read list without the instance), "fail", or "normal"
         self.listing_times: list[float] = []  # the clock at each `show instances` call
@@ -216,6 +217,7 @@ class World:
             self.created_on.append(oid)
             self.envs.append(args[args.index("--env") + 1])
             self.disks.append(args[args.index("--disk") + 1])
+            self.create_calls.append(tuple(args) + tuple(tail))
             if how == "unreadable":
                 return None  # vast rented it, but printed something that is not JSON
             if how == "late":
@@ -416,6 +418,30 @@ class LauncherTest(unittest.TestCase):
             self.log = out.getvalue()
         report = json.loads(world.store.get(f"runs/{RUN}/report.json", b"{}"))
         return code, report
+
+    def test_instances_are_rented_with_jupyter_and_ssh_and_start_the_boot_script_on_start(self):
+        # Owner 2026-10-23: SSH and Jupyter always on (vast runtype jupyter_direc ssh_direc ssh_proxy); the boot script
+        # is the on-start command, because vast's own init replaces the image's ENTRYPOINT.
+        w = World([offer(1, 11, 1.0)], ["done:2"])
+        code, report = self.run_launch(w, {"run_id": RUN, "chunk": {"difftest": {"matches": 10, "seed": 1}}})
+        self.assertEqual(code, 0)
+        call = w.create_calls[0]
+        self.assertIn("--jupyter", call)
+        self.assertIn("--direct", call)
+        self.assertEqual(call[call.index("--onstart-cmd") + 1], launch.TAKE_ONSTART)
+        self.assertNotIn("--entrypoint", call)
+        self.assertNotIn("--args", call)
+
+    def test_entrypoint_mode_is_still_there_when_the_manifest_asks_for_it(self):
+        w = World([offer(1, 11, 1.0)], ["done:2"])
+        m = {"run_id": RUN, "chunk": {"difftest": {"matches": 10, "seed": 1}}, "machine": {"entrypoint_mode": True}}
+        code, report = self.run_launch(w, m)
+        self.assertEqual(code, 0)
+        call = w.create_calls[0]
+        self.assertIn("--entrypoint", call)
+        self.assertEqual(call[-1], "--args")
+        self.assertNotIn("--jupyter", call)
+        self.assertNotIn("--onstart-cmd", call)
 
     def test_vanished_offer_falls_back_to_next_best(self):
         offers = [offer(1, 11, 1.0), offer(2, 12, 1.5), offer(3, 13, 2.0)]

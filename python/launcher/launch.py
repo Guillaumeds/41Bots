@@ -424,7 +424,7 @@ def parse_gpu_names(text: str) -> list[str]:
 MACHINE_KEYS = ("gpus", "min_gpu_ram_gb", "min_compute_cap", "min_cores", "min_ram_gb", "disk_gb", "min_inet_down",
                 "min_inet_up",
                 "max_dph", "wait_for_offer_min", "offer_poll_s", "price_steps", "tries_per_step", "gpu_names", "blackwell",
-                "keep", "keep_hours", "instance_id")
+                "keep", "keep_hours", "instance_id", "entrypoint_mode")
 
 KEEP_HOURS = 6.0  # default machine.keep_hours: how long a kept machine may idle before the cleanup destroys it
 KEEP_HOURS_MAX = 72.0
@@ -463,6 +463,8 @@ def apply_machine(a, manifest: dict) -> None:
         sys.exit(f"launch: machine.blackwell must be true or false (got {m['blackwell']!r})")
     if "keep" in m and not isinstance(m["keep"], bool):
         sys.exit(f"launch: machine.keep must be true or false (got {m['keep']!r})")
+    if "entrypoint_mode" in m and not isinstance(m["entrypoint_mode"], bool):
+        sys.exit(f"launch: machine.entrypoint_mode must be true or false (got {m['entrypoint_mode']!r})")
     if "instance_id" in m and (isinstance(m["instance_id"], bool) or not isinstance(m["instance_id"], int)
                                or m["instance_id"] <= 0):
         sys.exit(f"launch: machine.instance_id must be a vast instance number (got {m['instance_id']!r})")
@@ -470,7 +472,7 @@ def apply_machine(a, manifest: dict) -> None:
                                   and 0 < m["keep_hours"] <= KEEP_HOURS_MAX):
         sys.exit(f"launch: machine.keep_hours must be above 0 and at most {KEEP_HOURS_MAX:g} (got {m['keep_hours']!r})")
     for k, v in m.items():
-        if k in ("price_steps", "gpu_names", "blackwell", "keep", "instance_id"):
+        if k in ("price_steps", "gpu_names", "blackwell", "keep", "instance_id", "entrypoint_mode"):
             continue
         if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
             sys.exit(f"launch: machine.{k} must be a number, 0 or more (got {v!r})")
@@ -507,6 +509,8 @@ def apply_machine(a, manifest: dict) -> None:
     # instance (a standard deploy onto a machine kept or rented by hand): the command line wins.
     if m.get("keep") is True:
         a.keep = True
+    if m.get("entrypoint_mode") is True:
+        a.entrypoint_mode = True
     if "keep_hours" in m and getattr(a, "keep_hours", None) is None:
         a.keep_hours = float(m["keep_hours"])
     if "instance_id" in m and getattr(a, "instance_id", None) is None:
@@ -2505,15 +2509,23 @@ def adopt_instance(a, run_id: str, best: dict) -> int | None:
 
 
 def create_instance(a, best: dict, run_id: str, ncpu: int, dph: float) -> int | None:
-    # Entrypoint ("args") launch mode. Without --args the CLI defaults to the ssh runtype, and vast's
-    # ssh/jupyter modes replace the image's ENTRYPOINT/CMD with their own init, so the boot script
-    # never ran (run 38509301077). --entrypoint names the boot script; an empty --args (must be the
-    # very last token) selects runtype "args". On-demand: never pass --bid_price.
+    # Jupyter + SSH launch mode (owner 2026-10-23: SSH and Jupyter always on, so a machine can be opened from the
+    # vast console's Connect button). `--jupyter --direct` is vast's runtype "jupyter_direc ssh_direc ssh_proxy":
+    # Jupyter and SSH together. vast's own init replaces the image's ENTRYPOINT, so our boot script is started by the
+    # on-start command instead (TAKE_ONSTART: the same one a taken-over instance uses, proven on 2026-10-22), as root.
+    # `machine.entrypoint_mode: true` in the manifest keeps the old entrypoint ("args") mode, where nothing but the
+    # boot script runs (no SSH): the CLI picks runtype "args" with an empty `--args` as the very last token and
+    # --entrypoint names the boot script. On-demand: never pass --bid_price.
     env = instance_env(run_id, ncpu, dph, a.bin_sha, a.image, getattr(a, "destroy_key", ""), offer=best,
                        keep=bool(getattr(a, "keep", False)))
-    res = vast("create", "instance", str(best["id"]), "--image", a.image, "--disk", str(a.disk_gb),
-               "--env", env, "--label", f"41bots-{run_id}",
-               "--entrypoint", BOOT_PATH, "--cancel-unavail", tail=("--args",), timeout=None)
+    if getattr(a, "entrypoint_mode", False):
+        res = vast("create", "instance", str(best["id"]), "--image", a.image, "--disk", str(a.disk_gb),
+                   "--env", env, "--label", f"41bots-{run_id}",
+                   "--entrypoint", BOOT_PATH, "--cancel-unavail", tail=("--args",), timeout=None)
+    else:
+        res = vast("create", "instance", str(best["id"]), "--image", a.image, "--disk", str(a.disk_gb),
+                   "--env", env, "--label", f"41bots-{run_id}",
+                   "--jupyter", "--direct", "--onstart-cmd", TAKE_ONSTART, "--cancel-unavail", timeout=None)
     instance_id = res.get("new_contract") if isinstance(res, dict) else None
     if not instance_id:
         return None
