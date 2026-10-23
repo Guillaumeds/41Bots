@@ -1588,6 +1588,7 @@ mod tests {
             ("o2-g2arm-2.manifest.json", 1),
             ("o2-vol.manifest.json", 11),
             ("o2-g2arm-train.manifest.json", 1),
+            ("o2-volnet-5.manifest.json", 1),
             ("o3-round-1.manifest.json", 1),
             ("specialist-s1.manifest.json", 1),
             ("golden-routed-s2.manifest.json", 1),
