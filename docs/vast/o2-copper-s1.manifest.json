@@ -1,0 +1,83 @@
+{
+ "format": 2,
+ "run_id": "o2-copper-s1-1",
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "Owner 2026-10-23 (cheap EPYC 7B12 / RTX 3060 box): trick-1 teacher data with the adopted O_2 = round 1 of the 40M audit loop (o2-audit-10, integer network 13152c24, 40M plain labels, error SD 2.60%, sibling regret 0.188%, EXPERIMENTS D8/D10 and the loop's round 1). (1) copper: 2,000 trick-1 decisions at 128 deals, own seed 7801, kept apart from the training seeds (the cheap yardstick: how well S1 copies its teacher; measured rate 12,489 decisions an hour at 64 deals on a 256-thread EPYC, E6, so about 19 minutes). (2) S1 teacher labels: 250,000 trick-1 decisions at 64 deals (150,000 rules-v1 positions + 100,000 mixed), the first learning-curve point for S1; about 20 hours on this box. Seeds 7801, 7811, 7812 are new. No racing / restricted solve here (not in the runner yet). Teacher = H_2 + O_2.",
+ "machine": {
+  "min_cores": 190,
+  "min_ram_gb": 96,
+  "disk_gb": 100,
+  "keep": true,
+  "keep_hours": 8,
+  "force_take": true
+ },
+ "inputs": {
+  "o2": "sha256:13152c24bc27b5f8f29c167be04caa86bf2c8dc4d17e686f3c86991101a28c1d"
+ },
+ "streams": [
+  {
+   "name": "copper",
+   "priority": 1,
+   "kind": "student_teacher",
+   "chunks": 4,
+   "params": {
+    "threads": "all",
+    "trick": 1,
+    "count": 500,
+    "deals": 128,
+    "seed": 7801,
+    "source": "rules",
+    "net_input": "o2",
+    "tt_mb": 64,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  },
+  {
+   "name": "s1rules",
+   "priority": 2,
+   "kind": "student_teacher",
+   "chunks": 300,
+   "params": {
+    "threads": "all",
+    "trick": 1,
+    "count": 500,
+    "deals": 64,
+    "seed": 7811,
+    "source": "rules",
+    "net_input": "o2",
+    "tt_mb": 64,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  },
+  {
+   "name": "s1mixed",
+   "priority": 3,
+   "kind": "student_teacher",
+   "chunks": 200,
+   "params": {
+    "threads": "all",
+    "trick": 1,
+    "count": 500,
+    "deals": 64,
+    "seed": 7812,
+    "source": "mixed",
+    "net_input": "o2",
+    "tt_mb": 64,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  }
+ ]
+}
