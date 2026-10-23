@@ -4,42 +4,47 @@ Status: **proposal**, written from the owner's sequence of 2026-10-22 and our me
 here is running. Every number is cited to `docs/EXPERIMENTS.md` (written "E4", "D2" ...) or marked
 "estimate". Where this page and STATUS differ, STATUS is current.
 
-## 0. Update 2026-10-23 (late morning, Irish time): what has been done and the best way forward
+## 0. State at the end of the O_2 and S2 sessions (2026-10-23, Irish evening)
 
-### Done since this plan was written (all recorded in EXPERIMENTS; Session 2 = O_2, Session 1 = S2)
-- **O_2 label source and volume (D6, D7, D8).** Plain hybrid labels beat exact labels at equal money (plain 6M: SD 3.13% against exact 1.5M: 3.64%); G2 labels have no niche.
-  Volume still pays at a slow rate (SD falls about 0.11 in the exponent per row): 11M 2.93%, 19.8M **2.75%** (bias 0.028%, sibling regret 0.176%). Network keys:
-  `runs/o2-volnet-5/out/volnet/`, `runs/o2-volnet-9k/out/volnet/`. 22M plain labels are stored (`runs/o2-vol-3`, ten streams).
-- **Capacity (D9).** A second seed of the same network scored 2.950% against 2.932% (noise about 0.02%). Deeper 2.791% (bias 0.084%, sibling regret 0.202%), wider 2.830% (bias 0.018%, the lowest; sibling regret 0.219%): lower value error, no better decisions, as for O_3. Keep 2048-1024-256 and a short ladder.
-- **Calibration (D10).** O_3-recipe networks at 1M/3M/10M/20M rows: decision loss 0.029/0.014/0.0089/0.0071%, about sibling regret to the power 1.7. Read across: the 19.8M O_2 is an estimated **0.019-0.022%** at trick 1 (factor 1.5; an estimate, not a proof); 0.01% needs sibling regret about 0.11% (position SD about 2.25%).
-- **Audit-loop machinery readied.** `docs/vast/o2-audit.manifest.json` (run `o2-audit-3`): 22M stored plain labels, O_3 labeller, no exact leaves, 10% exact anchor, 4 rounds, 200k exact audit rows a round, capacity ladder. It started cleanly on a hand-rented machine (368 threads) and was stopped by the owner after minutes, to build the 40M base first (reasons below).
-- **Machine tooling.** Every launcher rental is now Jupyter + SSH (CLAUDE.md rule); `keep` holds a machine after a run; takeover of a hand-rented machine works (`instance_id`); a grab watcher (`python/tools/grab_machines.py`) rents wanted machines the moment they appear.
-- **S2 (Session 1; E12-E17).** The decision-aware loss halves the trick-2 student's golden-set loss; G2 teacher labels gave no gain; a weight/temperature search found nothing better than weight 1, temperature 0.01; the new network alone beats any search up to 25 deals in the app path.
+### Done (every result is in `docs/EXPERIMENTS.md`)
+- **Step 0 and step 1 (S2), sessions of 2026-10-22/23 (E9-E17).** Shortlist plus search and the router checks, the root-restricted solve, the decision-aware
+  loss (halves S2's golden-set loss), G2 teacher labels (no help), the weight/temperature search (no cell beats weight 1, temperature 0.01), the export check and
+  the ship record: the new S2 `3d1189e3...` (golden loss 0.0389%, 3-seed mean 0.0456%). Open items are in STATUS ("S2, state").
+- **Step 2 (O_2), 2026-10-22/23 (D6-D13).**
+  - Label source: plain hybrid labels (exact search through trick 2, O_3 at trick 3) beat exact labels at equal money; G2 labels have no niche (D6).
+  - Volume: error falls with an exponent of about -0.11 on rows (11M 2.93%, 19.8M 2.75%, 39.6M 2.60%), sibling regret about -0.20 and inside the noise (D7, D8, D11).
+  - Capacity: deeper and wider networks lower the value error, not the sibling regret; seed noise about 0.02 (D9).
+  - Calibration: decision loss grows as sibling regret to the power 1.7; the adopted O_2 is estimated at 0.016-0.024% at trick 1, above 0.01% (an estimate, D10).
+  - Audit loop on the 39.6M base: round 2's targeted rows changed nothing beyond noise; stopped after round 2's audit; **round 1 (integer `13152c24...`, error SD
+    2.60%, sibling regret 0.188%) is the adopted O_2** (owner, 2026-10-23, D11).
+  - Sibling ranking loss on O_3 (Fix E, `sibrank.md` section 6): weight 1 clearly worse than its control (D12).
+  - Trick-1 teacher data with the adopted O_2: copper (2,000 decisions at 128 deals) stored; 250,000 S1 labels at 64 deals running (D13).
+- **Machine tooling (A10).** Every rental is Jupyter + SSH; `keep` and takeover of a machine rented by hand; direct rent through the API; the watcher
+  `python/tools/grab_machines.py`; the O_2 audit-loop manifest builder and the O_3 A/B scorer.
 
-- **Audit loop and ranking loss, 2026-10-23 (D11, D12).** The O_2 audit loop's targeted round 2 changed nothing beyond noise (same weak score-state groups); round 1 (40M plain labels, SD 2.60%, sibling regret 0.188%) is the adopted O_2. The sibling ranking loss on O_3 at weight 1 is clearly worse than its control (sibling regret 0.127% against 0.072%). Neither lever moves decisions; the O_2 work stops here. Next: S1 (teacher labels with this O_2 running on the cheap box, then training with the decision-aware loss of E12), the playout yardstick, and the better stop rule (sibling regret per epoch) only if a loss idea returns.
+### Lessons (cost time; read before the next launch)
+1. **Cancelling a run could destroy its machine even with `keep` set** (the keep marker was written only when the launcher's interrupt handler ran, and the
+   workflow kills the launcher within seconds). Fixed 2026-10-23 in `launch.py` (the marker is written when a kept run starts). Rule in CLAUDE.md: never cancel or
+   destroy on a rare cheap machine without asking the owner; check `runs/<run id>/KEPT.json` and the instance list afterwards.
+2. **Takeover rebuilds the container** (pulls the 4-6 GB image): 3-4 minutes when it works, and two rentals never started the rebuild (A10). After a failed
+   takeover wait several minutes and retry once; read `runs/<other run id>/` too (a late rebuild can start under the first attempt's run id). The manifest's
+   `min_gpu_ram_gb` and `disk_gb` are checked against the instance (an 8 GB request on a 6 GB GPU is refused); a label that is not `41bots-<run>` needs `force_take`.
+3. **One machine, one session.** Two sessions took the same kept machine within two minutes; the launcher now records a claim (`claims/<instance>.json`).
+4. **Estimate an ETA from the measured speed of the first chunks and from best epoch plus patience, not from the epoch cap**; weight-1 arms trained 40 epochs
+   against the control's 17, so the experiment's arms took twice the time first planned.
+5. **Every chunk re-downloads its inputs** (a finished chunk's folder is deleted; no cache is shared between chunks): five arms of `o3-pair-1` read the same
+   62 GB five times, about 20 minutes each with the GPU idle. A `student_teacher` chunk of 500 decisions spends about 40 s of 105 s in setup (the equity table
+   is rebuilt in every chunk). Open items: a content-addressed input cache outside the chunk folders, arms as steps of one chunk, larger teacher chunks.
+6. **The disk bounds the base**: stored shards are 1.88 KB a row (39.6M rows = 74.6 GB) and the loop keeps them on disk; an 80 GB disk fits about 25-28M rows with
+   two or three rounds, 120 GB the full base.
+7. **The watcher needs a CPU allow-list** (AMD EPYC or Threadripper): a thread-count rule alone took a Xeon Phi box. Direct rent bypasses the launcher's own refusals.
 
-### Lessons (cost us time; read before the next launch)
-1. **Cancelling a run can destroy its machine even when `keep` is set** (`o2-audit-3`: the machine 57346089 was gone 8 seconds after the runner wrote DONE; the cancel's cleanup ran `launch.py stop` without `--keep`, because the keep marker was only written when the launcher's interrupt handler ran, and the workflow kills the launcher within seconds). Fixed 2026-10-23 in `launch.py` (the marker is written at the start of a kept run); the rule in CLAUDE.md: never cancel or destroy on a rare cheap machine without asking the owner, and check `runs/<run id>/KEPT.json` and the instance list afterwards.
-2. **Takeover rebuilds the container** (pulls the 4-6 GB image): about 10 minutes before the first heartbeat. The manifest's `min_gpu_ram_gb` and `disk_gb` are checked against the instance; a mismatch refuses the takeover (seen: 8 GB asked, 6 GB present).
-3. **One machine, one session.** Two sessions took over the same kept machine within two minutes. Put the machine's id in the launching message and in `docs/STATUS.md` before deploying; label hand-rented machines by session.
-4. **Do not assume "ETA" from the epoch cap.** Early stopping ended `o2-volnet-9k` at epoch 15 of 40; estimate from best epoch plus patience.
-
-5. **Every chunk re-downloads its inputs** (`crates/runner/src/v2.rs` removes a finished chunk's folder, `chunks/<stream>/`, inputs included; `remote::fetch_input` has no cache shared between chunks). In `o3-pair-1` each of the five arms fetched the same 62 GB again: about 20 minutes at about 50 MB/s, GPU idle, about $0.5 an arm. To do: a content-addressed input cache outside the chunk folders (disk permitting), or arms as steps of one chunk. Needs a runner change and a new build.
-
-### Best way forward, Session 2 (O_2), in order
-1. **Build the 40M base now** (running: `o2-vol40-1`, `docs/vast/o2-vol40.manifest.json`; eight more stored streams of 2.2M plain labels, 17.6M new rows, same recipe and harvest network, ~3-4 h, ~$4 on the 384-thread machine). Why before the loop: the loop retrains from scratch on whatever base it was launched with; the old O_2 loop on a 1.5-2M base got *worse* every round (D1: validation SD 3.66, 3.73, 3.85), O_3's loop started from 40M and gained only about 20% (C2: 0.0088 to 0.0068%, rounds 3-4 nothing), while O_2 is not yet data-saturated (O_3 saturated near 40M, C4). Volume and the loop are different gains, so they multiply; neither replaces the other.
-2. **Audit loop on the 39.6M base** (new run id, e.g. `o2-audit-4`): copy `o2-audit.manifest.json`, add the eight new streams to `label_inputs` (`python/tools/o2_train_manifest.py --vol-run o2-vol-3 --vol-streams 10` shows the entry format; the new streams are under `runs/o2-vol40-1`), raise `audit_target_rows` from 1M to 4-8M (O_3's targeted shard was 20% of its base, ours was 4.5%), keep `hybrid_exact_share` 0.1, choose `audit_shapes` from the wide-network result (deeper helped SD but not decisions, so keep the ladder short). Judge every round on the 250k exact test set and the sibling groups (`fortyone_nn.netcmp`), not only on the loop's own audit shard. Stop when a round does not beat the previous one's sibling regret by more than noise (about 0.03%).
-3. **A cheap ranking-loss A/B** (about $1, while labels build or after): S2 proved a decision-aware loss halves its decision loss (E12); O_3's pairwise ranking idea (C9) was only smoke-tested and its rented A/B never launched. Train O_2 on the 22M with a pairwise term over exact sibling groups and compare sibling regret on the held-out groups. This is the only lever with direct evidence that moves *decisions* rather than value error.
-4. **Reuse of the stored validation shard with `label_parts` above 1** (to-do in Session 2 below) still stands for any parts run.
-5. **Judge and record:** adopt the best O_2 on sibling regret and bias (not SD alone); report as "audit-clean on exact trick-2 positions with sibling regret X", never "proven 0.01%". Then Session 3.
-- Expected: 40M alone SD about 2.55%, sibling regret about 0.153%, estimated loss 0.015-0.017%; plus the loop's usual 20% gives about 0.012-0.014%. If that is still above 0.01% at trick 1, the next levers are the ranking loss and a bigger targeted share, then more volume (about $40 for 200M; poor value, see D8 reading).
-
-### Best way forward, Session 1 (S2) and the sessions that do not need O_2
-1. **S2 first:** finish the 1M-decision seeds 2-3 of weight 1, temperature 0.01 (E12; running), then the export check (`method: "student"`, native against WASM, `docs/WASM-API.md`) and the owner's decision to replace S2. E17 closed the loss search; do not search more cells.
-2. **Then the playout yardstick (Session 3's second item):** it uses fixed finishing players (S2 or H_3, then exact), so it does **not** need O_2: design it and run a small pilot now, with a dollar cap. It is the only trick-1 yardstick independent of O_2 and of PIMC's perfect-information assumption.
-3. **More plain-teacher data for S2** (about $4-5 per 64-deal 250k, E14; data helps as N^-0.23, E4) only after 1 and 2; G2 is out (E13).
-4. **Copper and S1 wait for O_2** (the teacher is H_2 + O_2). Prepare, do not run: the S1 manifests with the E12 loss (`rank_weight` 1, `rank_temperature` 0.01, `stop_on` decision), 3 seeds at 250k before any larger spend.
-5. **Machines:** the hand-rented 384-thread machine belongs to Session 2 while `o2-vol40-1` and the audit loop run; S2 uses its own cheap GPU boxes (the S2 jobs need almost no CPU). Check the vast instance labels (`41bots-<run id>`) before deploying anything to a kept machine.
+### Open (owner's plan, 2026-10-23)
+- Finish the S1 teacher labels (`o2-copper-s1-1`, expected end about 08:15 UTC on 2026-10-24), train S1 with the decision-aware loss, test S1 against the bronze
+  set, then ship (sessions 3-5 below).
+- Open code items: the shared input cache and larger teacher chunks (lesson 5); a stop rule on sibling regret per epoch for oracle training (D12 showed value
+  validation is not the decision); reuse of a stored validation shard with `label_parts` above 1 (`crates/runner/src/hybrid/reuse.rs`).
+- The playout yardstick (session 3) needs no O_2 and is not started; the app side of S2 (STATUS) is the owner's.
 
 ## 1. Where we stand (facts)
 - O_3 (trick-3 network): 0.0068% alone (seat 1 0.0201%), 0.0008% with G2 and exact solving (seat 1
@@ -234,7 +239,7 @@ Goal: the three questions of section 3, step 0, answered on the build VM and rec
 - Outcome 2026-10-23 (E12-E14): the decision-aware loss is the S2 win; G2 labels gave no gain at 50,000 decisions and the G2 labelling was
   cancelled at 60,000 (12 parts stored: `runs/student-t2-gv2-250k-{4,6,8}/out/rules/`); S2 continues with the plain H_3 teacher.
 
-### Session 2: O_2
+### Session 2: O_2 (done 2026-10-23: D6-D13; the brief below is the original)
 - The label test at equal money: plain hybrid labels (`label_source: hybrid`, `label_exact_leaves:
   none`, about 0.1 thread-s each) against exact labels (11.3 thread-s each) for the same dollars, judged
   on the exact validation shards s601, s602, s603 (keys in STATUS) for value SD and team bias, bias
