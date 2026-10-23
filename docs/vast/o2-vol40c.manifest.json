@@ -1,0 +1,108 @@
+{
+ "format": 2,
+ "run_id": "o2-vol40-3",
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "2026-10-23 (owner: a third label machine for vol17 and vol18): streams vol17, vol18 of o2-vol40-1's plan (same seeds and recipe: 5727-5728, 5747-5748, 5767-5768) on the owner-released machine 57346368 (AMD EPYC 7742, 256 threads, 258 GB, RTX 3070 8 GB, 80 GB disk, $0.80/h). o2-vol40-2 (the 7B12 box) is to be stopped gracefully after vol16 so no stream is made twice.",
+ "machine": {
+  "min_cores": 150,
+  "min_ram_gb": 100,
+  "min_inet_down": 100,
+  "disk_gb": 80,
+  "min_gpu_ram_gb": 6,
+  "max_dph": 1.3,
+  "keep": true,
+  "keep_hours": 8
+ },
+ "inputs": {
+  "o3": "sha256:f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
+  "o2": "sha256:505a0c7c65147ffa9565e06059f47664ea9f1bfdf0c5ea2f8d392b0e6e1337b0"
+ },
+ "streams": [
+  {
+   "name": "vol17",
+   "priority": 1,
+   "kind": "hybrid_rung",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "cut": 2,
+    "check": false,
+    "widths": "256,64",
+    "head": "outcome",
+    "epochs": 1,
+    "patience": 1,
+    "batch": 1024,
+    "lr": 0.001,
+    "train_seed": 1,
+    "max_minutes": 0,
+    "device": "cpu",
+    "overlap": false,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    },
+    "upload_shards": true,
+    "label_source": "hybrid",
+    "label_net": "inputs/sha256/f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
+    "label_exact_leaves": "none",
+    "hybrid_exact_share": 0,
+    "labels_random": 1600000,
+    "labels_random_seed": 5727,
+    "labels_rules": 400000,
+    "labels_rules_seed": 5747,
+    "labels_harvest": 200000,
+    "labels_harvest_seed": 5767,
+    "harvest_net": "inputs/sha256/505a0c7c65147ffa9565e06059f47664ea9f1bfdf0c5ea2f8d392b0e6e1337b0",
+    "val_count": 500,
+    "val_seed": 7727,
+    "label_parts": 1,
+    "train_fraction": 0.01
+   }
+  },
+  {
+   "name": "vol18",
+   "priority": 1,
+   "kind": "hybrid_rung",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "cut": 2,
+    "check": false,
+    "widths": "256,64",
+    "head": "outcome",
+    "epochs": 1,
+    "patience": 1,
+    "batch": 1024,
+    "lr": 0.001,
+    "train_seed": 1,
+    "max_minutes": 0,
+    "device": "cpu",
+    "overlap": false,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    },
+    "upload_shards": true,
+    "label_source": "hybrid",
+    "label_net": "inputs/sha256/f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
+    "label_exact_leaves": "none",
+    "hybrid_exact_share": 0,
+    "labels_random": 1600000,
+    "labels_random_seed": 5728,
+    "labels_rules": 400000,
+    "labels_rules_seed": 5748,
+    "labels_harvest": 200000,
+    "labels_harvest_seed": 5768,
+    "harvest_net": "inputs/sha256/505a0c7c65147ffa9565e06059f47664ea9f1bfdf0c5ea2f8d392b0e6e1337b0",
+    "val_count": 500,
+    "val_seed": 7728,
+    "label_parts": 1,
+    "train_fraction": 0.01
+   }
+  }
+ ]
+}
