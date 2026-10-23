@@ -16,7 +16,7 @@ rules-v1 + 2M harvested) in ten stored streams; then the real 2048-1024-256 netw
 (`python/tools/o2_train_manifest.py`, to be generalised), scored by `netcmp` against `p60`, followed by the audit loop. A
 trainer race on a late sidecar (killed `o2-g2arm-2`) is fixed in `train.py` (new binaries needed for streamed-parts runs).
 **To do before the audit loop:** reused validation with label_parts (path-forward.md, Session 2). Takeover of a hand-rented
-machine works (`vast-run.yml` `instance_id`, disk at least 80 GB).
+machine works (`vast-run.yml` `instance_id`; the instance's disk must be at least the run's own `disk_gb`, checked in `launch.py` `take_check`: 20 by default, 80 in the O_2 manifests; there is no fixed 80 GB limit; the disk is fixed when the instance is rented).
 
 ## START HERE (2026-10-22): more training data does not move O_3; choose the next lever
 
