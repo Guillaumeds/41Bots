@@ -23,6 +23,7 @@ import launch  # noqa: E402
 
 # machine id, what it is, the price cap ($/h) above which it is not taken
 WANTED = [
+    (68507, "RTX 3060 + AMD EPYC 7B12 (256 threads, 129 GB), Thailand, verified: the O_2 audit-loop box (owner killed it by accident 2026-10-23)", 0.90),
     (144582, "RTX 5090 + AMD EPYC 7742 (256 threads, 258 GB), Hawaii, verified", 0.90),
     (138819, "RTX 3070 + AMD EPYC 7742 (256 threads, 258 GB), Taiwan, verified", 0.90),
     (43901, "RTX 3080 + AMD EPYC 7B12 (256 threads, 258 GB), Thailand, verified", 0.90),
@@ -70,7 +71,10 @@ def main():
         if e.get("state") == "launched" and now - e["t"] > 900:
             if launch.r2_get(f"runs/{e['run_id']}/KEPT.json") is not None:
                 e["state"] = "kept"
-            elif launch.r2_get(f"runs/{e['run_id']}/DONE") is not None or launch.r2_get(f"runs/{e['run_id']}/FAILED") is not None:
+            elif (launch.r2_get(f"runs/{e['run_id']}/DONE") is not None or launch.r2_get(f"runs/{e['run_id']}/FAILED") is not None
+                  or launch.r2_get(f"runs/{e['run_id']}/heartbeat/000000.json") is None):
+                # ended without a KEPT record, or never started (the workflow run failed before any heartbeat, e.g. the offer
+                # was taken by someone else: seen 2026-10-23 on machine 68507): forget it so it can be grabbed again
                 e["state"] = "failed"
                 e["tries"] = e.get("tries", 0) + 1
     lines = []
