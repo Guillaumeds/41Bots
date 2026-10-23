@@ -64,15 +64,15 @@ small capped anchor), 4 S1, 5 ship and the improvements. The solver half of the 
    loses most: the lever there is the cost of a deal (WebAssembly network kernel) and top-2.
    Next: session 1 (S2 A/B tests) is unaffected; the open question for the app is the cost per leader deal.
 
-**Session 1 (S2 teacher A/B) in progress, 2026-10-22 (E12, branch `claude/s2-teacher-ab-test-tiv5yj`):** built the
+**Session 1 (S2 teacher A/B), 2026-10-22/23 (E12-E15, branch `claude/s2-teacher-ab-test-tiv5yj`):** built the
 trainer's rank loss and the `student_train` point options; the G2 teacher run (`docs/vast/student-t2-gv2-250k.manifest.json`,
 250,000 decisions, parts of 5,000) has stored 2 of 50 parts (R2 `runs/student-t2-gv2-250k-4/out/rules/000000-...`
 and `runs/student-t2-gv2-250k-6/out/rules/000000-,000001-...`; use `skip_parts`/`bundles`). Two throughput bugs
 found and fixed (ordered-writer window; a decision's 64 deals on one thread: now blocks of 8, byte-identical).
-**Session 1 result (S2 teacher A/B), 2026-10-23 (E12, E13):** the **decision-aware loss is the win** (`rank_weight` 1, `rank_temperature`
+**Session 1 result (S2 teacher A/B), 2026-10-23 (E12-E14):** the **decision-aware loss is the win** (`rank_weight` 1, `rank_temperature`
 0.01, `stop_on` decision): on the exact golden set the trick-2 student's loss halves, 0.0587% (3 seeds, SD 0.003) against 0.1195% for
 plain at 250,000 decisions, and at 1,000,000 decisions it reaches 0.0389% alone, 0.080% at seat 1 and 0.0030% for the top-3 pick
-(the existing S2: 0.0733%, 0.179%, 0.0073%). Its integer network is in R2 (key in E12). **G2 labels were no help at 50,000 decisions**
+(the existing S2: 0.0733%, 0.179%, 0.0073%). Its integer network is in R2 (key in E12). **G2 labels were no help at 50,000 decisions (E13)**
 (plain loss -0.006 +/- 0.017, decision-aware loss +0.024 +/- 0.009 worse, 3 seeds); the G2 labelling was cancelled at 60,000 decisions
 (12 parts, $3.49; 28 minutes a part after the two throughput fixes), and S2 goes on with the plain H_3 teacher (owner, 2026-10-23).
 **To check on S1 (trick 1) later:** the same loss, plain against decision-aware at 250,000 decisions, 3 seeds.

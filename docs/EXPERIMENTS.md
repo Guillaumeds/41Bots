@@ -956,93 +956,78 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 - **Sources.** `tools/shortlist_time.py`, `crates/wasm/src/bin/shortlist_cost.rs`,
   `crates/wasm/tests/api.rs`, E8.
 
-### E12. S2 teacher A/B: plain H_3 against H_3 + G2 (session 1, started 2026-10-22; decision-aware loss is the result; G2 labels no help at 50,000 decisions, G2 not pursued for S2 now)
-- **Question.** Does a cleaner teacher (the same PIMC at trick 2 over 64 deals, but with G2's learned exact
-  leaves) give a better trick-2 student than the plain H_3 teacher? Also: does the decision-aware loss
-  (`rank_weight`) help, and how large is the retraining noise?
-- **Method.** Same network (512-256), seed and positions in every arm: the first 250,000 decisions of the
-  stored student data (rules seed 401 decisions 0-199,999, mixed seed 402 decisions 0-49,999), 64 deals each.
-  Plain arm: the stored 320-deal base shards cut to their first 64 deals (exact subsets, E3), no new labelling.
-  G2 arm: `docs/vast/student-t2-gv2-250k.manifest.json` (H_3 with O_3 f5766a and G v2, t=277338260); a part of
-  1,000 decisions holds exactly the records of the same decisions inside a part of 5,000 (checked: every field
-  equal except the offset into the values file). Extra arms from cuts of those data: plain at 320 deals,
-  G2 at 32 deals; rank variants and several seeds (`student_train` points take `seed`, `rank_weight`,
-  `rank_temperature`, `stop_on`). Judged on the exact golden set (`search student-check --golden-decisions`),
-  alone and top-3, 95% bounds. The decision-aware term is the per-decision KL between the teacher's and the
-  student's softmax over the candidates' own-pair value divided by T (`fortyone_nn.student --rank-weight W
-  --rank-temperature T`; W = 0 is the old loss bit for bit; `--stop-on decision` stops on the validation
-  decision loss); tests in `python/nn/tests/test_student.py` and `crates/runner/src/student_train/tests.rs`.
-- **Result (plain arm and controls; the G2 arm is still open).** Run `student-t2-plain-1`, one GPU (AMD EPYC 7502,
-  64 threads, RTX 5070 Ti, $0.325/h), 9 networks in about 45 minutes. Loss on the exact golden set, % of the money
-  chance (95% upper bound in brackets; top-3 = the teacher's perfect pick among the student's three best cards):
-
-| network | decisions | alone | seat 1 | top-3 |
-|---|---|---|---|---|
-| existing S2 (stored, plain H_3, 64 deals) | 1,000,000 | 0.0733 [0.0876] | 0.179 | 0.0073 [0.0130] |
-| plain, 64 deals, seed 1 / 2 / 3 | 250,000 | 0.1217 / 0.1386 / 0.0980 (mean 0.1194, SD 0.021) | 0.147 / 0.182 / 0.155 | 0.0077 / 0.0139 / 0.0085 |
-| plain, 320 deals, seed 1 | 250,000 | 0.0936 [0.1089] | 0.140 | 0.0083 |
-| plain, 64 deals, seed 1, 100,000 / 50,000 | 100,000 / 50,000 | 0.1314 / 0.2320 | 0.168 / 0.252 | 0.0087 / 0.0150 |
-| rank loss W=1, T=0.01, seed 1 | 250,000 | 0.0951 [0.1319] | 0.126 | 0.0235 [0.0564] |
-| rank loss W=1, T=0.003, seed 1 | 250,000 | 0.0692 [0.0830] | 0.090 | 0.0070 [0.0125] |
-| rank loss W=1, T=0.01, stop on decision loss, seed 1 | 250,000 | **0.0599 [0.0709]** | 0.112 | **0.0061 [0.0094]** |
-
-  Retraining noise at the same data and settings: 0.098 to 0.139 alone (SD 0.021). Plain at 320 deals (0.094, one
-  seed) lies inside it. The decision-aware loss with T = 0.003, or with stopping on the validation decision loss, is
-  0.05-0.06 below the plain mean (2.4 and 2.9 SD of that noise, one seed each) and, from 250,000 decisions, below the
-  existing S2 trained on four times the data, with the leader seat (where S2 loses most) at 0.09-0.11 against 0.179;
-  W=1, T=0.01 without the stop rule has the best top-3 pick worse (0.0235). The same ordering holds on the runner's
-  fixed 4,096-decision test set (plain seed 1 0.092, rank T=0.01 0.067). The existing S2 reproduced its recorded
-  0.0733 on this check. The G2 arm is not run: its labels are 10,000 of 250,000 decisions (E13).
-- **Result of the follow-up run `student-t2-plain-2`** (one GPU, AMD EPYC 7502 / RTX 5070 Ti at $0.325/h, 68 minutes, $0.37,
-  10 networks; same golden-set check; mean and SD over seeds 1-3 where three were trained):
+### E12. A decision-aware loss for the trick-2 student (runs `student-t2-plain-1` and `-plain-2`, 2026-10-22/23)
+- **Question.** Does training the student on the ordering of a decision's candidate cards, and stopping on its card
+  choices, lower its loss against the exact golden set, and by how much against the retraining noise?
+- **Method.** Student 512-256 (3,292 inputs, `student-v1`), labels from the plain H_3 teacher (O_3 f5766a, 64 deals): the first
+  250,000 decisions of the stored base shards (320 deals cut to 64, exact subsets, E3), and for the 1,000,000-decision networks the base,
+  more-1 and more-2 shards the existing S2 was trained on. The decision-aware term (`fortyone_nn.student --rank-weight W
+  --rank-temperature T`) adds W times the per-decision KL divergence from the teacher's softmax over the candidates to the student's,
+  both on the deciding pair's money chance divided by T; W = 0 is the old loss bit for bit; `--stop-on decision` stops on the validation
+  decision loss instead of the value cross-entropy (tests: `python/nn/tests/test_student.py`). `student_train` points take `seed`,
+  `rank_weight`, `rank_temperature` and `stop_on`. Two GPU runs (`docs/vast/student-t2-plain-arm.manifest.json`, `student-t2-plain-2.manifest.json`;
+  AMD EPYC 7502, RTX 5070 Ti, $0.325/h). Each integer network judged on the exact trick-2 golden set (2,000 decisions x 320 worlds) with
+  `search student-check --golden-decisions --golden-worlds --top-k 3`: loss alone, at seat 1 (the leader), and with the teacher's perfect
+  pick among the student's top 3. The stored S2 (954223e2) reproduced its recorded 0.0733% on this check.
+- **Result.** Loss in % of the money chance (95% upper bound in brackets); seeds 1-3 where three were trained:
 
 | network | decisions | seeds | alone | seat 1 | top-3 |
 |---|---|---|---|---|---|
-| plain, 64 deals | 250,000 | 3 | 0.1195 (SD 0.020) | 0.161 | 0.0100 |
-| rank loss W=1, T=0.003 | 250,000 | 3 | 0.0855 (SD 0.014) | 0.132 | 0.0073 |
-| rank loss W=1, T=0.003, stop on decision loss | 250,000 | 3 | 0.0780 (SD 0.006) | 0.132 | 0.0056 |
-| **rank loss W=1, T=0.01, stop on decision loss** | 250,000 | 3 | **0.0587 (SD 0.003)** | **0.100** | **0.0045** |
-| stop on decision loss alone (no rank term) | 250,000 | 1 | 0.1001 | 0.120 | 0.0219 |
-| rank loss W=1, T=0.003, stop on decision loss | 1,000,000 | 1 | 0.0495 [0.0601] | 0.092 | 0.0036 |
-| **rank loss W=1, T=0.01, stop on decision loss** | **1,000,000** | 1 | **0.0389 [0.0467]** | **0.080** | **0.0030 [0.0051]** |
-| existing S2 (plain loss, plain H_3 teacher, 64 deals) | 1,000,000 | 1 | 0.0733 [0.0876] | 0.179 | 0.0073 |
+| existing S2 (plain loss) | 1,000,000 | 1 | 0.0733 [0.0876] | 0.179 | 0.0073 [0.0130] |
+| plain loss, 64 deals | 250,000 | 3 | 0.1195 (SD 0.020) | 0.161 | 0.0100 |
+| plain loss, 320 deals | 250,000 | 1 | 0.0936 [0.1089] | 0.140 | 0.0083 |
+| plain loss, 64 deals, 100,000 / 50,000 decisions | 100,000 / 50,000 | 1 | 0.1314 / 0.2320 | 0.168 / 0.252 | 0.0087 / 0.0150 |
+| stop on decision loss, no rank term | 250,000 | 1 | 0.1001 | 0.120 | 0.0219 |
+| rank W=1, T=0.01, no stop rule | 250,000 | 1 | 0.0951 [0.1319] | 0.126 | 0.0235 [0.0564] |
+| rank W=1, T=0.003 | 250,000 | 3 | 0.0855 (SD 0.014) | 0.132 | 0.0073 |
+| rank W=1, T=0.003, stop on decision loss | 250,000 | 3 | 0.0780 (SD 0.006) | 0.132 | 0.0056 |
+| **rank W=1, T=0.01, stop on decision loss** | 250,000 | 3 | **0.0587 (SD 0.003)** | **0.100** | **0.0045** |
+| rank W=1, T=0.003, stop on decision loss | 1,000,000 | 1 | 0.0495 [0.0601] | 0.092 | 0.0036 |
+| **rank W=1, T=0.01, stop on decision loss** | **1,000,000** | 1 | **0.0389 [0.0467]** | **0.080** | **0.0030 [0.0051]** |
 
   Per seed (alone): plain 0.1217 / 0.1386 / 0.0980; T=0.003 0.0692 / 0.0966 / 0.0907; T=0.003 + stop 0.0770 / 0.0725 / 0.0845;
-  T=0.01 + stop 0.0599 / 0.0550 / 0.0613. The decision-aware loss with T=0.01 and the stop rule is below every plain seed and
-  below the existing S2 in all three seeds, with a spread six times smaller than plain's; the stop rule without the rank term is
-  inside the plain range (one seed). At 1,000,000 decisions that loss reaches 0.0389% alone (the existing S2: 0.0733%) and 0.080% at
-  the leader seat (0.179%); the top-3 pick 0.0030% is the lowest measured. Networks (integer, content-addressed in R2):
-  1M T=0.01 + stop `3d1189e3042dfc9537b1f575f87e42b15e91628541e2ff90678ba319959c6e03`, 1M T=0.003 + stop `0cd6d08264dd99fe96ba0e6c0b496b6cc96b5604a0ba44302df7764e9d336db7`; the others in the run's out bundle (`runs/student-t2-plain-2/out/plain/`).
-- **Result of the early G2 comparison at 50,000 decisions** (runs `student-t2-g2arm-50k-1` and `student-t2-plainarm-50k-1`, 2026-10-23;
-  each arm one GPU for 13-20 minutes, about $0.05-0.2; the same 10 parts of the rules stream, decisions 0-49,999, targets at 64 deals,
-  3 seeds, same golden-set check; labels differ only in the teacher):
+  T=0.01 + stop 0.0599 / 0.0550 / 0.0613. Retraining noise at the same data and settings is SD 0.020 for the plain loss. T=0.01 with the stop
+  rule is below every plain seed and halves the plain mean, at SD 0.003; from 250,000 decisions it is below the existing S2, which used four
+  times the data, and its leader-seat loss is 0.100 against 0.179. At 1,000,000 decisions it reaches 0.0389% alone, 0.080% at seat 1 and 0.0030%
+  for the top-3 pick, the lowest measured. The stop rule alone and plain at 320 deals lie inside the plain noise (one seed each). The same ordering
+  holds on the runner's fixed 4,096-decision test set (plain seed 1 0.092, rank T=0.01 0.067, 250,000 decisions). Integer networks (content-addressed in R2):
+  1M T=0.01 + stop `3d1189e3042dfc9537b1f575f87e42b15e91628541e2ff90678ba319959c6e03`, 1M T=0.003 + stop
+  `0cd6d08264dd99fe96ba0e6c0b496b6cc96b5604a0ba44302df7764e9d336db7`; the others in the runs' out bundles (`runs/student-t2-plain-{1,2}/out/plain/`).
+- **Cost.** `-plain-1` 45 minutes, about $0.25 (9 networks); `-plain-2` 68 minutes, $0.37 (10 networks); each golden check a few seconds on the build VM.
+- **Limits.** One seed for the 1,000,000-decision networks, the stop rule alone, plain at 320 deals and the learning-curve points; the plain-320 difference
+  (0.094 against 0.119) is within the noise; the weight and temperature were tried on a small grid (W = 1; T = 0.003 and 0.01) only; every network is judged
+  on the same 2,000-decision golden set, which the training and the stop rule's validation split never touch; the labels are the plain H_3 teacher's
+  (noisy at 64 deals, E4); not yet run through the app's shortlist-plus-search path (E9) or exported to WASM.
+- **Sources.** `python/nn/fortyone_nn/student.py`, `crates/runner/src/student_train.rs`, `docs/vast/student-t2-plain-arm.manifest.json`,
+  `docs/vast/student-t2-plain-2.manifest.json`, R2 `runs/student-t2-plain-{1,2}/`, E2-E5.
+
+### E13. Does a G2-labelled teacher give a better trick-2 student? (runs `student-t2-g2arm-50k-1` and `student-t2-plainarm-50k-1`, 2026-10-23)
+- **Question.** Labelled by H_3 with G2's learned exact leaves instead of plain H_3 (same positions, same 64 deals), does the trick-2 student get a lower
+  golden-set loss, with the plain loss and with the decision-aware loss of E12?
+- **Method.** The first 10 parts of 5,000 decisions of the rules stream (seed 401, decisions 0-49,999), the same positions in both arms. Plain labels:
+  the base run's shards cut to 64 deals. G2 labels: `docs/vast/student-t2-gv2-250k.manifest.json` (O_3 f5766a, G v2 t=277338260, 64 deals), parts from runs
+  `student-t2-gv2-250k-4`, `-6` and `-8` (E14); a part of 1,000 decisions holds exactly the records of the same decisions inside a part of 5,000 (every field
+  equal except the offset into the values file). Each arm: 512-256, 50,000 decisions, seeds 1-3, with the plain loss and with the decision-aware
+  loss (W=1, T=0.01, stop on decision loss); judged on the golden set as in E12 (`docs/vast/student-t2-{g2,plain}arm-50k.manifest.json`; the G2 arm
+  needs `allow_stamps: teacher` against the plain test set). The planned 250,000-decision arm was not made: the G2 labelling was cancelled at 60,000 decisions.
+- **Result.** Loss alone in % of the money chance (seat 1 and top-3 are means over the three seeds):
 
 | labels | loss | alone, per seed | alone, mean (SD) | seat 1 | top-3 |
 |---|---|---|---|---|---|
 | plain H_3 | plain | 0.2718 / 0.2436 / 0.2140 | 0.2431 (0.029) | 0.342 | 0.0167 |
 | H_3 + G2 | plain | 0.2392 / 0.2312 / 0.2406 | 0.2370 (0.005) | 0.272 | 0.0139 |
-| plain H_3 | decision-aware (W=1, T=0.01, stop on decision loss) | 0.1095 / 0.1306 / 0.1249 | **0.1217 (0.011)** | 0.143 | 0.0089 |
-| H_3 + G2 | decision-aware (same) | 0.1323 / 0.1545 / 0.1505 | 0.1458 (0.012) | 0.150 | 0.0132 |
+| plain H_3 | decision-aware | 0.1095 / 0.1306 / 0.1249 | **0.1217 (0.011)** | 0.143 | 0.0089 |
+| H_3 + G2 | decision-aware | 0.1323 / 0.1545 / 0.1505 | 0.1458 (0.012) | 0.150 | 0.0132 |
 
-  G2 labels minus plain labels (alone, difference of means with its standard error): plain loss -0.006 (0.017), i.e. no difference;
-  decision-aware loss **+0.024 (0.009)**, i.e. the G2-labelled network is worse by about 2.6 standard errors, and its top-3 pick is
-  worse too (0.0132 against 0.0089). The decision-aware loss beats the plain loss on both label sets (0.122 against 0.243 on plain
-  labels, 0.146 against 0.237 on G2 labels), as at 250,000 decisions.
-- **Outcome (owner, 2026-10-23).** The decision-aware loss is the result; the G2 labelling was cancelled at 60,000 decisions and G2 is not
-  pursued for S2 now (a second look at 100,000 decisions was planned and not made). The same loss is to be tried on S1 (trick 1) later.
-- **Cost.** The plain arm about $0.25 (45 minutes at $0.325/h); the golden checks took seconds each on the build VM. The G2
-  labelling so far about $1.8 (E13); budget $30.
-- **Limits.** One seed for the 1,000,000-decision networks, the stop rule alone, plain at 320 deals and the learning-curve points; the
-  noise (SD 0.020 for plain, 0.003-0.014 for the rank variants) is as large as the plain-320 difference; the rank settings (W = 1, T
-  0.003 and 0.01, the stop rule) were tried on a small grid only (no other weight or temperature); every network is judged on the
-  same 2,000-decision golden set (the stop rule's validation split is separate from it); the 1,000,000-decision runs use the base,
-  more-1 and more-2 shards as the existing S2 did; the G2 arm (the question of this entry) is not yet run, and all the 250,000- and
-  1,000,000-decision results were made with the plain H_3 teacher; the G2 comparison is at 50,000 decisions only (3 seeds per cell), where a
-  larger effect might still appear with more data.
-- **Sources.** `docs/vast/student-t2-gv2-250k.manifest.json`, `docs/m3-hybrid/path-forward.md` section 6
-  session 1, `python/nn/fortyone_nn/student.py`, R2 `runs/student-t2-gv2-250k-{4,6}/out/rules/`.
+  G2 labels minus plain labels (difference of means, standard error): plain loss -0.006 (0.017), no difference; decision-aware loss +0.024 (0.009),
+  the G2-labelled network worse by about 2.6 standard errors, its top-3 pick worse too (0.0132 against 0.0089). The decision-aware loss halves the
+  loss on both label sets (0.122 against 0.243 on plain labels, 0.146 against 0.237 on G2 labels).
+- **Cost.** The G2 arm 13 minutes, $0.05; the plain arm about 20 minutes, about $0.2; the G2 labels used here are part of the $5.3 of E14.
+- **Limits.** 50,000 decisions only and three seeds per cell, so an effect that appears with more data is not excluded (the second look at 100,000 decisions was
+  not made); one teacher setting (G v2 at t=277338260, 64 deals); the labels differ only in the teacher; judged on the 2,000-decision golden set only.
+- **Sources.** `docs/vast/student-t2-g2arm-50k.manifest.json`, `docs/vast/student-t2-plainarm-50k.manifest.json`, R2 `runs/student-t2-{g2arm,plainarm}-50k-1/`, E7, E12, E14.
 
-### E13. Throughput of the G2 teacher on rented machines (runs `student-t2-gv2-250k-3`, `-4`, `-6`, `-8`, 2026-10-22/23)
+### E14. Throughput of the G2 teacher on rented machines (runs `student-t2-gv2-250k-3`, `-4`, `-6`, `-8`, 2026-10-22/23)
 - **Question.** What does a trick-2 decision at 64 deals cost with G2, and does the teacher keep a 245-thread
   machine busy?
 - **Method.** Four rentals of the same manifest (`docs/vast/student-t2-gv2-250k.manifest.json`), each with
@@ -1070,13 +1055,13 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   seats) leave the machine idle for the last 10-20 minutes of a part (fixed: a decision's deals are worked in
   blocks of 8 on any thread and joined, `DEAL_BLOCK`; records byte-identical, test
   `blocks_of_deals_join_into_the_whole_decisions_records` for 19, 8, 3 and 16 deals on 1-4 threads).
-- **Cost.** `-3` $0.33, `-4` about $0.93, `-6` about $0.55, `-8` $3.49; about $5.3 spent, 60,000 decisions stored.
+- **Cost.** `-3` $0.33, `-4` about $0.93, `-6` about $0.55, `-8` $3.49; about $5.3 in all, 60,000 decisions stored.
 - **Limits.** The block fix's effect is measured only together with the window fix (`-8` against `-6`: 28 against 38 minutes a part); part times include about 1 minute of setup; one machine type (Zen 2)
   measured; the estimate in E1/path-forward ($15-30 per million) was for a Zen 4 machine at $1.34/h.
 - **Sources.** R2 `runs/student-t2-gv2-250k-{3,4,6}/` (`report.json`, `heartbeat/`, `out/`), `crates/search/src/student_teacher.rs`,
   `crates/search/src/ordered.rs`, `docs/VAST-MACHINES.md` section 5.
 
-### E14. Keeping a machine after a run and taking it over (session 1, 2026-10-22)
+### E15. Keeping a machine after a run and taking it over (session 1, 2026-10-22)
 - **Question.** Can the next job be deployed onto a machine without renting another (an hour's search found the
   one cheap 245-thread machine), and can a run leave its machine up when it ends or fails?
 - **Method.** `machine.keep` / `machine.keep_hours` / `machine.instance_id` in the manifest (`launch.py`
