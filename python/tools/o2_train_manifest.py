@@ -5,7 +5,8 @@
 Reads the stored shards of the label runs `o2-g2arm-1` (part 1 and the s601 validation shard) and `o2-g2arm-2` (parts 1-4)
 from their `shards.json` (the `label_inputs` lists the runner wrote), and writes a one-stream `hybrid_rung` manifest that
 trains the 2048-1024-256 network on every stored G2 part (`label_inputs`, nothing generated), early stopping on the exact
-s601 shard, like the other Stage A arms. Refuses unless 5 random + 5 rules-v1 hybrid shards (750,000 rows) are found.
+s601 shard, like the other Stage A arms. Refuses unless 5 random + 5 rules-v1 hybrid shards (750,000 rows) are found. With --vol-run RUN --vol-streams N it builds
+from the first N stored streams volNN of the volume label run instead (random, rules-v1, harvest).
 """
 
 import argparse
@@ -60,13 +61,46 @@ def build(run_id, partial=False):
             "streams": [{"name": "g75full", "priority": 1, "kind": "hybrid_rung", "chunks": 1, "params": params}]}
 
 
+def build_vol(run_id, run, streams, disk_gb=200, max_dph=1.7):
+    """Training manifest on the first `streams` stored streams volNN of the volume label run `run`
+    (random, rules-v1 and harvest shards, plain hybrid labels) with the exact s601 validation shard of o2-g2arm-1."""
+    train = []
+    for k in range(1, streams + 1):
+        raw = launch.r2_get(f"runs/{run}/partial/vol{k:02d}/000000/out/hybrid/shards.json")
+        if raw is None:
+            sys.exit(f"stream vol{k:02d} of {run} is not stored yet")
+        s = json.loads(raw)
+        if s.get("label_inputs_pending"):
+            sys.exit(f"vol{k:02d}: shards still waiting to be stored")
+        train += [e for e in s["label_inputs"] if e["set"] in ("random", "rules", "harvest")]
+    raw = json.loads(launch.r2_get("runs/o2-g2arm-1/partial/g75/000000/out/hybrid/shards.json"))
+    val = [e for e in raw["label_inputs"] if e["set"] == "val" and e["seed"] == 601]
+    if len(val) != 1:
+        sys.exit("the s601 validation shard of o2-g2arm-1 is missing")
+    rows = sum(e["rows"] for e in train)
+    params = dict(threads="all", cut=2, check=False, widths="2048,1024,256", head="outcome", epochs=40, patience=6, batch=1024,
+                  lr=0.001, train_seed=1, max_minutes=0, device="cuda", overlap=False, upload_shards=False,
+                  table={"hands": 1000000, "seed": 1}, label_inputs=train + val)
+    return {"format": 2, "run_id": run_id, "run_seed": 1, "threads": None, "benchmark_seconds": 0, "upload_every_s": 300,
+            "heartbeat_every_s": 30,
+            "note": f"O_2 Stage B: the 2048-1024-256 network (seed 1, outcome head, early stopping on the exact s601 shard) on the {rows:,} "
+                    f"plain hybrid labels stored by the first {streams} streams of {run} (random + rules-v1 + harvested positions). "
+                    "Judged on the 250k exact test set with fortyone_nn.netcmp against p60 (plain 6M, SD 3.13%).",
+            "machine": {"gpus": 1, "min_gpu_ram_gb": 8, "min_cores": 120, "min_ram_gb": 64, "min_inet_down": 100, "max_dph": max_dph,
+                        "disk_gb": disk_gb},
+            "inputs": {},
+            "streams": [{"name": "volnet", "priority": 1, "kind": "hybrid_rung", "chunks": 1, "params": params}]}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=os.path.join(os.path.dirname(os.path.dirname(HERE)), "docs", "vast", "o2-g2arm-train.manifest.json"))
     ap.add_argument("--run-id", default="o2-g2full-1")
+    ap.add_argument("--vol-run", help="build from the volume label run (e.g. o2-vol-3) instead of the G2 arm")
+    ap.add_argument("--vol-streams", type=int, default=5, help="how many streams vol01.. to train on")
     ap.add_argument("--allow-partial", action="store_true", help="train on whatever G2 parts are stored (a label run died or was cut)")
     a = ap.parse_args()
-    m = build(a.run_id, a.allow_partial)
+    m = build_vol(a.run_id, a.vol_run, a.vol_streams) if a.vol_run else build(a.run_id, a.allow_partial)
     with open(a.out, "w") as f:
         json.dump(m, f, indent=1)
     p = m["streams"][0]["params"]["label_inputs"]
