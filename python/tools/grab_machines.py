@@ -82,9 +82,34 @@ def save_state(st):
     launch.r2_put(STATE_KEY, json.dumps(st, indent=1).encode())
 
 
+def direct_rent(o, what):
+    """Rents the offer at once through vast's API (one call, about a second), the way the console's Rent button does: vast's own
+    Jupyter + SSH image, 200 GB disk, labelled in the owner's style. The workflow route below needs 30-60 s to start, and offers of
+    machines that come and go (the Thailand and Taiwan boxes) were gone by then (2026-10-23). Returns the new instance id or None."""
+    body = {"client_id": "me", "image": "vastai/base-image:@vastai-automatic-tag", "disk": 200,
+            "label": f"41bots - hold {what} - free for the next job", "runtype": "jupyter_direc ssh_direc ssh_proxy",
+            "use_jupyter_lab": False, "cancel_unavail": True, "env": {}}
+    p = subprocess.run(["curl", "-sSL", "-m", "30", "-X", "PUT", f"https://console.vast.ai/api/v0/asks/{o['id']}/",
+                        "-H", "Content-Type: application/json", "-d", json.dumps(body)], capture_output=True, text=True)
+    try:
+        r = json.loads(p.stdout)
+    except ValueError:
+        return None
+    return r.get("new_contract") if isinstance(r, dict) and r.get("success") else None
+
+
 def launch_hold(st, mid, o, now, a, lines, generic):
-    """Rents the offer with a tiny hold job and `machine.keep`; records it in the state."""
+    """Rents the offer (directly through the API; the tiny hold job is the fallback) and records it in the state."""
     run_id = f"hold-{mid}-{int(now) % 100000}"
+    if not a.dry_run:
+        iid = direct_rent(o, f"machine {mid}")
+        if iid:
+            lines.append(f"{mid}: RENTED DIRECTLY: instance {iid}, ${o['dph_total']:.3f}/h, Jupyter + SSH, 200 GB disk; billing until you destroy it")
+            st[str(mid)] = {"state": "kept", "run_id": run_id, "t": now, "offer": o["id"], "dph": o["dph_total"], "generic": generic,
+                            "instance": iid}
+            save_state(st)
+            return
+        lines.append(f"{mid}: direct rent did not go through; trying the hold job")
     if not generic:
         lines.append(f"{mid}: RENTABLE: offer {o['id']} ${o['dph_total']:.3f}/h -> grabbing as {run_id}")
     if a.dry_run:
@@ -117,7 +142,19 @@ def main():
     st = load_state()
     now = time.time()
     held = [m for m, e in st.items() if e.get("state") in ("launched", "kept") and now - e["t"] < a.keep_hours * 3600 + 900]
+    live = None
+    if any(e.get("instance") for e in st.values()):
+        r = subprocess.run(["curl", "-sSL", "-m", "30", "https://console.vast.ai/api/v1/instances/"], capture_output=True, text=True)
+        try:
+            live = {i["id"] for i in json.loads(r.stdout).get("instances", [])}
+        except (ValueError, KeyError, AttributeError):
+            live = None
     for mid, e in list(st.items()):
+        # a machine rented directly that is not in vast's instance list any more (destroyed, by hand or by accident): forget it so
+        # the watcher takes the machine again when it is back on the market
+        if live is not None and e.get("instance") and e["instance"] not in live and now - e["t"] > 120:
+            del st[mid]
+            continue
         # a hold job whose workflow run already failed before any heartbeat (the offer was taken by another renter in the seconds
         # between the check and the rent, seen 2026-10-23): forget it at once so the machine can be grabbed again
         if e.get("state") == "launched" and e.get("gh_run") and now - e["t"] > 60:
