@@ -13,7 +13,7 @@
 # pair turned; and seven of them again with `method: "student"` and a seeded random student network)
 # are valued natively and as WebAssembly, and the results must be the same bytes;
 # every request is also split into 2, 3, 4 and 7 shards in Node and merged, and must give the
-# same bytes again. WASM_SIMD=1 also builds the module with simd128 and compares it the same way.
+# same bytes again. WASM_STUDENT=<file> uses a real student network for the `-student` requests. WASM_SIMD=1 also builds the module with simd128 and compares it the same way.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -68,7 +68,12 @@ trap 'rm -rf "$work"' EXIT
 "$api_native" fixtures "$work/req" 2> /dev/null
 # A seeded random student network for the `-student` requests (the same bytes natively and as
 # WebAssembly is what is checked, never a bot's strength).
-"$api_native" random-student "$work/student.safetensors" 2> /dev/null
+# WASM_STUDENT=<student .safetensors> checks a real network instead (an export check before it ships).
+if [ -n "${WASM_STUDENT:-}" ]; then
+  cp "$WASM_STUDENT" "$work/student.safetensors"
+else
+  "$api_native" random-student "$work/student.safetensors" 2> /dev/null
+fi
 files=("$work"/req/*.json)
 echo "API check: ${#files[@]} requests ($(cd "$work/req" && echo *.json))"
 "$api_native" --equity "$WASM_EQUITY" --net "$WASM_NET3" --student "$work/student.safetensors" eval "${files[@]}" \

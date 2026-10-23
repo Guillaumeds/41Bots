@@ -92,7 +92,7 @@ plain at 250,000 decisions, and at 1,000,000 decisions it reaches 0.0456% alone 
 (plain loss -0.006 +/- 0.017, decision-aware loss +0.024 +/- 0.009 worse, 3 seeds); the G2 labelling was cancelled at 60,000 decisions
 (12 parts, $3.49; 28 minutes a part after the two throughput fixes), and S2 goes on with the plain H_3 teacher (owner, 2026-10-23).
 **To check on S1 (trick 1) later:** the same loss, plain against decision-aware at 250,000 decisions, 3 seeds.
-**S2, next (owner chooses):** (1) [done, E16: the new network alone beats any search up to 25 deals; no router worth building] [loss search done, E17: weight 1, temperature 0.01 stays; no cell is clearly better]; (2) [done: 1M seeds 2-3 give 0.0491 / 0.0487, mean 0.0456 over 3 seeds, E12; run `student-t2-seeds-1m-2`, $0.71]; (3) [done as E16] the app-side checks with the new network (shortlist + search, router); (4) the export check (`method: "student"`, native against WASM,
+**S2, next (owner chooses):** (1) [done, E16: the new network alone beats any search up to 25 deals; no router worth building] [loss search done, E17: weight 1, temperature 0.01 stays; no cell is clearly better]; (2) [done: 1M seeds 2-3 give 0.0491 / 0.0487, mean 0.0456 over 3 seeds, E12; run `student-t2-seeds-1m-2`, $0.71]; (3) [done as E16] the app-side checks with the new network (shortlist + search, router); (4) [export check done: the seed-1 1M network gives the same bytes natively and in WASM, 21 requests, any split; `WASM_STUDENT=... tools/wasm_check.sh`; the owner's decision to replace S2 is still open] the export check (`method: "student"`, native against WASM,
 `docs/WASM-API.md`) and the owner's decision to replace S2; (5) more plain-teacher data (the plain 64-deal teacher costs about $4-5 per
 million decisions): a 2M-decision point with the new loss.
 
@@ -135,7 +135,8 @@ The owner wants the teachers and their deal counts decided last.
 | exact trick-2 validation 50k (s601) | shard 38de48356209cbec0f9ce41ceba28e6d5df52428abc0c866d443f9eb57964327, sidecar b39dbd6bf8f00a9b71fa800ccdaf9dd7de0ef25bc5dd3fa7b8b9e718fe895df8 | |
 | exact trick-2 validation 20k (s602) | shard 855ba467ee6bd7521a442cf668980af8cefacf00701939237895d7c749dfdeea, sidecar 6e346cbf05b9f2cc0d4368e224e4dd81a11a7c2aaab1fd5af0c52a8ad177c86d | made 2026-10-20 |
 | exact trick-2 validation 5k (s603) | shard 46ba92fcdf8e… (see `runs/o2-gv2-labels-3/partial/.../shards.json`) | made 2026-10-20 |
-| trick-2 student (512-256, 1M lessons, plain H_3 teacher) | 954223e2f56ecade906ba28ad2ea07ff70fee70b841e0743d4c911217afb6ce6 | see below |
+| **trick-2 student S2, shipped 2026-10-23** (512-256, 1M decisions, decision-aware loss, seed 1) | 3d1189e3042dfc9537b1f575f87e42b15e91628541e2ff90678ba319959c6e03 | golden-set loss 0.0389% (3-seed mean 0.0456%); export check passed; `inputs/sha256/<sha>` in R2, 7,306,112 bytes; the app swaps by its manifest (WASM-API §7) |
+| previous S2 (512-256, 1M lessons, plain H_3 teacher) | 954223e2f56ecade906ba28ad2ea07ff70fee70b841e0743d4c911217afb6ce6 | replaced; 0.0733% |
 | equity table v0 | sha256 64740dab7845f0502c93ce195d721e1ffb8aa6ab141739ef43f754690de16808 | rebuilt by every run from `table: {hands: 1000000, seed: 1}` |
 | O3G2 round records | `rounds/<id>/round.json`, `report.txt`, `profile.json` | written by each round (docs/m3-hybrid/o3-rounds.md) |
 | round 1 result (`o3r-1`) | init_net f5766aa9 (unchanged), G2 20c41678 (unchanged), dataset 8336ccf3ce45dba40fae05319cbb3698d128d0509cafa0add799bf70e3175daa | winner: the incumbent |
