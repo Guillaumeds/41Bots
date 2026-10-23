@@ -49,8 +49,9 @@ def rentable_offer(machine_id):
     return min(offers, key=lambda o: o["dph_total"]) if offers else None
 
 
-GENERIC_MAX_DPH = 1.20
+GENERIC_MAX_DPH = 1.50  # owner 2026-10-23: 190+ threads under $1.50/h
 GENERIC_MIN_THREADS = 190
+GENERIC_MIN_RAM_MB = 120_000  # the O_3 decision-loss experiment holds 46M rows (87 GB) in RAM
 GENERIC_GOOD_CPUS = ("EPYC", "Threadripper")  # a Xeon Phi 7250 (272 slow threads) was taken by the plain thread rule on 2026-10-23
 GENERIC_BAD_CPUS = ("9B45",)  # lists 384 threads, gave about 46 (docs/VAST-MACHINES.md)
 
@@ -59,7 +60,7 @@ def generic_offer(exclude_machines):
     """The cheapest-per-thread rentable offer that fits the owner's floor (190+ effective threads, a GPU of 6 GB or more, at most
     $1.20/h, reliability 0.90, 100 Mbps, 200 GB disk), not one of `exclude_machines` and not a CPU known to give far fewer threads."""
     body = json.dumps({"type": "on-demand", "rentable": {"eq": True}, "num_gpus": {"gte": 1}, "gpu_ram": {"gte": 6000},
-                       "cpu_cores_effective": {"gte": GENERIC_MIN_THREADS}, "dph_total": {"lte": GENERIC_MAX_DPH},
+                       "cpu_cores_effective": {"gte": GENERIC_MIN_THREADS}, "dph_total": {"lte": GENERIC_MAX_DPH}, "cpu_ram": {"gte": GENERIC_MIN_RAM_MB},
                        "reliability": {"gte": 0.90}, "inet_down": {"gte": 500}, "disk_space": {"gte": 200},
                        "order": [["dph_total", "asc"]], "limit": 60})
     p = subprocess.run(["curl", "-sSL", "-m", "30", "-X", "POST", "https://console.vast.ai/api/v0/bundles/",
@@ -139,6 +140,7 @@ def main():
     ap.add_argument("--max-held", type=int, default=3)
     ap.add_argument("--keep-hours", type=float, default=8)
     ap.add_argument("--generic", action="store_true", help=f"also take the cheapest-per-thread machine with {GENERIC_MIN_THREADS}+ threads under ${GENERIC_MAX_DPH}/h")
+    ap.add_argument("--generic-only", action="store_true", help="skip the named machines: only the generic rule")
     ap.add_argument("--max-generic", type=int, default=1, help="how many generic machines may be held at once")
     a = ap.parse_args()
     st = load_state()
@@ -175,7 +177,7 @@ def main():
                 e["state"] = "failed"
                 e["tries"] = e.get("tries", 0) + 1
     lines = []
-    for mid, what, cap in WANTED:
+    for mid, what, cap in ([] if a.generic_only else WANTED):
         e = st.get(str(mid), {})
         if e.get("state") in ("launched", "kept"):
             lines.append(f"{mid}: {e['state']} ({e['run_id']})")
@@ -202,7 +204,7 @@ def main():
         if n_gen >= a.max_generic or n_held >= a.max_held:
             lines.append(f"generic: {n_gen} generic and {n_held} machines held already (max {a.max_generic} / {a.max_held})")
         else:
-            o = generic_offer({int(k) for k in st if k.isdigit()} | {mid for mid, _, _ in WANTED})
+            o = generic_offer({int(k) for k in st if k.isdigit()} | ({mid for mid, _, _ in WANTED} if not a.generic_only else set()))
             if not o:
                 lines.append(f"generic: no rentable machine with {GENERIC_MIN_THREADS}+ threads under ${GENERIC_MAX_DPH}/h")
             else:
