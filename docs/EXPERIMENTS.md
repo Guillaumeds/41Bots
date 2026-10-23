@@ -800,6 +800,28 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 - **Tools made.** `fortyone_nn.netcmp`, `python/tools/o2watch.py` (progress, speed, ETA from R2 heartbeats),
   `vast-run.yml` input `instance_id` (take over a machine rented by hand; the instance needs the run's disk, 80 GB).
 
+### D7. O_2 on 11M plain labels (Stage B volume, runs `o2-vol-3` (labels), `o2-volnet-5` (network), 2026-10-23)
+- **Question.** Does plain-label volume keep helping past 6M, and by how much? (D6: plain 6M beat exact 1.5M.)
+- **Method.** Labels: `o2-vol-3`, CPU-only on an AMD EPYC 7742 (245 threads, $0.775/h), ten stored streams of 2.2M plain hybrid labels
+  (1.6M random + 0.4M rules-v1 + 0.2M harvested positions, harvest driven by the provisional O_2; smoke step first), seeds
+  5711-5760; about 32 min and $0.41 per stream (1,170 labels/s). Network: the first five streams (11M rows: 8M random, 2M rules-v1,
+  1M harvest) plus the exact s601 validation shard, 2048-1024-256, outcome head, seed 1, early stopping (best epoch 7 of 14):
+  `o2-volnet-5` on an EPYC 7B12 + RTX 3090, 18 min, $0.19 (`python/tools/o2_train_manifest.py`).
+- **Result** (same 250k exact test set and 4,479 sibling groups as D6; `docs/m3-hybrid/o2-stageb-netcmp-v11.json`):
+
+| arm | labels | validation loss / accuracy (s601) | test SD | paired change in squared error vs `p60` | largest team bias | sibling regret (95%) |
+|---|---|---|---|---|---|---|
+| `p15` | plain 1.5M | 2.069 / 67.1% | 3.668 | +3.64 +-0.29 | 0.116 | 0.295 +-0.055 |
+| `p60` | plain 6M | not read | 3.132 | reference | 0.126 | 0.247 +-0.051 |
+| `v11` | plain 11M (5 streams) | 1.861 / 74.7% | **2.932** | **-1.21 +-0.25** | **0.054** | **0.199 +-0.038** |
+
+- **Reading.** More plain volume still helps: SD 3.132 to 2.932 for 1.83x the data (exponent about -0.11 on rows, flatter than the
+  -0.12 read off 1.5M to 6M); bias and sibling regret improved too. Extrapolated at this exponent: 22M about 2.71%, 40M about
+  2.55% (not measured). Volume alone will not reach O_3's 1.85%: that would need about 700M rows at this exponent, so capacity,
+  loss shape and the audit loop (exact audits of the weak groups) are the next levers.
+- **Cost of the whole path so far.** Labels $0.41 per 2.2M rows; the 11M network $0.19.
+- **Limits.** One seed per arm; random-play test positions; sibling-regret differences inside the noise except v11 against p15.
+
 ---
 
 ## Part E. Students (small networks for the app's tricks 1-2)

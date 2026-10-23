@@ -5,7 +5,7 @@
 ## O_2 Stage A (2026-10-22): plain labels win; G2 is no bulk source; volume run next
 Results in EXPERIMENTS D6 (`docs/m3-hybrid/o2-stagea-netcmp*.json`): on the 250k exact test set plain 1.5M ties exact 1.5M
 (SD 3.67% against 3.64%), plain 6M is clearly better (3.13%) at about 1/30 of the label cost, and G2 labels (0.42M) score the same as
-exact labels of that count (4.15%): no niche. **Stage B started overnight:** `o2-vol-2` makes 22M plain labels (16M random + 4M
+exact labels of that count (4.15%): no niche. **Stage B result (2026-10-23, EXPERIMENTS D7): the 11M-plain-label network scores SD 2.93% (p60 3.13%), bias 0.05%, sibling regret 0.199%; keys: `runs/o2-volnet-5/out/volnet/`.** **Stage B started overnight:** `o2-vol-2` makes 22M plain labels (16M random + 4M
 rules-v1 + 2M harvested) in ten stored streams; then the real 2048-1024-256 network is trained from the stored streams
 (`python/tools/o2_train_manifest.py`, to be generalised), scored by `netcmp` against `p60`, followed by the audit loop. A
 trainer race on a late sidecar (killed `o2-g2arm-2`) is fixed in `train.py` (new binaries needed for streamed-parts runs).
