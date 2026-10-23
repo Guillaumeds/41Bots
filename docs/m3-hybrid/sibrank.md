@@ -119,3 +119,17 @@ $0.64/h (up to $2.6 at the $1.70 cap); both runs about $2–5.**
 ## Status (2026-10-22)
 The rented A/B (`o3-sibrank-a`, `-b`) was never launched; no golden-set result exists. The only
 measurement is the build-VM A/B in §4. Write-up: `docs/EXPERIMENTS.md` C9.
+
+
+## 6. The rented A/B, ready to run (2026-10-23, owner: "try the decision-aware loss on O_3 first, it is cheaper than O_2")
+
+`docs/vast/o3-pair.manifest.json` (run `o3-pair-1`), judged by `python/tools/o3_pair_score.py`. The O_3 recipe (2048-1024-256, outcome head, cut 3) on the
+stored 40M trick-3 base (random s321, rules s322, harvest s313, validation s401) **plus 6M exact sibling rows** (seed 7911, driven by O_3 f5766a, generated in
+each arm with the same seed so every arm sees identical rows). Arms: `base_s1`, `base_s2` (pair_weight 0: the control and the retraining noise), `w1_s1`,
+`w1_s2` (weight 1, scale 100: a 1% gap is a logit of 1, S2's setting), `w3_s1` (weight 3). Each arm is golden-checked in the run and judged afterwards on the 100,000
+held-out exact sibling rows `sib3` (seed 7903): **sibling regret first** (sensitive: the o3-ladder fit gives decision loss about sibling regret to the power 1.7), the
+golden loss second (noise up to about 0.0025 points on a 0.0068% baseline, so only a drop of more than about 35% shows without more seeds).
+Needs 190+ threads, 128+ GB RAM (46M rows = 87 GB), a GPU with 8+ GB, 120+ GB disk (the manifest asks 200). Estimated: labels 5-30 min, five trainings of 25-40 min,
+golden checks about 4 min each: about 3-4 h and $5-8 at $1.4/h. Order of arms by priority, so a cut run still has the control and weight 1. Decision rule (before running):
+a weight is worth carrying to O_2 if its sibling regret is below the control's two-seed mean by more than the seed spread AND the golden loss does not rise.
+The S2 stop rule on decision loss (E12) is not part of this run (the O_3 trainer stops on value validation); it is the follow-up if weight 1 helps.
