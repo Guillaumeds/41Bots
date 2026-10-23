@@ -822,6 +822,24 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 - **Cost of the whole path so far.** Labels $0.41 per 2.2M rows; the 11M network $0.19.
 - **Limits.** One seed per arm; random-play test positions; sibling-regret differences inside the noise except v11 against p15.
 
+### D8. O_2 on 19.8M plain labels (run `o2-volnet-9k`, 2026-10-23)
+- **Question.** Does the full volume run (nine of the ten D7 label streams, 19.8M rows) keep following the volume curve?
+- **Method.** As D7 (2048-1024-256, outcome head, seed 1, early stopping, exact validation shard s601) on an AMD EPYC 7742
+  (245 threads, $0.775/h) with a GPU; 15 epochs run, best epoch 8; 46 min, $0.60 (machine kept 8 h). Scored on the same 250k
+  exact test set and 4,479 sibling groups (`docs/m3-hybrid/o2-stageb-netcmp-v20.json`). Network key: `runs/o2-volnet-9k/out/volnet/`.
+- **Result.**
+
+| arm | rows | validation loss / accuracy (s601) | test SD | paired change in squared error vs `v11` | largest team bias | sibling regret (95%) |
+|---|---|---|---|---|---|---|
+| `v11` | 11M | 1.861 / 74.7% | 2.932 | reference | 0.054 | 0.199 +-0.038 |
+| `v20` | 19.8M | 1.795 / 77.2% | **2.748** | **-1.04 +-0.21** | **0.028** | **0.176 +-0.033** |
+
+- **Reading.** On the line from D7: SD exponent about -0.11 for 1.8x the rows (predicted 2.71%, measured 2.75%). Sibling regret
+  falls more slowly (exponent about -0.20): 0.199% to 0.176%. By the D10 fit the trick-1 decision loss estimate is about
+  **0.019 to 0.022%** (factor 1.5). Reaching sibling regret 0.11% by volume alone would need about 10x the rows (roughly 200M),
+  which is not affordable in rows or disk; capacity and the audit loop are the levers.
+- **Limits.** One seed; random-play test positions; the sibling-regret gain is inside the noise.
+
 ### D10. Calibration: what a network's error costs in decisions (run `o3-ladder-1`, 2026-10-23)
 - **Question.** No trick-1 golden set exists (owner, 2026-10-16), so how much trick-1 decision loss does O_2's current error
   imply? Method: the same question one trick later, where exact answers exist.

@@ -68,6 +68,7 @@ Old branches are tags (`git tag -l 'archive/*'`; `git checkout archive/<name>` r
 | STATUS history 2026-10-20 | O_2 on G v2 labels | **rejected**: only 1.2× cheaper than exact (D2) |
 | `m3-hybrid/learned-leaves.md` "O_2 G v2" | O_2's error predictor | predictor **done**; trick-1 test **not run** (D3) |
 | `m3-hybrid/o2-stagea-netcmp.json` | O_2 Stage A: scores of five networks on the 250k exact test set (EXPERIMENTS D6) | **result: plain labels tie exact at equal volume and win at equal money; volume is the lever**; G2 arm pending |
+| `m3-hybrid/o2-stageb-netcmp-v20.json` | O_2 on 19.8M plain labels, scored on the 250k exact test set (EXPERIMENTS D8) | **result: SD 2.75%, sibling regret 0.176%; volume alone will not reach 0.01%** |
 | `m3-hybrid/o3-ladder-calibration.json`, `m3-hybrid/o3-ladder/` | Calibration: O_3-recipe networks at 1M-20M rows, decision loss against sibling regret / SD (EXPERIMENTS D10) | **result: decision loss about regret^1.7; O_2 v11 estimated at 0.022-0.026% at trick 1; 0.01% needs sibling regret about 0.11%** |
 | `m3-hybrid/silver.md` | trick-1 reference (exact through trick 2, then O_3) | built, **incomplete**: no silver set exists (D4) |
 
