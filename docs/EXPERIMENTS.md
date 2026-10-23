@@ -1203,6 +1203,39 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   stratum and candidate count only; one seed of the network (E12); the phone's cost of a deal is separate (a leader deal is 368 ms in WebAssembly, `WASM-API.md` section 8).
 - **Sources.** `crates/search/src/shortlist.rs`, `tools/router_fit.py`, E9, E10, E12.
 
+### E17. A weight and temperature search for the decision-aware loss (run `student-t2-losssearch-1`, 2026-10-23)
+- **Question.** Is there a `rank_weight` and `rank_temperature` better than the weight 1, temperature 0.01 of E12, and how much does the choice matter?
+- **Method.** As E12: 512-256, the first 250,000 plain-H_3 decisions at 64 deals, stop on the validation decision loss; weight 0.3 / 1 / 3 against temperature
+  0.005 / 0.01 / 0.02 / 0.03, seeds 1 and 2 for every cell except (1, 0.01), which is E12's three seeds (22 networks; `docs/vast/student-t2-losssearch.manifest.json`, one
+  GPU, a Xeon E5-2697 v4 box at $0.134/h). Each network judged on the exact golden set as in E12.
+- **Result.** Loss alone in % of the money chance, seeds 1 / 2, then the 2-seed mean; seat 1 and top-3 are means:
+
+| weight | temperature | alone, seed 1 / 2 | alone, mean | seat 1 | top-3 |
+|---|---|---|---|---|---|
+| 0.3 | 0.005 | 0.0839 / 0.0865 | 0.0852 | 0.096 | 0.0160 |
+| 0.3 | **0.01** | 0.0515 / 0.0636 | **0.0576** | 0.091 | 0.0054 |
+| 0.3 | 0.02 | 0.0637 / 0.0654 | 0.0646 | 0.085 | 0.0061 |
+| 0.3 | 0.03 | 0.0732 / 0.0653 | 0.0692 | 0.103 | 0.0051 |
+| 1 | 0.005 | 0.0854 / 0.0757 | 0.0806 | 0.087 | 0.0132 |
+| **1** | **0.01** (E12, 3 seeds) | 0.0599 / 0.0550 / 0.0613 | **0.0587** | 0.100 | 0.0045 |
+| 1 | 0.02 | 0.0720 / 0.0736 | 0.0728 | 0.092 | 0.0043 |
+| 1 | 0.03 | 0.0871 / 0.0652 | 0.0762 | 0.104 | 0.0040 |
+| 3 | 0.005 | 0.0524 / 0.0651 | 0.0588 | 0.091 | 0.0048 |
+| 3 | **0.01** | 0.0550 / 0.0684 | 0.0617 | 0.090 | **0.0032** |
+| 3 | 0.02 | 0.0746 / 0.0567 | 0.0657 | 0.089 | 0.0044 |
+| 3 | 0.03 | 0.0677 / 0.0726 | 0.0701 | 0.112 | 0.0040 |
+
+  No cell is clearly better than weight 1, temperature 0.01 (0.0587): the nearest are weight 0.3 at 0.01 (0.0576), weight 3 at 0.005 (0.0588) and weight 3 at 0.01 (0.0617),
+  all within the noise (the two seeds of one cell differ by up to 0.017). By temperature, over the weights: 0.005 gives 0.0852 / 0.0806 / 0.0588, 0.01 gives 0.0576 /
+  0.0587 / 0.0617, 0.02 gives 0.0646 / 0.0728 / 0.0657, 0.03 gives 0.0692 / 0.0762 / 0.0701 (weights 0.3 / 1 / 3): temperature 0.01 is the best column at every weight but 3,
+  where 0.005 ties it; 0.02 and 0.03 are worse; the weight matters little between 0.3 and 3 at temperature 0.01, and a small weight with temperature 0.005 is poor (0.085). The top-3
+  pick is lowest at weight 3, temperature 0.01 (0.0032) and highest at temperature 0.005 with weight 0.3 or 1 (0.0160, 0.0132).
+- **Cost.** 128 minutes, $0.29 (22 networks); the golden checks about 3 minutes on the build VM.
+- **Limits.** Two seeds per cell (the seed SD within a cell is 0.003-0.010, E12), so differences under about 0.01 between cells are not resolved; one set of 250,000
+  plain-H_3 decisions; the grid is coarse (a factor of 2-3 in each setting) and the stop rule is on in all cells; a third seed was not run for the best cells; the
+  1,000,000-decision network of E12 was not retrained with another setting.
+- **Sources.** `docs/vast/student-t2-losssearch.manifest.json`, R2 `runs/student-t2-losssearch-1/out/search/`, E12.
+
 ---
 
 ## Part F. Runs and builds without a result, and work set aside

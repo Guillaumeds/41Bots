@@ -92,8 +92,7 @@ plain at 250,000 decisions, and at 1,000,000 decisions it reaches 0.0389% alone,
 (plain loss -0.006 +/- 0.017, decision-aware loss +0.024 +/- 0.009 worse, 3 seeds); the G2 labelling was cancelled at 60,000 decisions
 (12 parts, $3.49; 28 minutes a part after the two throughput fixes), and S2 goes on with the plain H_3 teacher (owner, 2026-10-23).
 **To check on S1 (trick 1) later:** the same loss, plain against decision-aware at 250,000 decisions, 3 seeds.
-**S2, next (owner chooses):** (1) [done, E16: the new network alone beats any search up to 25 deals; no router worth building] a small loss search (weight 0.3/1/3, temperature 0.005/0.01/0.02/0.03, 3 seeds each, 250,000 decisions,
-about $0.5); (2) 1M seeds 2-3 of the best setting (about $0.5); (3) [done as E16] the app-side checks with the new network (shortlist + search, router); (4) the export check (`method: "student"`, native against WASM,
+**S2, next (owner chooses):** (1) [done, E16: the new network alone beats any search up to 25 deals; no router worth building] [loss search done, E17: weight 1, temperature 0.01 stays; no cell is clearly better]; (2) 1M seeds 2-3 of the best setting (about $0.5); (3) [done as E16] the app-side checks with the new network (shortlist + search, router); (4) the export check (`method: "student"`, native against WASM,
 `docs/WASM-API.md`) and the owner's decision to replace S2; (5) more plain-teacher data (the plain 64-deal teacher costs about $4-5 per
 million decisions): a 2M-decision point with the new loss.
 
