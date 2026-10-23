@@ -961,14 +961,14 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   3090, $1.54/h; two of five arms finished (`base_s1`, `w1_s1`); the others were stopped by the owner (2026-10-23) after the result.
 - **Result.**
 
-| arm | sibling regret (95%) | sibling SD | largest bias | golden loss (95% bound) | epochs (best) |
-|---|---|---|---|---|---|
-| `base_s1` (weight 0) | 0.0720% +-0.0094 | 1.787% | 0.0242% | 0.0066% (0.0081%) | 17 (13) |
-| `w1_s1` (weight 1) | 0.1274% +-0.0128 | 2.276% | 0.0067% | 0.0089% (0.0108%) | 40 (40, the cap) |
+| arm | sibling regret (95%) | sibling SD | largest bias | golden loss (95% bound) | epochs run (best) | validation loss / outcome accuracy |
+|---|---|---|---|---|---|---|
+| `base_s1` (weight 0) | 0.0720% +-0.0094 | 1.787% | 0.0242% | 0.0066% (0.0081%) | 17 (13) | 1.456 / 88.6% |
+| `w1_s1` (weight 1) | 0.1274% +-0.0128 | 2.276% | 0.0067% | 0.0089% (0.0108%) | 40 (39, at the cap) | 1.653 / 81.2% |
 | adopted O_3 f5766a (D10 / C2) | not scored on this set | | | 0.0056% (0.0068%) | |
 
 - **Observed.** Weight 1 had sibling regret 77% above the control (outside the noise) and a higher golden loss (inside the 0.0025-point retraining
-  noise); only the team bias improved. It reached the 40-epoch cap with its value score still improving; the trainer stops on value validation, not
+  noise); only the team bias improved. It ran to the 40-epoch cap with its best epoch at 39, and its validation loss and outcome accuracy were worse than the control's (1.653 and 81.2% against 1.456 and 88.6%, 46,000,000 rows each); the trainer stops on value validation, not
   on decisions (E12: the same ranking term scored 0.095% without and 0.059% with a stop on decision loss). The control reproduced f5766a within
   retraining noise. Cost of the experiment: about $6.
 - **Limits.** One seed per arm (`base_s2`, `w1_s2` and `w3_s1` were not run); one weight; the sibling set is built with the same rule as the training
