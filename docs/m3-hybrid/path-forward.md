@@ -4,6 +4,39 @@ Status: **proposal**, written from the owner's sequence of 2026-10-22 and our me
 here is running. Every number is cited to `docs/EXPERIMENTS.md` (written "E4", "D2" ...) or marked
 "estimate". Where this page and STATUS differ, STATUS is current.
 
+## 0. Update 2026-10-23 (late morning, Irish time): what has been done and the best way forward
+
+### Done since this plan was written (all recorded in EXPERIMENTS; Session 2 = O_2, Session 1 = S2)
+- **O_2 label source and volume (D6, D7, D8).** Plain hybrid labels beat exact labels at equal money (plain 6M: SD 3.13% against exact 1.5M: 3.64%); G2 labels have no niche.
+  Volume still pays at a slow rate (SD falls about 0.11 in the exponent per row): 11M 2.93%, 19.8M **2.75%** (bias 0.028%, sibling regret 0.176%). Network keys:
+  `runs/o2-volnet-5/out/volnet/`, `runs/o2-volnet-9k/out/volnet/`. 22M plain labels are stored (`runs/o2-vol-3`, ten streams).
+- **Capacity (D9, partly in).** A second seed of the same network scored 2.950% against 2.932%, so run-to-run noise is about 0.02%. A deeper network (4 layers) scored 2.791% (better SD, but bias 0.084% and sibling regret 0.202% not better). The wide network was still training at 10:10 Irish.
+- **Calibration (D10).** O_3-recipe networks at 1M/3M/10M/20M rows: decision loss 0.029/0.014/0.0089/0.0071%, about sibling regret to the power 1.7. Read across: the 19.8M O_2 is an estimated **0.019-0.022%** at trick 1 (factor 1.5; an estimate, not a proof); 0.01% needs sibling regret about 0.11% (position SD about 2.25%).
+- **Audit-loop machinery readied.** `docs/vast/o2-audit.manifest.json` (run `o2-audit-3`): 22M stored plain labels, O_3 labeller, no exact leaves, 10% exact anchor, 4 rounds, 200k exact audit rows a round, capacity ladder. It started cleanly on a hand-rented machine (368 threads) and was stopped by the owner after minutes, to build the 40M base first (reasons below).
+- **Machine tooling.** Every launcher rental is now Jupyter + SSH (CLAUDE.md rule); `keep` holds a machine after a run; takeover of a hand-rented machine works (`instance_id`); a grab watcher (`python/tools/grab_machines.py`) rents wanted machines the moment they appear.
+- **S2 (Session 1; E12-E17).** The decision-aware loss halves the trick-2 student's golden-set loss; G2 teacher labels gave no gain; a weight/temperature search found nothing better than weight 1, temperature 0.01; the new network alone beats any search up to 25 deals in the app path.
+
+### Lessons (cost us time; read before the next launch)
+1. **Cancelling a run destroys its machine even when `keep` is set** (`o2-audit-3`: the hand-rented machine 57346089 was destroyed on cancel). `keep` holds a machine only when the run ends by itself. To stop a run and keep the box, ssh in and stop the job instead, or accept the loss.
+2. **Takeover rebuilds the container** (pulls the 4-6 GB image): about 10 minutes before the first heartbeat. The manifest's `min_gpu_ram_gb` and `disk_gb` are checked against the instance; a mismatch refuses the takeover (seen: 8 GB asked, 6 GB present).
+3. **One machine, one session.** Two sessions took over the same kept machine within two minutes. Put the machine's id in the launching message and in `docs/STATUS.md` before deploying; label hand-rented machines by session.
+4. **Do not assume "ETA" from the epoch cap.** Early stopping ended `o2-volnet-9k` at epoch 15 of 40; estimate from best epoch plus patience.
+
+### Best way forward, Session 2 (O_2), in order
+1. **Build the 40M base now** (running: `o2-vol40-1`, `docs/vast/o2-vol40.manifest.json`; eight more stored streams of 2.2M plain labels, 17.6M new rows, same recipe and harvest network, ~3-4 h, ~$4 on the 384-thread machine). Why before the loop: the loop retrains from scratch on whatever base it was launched with; the old O_2 loop on a 1.5-2M base got *worse* every round (D1: validation SD 3.66, 3.73, 3.85), O_3's loop started from 40M and gained only about 20% (C2: 0.0088 to 0.0068%, rounds 3-4 nothing), while O_2 is not yet data-saturated (O_3 saturated near 40M, C4). Volume and the loop are different gains, so they multiply; neither replaces the other.
+2. **Audit loop on the 39.6M base** (new run id, e.g. `o2-audit-4`): copy `o2-audit.manifest.json`, add the eight new streams to `label_inputs` (`python/tools/o2_train_manifest.py --vol-run o2-vol-3 --vol-streams 10` shows the entry format; the new streams are under `runs/o2-vol40-1`), raise `audit_target_rows` from 1M to 4-8M (O_3's targeted shard was 20% of its base, ours was 4.5%), keep `hybrid_exact_share` 0.1, choose `audit_shapes` from the wide-network result (deeper helped SD but not decisions, so keep the ladder short). Judge every round on the 250k exact test set and the sibling groups (`fortyone_nn.netcmp`), not only on the loop's own audit shard. Stop when a round does not beat the previous one's sibling regret by more than noise (about 0.03%).
+3. **A cheap ranking-loss A/B** (about $1, while labels build or after): S2 proved a decision-aware loss halves its decision loss (E12); O_3's pairwise ranking idea (C9) was only smoke-tested and its rented A/B never launched. Train O_2 on the 22M with a pairwise term over exact sibling groups and compare sibling regret on the held-out groups. This is the only lever with direct evidence that moves *decisions* rather than value error.
+4. **Reuse of the stored validation shard with `label_parts` above 1** (to-do in Session 2 below) still stands for any parts run.
+5. **Judge and record:** adopt the best O_2 on sibling regret and bias (not SD alone); report as "audit-clean on exact trick-2 positions with sibling regret X", never "proven 0.01%". Then Session 3.
+- Expected: 40M alone SD about 2.55%, sibling regret about 0.153%, estimated loss 0.015-0.017%; plus the loop's usual 20% gives about 0.012-0.014%. If that is still above 0.01% at trick 1, the next levers are the ranking loss and a bigger targeted share, then more volume (about $40 for 200M; poor value, see D8 reading).
+
+### Best way forward, Session 1 (S2) and the sessions that do not need O_2
+1. **S2 first:** finish the 1M-decision seeds 2-3 of weight 1, temperature 0.01 (E12; running), then the export check (`method: "student"`, native against WASM, `docs/WASM-API.md`) and the owner's decision to replace S2. E17 closed the loss search; do not search more cells.
+2. **Then the playout yardstick (Session 3's second item):** it uses fixed finishing players (S2 or H_3, then exact), so it does **not** need O_2: design it and run a small pilot now, with a dollar cap. It is the only trick-1 yardstick independent of O_2 and of PIMC's perfect-information assumption.
+3. **More plain-teacher data for S2** (about $4-5 per 64-deal 250k, E14; data helps as N^-0.23, E4) only after 1 and 2; G2 is out (E13).
+4. **Copper and S1 wait for O_2** (the teacher is H_2 + O_2). Prepare, do not run: the S1 manifests with the E12 loss (`rank_weight` 1, `rank_temperature` 0.01, `stop_on` decision), 3 seeds at 250k before any larger spend.
+5. **Machines:** the hand-rented 384-thread machine belongs to Session 2 while `o2-vol40-1` and the audit loop run; S2 uses its own cheap GPU boxes (the S2 jobs need almost no CPU). Check the vast instance labels (`41bots-<run id>`) before deploying anything to a kept machine.
+
 ## 1. Where we stand (facts)
 - O_3 (trick-3 network): 0.0068% alone (seat 1 0.0201%), 0.0008% with G2 and exact solving (seat 1
   0.0022%). Three attempts to lower O_3 alone (O3G2 rounds, 80M base, specialist S) did not move it
