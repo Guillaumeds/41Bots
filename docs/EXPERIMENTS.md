@@ -859,6 +859,37 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   bias. As for O_3 (C2: the 4-layer ladder step brought nothing at the decision level), capacity does not buy decisions here; volume and the audit loop come first.
 - **Limits.** One seed per shape; 11M rows only; larger capacity may pay at 40M rows (not tested); random-play test positions.
 
+### D11. The O_2 audit loop at trick 2 (run `o2-audit-10`, 2026-10-23)
+- **Question.** Does the audit loop (find weak groups on fresh exact positions, harvest more of them at double weight, retrain) improve O_2 beyond plain volume?
+- **Method.** `docs/vast/o2-audit-4.manifest.json` (built by `python/tools/o2_audit_manifest.py`): the 39.6M stored plain hybrid labels (`o2-vol-3` streams 1-10 and `o2-vol40-1` streams 11-18) plus the exact s601 validation shard; 2048-1024-256, outcome head; audit shards of 200,000 exact trick-2 positions as the hybrid reaches them from trick-1 decisions (seeds 22101, 22102); targeted harvest of 2,000,000 rows a round at weight 2 (plain O_3 labels, 10% exact); 3 rounds planned. New York machine (AMD EPYC 9B14, 184 usable threads, RTX 5090, 128 GB RAM, $1.41/h), run about 5.7 h, about $8; stopped by the owner after round 2's audit report (plan B), before its harvest. Earlier attempts on other machines failed or were abandoned (a 6 Mbps host, destroyed boxes, a box whose GPU could not start containers); about $3 of rentals.
+- **Result.** Round 1 network `13152c24bc27` (best epoch 9; validation loss 1.754, accuracy 78.4%); round 2 network `235ed448acc7` (best epoch 20; 1.767, 78.3%). On the 250k exact test set and 4,479 sibling groups:
+
+| | round 1 | round 2 | v20 (19.8M, D8) |
+|---|---|---|---|
+| test SD | 2.603% | 2.624% (paired change +0.11 +-0.14, no change) | 2.748% |
+| largest team bias | 0.019% | 0.022% | 0.028% |
+| sibling regret (95%) | 0.188% +-0.044 | 0.171% +-0.036 | 0.176% +-0.033 |
+
+  The audits on fresh exact shards: round 1 overall SD 2.531%, 668 weak groups, worst "the leader's team has 40 points" (weight 0.19%, SD 7.05%, bias -0.88%); round 2 overall SD 2.524%, 667 weak groups, worst the same group (weight 0.21%, SD 6.84%); race class 4 SD 4.07% then 4.08%. Verdict both times "not flat". Reports: `docs/m3-hybrid/o2-audit-10/`.
+- **Reading.** The 40M network beats the 19.8M one on error (2.60% against 2.75%) and bias, not on sibling regret (inside the noise). The targeted round changed nothing measurable: the same score states stay at SD 4-7%. As for O_3 (C2, C3, C12), more audit rounds do not move the network beyond retraining noise. Round 1's network is adopted as O_2 for the trick-1 work (owner, 2026-10-23). Estimated trick-1 loss from D10's fit: about 0.016-0.019%, above 0.01%.
+- **Limits.** Round 1's rough trick-1 test is 8 decisions (coarse); one seed per round; round 2's own audit shard was not stored; round 3 and its harvest were not run.
+- **Sources.** R2 `runs/o2-audit-10/partial/rung/000000/out/hybrid/` (nets, `audit/round-N/`), round-1 audit shard `inputs/sha256/c8a8a392...`, targeted shard `inputs/sha256/6fceb941...`.
+
+### D12. A sibling ranking loss on O_3 (run `o3-pair-1`, 2026-10-23)
+- **Question.** Does a decision-aware (pairwise ranking) loss over sibling positions move O_3's decisions, as S2's decision-aware loss did (E12)?
+- **Method.** `docs/vast/o3-pair.manifest.json`, scored by `python/tools/o3_pair_score.py`: the O_3 recipe (2048-1024-256, outcome head, cut 3) on the stored 40M trick-3 base plus 6M exact sibling rows (seed 7911, driven by O_3 f5766a), every arm with the same rows; arms differ in `pair_weight` (the trainer's gap-weighted RankNet term, scale 100) and seed. Judged on the 100,000 held-out exact sibling rows `sib3` (seed 7903) and the in-run golden check (2,000 trick-2 decisions x 320 worlds). AMD Threadripper PRO 9995WX (184 usable threads), RTX 3090, $1.54/h; two of five arms finished (`base_s1`, `w1_s1`), the rest stopped by the owner after the result. About $6.
+- **Result.**
+
+| arm | sibling regret (95%) | sibling SD | largest bias | golden loss (95% bound) | epochs (best) |
+|---|---|---|---|---|---|
+| `base_s1` (weight 0, control) | 0.0720% +-0.0094 | 1.787% | 0.0242% | 0.0066% (0.0081%) | 17 (13) |
+| `w1_s1` (weight 1) | 0.1274% +-0.0128 | 2.276% | 0.0067% | 0.0089% (0.0108%) | 40, the cap (still improving) |
+| adopted O_3 f5766a (reference) | not scored on this set | | | 0.0056% (0.0068%) | |
+
+- **Reading.** Weight 1 is clearly worse on sibling regret (+77%, far outside the noise) and on the golden loss; only the team bias improved. It also hit the 40-epoch cap while its value score was still creeping down: stopping on value error is not stopping on decisions (E12 saw the same difference). The control reproduces f5766a within retraining noise. S2's win used a policy whose loss is the decision itself; O_3 is a value network averaged over many worlds, and the ranking term seems to disturb the values the search needs. No reason to try this weight on O_2.
+- **Limits.** One seed per arm (the second control seed and the second weight-1 seed were not run), one weight; the loss and the sibling set share the rule that makes sibling groups (principal lines driven by f5766a); a smaller weight (0.1) and a stop rule on sibling regret were not tried; the golden difference (0.0089 against 0.0066) is inside the 0.0025-point retraining noise, the sibling-regret one is not.
+- **Sources.** R2 `runs/o3-pair-1/out/base_s1/`, `out/w1_s1/`; `docs/m3-hybrid/o3-pair-score.json`; `docs/m3-hybrid/sibrank.md` section 6.
+
 ### D10. Calibration: what a network's error costs in decisions (run `o3-ladder-1`, 2026-10-23)
 - **Question.** No trick-1 golden set exists (owner, 2026-10-16), so how much trick-1 decision loss does O_2's current error
   imply? Method: the same question one trick later, where exact answers exist.

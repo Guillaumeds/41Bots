@@ -1,0 +1,52 @@
+Audit of the network /root/w/work/o2-audit-10/chunks/rung/000000-959/out/hybrid/audit/round-2/net/int.safetensors (sha256 235ed448acc75b7f..., trick 2, outcome-v1 head).
+Rows audited: 200,000 from 1 shard(s); half A (discovery) 100,113, half B (confirmation) 99,887, split seed 22102.
+Integer network checked against the reference integer path on 512 rows: identical.
+Teams are named relative to the player who leads the position's trick: the leader's team / the next team / the opposite team / the previous team (the shard does not say which seat decided).
+
+Overall: SD 2.524%, bias -0.015% / -0.002% / +0.022% / -0.005%, 99.9th percentile of |error| 27.76%.
+By race class (a diagnostic; the audit does not use race classes):
+  1 (one team can win the game, not the match): 75,833 rows (37.9%), SD 1.332%, bias -0.010% / +0.003% / +0.003% / +0.004%
+  2 (two or more teams can win the game, not the match): 57,183 rows (28.6%), SD 2.101%, bias -0.004% / +0.002% / +0.022% / -0.021%
+  3 (one team can win the match, nobody else the game): 18,919 rows (9.5%), SD 2.140%, bias -0.069% / -0.017% / +0.068% / +0.017%
+  4 (a team can win the match and another the game): 48,065 rows (24.0%), SD 4.082%, bias -0.016% / -0.007% / +0.034% / -0.011%
+
+Standard: no group of weight at least 0.1% (101 rows of half A) with |bias| over 0.25% for some team or SD over 1%; trees of depth up to 6, conjunctions of up to 3 binary conditions; candidates screened on half A at p <= 0.01; Benjamini-Hochberg at 5% on half B.
+Searched on half A: tree nodes {'tree-signed': 30, 'tree-abs': 86}; 684 items, conjunctions counted by size [684, 91, 0] (frequent [684, 0, 0]; items and pairs not extended because their sums rule out every extension: [0, 0]).
+Candidates found on half A: 771 (102 from the trees, 670 from the conjunctions); hypotheses tested on half B: 780.
+Confirmed on half B: 762 group(s); 667 after leaving out groups inside a more general confirmed group (these go to predicates.json).
+
+Positions inside the confirmed groups: 200,000 (100.0%); by race class, the share of its positions inside them: 1: 100%, 2: 100%, 3: 100%, 4: 100%.
+
+Verdict: not flat. 667 weak group(s) remain. The worst:
+  1. the leader's team has 40 points
+     weight 0.2055% (411 rows); on half B: SD 6.841%, bias +0.567% / -0.479% / +0.209% / -0.297%, p99.9 |error| 59.42%; confirmed by sd (p 9.0e-04); found by conj-1, tree-signed; example row 7989; race classes 0-4: 0%, 0%, 34%, 0%, 66%
+  2. the next team has 30 points
+     weight 0.5835% (1,167 rows); on half B: SD 5.549%, bias -0.187% / +0.547% / -0.103% / -0.257%, p99.9 |error| 88.07%; confirmed by sd (p 3.8e-03); found by conj-1; example row 41298; race classes 0-4: 0%, 0%, 40%, 0%, 60%
+  3. the previous team has 30 points
+     weight 0.4965% (993 rows); on half B: SD 4.707%, bias +0.361% / -0.304% / -0.154% / +0.097%, p99.9 |error| 59.41%; confirmed by sd (p 1.5e-04); found by conj-1; example row 7989; race classes 0-4: 0%, 0%, 38%, 0%, 62%
+  4. the 2nd player holds the 12th-best live card of plain suit 1
+     weight 0.3405% (681 rows); on half B: SD 4.678%, bias +0.450% / -0.801% / +0.273% / +0.077%, p99.9 |error| 59.12%; confirmed by sd (p 3.6e-03); found by conj-1; example row 7989; race classes 0-4: 0%, 39%, 31%, 9%, 21%
+  5. the opposite team has 31 points
+     weight 3.7955% (7,591 rows); on half B: SD 4.540%, bias -0.030% / +0.080% / -0.116% / +0.066%, p99.9 |error| 57.23%; confirmed by sd (p 9.7e-16); found by conj-1; example row 135414; race classes 0-4: 0%, 0%, 39%, 0%, 61%
+  6. the previous team has 36 points
+     weight 3.8245% (7,649 rows); on half B: SD 4.464%, bias +0.136% / +0.120% / -0.121% / -0.134%, p99.9 |error| 51.87%; confirmed by sd (p 2.5e-21); found by conj-1; example row 163205; race classes 0-4: 0%, 0%, 37%, 0%, 63%
+  7. the next team has 36 points
+     weight 3.8735% (7,747 rows); on half B: SD 4.456%, bias +0.001% / -0.091% / +0.074% / +0.016%, p99.9 |error| 49.68%; confirmed by sd (p 2.7e-30); found by conj-1; example row 162942; race classes 0-4: 0%, 0%, 39%, 0%, 61%
+  8. the opposite team has 35 points
+     weight 0.1390% (278 rows); on half B: SD 4.364%, bias -0.246% / -0.574% / +1.011% / -0.191%, p99.9 |error| 39.82%; confirmed by sd (p 7.8e-03); found by conj-1; example row 116641; race classes 0-4: 0%, 0%, 23%, 0%, 77%
+  9. the 7th player holds the 9th-best live ordinary trump
+     weight 0.5005% (1,001 rows); on half B: SD 4.324%, bias +0.090% / +0.109% / -0.376% / +0.177%, p99.9 |error| 56.75%; confirmed by sd (p 4.0e-02); found by conj-1; example row 135414; race classes 0-4: 0%, 36%, 30%, 8%, 26%
+ 10. the leader's team has 36 points
+     weight 5.3600% (10,720 rows); on half B: SD 4.227%, bias +0.064% / +0.033% / -0.087% / -0.011%, p99.9 |error| 50.28%; confirmed by sd (p 2.1e-21); found by conj-1; example row 41298; race classes 0-4: 0%, 14%, 37%, 4%, 46%
+ 11. the previous team has 25 points
+     weight 1.1615% (2,323 rows); on half B: SD 4.215%, bias +0.236% / -0.097% / -0.209% / +0.070%, p99.9 |error| 37.08%; confirmed by sd (p 8.2e-05); found by conj-1; example row 71770; race classes 0-4: 0%, 0%, 44%, 0%, 56%
+ 12. the next team has 31 points
+     weight 3.7780% (7,556 rows); on half B: SD 4.177%, bias -0.032% / -0.094% / +0.047% / +0.079%, p99.9 |error| 43.80%; confirmed by sd (p 1.7e-32); found by conj-1; example row 37485; race classes 0-4: 0%, 0%, 39%, 0%, 61%
+ 13. the opposite team has 36 points
+     weight 4.0605% (8,121 rows); on half B: SD 4.091%, bias -0.074% / -0.017% / +0.078% / +0.013%, p99.9 |error| 40.40%; confirmed by sd (p 8.7e-22); found by conj-1; example row 41298; race classes 0-4: 0%, 0%, 40%, 0%, 60%
+ 14. the opposite team's money chance after the next team then the next team win the next two tricks is at most 8.34%
+     weight 14.1150% (28,230 rows); on half B: SD 3.989%, bias -0.002% / -0.101% / +0.050% / +0.053%, p99.9 |error| 43.91%; confirmed by sd (p 2.7e-60); found by tree-abs; example row 135413; race classes 0-4: 0%, 10%, 2%, 26%, 62%
+ 15. the previous team has 31 points
+     weight 3.9730% (7,946 rows); on half B: SD 3.958%, bias -0.080% / -0.074% / +0.093% / +0.061%, p99.9 |error| 37.14%; confirmed by sd (p 3.9e-19); found by conj-1; example row 135413; race classes 0-4: 0%, 0%, 38%, 0%, 62%
+
+Time: {'load': 0.299, 'network': 21.684, 'audit': {'items': 0.891, 'trees': 1.04, 'enumeration': 0.038, 'confirmation': 1.594, 'total': 3.845}, 'total': 26.591, 'workers': 184}

@@ -1,0 +1,79 @@
+{
+ "netcmp": {
+  "shards": [
+   "/tmp/o3-pair-score/sib3.npy"
+  ],
+  "nets": {
+   "base_s1": {
+    "file": "/tmp/o3-pair-score/base_s1.float.safetensors",
+    "rows": 100000,
+    "bias_pct": {
+     "leader's team": -0.02417597643511241,
+     "next team": 0.004945034455412367,
+     "opposite team": 0.006638580056326428,
+     "previous team": 0.012592316749931085
+    },
+    "bias_se_pct": {
+     "leader's team": 0.0064203932345616894,
+     "next team": 0.0052850358273253935,
+     "opposite team": 0.005375739923859441,
+     "previous team": 0.005443800352775961
+    },
+    "largest_abs_bias_pct": 0.02417597643511241,
+    "sd_pct": 1.7867109014213327,
+    "rms_pct": 1.7867109014213327,
+    "mean_abs_pct": 0.4751960136741579,
+    "siblings": {
+     "groups": 34070,
+     "mean_regret_pct": 0.0720449835215106,
+     "mean_regret_pm95_pct": 0.009438132267705042,
+     "misordered_share": 0.028734957440563546
+    }
+   },
+   "w1_s1": {
+    "file": "/tmp/o3-pair-score/w1_s1.float.safetensors",
+    "rows": 100000,
+    "bias_pct": {
+     "leader's team": -0.0031176573228350155,
+     "next team": -0.0024797749677850185,
+     "opposite team": -0.0011391927237914428,
+     "previous team": 0.0067365873881149955
+    },
+    "bias_se_pct": {
+     "leader's team": 0.008102305377329252,
+     "next team": 0.0068332699870816554,
+     "opposite team": 0.006853642075256834,
+     "previous team": 0.006920370623912569
+    },
+    "largest_abs_bias_pct": 0.0067365873881149955,
+    "sd_pct": 2.2759801396738837,
+    "rms_pct": 2.2759801396738837,
+    "mean_abs_pct": 0.8042585353814531,
+    "siblings": {
+     "groups": 34070,
+     "mean_regret_pct": 0.12744633011759915,
+     "mean_regret_pm95_pct": 0.012810061688436567,
+     "misordered_share": 0.047402406809509835
+    }
+   }
+  },
+  "paired_vs_ref": {},
+  "ref": null
+ },
+ "golden": {
+  "base_s1": {
+   "decisions": 2000,
+   "mean_loss_pct": 0.0066,
+   "upper95_pct": 0.0081,
+   "own_bias_pct": -0.0148,
+   "sd_pct": 1.8781
+  },
+  "w1_s1": {
+   "decisions": 2000,
+   "mean_loss_pct": 0.0089,
+   "upper95_pct": 0.0108,
+   "own_bias_pct": -0.0169,
+   "sd_pct": 2.4104
+  }
+ }
+}
