@@ -24,6 +24,7 @@ import launch  # noqa: E402
 # machine id, what it is, the price cap ($/h) above which it is not taken
 WANTED = [
     (68507, "RTX 3060 + AMD EPYC 7B12 (256 threads, 129 GB), Thailand, verified: the O_2 audit-loop box (owner killed it by accident 2026-10-23)", 0.90),
+    (38144, "RTX 3070 + AMD EPYC 7742 (256 threads, 258 GB), verified: the O_2 box the owner killed (host 20284)", 1.20),
     (151960, "RTX A2000 + AMD EPYC 9654 (368 threads, 129 GB), British Columbia, verified: the O_2 label box, taken back once o2-vol40-1 ends and destroys it (fallback host of the audit loop)", 1.20),
     (144582, "RTX 5090 + AMD EPYC 7742 (256 threads, 258 GB), Hawaii, verified", 0.90),
     (138819, "RTX 3070 + AMD EPYC 7742 (256 threads, 258 GB), Taiwan, verified", 0.90),
@@ -48,6 +49,30 @@ def rentable_offer(machine_id):
     return min(offers, key=lambda o: o["dph_total"]) if offers else None
 
 
+GENERIC_MAX_DPH = 1.20
+GENERIC_MIN_THREADS = 190
+GENERIC_BAD_CPUS = ("9B45",)  # lists 384 threads, gave about 46 (docs/VAST-MACHINES.md)
+
+
+def generic_offer(exclude_machines):
+    """The cheapest-per-thread rentable offer that fits the owner's floor (190+ effective threads, a GPU of 6 GB or more, at most
+    $1.20/h, reliability 0.90, 100 Mbps, 200 GB disk), not one of `exclude_machines` and not a CPU known to give far fewer threads."""
+    body = json.dumps({"type": "on-demand", "rentable": {"eq": True}, "num_gpus": {"gte": 1}, "gpu_ram": {"gte": 6000},
+                       "cpu_cores_effective": {"gte": GENERIC_MIN_THREADS}, "dph_total": {"lte": GENERIC_MAX_DPH},
+                       "reliability": {"gte": 0.90}, "inet_down": {"gte": 100}, "disk_space": {"gte": 200},
+                       "order": [["dph_total", "asc"]], "limit": 60})
+    p = subprocess.run(["curl", "-sSL", "-m", "30", "-X", "POST", "https://console.vast.ai/api/v0/bundles/",
+                        "-H", "Content-Type: application/json", "-d", body], capture_output=True, text=True)
+    try:
+        offers = json.loads(p.stdout).get("offers", [])
+    except ValueError:
+        return None
+    ok = [o for o in offers if o.get("rentable") and o.get("machine_id") not in exclude_machines
+          and o.get("cpu_cores_effective", 0) >= GENERIC_MIN_THREADS and o.get("dph_total", 9) <= GENERIC_MAX_DPH
+          and not any(b in str(o.get("cpu_name")) for b in GENERIC_BAD_CPUS)]
+    return min(ok, key=lambda o: o["dph_total"] / o["cpu_cores_effective"]) if ok else None
+
+
 def load_state():
     raw = launch.r2_get(STATE_KEY)
     return json.loads(raw) if raw else {}
@@ -57,12 +82,35 @@ def save_state(st):
     launch.r2_put(STATE_KEY, json.dumps(st, indent=1).encode())
 
 
+def launch_hold(st, mid, o, now, a, lines, generic):
+    """Rents the offer with a tiny hold job and `machine.keep`; records it in the state."""
+    run_id = f"hold-{mid}-{int(now) % 100000}"
+    if not generic:
+        lines.append(f"{mid}: RENTABLE: offer {o['id']} ${o['dph_total']:.3f}/h -> grabbing as {run_id}")
+    if a.dry_run:
+        return
+    m = {"run_id": run_id, "chunk": {"difftest": {"matches": 20, "seed": 3}},
+         "machine": {"keep": True, "keep_hours": a.keep_hours, "disk_gb": 200}}
+    cmd = ["gh", "workflow", "run", "vast-run.yml", "-R", "Guillaumeds/41Bots", "--ref", "main",
+           "-f", "manifest=" + json.dumps(m, separators=(",", ":")), "-f", "min_cores=150", "-f", "min_ram_gb=32",
+           "-f", "disk_gb=200", "-f", "cpu_only=false", "-f", "gpus=1", "-f", "min_gpu_ram_gb=6", "-f", "low_cpu_pct=1",
+           "-f", "max_dollars=2", "-f", "any_host=true", "-f", f"offer_id={o['id']}", "-f", f"offer_dph={o['dph_total']:.4f}",
+           "-f", f"bin_sha={BIN}", "-f", f"image={IMAGE}", "-f", "dry_run=false"]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    lines.append("   " + (r.stdout + r.stderr).strip()[-200:])
+    if r.returncode == 0:
+        st[str(mid)] = {"state": "launched", "run_id": run_id, "t": now, "offer": o["id"], "dph": o["dph_total"], "generic": generic}
+        save_state(st)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--max-held", type=int, default=3)
     ap.add_argument("--keep-hours", type=float, default=8)
+    ap.add_argument("--generic", action="store_true", help=f"also take the cheapest-per-thread machine with {GENERIC_MIN_THREADS}+ threads under ${GENERIC_MAX_DPH}/h")
+    ap.add_argument("--max-generic", type=int, default=1, help="how many generic machines may be held at once")
     a = ap.parse_args()
     st = load_state()
     now = time.time()
@@ -98,22 +146,22 @@ def main():
         if n_held >= a.max_held:
             lines.append(f"{mid}: RENTABLE (offer {o['id']}, ${o['dph_total']:.3f}/h) but {n_held} machines are held already (max {a.max_held})")
             continue
-        run_id = f"hold-{mid}-{int(now) % 100000}"
-        lines.append(f"{mid}: RENTABLE: offer {o['id']} ${o['dph_total']:.3f}/h -> grabbing as {run_id}")
-        if a.dry_run:
-            continue
-        m = {"run_id": run_id, "chunk": {"difftest": {"matches": 20, "seed": 3}},
-             "machine": {"keep": True, "keep_hours": a.keep_hours, "disk_gb": 200}}
-        cmd = ["gh", "workflow", "run", "vast-run.yml", "-R", "Guillaumeds/41Bots", "--ref", "main",
-               "-f", "manifest=" + json.dumps(m, separators=(",", ":")), "-f", "min_cores=150", "-f", "min_ram_gb=32",
-               "-f", "disk_gb=200", "-f", "cpu_only=false", "-f", "gpus=1", "-f", "min_gpu_ram_gb=6", "-f", "low_cpu_pct=1",
-               "-f", "max_dollars=2", "-f", "any_host=true", "-f", f"offer_id={o['id']}", "-f", f"offer_dph={o['dph_total']:.4f}",
-               "-f", f"bin_sha={BIN}", "-f", f"image={IMAGE}", "-f", "dry_run=false"]
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        lines.append("   " + (r.stdout + r.stderr).strip()[-200:])
-        if r.returncode == 0:
-            st[str(mid)] = {"state": "launched", "run_id": run_id, "t": now, "offer": o["id"], "dph": o["dph_total"]}
-            save_state(st)
+        launch_hold(st, mid, o, now, a, lines, generic=False)
+    if a.generic:
+        n_held = sum(1 for x in st.values() if x.get("state") in ("launched", "kept") and now - x["t"] < a.keep_hours * 3600 + 900)
+        n_gen = sum(1 for x in st.values() if x.get("generic") and x.get("state") in ("launched", "kept")
+                    and now - x["t"] < a.keep_hours * 3600 + 900)
+        if n_gen >= a.max_generic or n_held >= a.max_held:
+            lines.append(f"generic: {n_gen} generic and {n_held} machines held already (max {a.max_generic} / {a.max_held})")
+        else:
+            o = generic_offer({int(k) for k in st if k.isdigit()} | {mid for mid, _, _ in WANTED})
+            if not o:
+                lines.append(f"generic: no rentable machine with {GENERIC_MIN_THREADS}+ threads under ${GENERIC_MAX_DPH}/h")
+            else:
+                lines.append(f"generic: machine {o['machine_id']} {o.get('gpu_name')} + {o.get('cpu_name')} "
+                             f"({o['cpu_cores_effective']:.0f} threads, ${o['dph_total']:.3f}/h) -> grabbing")
+                if not a.dry_run:
+                    launch_hold(st, o["machine_id"], o, now, a, lines, generic=True)
     if not a.dry_run:
         save_state(st)
     print(f"held now: {len(held)} (max {a.max_held})")
