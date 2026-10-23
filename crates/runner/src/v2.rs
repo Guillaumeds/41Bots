@@ -1583,6 +1583,7 @@ mod tests {
             ("o2-vol40.manifest.json", 9),
             ("o2-vol40b.manifest.json", 5),
             ("o2-vol40c.manifest.json", 2),
+            ("o2-audit-smoke.manifest.json", 1),
             ("o3-learnedleaf.manifest.json", 1),
             ("o2-leafrisk.manifest.json", 1),
             ("o2-gv2-labels.manifest.json", 1),

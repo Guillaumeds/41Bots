@@ -1,0 +1,148 @@
+{
+ "format": 2,
+ "run_id": "o2-audit-smoke-1",
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "SMOKE TEST of the machinery: O_2 audit loop at trick 2 on 4,400,000 stored plain hybrid labels (['o2-vol-3:1-2']), exact s601 validation, new harvests plain O_3 with a 10% exact anchor, exact audit shards, 2 rounds, targeted harvest 50,000 rows a round at weight 2. Shards on disk about 8.3 GB + targeted shards 0.2 GB + 8 GB image and networks = 16 GB against a disk of 80 GB. The run is taken over onto a kept or hand-rented machine with vast-run.yml instance_id.",
+ "machine": {
+  "gpus": 1,
+  "min_gpu_ram_gb": 6,
+  "min_cores": 150,
+  "min_ram_gb": 128,
+  "disk_gb": 80,
+  "min_inet_down": 100,
+  "min_inet_up": 100,
+  "max_dph": 0.9,
+  "price_steps": [
+   0.9
+  ],
+  "tries_per_step": 3,
+  "wait_for_offer_min": 180,
+  "offer_poll_s": 30,
+  "keep": true,
+  "keep_hours": 8,
+  "force_take": true
+ },
+ "streams": [
+  {
+   "name": "rung",
+   "priority": 1,
+   "kind": "hybrid_rung",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "cut": 2,
+    "widths": "2048,1024,256",
+    "head": "outcome",
+    "epochs": 3,
+    "patience": 2,
+    "batch": 1024,
+    "lr": 0.001,
+    "train_seed": 1,
+    "max_minutes": 0,
+    "device": "cuda",
+    "overlap": true,
+    "partial_epochs": 2,
+    "upload_shards": true,
+    "audit_rounds": 2,
+    "audit_rows": 20000,
+    "audit_seed": 221,
+    "audit_gamma": 0.01,
+    "audit_target_rows": 50000,
+    "audit_weight": 2,
+    "audit_shapes": "<widths>;2048,2048,1024,256;4096,2048,1024,256",
+    "t1_decisions_input": "inputs/sha256/b23c8b0d48ea90773adc21290e600eeea290530bdc49d7c1573a62516cbb7e37",
+    "t1_saved_inputs": [
+     {
+      "run": "m3-t1-tables-1",
+      "input": "inputs/sha256/b788224c346692af3e82d021c9564b7e1909a8c0b3924f1a842413eb70e1b832"
+     },
+     {
+      "run": "m3-t1-leader-layouts-1",
+      "input": "inputs/sha256/8a9bd83e8c4dcda2603aefd4d8ab79f7ce85cc1f3123ca12d4b017661292b029"
+     },
+     {
+      "run": "m3-t1-leader-layouts-9654",
+      "input": "inputs/sha256/96420885a545ae17c34cbc5dc1affb146b9ee1c45e764d6d8237e39138eff768"
+     },
+     {
+      "run": "m3-t1-leader-layouts (worlds file)",
+      "input": "inputs/sha256/df3e4d4a1b29a23a80a8af065182aca10c7ccb9e7b947d62e4e1b6d040339df9"
+     },
+     {
+      "run": "m3-agree-t1-ab1",
+      "input": "inputs/sha256/ca74c2acf6fbe189cd46408bbd39e9cfc529ed5f87ca186019246f5264ed476c"
+     }
+    ],
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    },
+    "label_inputs": [
+     {
+      "label_source": "hybrid",
+      "rows": 1600000,
+      "seed": 5711,
+      "set": "random",
+      "shard": "inputs/sha256/1c5a9dd82cb42a9e5177e819b236cb3fb8a25fdaca897f02e5b2489b007702c7",
+      "sidecar": "inputs/sha256/bb1b88a55a4e9b500427bd51764a2227157765fdbed79c6dbaec3e384d13fa69"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 400000,
+      "seed": 5731,
+      "set": "rules",
+      "shard": "inputs/sha256/c9c9aaeb58896457bc510a27fb4cf27533991092855e1db5176d96e889fa8a3e",
+      "sidecar": "inputs/sha256/a6d61972a930af0860db789030fdffb183c2751ec1bd34c76eb2dc440852ac1c"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 200000,
+      "seed": 5751,
+      "set": "harvest",
+      "shard": "inputs/sha256/e3724f02e40fde0b12d6f3c794c26a6b9482fbe4c915457a9cb4e8a6137e38c9",
+      "sidecar": "inputs/sha256/4604d351543832d064996af98cb458f1df4ef66de3a7bb6aa3bd55fa90cd4c06"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 1600000,
+      "seed": 5712,
+      "set": "random",
+      "shard": "inputs/sha256/aa8d2612a5a69270ffc34efb0d9023f1c4cca32c256421af87612322dad1f8ac",
+      "sidecar": "inputs/sha256/6e1b9298aab2391cb4b6df963109914fb83593802bf8701c5c0b25cb7b44f3b5"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 400000,
+      "seed": 5732,
+      "set": "rules",
+      "shard": "inputs/sha256/e290c41e1e5983664e9718f259b4f450b28d8c1fa3144632b464c31e3ba385eb",
+      "sidecar": "inputs/sha256/5bddeb2e08578defd2d1bbab4ec7678266a087b9c90baca63061577c215eae87"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 200000,
+      "seed": 5752,
+      "set": "harvest",
+      "shard": "inputs/sha256/6807eea49880d0343b72a2277460cff1dfa0995e5a9167592c7fdbd382e54a82",
+      "sidecar": "inputs/sha256/3a518b957246bf3ada6c39f084a8f6969694ee1f94b8254a2924f5596dbc1b74"
+     },
+     {
+      "rows": 50000,
+      "seed": 601,
+      "set": "val",
+      "shard": "inputs/sha256/38de48356209cbec0f9ce41ceba28e6d5df52428abc0c866d443f9eb57964327",
+      "sidecar": "inputs/sha256/8833775c975aa4a5aedd806aac541363def78810db292d0bdd8fb15773989f93"
+     }
+    ],
+    "label_source": "hybrid",
+    "label_net": "inputs/sha256/f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad",
+    "hybrid_exact_share": 0.1,
+    "label_exact_leaves": "none"
+   }
+  }
+ ]
+}
