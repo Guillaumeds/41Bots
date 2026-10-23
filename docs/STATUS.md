@@ -2,60 +2,25 @@
 
 **Current checkpoint: M3 (in progress)** (PLAN §13, as revised on 2026-10-13): PIMC bots, the exact early-trick yardstick and its N-curves, the trick-1 runs on rented machines, the gate against rules-v1. M0 (engine, reference, RNG, CI), M1 (equity table, arena, launcher) and M2 (solver spike) are done; see `docs/history/STATUS-history.md`.
 
-**SSH and Jupyter on every machine (owner 2026-10-23, `python/launcher/launch.py` `create_instance`):** the launcher rents every instance as
-`--jupyter --direct` (vast runtype `jupyter_direc ssh_direc ssh_proxy`: Jupyter and SSH together, the Connect button) and starts the boot
-script from the on-start command (`TAKE_ONSTART`), because vast's own init replaces the image's ENTRYPOINT. `"entrypoint_mode": true` in a
-manifest's `machine` block keeps the old mode. Trial `ssh-trial-1` (cheap CPU box, `keep: true`): DONE in 80 s, `ssh_host`/`ssh_port` and
-port 22 present in vast's instance record, Connect button shown, machine kept. Runs launched before this change (and from other branches) are in the old mode.
+## Where we are (2026-10-23, end of the O_2 and S2 sessions)
 
-## O_2 Stage A (2026-10-22): plain labels win; G2 is no bulk source; volume run next
-Results in EXPERIMENTS D6 (`docs/m3-hybrid/o2-stagea-netcmp*.json`): on the 250k exact test set plain 1.5M ties exact 1.5M
-(SD 3.67% against 3.64%), plain 6M is clearly better (3.13%) at about 1/30 of the label cost, and G2 labels (0.42M) score the same as
-exact labels of that count (4.15%): no niche. **Stage B result (2026-10-23, EXPERIMENTS D7): the 11M-plain-label network scores SD 2.93% (p60 3.13%), bias 0.05%, sibling regret 0.199%; keys: `runs/o2-volnet-5/out/volnet/`.** **2026-10-23 results: (D11) the O_2 audit loop's targeted round 2 did not beat round 1 beyond noise; round 1 (39.6M plain labels, SD 2.60%, sibling regret 0.188%, int net `13152c24...`, `runs/o2-audit-10/partial/rung/000000/out/hybrid/net/`) is the adopted O_2 for the trick-1 work. (D12) the sibling ranking loss on O_3 at weight 1 is clearly worse than the control (sibling regret 0.127% against 0.072%); rejected. Trick-1 teacher data with this O_2 is being made on a cheap box: copper (2,000 decisions at 128 deals) done, 250k S1 labels (`runs/o2-copper-s1-1`) due about 09:15 Irish on 2026-10-24.** **19.8M plain labels (EXPERIMENTS D8): SD 2.75%, bias 0.028%, sibling regret 0.176%; estimated trick-1 loss 0.019-0.022%; keys `runs/o2-volnet-9k/out/volnet/`.** **Calibration (2026-10-23, EXPERIMENTS D10): O_3-recipe networks at 1M/3M/10M/20M rows give decision loss 0.029/0.014/0.0089/0.0071% against sibling regret 0.19/0.15/0.11/0.085%; read across, O_2 v11 (regret 0.199%) is an estimated 0.022-0.026% at trick 1 (x/÷1.5); 0.01% needs sibling regret about 0.11% (position SD about 2.25%).** **Stage B started overnight:** `o2-vol-2` makes 22M plain labels (16M random + 4M
-rules-v1 + 2M harvested) in ten stored streams; then the real 2048-1024-256 network is trained from the stored streams
-(`python/tools/o2_train_manifest.py`, to be generalised), scored by `netcmp` against `p60`, followed by the audit loop. A
-trainer race on a late sidecar (killed `o2-g2arm-2`) is fixed in `train.py` (new binaries needed for streamed-parts runs).
-**To do before the audit loop:** reused validation with label_parts (path-forward.md, Session 2). Takeover of a hand-rented
-machine works (`vast-run.yml` `instance_id`; the instance's disk must be at least the run's own `disk_gb`, checked in `launch.py` `take_check`: 20 by default, 80 in the O_2 manifests; there is no fixed 80 GB limit; the disk is fixed when the instance is rented).
-
-## START HERE (2026-10-22): more training data does not move O_3; choose the next lever
-
-**Where we are.** O_3 f5766a is still the adopted trick-3 network: 0.0068% alone (seat 1 0.0201%),
-0.0008% with G2 and exact solving (seat 1 0.0022%) on the stored trick-2 golden set. The goal
-(owner, 2026-10-21) is O_3 *alone* at most 0.0025% overall and at every seat, because O_2's training
-labels and the bronze set use O_3 alone. Three attempts on 2026-10-21/22 did not move it (full
-record: `docs/m3-hybrid/o3-rounds.md` "Results" and `docs/m3-hybrid/specialist.md`):
-1. **O3G2 rounds 1 and 2** (extra G2-chosen rows, +2M/+4M/+8M, additive): 0.0069-0.0080%, all
-   within retrain noise of 0.0068%; round 2's wide network from scratch was worse (0.0079%, seat 1
-   0.0325%). Round 2's rule-winner c2 (0.0070%) is stored but not adopted as O_3.
-2. **Specialist S** (a network trained only on the 16.5M base rows G2 flags): on its own rows S is
-   at O_3's level (SD 3.03% against 2.94%); routed in play it scored 0.0079%, against 0.0008% for
-   the exact solve. Rejected for now.
-3. Nothing is running: no rented machine was open at the last check (2026-10-22 07:05 UTC). About
-   $6 went on rentals from round 1 attempt 3 onward (rounds $3.2, specialist training $0.55, routed
-   check $1, the three stopped speedtests and the error measurement about $0.5, the refused start $0.7).
-
-**Next, in order (owner chooses):**
-1. The free reads are done (2026-10-22, `docs/EXPERIMENTS.md`): O_3 on an 80M base had lower value
-   error but no better decisions (0.0080%, C4); the optimizer's-curse test reproduced the leader's
-   own-team under-valuation from zero-mean noise alone (C7); the ensemble was never measured (C8).
-2. The data-versus-capacity test that never ran: `o3-basecurve-50/100` (O_3 on 20M against 40M rows,
-   golden set) were cancelled at the start on 2026-10-19; the manifests exist, untested since (C5).
-3. A 2-4-network ensemble of O_3 for building the bronze set only (offline, so 2-4x network time is
-   acceptable), judged by the same golden check. Its two earlier attempts ran at about 10 worlds a
-   second on an AMD EPYC 7B12 server chip (256 threads, $0.30/h; members' weights exceed the chip's cache; C8).
-4. A round 3 only if a new lever appears (it would start from round 2's c2:
-   `rounds/o3r-2/round.json`). After about three rounds, or before claiming a number: a fresh golden
-   set (seed 2).
-5. Then the trick-1 check of O_3 alone against O_3 + G2 on about 100 trick-1 decisions (decides
-   whether G2 is used for the bronze set).
-
-**Path from here (2026-10-22, owner starts one new session and branch per step, each pushes to `main` when done):**
-`docs/m3-hybrid/path-forward.md`, section 6 has a brief per session: 0 the free checks (shortlist + search at
-the app's deal counts, concentration of S2's loss and the router, the root-restricted solve), 1 S2 A/B tests,
-2 O_2 (label test at equal money, volume, audit loop), 3 trick-1 yardsticks (copper, playout yardstick, a
-small capped anchor), 4 S1, 5 ship and the improvements. The solver half of the root-restricted solve
-(`FastOptions::root_keep`) is already on `main`.
+- **O_2 (trick 2) adopted:** round 1 of the audit loop, 39.6M plain hybrid labels, 2048-1024-256, integer network `13152c24bc27...`
+  (`runs/o2-audit-10/partial/rung/000000/out/hybrid/net/`; owner decision 2026-10-23). On the 250k exact test set: error SD 2.60% (the provisional O_2
+  had 3.6%), largest team bias 0.019%, sibling regret 0.188%. Fits read across from O_3 put its trick-1 decision loss at 0.016-0.024%, above the
+  0.01% line; no trick-1 golden set exists, so that is an estimate (D10). What was learned: plain labels beat exact ones at equal money, volume
+  helps the value error slowly and not the decisions, capacity does not help, the audit loop's targeted round did not (D6-D11).
+- **O_3 (trick 3) unchanged:** f5766a. The sibling ranking loss at weight 1 was clearly worse than its control (D12).
+- **S2 (trick-2 student) shipped** (2026-10-23): `3d1189e3...`, golden loss 0.0389% (3-seed mean 0.0456%); open items in "S2, state" below.
+- **S1 (trick-1 student), next:** teacher labels (250,000 trick-1 decisions at 64 deals, teacher H_2 + O_2 round 1) are being made as run
+  `o2-copper-s1-1` on the cheap machine below; copper (2,000 decisions at 128 deals) is stored; expected end about 08:15 UTC on 2026-10-24, about
+  $4.70 in all (D13). Then (owner, 2026-10-23): train S1 with the decision-aware loss of E12 (`rank_weight` 1, `rank_temperature` 0.01, stop on
+  decision loss), test it against the bronze set (the set the owner calls the result of this label run), and ship.
+- **Machines:** one is running, instance 57404109 (AMD EPYC 7B12, 245 usable threads, RTX 3060, $0.33/h, label "41bots - S1 ... ETA"); nothing
+  else is rented and no watcher is on. Rules (CLAUDE.md): rare cheap machines are stopped by hand, never killed by a cancel; labels read
+  `41bots - <session> (<what>) - ETA <HH:MM Irish>`; every rental is Jupyter + SSH. What the launcher and the takeover did on 2026-10-22/23, with
+  the failures and fixes: `docs/EXPERIMENTS.md` A10.
+- **Records of these sessions:** `docs/EXPERIMENTS.md` D6-D13, A10 and the tables in parts F-H; `docs/RESEARCH.md` sections 8, 10, 12;
+  `docs/m3-hybrid/path-forward.md` section 0; the older state paragraphs moved to `docs/history/STATUS-history.md` ("Moved from STATUS on 2026-10-23").
 
 **Session 0 (free checks) done, 2026-10-22, no rental (E9-E11, branch `claude/confident-albattani-sck9ru`):**
 1. *Shortlist + search at 25-100 deals* (S2, O_3, exact golden set): top-3 + search beats S2 alone
@@ -92,7 +57,7 @@ plain at 250,000 decisions, and at 1,000,000 decisions it reaches 0.0456% alone 
 (plain loss -0.006 +/- 0.017, decision-aware loss +0.024 +/- 0.009 worse, 3 seeds); the G2 labelling was cancelled at 60,000 decisions
 (12 parts, $3.49; 28 minutes a part after the two throughput fixes), and S2 goes on with the plain H_3 teacher (owner, 2026-10-23).
 **To check on S1 (trick 1) later:** the same loss, plain against decision-aware at 250,000 decisions, 3 seeds.
-**S2, state (2026-10-23, end of the S2 session):** done: the decision-aware loss (E12, E17), G2 labels (no help, E13-E14), the app-path checks (E16), 1M seeds 1-3 (mean 0.0456%), the export check (native = WASM), and the ship record (the new S2 `3d1189e3...` in WASM-API §7). **Open:** (a) the app side: merge the fivefingers branch `engine41-bots` and switch the student on for trick 2 (owner; branch `claude/dreamy-franklin-irw8kk`, d0ca40f, holds the one-line swap; a real-browser check with `?bots=engine41` first); (b) optional: a 2M-decision point with the new loss (the plain 64-deal teacher costs about $4-5 per million decisions); (c) S1 with the same loss, after O_2 (see above); (d) machine 57346368 is kept (6 h from 09:33 UTC, idle): the owner stops it by hand.
+**S2, state (2026-10-23, end of the S2 session):** done: the decision-aware loss (E12, E17), G2 labels (no help, E13-E14), the app-path checks (E16), 1M seeds 1-3 (mean 0.0456%), the export check (native = WASM), and the ship record (the new S2 `3d1189e3...` in WASM-API §7). **Open:** (a) the app side: merge the fivefingers branch `engine41-bots` and switch the student on for trick 2 (owner; branch `claude/dreamy-franklin-irw8kk`, d0ca40f, holds the one-line swap; a real-browser check with `?bots=engine41` first); (b) optional: a 2M-decision point with the new loss (the plain 64-deal teacher costs about $4-5 per million decisions); (c) S1 with the same loss, after O_2 (see above); (d) [done 2026-10-23] machine 57346368 was destroyed by the owner.
 
 **Records:** `docs/EXPERIMENTS.md` (every experiment and its result), `docs/RESEARCH.md` (the outside
 research), `docs/README.md` (index).

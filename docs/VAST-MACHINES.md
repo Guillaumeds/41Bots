@@ -1,8 +1,8 @@
 # Choosing vast.ai machines for our CPU-heavy jobs
 
-Measured speed and cost of every machine we have rented (first section, updated 2026-10-22), then the reference table and ranking first written 2026-10-14 (market snapshot 13:02 UTC) from published benchmark results, kept for chips we have not rented. Refresh it with one command (see "How to refresh").
+Measured speed and cost of every machine we have rented (first section, updated 2026-10-23), then the reference table and ranking first written 2026-10-14 (market snapshot 13:02 UTC) from published benchmark results, kept for chips we have not rented. Refresh it with one command (see "How to refresh").
 
-## Measured cost per unit of work: every machine we have data for (updated 2026-10-22)
+## Measured cost per unit of work: every machine we have data for (updated 2026-10-23)
 
 **This section is the measured record.** Everything below it that ranks machines ("The short answer",
 Tables 1-2, "Rankings") is the 2026-10-14 estimate from published benchmarks, kept for chips we have
@@ -81,6 +81,11 @@ listed: trick-4 label steps last seconds and are dominated by start-up, so they 
 | 2 | AMD EPYC 7742 server chip | 245 | 264 | 0.72 | 0.10-0.11 | 7.6-8.0 | 1.5M | m3-hybrid-t2-loop-1 |
 | 2 | AMD EPYC 9654 server chip | 368 | 132 | 1.01 | 0.068 | 11.2 | 25k | m3-hybrid-t2-mech-6 |
 | 2 | AMD EPYC 7B12 server chip, 122-thread rental | 122 | 264 | 0.86 | 0.14 | 14.0 | 25k | m3-hybrid-t2-mech-1 |
+| 2, plain hybrid | AMD Threadripper PRO 7995WX workstation chip | 184 | 263 | 1.27 | 8.7 | 0.22 | 120k-1.5M | o2-stagea-full-2 (D6; 1,607 labels/s) |
+| 2, plain hybrid | AMD EPYC 7742 server chip | 245 | 258 | 0.775 | 4.8 | 0.18 | 22M (ten streams of 2.2M) | o2-vol-3 (D7; 1,170 labels/s) |
+| 2, plain hybrid | AMD EPYC 9654 server chip | 368 | 129 | 1.03 | 5.4 | 0.14 | 17.6M (eight streams of 2.2M) | o2-vol40-1 (D11; about 2,000 labels/s, 21 min a stream) |
+| 2, exact audit rows (positions as the hybrid reaches them) | AMD EPYC 9B14 server chip | 184 | 128 | 1.41 | 0.22 | 9.6 | 200k | o2-audit-10 (D11; 41 rows/s) |
+| 2, targeted harvest rows (plain labels, driven by the network) | AMD EPYC 9B14 server chip | 184 | 128 | 1.41 | 1.8 | 1.2 | 2M | o2-audit-10 (D11; 320-335 rows/s) |
 
 The trick-2 loop's second run (`m3-hybrid-t2-loop-2`) ran the same AMD EPYC 7742 machine type at
 $1.27/h, which puts the same rate at about $14 per million labels.
@@ -109,6 +114,8 @@ the 7663); the 4096-wide network 77.5 against 23.5 ms on the 9B14.
 | trick 2, H_3 | AMD Threadripper PRO 7995WX workstation chip | 184 | 1.14 | 320 | 69,900 | 122 | 16.3 | student-t2-more-1 |
 | trick 2, H_3 | AMD EPYC 7K62 server chip | 184 | 0.86 | 64 | 181,000 | 63 | 4.7 | student-t2-more-2 |
 | trick 1, H_2 (provisional O_2) | AMD EPYC 7B13 server chip | 245 | 1.05 | 64 | 12,500 | 3.3 | 84 | student-t1-cost-2 |
+| trick 1, H_2 (O_2 round 1, 39.6M labels) | AMD EPYC 7B12 server chip | 245 | 0.328 | 64 | 16,800 (compute alone 29,700) | 4.4 (7.8) | 19.5 (11) | o2-copper-s1-1 (D13; 500-decision chunks, 65 s of compute and about 40 s of setup each) |
+| trick 1, H_2 (O_2 round 1) | AMD EPYC 7B12 server chip | 245 | 0.328 | 128 | 15,600 | 8.1 | 21 | o2-copper-s1-1 (copper, D13) |
 | trick 2, H_3 + G2 (learned exact leaves) | AMD EPYC 7B12 server chip | 245 | 0.723 | 64 | 7,900 | 2.1 | 92 | student-t2-gv2-250k-6 (5,000 decisions in 38 min, window fix, before the deal-block fix; E14) |
 | trick 2, H_3 + G2 (learned exact leaves) | AMD EPYC 7742 server chip | 245 | 0.735 | 64 | 7,200 | 1.9 | 102 | student-t2-gv2-250k-4 (part 0 in 41 min, CPU starved by the ordered window; E14) |
 
@@ -145,6 +152,10 @@ ran two discarded Copilot runs (184 threads, 64 GB, $0.40-0.46/h).
   Xeon E5-2682 v4 (cu130-smoke-1), Intel Xeon Phi 7250 (m3-hybrid-t2-mech-4; the launcher now refuses
   Xeon Phi), AMD EPYC 7713, 7W83, 9684X (discarded Copilot runs), AMD EPYC 7702 (student-t2-curve-mech-1,
   GPU training only), AMD Ryzen 9 7950X (m3-hybrid-harvest-1), AMD EPYC 9354 (start failure).
+- Rented 2026-10-23 and not usable (EXPERIMENTS A10): an Intel Xeon Phi 7250 + RTX 5090 box (m:29255, 272 threads, $1.14/h; taken by the watcher's
+  direct rent, which does not go through the launcher's Xeon Phi refusal; destroyed by the owner); an unverified AMD EPYC 7H12 + RTX 5090 host (m:154989,
+  60% reliability, pulled the image at 6 Mbps); a Michigan 4 x RTX 5090 box with an AMD engineering sample (m:51313, $2.43/h, deverified: containers
+  could not start, `failed to inject CDI devices`); an AMD EPYC 7742 + RTX 3070 box (m:38144, instance 57346368) whose takeover never started.
 - The launcher's whole-rental figures for every run (machine, threads, $/h, minutes, $) are in each
   run's `runs/<run_id>/report.json`.
 
@@ -455,6 +466,19 @@ Since 2026-10-16 every rented machine writes its own cost record (`machines/<run
 | Threadripper PRO 9995WX + 2 x RTX 5090D (Greece, offer 57221898, $2.003/h, unverified) | 192 threads | not rented | about as fast per thread as a 9B14 (23-24 thread-ms an H_3 world), so the 250k G2 job would take 13-17 hours and $27-34: six times the price of the cheap Zen 4 estimate for the same time |
 | AMD EPYC 9654, 128 of 384 threads shared, offer 57209632 ($0.784/h, 88% reliable) | 128 threads | not rented | gone when checked; below the 190-thread and 90% floors |
 | GTX TITAN X + Xeon E5-2630 v4 (host 154621, unverified, $0.006-0.046/h) | 20 threads | 20 | the spare machine of the keep / takeover trial (E15), $0.014 for the first run |
+## Rented on 2026-10-23: what the machines really gave (O_2 audit loop, ranking-loss test, trick-1 teacher data)
+| machine | listed | the container got | result |
+|---|---|---|---|
+| AMD EPYC 9B14 + RTX 5090 32 GB (m:154756, New York, verified, 93.7% reliable, $1.41/h, 2.9 Gbps down) | 192 threads, 128 GB RAM, 120 GB disk | **184 usable** | the O_2 audit loop `o2-audit-10` (D11): 39.6M-row training 1.7 min an epoch (38,672 batches of 1,024), exact audit rows 41/s, targeted harvest 320-335 rows/s, RAM 62-90% of 128 GB with 75 GB of rows, disk 77-80 of 120 GB; takeover 4 min, the 75 GB of shards in 12-18 min |
+| AMD Threadripper PRO 9995WX + RTX 3090 24 GB (m:7584, host 1276, $1.47/h offer, $1.54 with the 200 GB disk, 716 Mbps down) | 192 threads, 257 GB RAM | **184 usable** | the O_3 ranking-loss test `o3-pair-1` (D12): 46M-row training 3.3-3.4 min an epoch (44,922 batches), RAM 49% with 87 GB of rows, 62 GB of shards in about 20 minutes (50-65 MB/s) for every arm; the first takeover of this rental did not act for 25 minutes (A10) |
+| AMD EPYC 7B12 + RTX 3060 12 GB (m:68507, Thailand, verified, $0.328/h, 594 Mbps down) | 256 threads, 129 GB RAM | **245 usable** | the O_2 capacity test (D9, wide network 6.9 min an epoch on 11M rows, deeper and seed 2 about 1.5 h each) and the trick-1 teacher data `o2-copper-s1-1` (D13: 16,800 decisions an hour at 64 deals); the machine disappeared from the market while idle and was rented again by the owner |
+| AMD EPYC 7742 + RTX 3070 8 GB (m:38144, Taiwan-class host 20284, $0.775-0.80/h) | 256 threads, 258 GB RAM | **245 usable** | `o2-vol-3` (22M plain labels, 7.9 h, $6.09) and the 19.8M network (D7, D8); a later takeover of the same rental never started |
+| AMD EPYC 9654 + RTX A2000 6 GB (m:151960, British Columbia, verified, $1.03-1.07/h, 1.4 Gbps down, 129 GB RAM, 80 GB disk) | 384 threads | **368 usable** | `o2-vol40-1` (17.6M plain labels in 170 minutes, $2.91); the A2000 (DLPerf 8.6) is too weak to train 40M rows in reasonable time (estimated 100-130 min a round, not measured) |
+| AMD EPYC 7B12 + RTX 3060 (the cheap box, instance 57404109, $0.328/h) | 256 threads, 129 GB RAM, 120 GB disk | **245 usable** | the trick-1 teacher data (D13) |
+| not rented or not usable | | | the offers compared on 2026-10-23: AMD EPYC 9965 (768 threads, RTX A2000, $2.42/h, 810 Mbps down), AMD EPYC 9T24 + RTX 4090 48 GB (China, 192 threads, 96 GB RAM, $2.03/h), AMD EPYC 7662 4 x A40 (Belgium, $2.27/h) and 1 x 45 GB GPU (256 threads, 2 TB RAM, disk 88 MB/s, $2.14/h), Norway RTX 4090 + EPYC 7B13 ($2.67/h, rented and then destroyed before the takeover), a 128-thread EPYC 7742 + 4090-class box ($0.95/h, destroyed before the takeover), France RTX 3060 + EPYC 7551 (128 threads, 91 Mbps, 82% reliable) |
+Reading the rate of a chip class from these rows: the EPYC 9B14 and Threadripper PRO 9995WX gave 184 usable of 192 listed threads; the training rows
+show a GPU's speed (RTX 5090 1.7 min against RTX 3090 3.4 min an epoch, for 39.6M against 46M rows).
+
 The `benchmark` chunk (matches a second with every thread busy, `crates/runner/src/main.rs`) was set up
 as a speedtest manifest for the 9B45 offers; no machine finished one. The listed thread count is
 therefore not the container's: read `usable_cores` in the first heartbeat before trusting a machine.

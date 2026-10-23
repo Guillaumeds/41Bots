@@ -1,7 +1,7 @@
 # Experiments: every experiment we ran, its method and its result
 
 This is the single collected record of what the project has measured, built to measure, tried and
-stopped, from the first engine test (2026-10-13) to the specialist test (2026-10-22). Each entry is
+stopped, from the first engine test (2026-10-13) to the trick-1 teacher data of 2026-10-23. Each entry is
 a short study: the question, the method, the result in numbers, the cost, the limits of the evidence,
 and where the files are. It reports what was done and what came out. It does not recommend what to
 do next; where the project made a decision at the time, the decision is stated as a fact, with its
@@ -207,6 +207,39 @@ load (§A8).
   with stake 0); runner and launcher safety issues. Records now carry `VALUES_VERSION` = 2; worlds
   made before 2026-10-15 cannot be extended by later binaries.
 - **Sources.** `history/STATUS-history.md` (2026-10-15/16), `reviews/`.
+
+### A10. Taking over, renting and watching machines (2026-10-22/23)
+- **Method.** The O_2 work of 2026-10-22/23 ran on many rentals. What the launcher (`python/launcher/launch.py`), the vast-run workflow and
+  the watcher (`python/tools/grab_machines.py`) did on them is recorded here from the runs' own logs and R2 records.
+- **Result.**
+  - **Every rental is Jupyter + SSH** since 2026-10-23 (`--jupyter --direct`, the console's Connect button; the boot script starts from the
+    on-start command because vast's own init replaces the image's entrypoint). The SSH trial `ssh-trial-1` ran 80 s and kept the machine. The
+    agent's network can reach only an allow-list of hosts: a machine's Jupyter port and SSH could not be opened from the session (connection reset).
+  - **Takeover of a machine rented by hand** (`instance_id`): vast's `update instance` stores the new image, environment and start command and
+    `recycle instance` rebuilds the container. First heartbeat 3-4 minutes after the call on the New York machine and the cheap EPYC 7B12 box.
+    Failures: the EPYC 7742 box 57346368 (container started on vast's base image, no heartbeat in 15 minutes); the Threadripper 9995WX box
+    57386924 (the recreate sent 25 s after creation had no effect for 25 minutes; the container then started with the first attempt's environment,
+    `RUN_ID=o3-pair-1`, while the retry `o3-pair-2` had updated the stored settings; both launcher jobs gave up after 15 minutes without a
+    heartbeat and kept the machine, the runner went on and wrote to `runs/o3-pair-1/`).
+  - **Keep.** A cancelled run of a machine with `keep` destroyed the machine on 2026-10-23 (the keep marker was written only when the launcher's
+    interrupt handler ran, and the workflow kills the launcher within seconds); the marker is now written when a kept run starts. The launcher
+    refuses a machine whose label is not `41bots-<run>` (`force_take` in the manifest's machine block overrides it); two sessions took the same kept
+    machine within two minutes on 2026-10-23.
+  - **Renting.** The workflow route (check the offer, then `vast-run.yml`) needs 30-60 s; offers of machines that come and go were gone by then
+    (the EPYC 7742 3070 offer 56279046 on 2026-10-23). One API call (`PUT /api/v0/asks/<offer id>/` with vast's Jupyter + SSH image, 200 GB disk)
+    rents in about a second; it rented the Threadripper 9995WX box (instance 57386924) and the Norway RTX 4090 box (57373788) that way.
+  - **Watcher.** `grab_machines.py` polls named machines and, with `--generic`, any AMD EPYC or Threadripper offer with 190+ effective threads, 120+ GB
+    RAM and 500+ Mbps at most $1.50/h. Its first thread-only rule took a Xeon Phi 7250 box (272 slow threads, instance 57365260, $1.14/h); the direct rent does not go through the launcher's refusal of Xeon Phi hosts.
+    The vast API `/api/v0/instances/` is deprecated (`/api/v1/instances/`); labels are set with `PUT /api/v0/instances/<id>/`.
+  - **Hosts that failed.** An unverified RTX 5090 + EPYC 7H12 host (60% reliability) pulled the image at 6 Mbps; a Michigan 4 x RTX 5090 box could not
+    start containers (`failed to inject CDI devices: unresolvable CDI devices`); the EPYC 9B45 gave 46 threads again (A8).
+  - **Every chunk fetches its inputs again** (a finished chunk's folder, inputs included, is deleted): in `o3-pair-1` each of the five arms read the
+    same 62 GB (about 20 minutes at 50-65 MB/s, GPU idle). A `student_teacher` chunk of 500 decisions spends about 40 s of its 105 s in setup (D13).
+- **Cost.** About $3 of rentals went to failed or abandoned launches of `o2-audit-4` to `-9`; the Xeon Phi box billed $1.14/h until it was destroyed.
+- **Limits.** Counts are from one session; the causes of the two takeover failures are read from vast's status records and the launcher log, not from
+  inside the machines.
+- **Sources.** `python/launcher/launch.py`, `python/launcher/test_keep.py`, `python/tools/grab_machines.py`, `.github/workflows/vast-run.yml`, GitHub
+  runs 39925013210, 39926028226, 39975581166, 39979256595; R2 `runs/o2-audit-*/KEPT.json`, `runs/o3-pair-*/`; `CLAUDE.md` (machine rules).
 
 ---
 
@@ -767,7 +800,7 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 | `p60` | plain 6M | 3.132 | -3.44 +-0.30 | 0.126 | 0.247 +-0.051 |
 
   Standard error of a team bias about 0.01%. Sibling-regret differences between arms are inside the noise.
-- **Reading.** At equal volume plain labels tie exact ones; at equal money (6M plain about $0.4 against 1.5M exact
+- **Observed.** At equal volume plain labels tie exact ones; at equal money (6M plain about $0.4 against 1.5M exact
   about $12) plain wins clearly; volume has not flattened (SD 3.67 to 3.13 for 4x data; extrapolated 40M about
   2.5%, not measured). Every network's own team bias (0.1-0.2%) is far above the plain labels' 0.013-0.017%.
   O_2's best SD 3.13% is far from O_3's 1.85%.
@@ -777,9 +810,8 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   plain 9.7 s (0.21). Wider-machine speeds: plain 1,607 labels/s on the 7995WX (40M plain labels about 7 h, about
   $9, not the $2.7 once estimated); G2 about 50 labels/s on an EPYC 7B12 (245 threads).
 - **G2 arm** (0.75M G2 labels, same recipe): `o2-g2arm-1` (EPYC 7663, $1.60/h) made part 1 (120k random + 30k rules,
-  seeds 561/562) and was stopped; `o2-g2arm-2` (EPYC 7B12 taken over by hand, instance 57260975, $0.73/h) makes the
-  other 600k (seeds 563/564) in four parts; a training-only run on all stored parts plus s601 then gives the
-  network. **Result** (`o2-g2arm-1` + `o2-g2arm-2`, `o2-g2full-1`; the label run `-2` died on a sidecar race after 4 of 5 parts, fixed
+  seeds 561/562) and was stopped; `o2-g2arm-2` (EPYC 7B12 taken over by hand, instance 57260975, $0.73/h) made 4 of the
+  other 5 parts (seeds 563/564); a training-only run on all stored parts plus s601 gave the network. **Result** (`o2-g2arm-1` + `o2-g2arm-2`, `o2-g2full-1`; the label run `-2` died on a sidecar race after 4 of 5 parts, fixed
   in the trainer, `test_hybrid_train`): the network was trained on the 420,000 stored G2 labels (360k random + 60k rules-v1;
   `docs/m3-hybrid/o2-stagea-netcmp-g75.json`, same test set as above, 16 min, $0.23 on an EPYC 7B12 + RTX 3090):
 
@@ -793,8 +825,8 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 
   G2 0.42M sits exactly where exact labels of the same count would (log-interpolating `e03` and `e075` gives 4.16): G2
   labels are as good as exact ones per label, not better, at about half the cost of exact (3.7 against 7.3 thread-s) and 18 times
-  the cost of plain. At equal money plain volume wins by a wide margin (6M plain about $0.4 of labels against 0.42M G2 about
-  $3). **Verdict: no niche for G2 labels as a bulk source** (the 2026-10-20 note stands); plain volume is the lever.
+  the cost of plain. At equal money plain volume won by a wide margin (6M plain about $0.4 of labels against 0.42M G2 about
+  $3). Decision (owner, 2026-10-22): no niche for G2 labels as a bulk source (the 2026-10-20 note stands).
 - **Limits.** One seed per arm; the test set is random-play positions, not the positions trick-1 search reaches;
   no trick-1 decision-level number exists, so O_2 can only be audit-clean on exact trick-2 positions.
 - **Tools made.** `fortyone_nn.netcmp`, `python/tools/o2watch.py` (progress, speed, ETA from R2 heartbeats),
@@ -815,18 +847,17 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 | `p60` | plain 6M | not read | 3.132 | reference | 0.126 | 0.247 +-0.051 |
 | `v11` | plain 11M (5 streams) | 1.861 / 74.7% | **2.932** | **-1.21 +-0.25** | **0.054** | **0.199 +-0.038** |
 
-- **Reading.** More plain volume still helps: SD 3.132 to 2.932 for 1.83x the data (exponent about -0.11 on rows, flatter than the
+- **Observed.** More plain volume still helps: SD 3.132 to 2.932 for 1.83x the data (exponent about -0.11 on rows, flatter than the
   -0.12 read off 1.5M to 6M); bias and sibling regret improved too. Extrapolated at this exponent: 22M about 2.71%, 40M about
-  2.55% (not measured). Volume alone will not reach O_3's 1.85%: that would need about 700M rows at this exponent, so capacity,
-  loss shape and the audit loop (exact audits of the weak groups) are the next levers.
-- **Cost of the whole path so far.** Labels $0.41 per 2.2M rows; the 11M network $0.19.
+  2.55% (not measured); reaching O_3's 1.85% would need about 700M rows at this exponent (extrapolated).
+- **Cost.** Labels $0.41 per 2.2M rows; the 11M network $0.19.
 - **Limits.** One seed per arm; random-play test positions; sibling-regret differences inside the noise except v11 against p15.
 
 ### D8. O_2 on 19.8M plain labels (run `o2-volnet-9k`, 2026-10-23)
-- **Question.** Does the full volume run (nine of the ten D7 label streams, 19.8M rows) keep following the volume curve?
-- **Method.** As D7 (2048-1024-256, outcome head, seed 1, early stopping, exact validation shard s601) on an AMD EPYC 7742
-  (245 threads, $0.775/h) with a GPU; 15 epochs run, best epoch 8; 46 min, $0.60 (machine kept 8 h). Scored on the same 250k
-  exact test set and 4,479 sibling groups (`docs/m3-hybrid/o2-stageb-netcmp-v20.json`). Network key: `runs/o2-volnet-9k/out/volnet/`.
+- **Question.** Does the volume curve keep going with nine of the ten D7 label streams (19.8M rows)?
+- **Method.** As D7 (2048-1024-256, outcome head, seed 1, early stopping on the exact s601 shard) on an AMD EPYC 7742 (245 threads, RTX 3070,
+  $0.775/h): 15 epochs, best epoch 8; 46 min, $0.60 (machine kept 8 h). Scored on the same 250k exact test set and 4,479 sibling groups
+  (`docs/m3-hybrid/o2-stageb-netcmp-v20.json`). Network: `runs/o2-volnet-9k/out/volnet/`.
 - **Result.**
 
 | arm | rows | validation loss / accuracy (s601) | test SD | paired change in squared error vs `v11` | largest team bias | sibling regret (95%) |
@@ -834,17 +865,19 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 | `v11` | 11M | 1.861 / 74.7% | 2.932 | reference | 0.054 | 0.199 +-0.038 |
 | `v20` | 19.8M | 1.795 / 77.2% | **2.748** | **-1.04 +-0.21** | **0.028** | **0.176 +-0.033** |
 
-- **Reading.** On the line from D7: SD exponent about -0.11 for 1.8x the rows (predicted 2.71%, measured 2.75%). Sibling regret
-  falls more slowly (exponent about -0.20): 0.199% to 0.176%. By the D10 fit the trick-1 decision loss estimate is about
-  **0.019 to 0.022%** (factor 1.5). Reaching sibling regret 0.11% by volume alone would need about 10x the rows (roughly 200M),
-  which is not affordable in rows or disk; capacity and the audit loop are the levers.
-- **Limits.** One seed; random-play test positions; the sibling-regret gain is inside the noise.
+- **Observed.** SD exponent about -0.11 on rows for 1.8x the data (predicted 2.71%, measured 2.75%); sibling regret falls more slowly
+  (exponent about -0.20, 0.199% to 0.176%, inside the noise). At these exponents sibling regret 0.11% would need about 10x the rows
+  (extrapolated; about 200M rows, 380 GB of shards).
+- **Cost.** Network $0.60 (labels: D7).
+- **Limits.** One seed; random-play test positions; the sibling-regret change is inside the noise.
+- **Sources.** R2 `runs/o2-volnet-9k/`; `docs/vast/o2-volnet-9k.manifest.json`; `docs/m3-hybrid/o2-stageb-netcmp-v20.json`.
 
 ### D9. O_2 capacity and seed noise on the 11M plain labels (run `o2-volcap-1`, 2026-10-23)
 - **Question.** Does a deeper or wider network help O_2 at fixed data, and how large is run-to-run noise?
-- **Method.** The 11M plain labels of D7 (first five streams of `o2-vol-3`) and s601 validation; outcome head, early stopping. Arms: seed 2 of 2048-1024-256;
-  deeper 2048-2048-1024-256; wider 4096-2048-1024-256. One RTX 3060 on an AMD EPYC 7B12 (256 threads, $0.328/h), about 5 h, $1.5. Scored on the same 250k exact
-  test set and 4,479 sibling groups as D6-D8 (`docs/m3-hybrid/o2-capacity-netcmp.json`, `o2-capacity-wide-netcmp.json`).
+- **Method.** The 11M plain labels of D7 (first five streams of `o2-vol-3`) and s601 validation; outcome head, early stopping. Arms: seed 2 of
+  2048-1024-256; deeper 2048-2048-1024-256; wider 4096-2048-1024-256. One RTX 3060 on an AMD EPYC 7B12 (256 threads, $0.328/h), about 5 h,
+  $1.5. Scored on the same 250k exact test set and 4,479 sibling groups as D6-D8 (`docs/m3-hybrid/o2-capacity-netcmp.json`,
+  `o2-capacity-wide-netcmp.json`).
 - **Result.**
 
 | arm | best epoch | validation loss / accuracy | test SD | paired change in squared error vs `v11` | largest team bias | sibling regret (95%) |
@@ -854,50 +887,22 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 | deeper | 8 | 1.829 / 76.7% | 2.791 | -0.80 +-0.23 | 0.084 | 0.202 |
 | wider | 8 | 1.845 / 76.2% | 2.830 | -0.59 +-0.22 | **0.018** | 0.219 |
 
-- **Reading.** Seed noise is about 0.02 in SD (seed 2 against seed 1 is inside the paired bound). Depth and width lower the value error somewhat (deeper about what 1.6x the data gives),
-  but sibling regret does not improve (0.202, 0.219 against 0.199; the 95% half-width is about 0.035) and the deeper network's bias is larger. The wider network has the smallest
-  bias. As for O_3 (C2: the 4-layer ladder step brought nothing at the decision level), capacity does not buy decisions here; volume and the audit loop come first.
-- **Limits.** One seed per shape; 11M rows only; larger capacity may pay at 40M rows (not tested); random-play test positions.
-
-### D11. The O_2 audit loop at trick 2 (run `o2-audit-10`, 2026-10-23)
-- **Question.** Does the audit loop (find weak groups on fresh exact positions, harvest more of them at double weight, retrain) improve O_2 beyond plain volume?
-- **Method.** `docs/vast/o2-audit-4.manifest.json` (built by `python/tools/o2_audit_manifest.py`): the 39.6M stored plain hybrid labels (`o2-vol-3` streams 1-10 and `o2-vol40-1` streams 11-18) plus the exact s601 validation shard; 2048-1024-256, outcome head; audit shards of 200,000 exact trick-2 positions as the hybrid reaches them from trick-1 decisions (seeds 22101, 22102); targeted harvest of 2,000,000 rows a round at weight 2 (plain O_3 labels, 10% exact); 3 rounds planned. New York machine (AMD EPYC 9B14, 184 usable threads, RTX 5090, 128 GB RAM, $1.41/h), run about 5.7 h, about $8; stopped by the owner after round 2's audit report (plan B), before its harvest. Earlier attempts on other machines failed or were abandoned (a 6 Mbps host, destroyed boxes, a box whose GPU could not start containers); about $3 of rentals.
-- **Result.** Round 1 network `13152c24bc27` (best epoch 9; validation loss 1.754, accuracy 78.4%); round 2 network `235ed448acc7` (best epoch 20; 1.767, 78.3%). On the 250k exact test set and 4,479 sibling groups:
-
-| | round 1 | round 2 | v20 (19.8M, D8) |
-|---|---|---|---|
-| test SD | 2.603% | 2.624% (paired change +0.11 +-0.14, no change) | 2.748% |
-| largest team bias | 0.019% | 0.022% | 0.028% |
-| sibling regret (95%) | 0.188% +-0.044 | 0.171% +-0.036 | 0.176% +-0.033 |
-
-  The audits on fresh exact shards: round 1 overall SD 2.531%, 668 weak groups, worst "the leader's team has 40 points" (weight 0.19%, SD 7.05%, bias -0.88%); round 2 overall SD 2.524%, 667 weak groups, worst the same group (weight 0.21%, SD 6.84%); race class 4 SD 4.07% then 4.08%. Verdict both times "not flat". Reports: `docs/m3-hybrid/o2-audit-10/`.
-- **Reading.** The 40M network beats the 19.8M one on error (2.60% against 2.75%) and bias, not on sibling regret (inside the noise). The targeted round changed nothing measurable: the same score states stay at SD 4-7%. As for O_3 (C2, C3, C12), more audit rounds do not move the network beyond retraining noise. Round 1's network is adopted as O_2 for the trick-1 work (owner, 2026-10-23). Estimated trick-1 loss from D10's fit: about 0.016-0.019%, above 0.01%.
-- **Limits.** Round 1's rough trick-1 test is 8 decisions (coarse); one seed per round; round 2's own audit shard was not stored; round 3 and its harvest were not run.
-- **Sources.** R2 `runs/o2-audit-10/partial/rung/000000/out/hybrid/` (nets, `audit/round-N/`), round-1 audit shard `inputs/sha256/c8a8a392...`, targeted shard `inputs/sha256/6fceb941...`.
-
-### D12. A sibling ranking loss on O_3 (run `o3-pair-1`, 2026-10-23)
-- **Question.** Does a decision-aware (pairwise ranking) loss over sibling positions move O_3's decisions, as S2's decision-aware loss did (E12)?
-- **Method.** `docs/vast/o3-pair.manifest.json`, scored by `python/tools/o3_pair_score.py`: the O_3 recipe (2048-1024-256, outcome head, cut 3) on the stored 40M trick-3 base plus 6M exact sibling rows (seed 7911, driven by O_3 f5766a), every arm with the same rows; arms differ in `pair_weight` (the trainer's gap-weighted RankNet term, scale 100) and seed. Judged on the 100,000 held-out exact sibling rows `sib3` (seed 7903) and the in-run golden check (2,000 trick-2 decisions x 320 worlds). AMD Threadripper PRO 9995WX (184 usable threads), RTX 3090, $1.54/h; two of five arms finished (`base_s1`, `w1_s1`), the rest stopped by the owner after the result. About $6.
-- **Result.**
-
-| arm | sibling regret (95%) | sibling SD | largest bias | golden loss (95% bound) | epochs (best) |
-|---|---|---|---|---|---|
-| `base_s1` (weight 0, control) | 0.0720% +-0.0094 | 1.787% | 0.0242% | 0.0066% (0.0081%) | 17 (13) |
-| `w1_s1` (weight 1) | 0.1274% +-0.0128 | 2.276% | 0.0067% | 0.0089% (0.0108%) | 40, the cap (still improving) |
-| adopted O_3 f5766a (reference) | not scored on this set | | | 0.0056% (0.0068%) | |
-
-- **Reading.** Weight 1 is clearly worse on sibling regret (+77%, far outside the noise) and on the golden loss; only the team bias improved. It also hit the 40-epoch cap while its value score was still creeping down: stopping on value error is not stopping on decisions (E12 saw the same difference). The control reproduces f5766a within retraining noise. S2's win used a policy whose loss is the decision itself; O_3 is a value network averaged over many worlds, and the ranking term seems to disturb the values the search needs. No reason to try this weight on O_2.
-- **Limits.** One seed per arm (the second control seed and the second weight-1 seed were not run), one weight; the loss and the sibling set share the rule that makes sibling groups (principal lines driven by f5766a); a smaller weight (0.1) and a stop rule on sibling regret were not tried; the golden difference (0.0089 against 0.0066) is inside the 0.0025-point retraining noise, the sibling-regret one is not.
-- **Sources.** R2 `runs/o3-pair-1/out/base_s1/`, `out/w1_s1/`; `docs/m3-hybrid/o3-pair-score.json`; `docs/m3-hybrid/sibrank.md` section 6.
+- **Observed.** Seed noise is about 0.02 in SD (seed 2 against seed 1 is inside the paired bound). Depth and width lower the value error
+  (deeper about as much as 1.6x the data would), while sibling regret does not improve (0.202 and 0.219 against 0.199; 95% half-width about
+  0.035) and the deeper network's bias is larger; the wider network has the smallest bias. As for O_3 (C2, C12) and O_4 (B4), capacity did
+  not move decision-level numbers.
+- **Cost.** $1.5.
+- **Limits.** One seed per shape; 11M rows only (capacity at 40M rows was not tested); random-play test positions.
+- **Sources.** R2 `runs/o2-volcap-1/out/{seed2,deep,wide}/`; `docs/vast/o2-volcap.manifest.json`.
 
 ### D10. Calibration: what a network's error costs in decisions (run `o3-ladder-1`, 2026-10-23)
-- **Question.** No trick-1 golden set exists (owner, 2026-10-16), so how much trick-1 decision loss does O_2's current error
-  imply? Method: the same question one trick later, where exact answers exist.
-- **Method.** Four O_3-recipe networks (2048-1024-256, same data mix and seed as O_3, exact trick-3 labels) trained on 1M, 3M,
-  10M and 20M rows (0.025, 0.075, 0.25, 0.5 of the 40M set). Each is judged two ways: (a) the trick-2 golden check (2,000 decisions x
-  320 worlds, exact values stored; H_3 with that network at the leaves against exact), giving mean decision loss; (b) position SD and
-  sibling regret on 100,000 exact trick-3 siblings (seed 7903, `sib3`). Then log-log lines through the four points. Run: 96 min,
-  $2.36 (`docs/vast/o3-ladder.manifest.json`; reports `docs/m3-hybrid/o3-ladder/lad*-hc-t2-o3.txt`, `docs/m3-hybrid/o3-ladder-calibration.json`).
+- **Question.** No trick-1 golden set exists (owner decision, 2026-10-16). What trick-1 decision loss does a given O_2 error imply, read from the
+  same relation one trick later, where exact answers exist?
+- **Method.** Four O_3-recipe networks (2048-1024-256, outcome head, seed 1, exact trick-3 labels) trained on 1M, 3M, 10M and 20M rows (0.025,
+  0.075, 0.25 and 0.5 of the stored 40M base). Each judged two ways: (a) the trick-2 golden check (2,000 decisions x 320 worlds, 1% re-solved;
+  H_3 with that network at the leaves against exact) for decision loss; (b) position SD and sibling regret on 100,000 exact trick-3 sibling
+  positions (`sib3`, seed 7903, driven by O_3 f5766a). Log-log lines through the four points. AMD Threadripper PRO 9995WX, 96 min, $2.36
+  (`docs/vast/o3-ladder.manifest.json`).
 - **Result.**
 
 | network (rows) | position SD | sibling regret | golden decision loss (95% upper) | largest team bias (golden) |
@@ -907,17 +912,82 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 | lad10 (10M) | 2.28% | 0.111% | 0.0089% (0.0110) | 0.025% |
 | lad20 (20M) | 1.93% | 0.085% | 0.0071% (0.0085) | 0.016% |
 
-  Decision loss grows as sibling regret to the power 1.7 (residual SD 0.22 in log) and as position SD to the power 3.1 to 3.2
-  (residual 0.15 to 0.22). Read across to O_2 (the 11M plain network `v11`, SD 2.93%, sibling regret 0.199% on trick-2 siblings):
-  predicted trick-1 decision loss about **0.022 to 0.026%**, a factor of 1.5 either way (about 2 sigma of the fit). The loss would
-  reach 0.01% at a sibling regret near **0.11%** or a position SD near **2.25 to 2.3%**.
-- **Reading.** O_2 as it stands (v11) is an estimated 2 to 3 times above 0.01%; it needs roughly half its sibling regret. Volume at
-  the D7 exponent gives 22M about 2.71% SD, 40M about 2.55% (not measured), so volume alone gets to about 0.015%; the audit loop and
-  capacity must do the rest. Bias also matters: the 0.01% standard failed for every ladder net on bias even where loss was fine.
-- **Limits.** An estimate, never a proof. Four points, one seed each, a fit across two different tricks (trick-2 decisions with
-  trick-3 leaves, applied to trick-1 decisions with trick-2 leaves: trick 1 has more cards and larger spreads, so the true loss
-  may sit above or below); golden decision losses carry their own noise (the 95% upper bounds above); random-play sibling
-  positions, not search-reached ones.
+  Decision loss grows as sibling regret to the power 1.7 (residual SD 0.22 in log) and as position SD to the power 3.1-3.2 (residual 0.15-0.22).
+  Applying the fits to O_2 networks (trick-2 position SD and sibling regret on the 250k exact test set, D6-D11): `v11` (11M) 0.022-0.026%;
+  `v20` (19.8M) 0.019-0.022%; round 1 of the audit loop (39.6M, D11) 0.016% by SD and 0.024% by sibling regret; round 2 0.016% and 0.020%;
+  each interval a factor of 1.5 either way. The fits reach 0.01% at sibling regret about 0.11% or position SD about 2.25-2.3%.
+- **Observed.** The 0.01% standard failed for every ladder network on bias (largest 0.016-0.033%) even where decision loss was close.
+- **Limits.** An estimate, not a measurement: four points, one seed each; the relation is read across two tricks (trick-2 decisions with trick-3
+  leaves, applied to trick-1 decisions with trick-2 leaves; trick 1 has more cards and larger spreads, so the true loss may be above or below);
+  the golden losses carry their own noise (the upper bounds above); the sibling positions are random-play positions.
+- **Sources.** `docs/m3-hybrid/o3-ladder/lad*-hc-t2-o3.txt`, `docs/m3-hybrid/o3-ladder-calibration.json`; R2 `runs/o3-ladder-1/`.
+
+### D11. The O_2 audit loop at trick 2 (run `o2-audit-10`, 2026-10-23)
+- **Question.** Does the audit loop (find weak groups on fresh exact positions, harvest more of them at double weight, retrain from scratch) improve
+  O_2 beyond plain volume?
+- **Method.** `docs/vast/o2-audit-4.manifest.json` (built by `python/tools/o2_audit_manifest.py`): the 39.6M stored plain hybrid labels (`o2-vol-3`
+  streams 1-10, `o2-vol40-1` streams 11-18) plus the exact s601 validation shard; 2048-1024-256, outcome head; audit shards of 200,000 exact trick-2
+  positions as the hybrid reaches them from trick-1 decisions (seeds 22101, 22102); targeted harvest of 2,000,000 rows a round at weight 2 (plain O_3
+  labels, 10% exact); 3 rounds set. New York machine (AMD EPYC 9B14, 184 usable threads, RTX 5090, 128 GB RAM, $1.41/h), 5.7 h, about $8. Stopped by
+  the owner (2026-10-23) after round 2's audit report, before its harvest. Earlier launches (`o2-audit-4` to `-9`) failed or were abandoned: a host
+  downloading at 6 Mbps, boxes destroyed before the takeover, a box whose GPU could not start containers (CDI error); about $3 of rentals.
+- **Result.** Round 1 network `13152c24bc27` (best epoch 9; validation loss 1.754, accuracy 78.4%); round 2 network `235ed448acc7` (best epoch 20;
+  1.767, 78.3%). On the 250k exact test set and 4,479 sibling groups:
+
+| | round 1 | round 2 | `v20` (19.8M, D8) |
+|---|---|---|---|
+| test SD | 2.603% | 2.624% (paired change +0.11 +-0.14) | 2.748% |
+| largest team bias | 0.019% | 0.022% | 0.028% |
+| sibling regret (95%) | 0.188% +-0.044 | 0.171% +-0.036 | 0.176% +-0.033 |
+
+  The audits on fresh exact shards: round 1 overall SD 2.531%, 668 weak groups, worst "the leader's team has 40 points" (weight 0.19%, SD 7.05%,
+  bias -0.88%); round 2 overall SD 2.524%, 667 weak groups, worst the same group (weight 0.21%, SD 6.84%); race class 4 SD 4.07% then 4.08%. The auditor's
+  verdict was "not flat" both times. Round 1's rough test on the saved exact trick-1 worlds (8 decisions): mean loss 0.16% (95% upper 0.48%).
+- **Observed.** The 39.6M network beat the 19.8M one on error (2.60% against 2.75%) and bias; sibling regret did not change beyond the noise. The
+  targeted round changed nothing measurable: the same score-state groups (30, 31, 36, 40 points) stayed at SD 4-7%. As for O_3 (C2, C3, C12), more
+  audit rounds did not move the network beyond retraining noise. Decision (owner, 2026-10-23): round 1's network (integer `13152c24`) is the O_2 for
+  the trick-1 work.
+- **Cost.** Loop about $8; stored base labels $6.1 (`o2-vol-3`) and $2.9 (`o2-vol40-1`).
+- **Limits.** One seed per round; round 3 and round 2's harvest were not run; round 2's own audit shard was not stored; the rough test is 8 decisions.
+- **Sources.** R2 `runs/o2-audit-10/partial/rung/000000/out/hybrid/` (networks, `audit/round-N/`), round-1 audit shard `inputs/sha256/c8a8a392...`,
+  targeted shard `inputs/sha256/6fceb941...`; `docs/m3-hybrid/o2-audit-10/` (auditor reports).
+
+### D12. A sibling ranking loss on O_3 (run `o3-pair-1`, 2026-10-23)
+- **Question.** Does a pairwise ranking loss over sibling positions move O_3's decisions, as S2's decision-aware loss did for the student (E12)?
+- **Method.** `docs/vast/o3-pair.manifest.json`, judged by `python/tools/o3_pair_score.py`: the O_3 recipe (2048-1024-256, outcome head, cut 3) on the
+  stored 40M trick-3 base plus 6M exact sibling rows (seed 7911, driven by O_3 f5766a), identical in every arm; arms differ in `pair_weight` (the
+  trainer's gap-weighted RankNet term, scale 100, Fix E, `docs/m3-hybrid/sibrank.md`) and seed. Judged on the 100,000 held-out exact sibling
+  positions `sib3` and on the in-run golden check (2,000 trick-2 decisions x 320 worlds). AMD Threadripper PRO 9995WX (184 usable threads), RTX
+  3090, $1.54/h; two of five arms finished (`base_s1`, `w1_s1`); the others were stopped by the owner (2026-10-23) after the result.
+- **Result.**
+
+| arm | sibling regret (95%) | sibling SD | largest bias | golden loss (95% bound) | epochs (best) |
+|---|---|---|---|---|---|
+| `base_s1` (weight 0) | 0.0720% +-0.0094 | 1.787% | 0.0242% | 0.0066% (0.0081%) | 17 (13) |
+| `w1_s1` (weight 1) | 0.1274% +-0.0128 | 2.276% | 0.0067% | 0.0089% (0.0108%) | 40 (40, the cap) |
+| adopted O_3 f5766a (D10 / C2) | not scored on this set | | | 0.0056% (0.0068%) | |
+
+- **Observed.** Weight 1 had sibling regret 77% above the control (outside the noise) and a higher golden loss (inside the 0.0025-point retraining
+  noise); only the team bias improved. It reached the 40-epoch cap with its value score still improving; the trainer stops on value validation, not
+  on decisions (E12: the same ranking term scored 0.095% without and 0.059% with a stop on decision loss). The control reproduced f5766a within
+  retraining noise. Cost of the experiment: about $6.
+- **Limits.** One seed per arm (`base_s2`, `w1_s2` and `w3_s1` were not run); one weight; the sibling set is built with the same rule as the training
+  sibling rows (principal lines driven by f5766a); a smaller weight and a stop rule on sibling regret were not tried.
+- **Sources.** R2 `runs/o3-pair-1/out/base_s1/`, `out/w1_s1/`; `docs/m3-hybrid/o3-pair-score.json`; `docs/m3-hybrid/sibrank.md` section 6.
+
+### D13. Trick-1 teacher data with the adopted O_2 (run `o2-copper-s1-1`, 2026-10-23, in progress)
+- **Question.** What does the trick-1 teacher cost on a cheap machine with the adopted O_2, and what do the copper set and the first S1 training
+  labels look like?
+- **Method.** `docs/vast/o2-copper-s1.manifest.json`: `student_teacher` chunks of 500 trick-1 decisions, teacher H_2 with O_2 round 1 of D11 (integer
+  `13152c24`, `inputs/sha256/13152c24...`); copper = 4 chunks at 128 deals (seed 7801, rules-v1 positions); S1 labels = 300 chunks of rules-v1
+  positions (seed 7811) and 200 chunks of mixed positions (seed 7812), 64 deals each, 250,000 decisions. AMD EPYC 7B12 (245 usable threads), RTX 3060,
+  $0.328/h, taken over by hand (instance 57404109; takeover 3 min).
+- **Result so far.** Copper (2,000 decisions at 128 deals) finished: chunks of 107-124 s, about 15,600 decisions an hour. Rules-v1 chunks at 64 deals
+  (13 read): median 65 s of compute for 500 decisions (about 29,700 decisions an hour); with about 40 s of setup between chunks (`setup: table v0`,
+  the equity table is rebuilt in every chunk) the wall time is 103-107 s a chunk, 16,800 decisions an hour. The earlier measurement (E6) was 12,489
+  decisions an hour at 64 deals on an EPYC 7B13. At 36 chunks of 500 at 19:07 UTC: $0.41, estimate for all 500 chunks about 13 h more.
+- **Limits.** Mixed positions were not yet measured; the run is not finished, its final numbers are not recorded here.
+- **Sources.** R2 `runs/o2-copper-s1-1/out/{copper,s1rules,s1mixed}/`; E6.
 
 ---
 
@@ -1368,6 +1438,13 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 | Trick-1 deal-count curves (A7) | incomplete | 31 + 355 saved exact worlds |
 | PIMC-v0 vs rules-v1 SPRT gate (M3-SPEC §8.3), PIMC-suitability report (§6) | not run | — |
 | Speed tests of AMD EPYC 9B45 offers (2026-10-22) | stopped: 46 usable threads | no speed figure |
+| O_2 test-set parts 1-3 (`o2-testset-1/-2/-3`) | stopped, one failed on a chunk error, 2026-10-22 | replaced by `o2-stagea-full-2` (D6) |
+| O_2 volume labels as streamed parts (`o2-vol-1`, `o2-vol-2`) | no machine found in 50 min / label parts hit the trainer's sidecar race | replaced by ten stored streams (`o2-vol-3`, D7) |
+| O_2 on 19.8M labels as `o2-volnet-9` | superseded by the same run with `keep` (`o2-volnet-9k`, D8) | manifest |
+| O_2 audit loop launches `o2-audit-4` to `-9` | failed or abandoned (a 6 Mbps host, boxes destroyed before the takeover, a box whose GPU could not start containers) | A10, D11 |
+| O_2 audit loop round 3 and round 2's harvest | not run (stopped by the owner after round 2's audit) | D11 |
+| O_3 sibling ranking A/B arms `base_s2`, `w1_s2`, `w3_s1` of `o3-pair-1` | not run (stopped by the owner after weight 1) | D12 |
+| O_3 sibling ranking A/B launch `o3-pair-2` | container never started under that name (A10) | the experiment ran as `o3-pair-1` |
 | Copilot work of 2026-10-19/20 (`silver-shared`, `sx50_*`, `s2_50`, `o2-silver-2..4`, `o3v2-*`, `o3g2-linux-verify-*`, `o3-targeted2m-recovery-*`) | discarded by the owner | files in R2, not analysed here; branch `archive/silver-shared` |
 
 ---
@@ -1390,6 +1467,14 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 | plain hybrid trick-2 label | 86 thread-ms build VM; 110 thread-ms (9.1 a thread-second) on an Intel engineering sample, 184 threads | D2 |
 | trick-2 teacher decision at 320 deals (H_3) | 4.7 thread-s build VM | E1 |
 | trick-1 teacher decision at 64 deals (H_2) | 12,489 decisions an hour on 256 EPYC 7B13 threads | E6 |
+| plain hybrid trick-2 label, 245 EPYC 7742 threads | 1,170 labels/s (4.8 a thread-second), $0.41 per 2.2M rows | D7 |
+| plain hybrid trick-2 label, 368 EPYC 9654 threads | about 2,000 labels/s (5.4 a thread-second) | D11 |
+| exact trick-2 audit label, 184 EPYC 9B14 threads | 41 rows/s (about 4.5 thread-s) | D11 |
+| targeted harvest row (plain labels at trick 2 driven by the network), same machine | 320-335 rows/s (about 0.55 thread-s, about 3x a random plain label) | D11 |
+| O_2 training, 39.6M rows, 2048-1024-256 | about 1.7 min an epoch on an RTX 5090 (38,672 batches of 1,024) | D11 |
+| O_3 training, 46M rows, 2048-1024-256 | about 3.4 min an epoch on an RTX 3090 (44,922 batches) | D12 |
+| trick-1 teacher decision (H_2 + O_2 round 1), 245 EPYC 7B12 threads | 64 deals: 65 s of compute a chunk of 500 (29,700 an hour), 105 s with setup (16,800 an hour); 128 deals: 108-124 s (15,600 an hour) | D13 |
+| R2 download of 62-75 GB of shards | 12-20 min (50-65 MB/s; 6 Mbps on one host) | A10 |
 | student request in WASM | 0.4-0.7 ms | E1 |
 
 ---
@@ -1413,4 +1498,14 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 | trick-3 80M additions | random a27d0ce2…, rules 79ed2709…, harvest 9ea6a23a… |
 | exact trick-2 labels | random 1.2M fb51c217…, rules 0.3M 2160fefc…, validation 50k 38de4835…, 20k 855ba467…, 5k 46ba92fc… |
 | trick-2 student (1M, 512-256) | 954223e2… |
+| O_2 networks of D6-D9 | `p60` runs/o2-stagea-full-2/out/p60; `v11` runs/o2-volnet-5/out/volnet; `v20` runs/o2-volnet-9k/out/volnet; capacity arms runs/o2-volcap-1/out/{seed2,deep,wide} |
+| **O_2 adopted (audit loop round 1, 39.6M plain labels)** | integer 13152c24bc27…, float and report under runs/o2-audit-10/partial/rung/000000/out/hybrid/net/ |
+| O_2 audit loop round 2 network | 235ed448acc7…, under .../audit/round-2/net/ |
+| O_2 plain labels (22M and 17.6M rows) | per-stream `shards.json` of runs/o2-vol-3 (vol01-vol10) and runs/o2-vol40-1 (vol11-vol18); 54 shards, 74.6 GB |
+| O_2 exact test set (250k) and sibling groups (4,479) | ten parts in runs/o2-stagea-full-2/partial/test01-test10; sibling shard 5734d7f0… |
+| trick-3 exact sibling set `sib3` (100k, seed 7903) | shard 5cdf183b…, groups d2854861…, sidecar c4fb5318… |
+| O_2 audit round-1 shard (200k exact) and targeted shard (2M) | c8a8a392…, 6fceb941… |
+| O_3 sibling A/B arms | runs/o3-pair-1/out/base_s1 and out/w1_s1 |
+| O_3 ladder networks (1M, 3M, 10M, 20M rows) | runs/o3-ladder-1/out/lad{1,3,10,20}/ |
+| copper and S1 teacher labels with O_2 round 1 | runs/o2-copper-s1-1/out/{copper,s1rules,s1mixed}/ |
 | equity table v0 | 64740dab…6808 |

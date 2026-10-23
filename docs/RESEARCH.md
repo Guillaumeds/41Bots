@@ -319,6 +319,17 @@ answers are in RULES section H.
   weighting shows positions where the network was most wrong more often.
 - **Distillation.** Hinton, Vinyals & Dean 2015 (soft targets); Rusu et al., ICLR 2016 (policy
   distillation, several teachers into one student).
+- **Loss against data size.** Kaplan et al. 2020 and Hoffmann et al. 2022 (language models): test loss
+  falls as a power law of the training-set size, with exponents of a few hundredths to a few tenths;
+  they were not re-read on 2026-10-23 (cited from memory of the papers). Project measurement: the value
+  error of the trick-2 oracle falls with an exponent of about -0.11 on the number of rows, its sibling
+  regret about -0.20 (`docs/EXPERIMENTS.md` D6-D8, D11); O_3 at 40M against 80M rows lowered value error
+  and not decision loss (C4).
+- **Training on a teacher's noisy values.** Learning with noisy labels (Natarajan et al., NeurIPS 2013;
+  Zhang et al., ICLR 2017 on memorisation of noisy labels; not re-read on 2026-10-23). Project
+  measurement: hybrid labels (exact search through trick 2, O_3 at the leaves; root-mean-square error 2.1%
+  against exact) trained the trick-2 oracle as well as exact labels of the same count and better at the
+  same money (D6).
 - **Partners and humans.** Fictitious Co-Play (Strouse et al. 2021): skill-level checkpoints make a
   bot a good partner to strangers (10.6 vs 4.7 with a human proxy; 8.6 vs 1.0 with random partners);
   architecture diversity added nothing; the population plateaued at about 32; 114 human participants
@@ -396,8 +407,20 @@ These sources underlie the hybrid yardstick and its later fixes (2026-10-16 to 2
 - **Warm starts**: Ash & Adams 2020: a warm-started network can generalise worse than one trained from
   scratch; shrink-and-perturb is their remedy. Continual training on old plus new data (replay) is the
   practice of self-play engines. Project use: C3, C12.
-- **Ranking losses**: RankNet (Burges et al., ICML 2005); decision-focused learning, "Smart Predict-
-  then-Optimize" (Elmachtoub & Grigas 2022). Project use: C9.
+- **Ranking losses**: RankNet (Burges et al., ICML 2005); LambdaRank (pairs weighted by what swapping
+  them costs; Burges, Ragno & Le 2006); the listwise ListNet (Cao et al., ICML 2007: a softmax over the
+  candidates, cross-entropy to the target's softmax); decision-focused learning, "Smart Predict-then-
+  Optimize" (Elmachtoub & Grigas 2022), whose SPO loss is the regret of the decision taken. Project use:
+  the trick-2 student's loss is a listwise KL over the candidate cards with temperature T and halved its
+  golden-set loss (`docs/EXPERIMENTS.md` E12, E17); the same idea as a pairwise term on O_3's sibling
+  positions made O_3 worse (C9, D12); the sibling regret used to judge oracles (D6-D12) is the SPO loss on
+  the positions a choice point's cards lead to.
+- **Surrogate loss against task loss**: minimising a convex surrogate need not minimise the task loss
+  (Bartlett, Jordan & McAuliffe, JASA 2006, on classification-calibrated surrogates; not re-read on
+  2026-10-23). Project measurement: stopping on the validation decision loss instead of the value
+  cross-entropy lowered the student's golden-set loss by about 16% without a ranking term and the ranking
+  term with that stop rule by about half (E12); O_3's ranking arm kept improving its value score for 40
+  epochs while its decisions were worse (D12).
 - **Ensembles**: deep ensembles' disagreement as uncertainty (Lakshminarayanan et al. 2017). Project
   use: C8.
 
@@ -427,6 +450,12 @@ These sources underlie the hybrid yardstick and its later fixes (2026-10-16 to 2
   storage offers); CPU and RAM are allocated in proportion to the GPU fraction; interruptible instances
   are stopped when outbid (processes killed); storage and bandwidth are billed while loading. Project
   measurements of rented machines: `docs/EXPERIMENTS.md` A8, `docs/VAST-MACHINES.md`.
+  Checked in use on 2026-10-22/23 (`docs/EXPERIMENTS.md` A10): `--jupyter --direct` is the runtype
+  `jupyter_direc ssh_direc ssh_proxy`; `PUT /api/v0/asks/<offer id>/` rents an offer in one call;
+  `update instance` followed by `recycle instance` rebuilds a rented machine's container in place and can
+  take minutes to act; `/api/v0/instances/` is deprecated for `/api/v1/instances/`; an instance record
+  carries `public_ipaddr`, `ports`, `jupyter_token`, `disk_usage`, `inet_down_billed` and the stored
+  `extra_env`; a stopped instance can lose its GPU slot to another renter.
 - **PyTorch 2.15** drops CUDA 12.6 wheels and Maxwell/Pascal/Volta GPUs; 2.14.1 is the last line for
   them.
 - **Cloudflare** (as reported by the 2026-10-13 review; conflicting figures to be re-checked against
@@ -508,5 +537,10 @@ Primary papers and pages (most also listed with notes in `docs/PLAN.md` §18 and
   https://en.wikipedia.org/wiki/Forty-fives · Parlett https://www.parlettgames.uk/histocs/maw.html ·
   boards.ie 31/41 https://www.boards.ie/discussion/2057461308/31-41-card-game-rules · Irish 25 app
   https://irish25cardgame.com/scoring/ · 45s AI https://github.com/jitousig/fortyfives-ai
+- Added 2026-10-23 (cited from memory, not re-read): Kaplan et al. https://arxiv.org/abs/2001.08361 ·
+  Hoffmann et al. https://arxiv.org/abs/2203.15556 · Zhang et al. https://arxiv.org/abs/1611.03530 ·
+  Natarajan et al. (NeurIPS 2013, "Learning with noisy labels") · Cao et al., ListNet (ICML 2007) ·
+  Burges, Ragno & Le, LambdaRank (NeurIPS 2006) · Elmachtoub & Grigas https://arxiv.org/abs/1710.08005 ·
+  Bartlett, Jordan & McAuliffe (JASA 101, 2006)
 - Not readable at the time (2026-10-13): Bounan & Edelkamp ISAIM 2024; full text of Edelkamp KI 2024;
   the Irish 25 app's in-game 41 rules.
