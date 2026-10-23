@@ -822,6 +822,35 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 - **Cost of the whole path so far.** Labels $0.41 per 2.2M rows; the 11M network $0.19.
 - **Limits.** One seed per arm; random-play test positions; sibling-regret differences inside the noise except v11 against p15.
 
+### D10. Calibration: what a network's error costs in decisions (run `o3-ladder-1`, 2026-10-23)
+- **Question.** No trick-1 golden set exists (owner, 2026-10-16), so how much trick-1 decision loss does O_2's current error
+  imply? Method: the same question one trick later, where exact answers exist.
+- **Method.** Four O_3-recipe networks (2048-1024-256, same data mix and seed as O_3, exact trick-3 labels) trained on 1M, 3M,
+  10M and 20M rows (0.025, 0.075, 0.25, 0.5 of the 40M set). Each is judged two ways: (a) the trick-2 golden check (2,000 decisions x
+  320 worlds, exact values stored; H_3 with that network at the leaves against exact), giving mean decision loss; (b) position SD and
+  sibling regret on 100,000 exact trick-3 siblings (seed 7903, `sib3`). Then log-log lines through the four points. Run: 96 min,
+  $2.36 (`docs/vast/o3-ladder.manifest.json`; reports `docs/m3-hybrid/o3-ladder/lad*-hc-t2-o3.txt`, `docs/m3-hybrid/o3-ladder-calibration.json`).
+- **Result.**
+
+| network (rows) | position SD | sibling regret | golden decision loss (95% upper) | largest team bias (golden) |
+|---|---|---|---|---|
+| lad1 (1M) | 3.02% | 0.190% | 0.0293% (0.0491) | 0.033% |
+| lad3 (3M) | 2.65% | 0.154% | 0.0143% (0.0179) | 0.032% |
+| lad10 (10M) | 2.28% | 0.111% | 0.0089% (0.0110) | 0.025% |
+| lad20 (20M) | 1.93% | 0.085% | 0.0071% (0.0085) | 0.016% |
+
+  Decision loss grows as sibling regret to the power 1.7 (residual SD 0.22 in log) and as position SD to the power 3.1 to 3.2
+  (residual 0.15 to 0.22). Read across to O_2 (the 11M plain network `v11`, SD 2.93%, sibling regret 0.199% on trick-2 siblings):
+  predicted trick-1 decision loss about **0.022 to 0.026%**, a factor of 1.5 either way (about 2 sigma of the fit). The loss would
+  reach 0.01% at a sibling regret near **0.11%** or a position SD near **2.25 to 2.3%**.
+- **Reading.** O_2 as it stands (v11) is an estimated 2 to 3 times above 0.01%; it needs roughly half its sibling regret. Volume at
+  the D7 exponent gives 22M about 2.71% SD, 40M about 2.55% (not measured), so volume alone gets to about 0.015%; the audit loop and
+  capacity must do the rest. Bias also matters: the 0.01% standard failed for every ladder net on bias even where loss was fine.
+- **Limits.** An estimate, never a proof. Four points, one seed each, a fit across two different tricks (trick-2 decisions with
+  trick-3 leaves, applied to trick-1 decisions with trick-2 leaves: trick 1 has more cards and larger spreads, so the true loss
+  may sit above or below); golden decision losses carry their own noise (the 95% upper bounds above); random-play sibling
+  positions, not search-reached ones.
+
 ---
 
 ## Part E. Students (small networks for the app's tricks 1-2)

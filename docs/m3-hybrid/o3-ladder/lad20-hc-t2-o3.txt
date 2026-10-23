@@ -1,0 +1,17 @@
+H_3 vs exact, trick 2: 2000 decisions x 320 worlds (seed 1, label 1, belief-uniform source); net a066e6708e38 [2048, 1024, 256, 24]; exact values stored (/home/app/w/work/o3-ladder-1/chunks/lad20/000000-679/hybrid-work/inputs/6ddc59b191e1fd534f260f9dfe103f742d6026768ca74acdbbb4fd430eb8265e), 1% sample recomputed (6345 worlds verified byte-identical)
+group       dec  mean loss  95% upper <=0.01%   agree   values bias: own / next / opposite / previous        SD   p99.9|e|    max|e|
+all        2000    0.0071%    0.0085%     yes   84.4%  8439040    -0.0160% +0.0092% +0.0068% -0.0001%   2.0020%   24.4017% 100.0000%
+pos 1-2     504    0.0109%    0.0147%      no   77.4%  2312960    -0.0368% +0.0204% +0.0146% +0.0017%   1.9933%   24.7128%  99.9340%
+pos 3-4     504    0.0057%    0.0076%     yes   82.9%  2048000    -0.0208% +0.0089% +0.0152% -0.0034%   2.1353%   24.8850% 100.0000%
+pos 5-8     992    0.0058%    0.0080%     yes   88.6%  4078080    -0.0018% +0.0030% -0.0018% +0.0006%   1.9367%   23.9194%  99.9998%
+pos 1       252    0.0175%    0.0243%      no   68.7%  1290240    -0.0399% +0.0155% +0.0274% -0.0030%   2.0531%   24.6895%  99.9340%
+pos 2       252    0.0044%    0.0071%     yes   86.1%  1022720    -0.0329% +0.0267% -0.0016% +0.0077%   1.9152%   24.7684%  96.7826%
+pos 3       252    0.0057%    0.0081%     yes   81.0%  1041920    -0.0385% +0.0069% +0.0276% +0.0039%   2.2215%   27.0755% 100.0000%
+pos 4       252    0.0057%    0.0091%     yes   84.9%  1006080    -0.0025% +0.0110% +0.0024% -0.0109%   2.0423%   22.6291% 100.0000%
+pos 5       248    0.0132%    0.0211%      no   85.1%  1016320    +0.0065% -0.0129% +0.0010% +0.0054%   2.2143%   26.6037%  99.7914%
+pos 6       248    0.0033%    0.0071%     yes   91.5%   990720    -0.0241% +0.0091% -0.0004% +0.0154%   1.9360%   22.7425%  99.9998%
+pos 7       248    0.0045%    0.0070%     yes   88.3%  1034240    +0.0049% +0.0110% +0.0028% -0.0187%   1.7230%   21.3773%  76.3296%
+pos 8       248    0.0023%    0.0039%     yes   89.5%  1036800    +0.0049% +0.0046% -0.0104% +0.0009%   1.8448%   24.3005%  96.2636%
+(value error over all four teams' chances; bias per team relative to the decider; the decider's team alone: SD 2.0816%, p99.9|e| 25.4004%)
+time: exact 999.472 ms a world (9262855 nodes; 6345 worlds solved exactly here), hybrid 23.226 ms a world (811 nodes, 519 frontier evaluations); 41045 ns per frontier evaluation (encode + integer forward + softmax, or the oracle's memo of recent positions); 138.2 s wall on 184 threads
+standard: decision loss 95% upper bound <= 0.01% overall and in every band: no; every team's |bias| <= 0.01%: no (largest 0.0160%); FAIL
