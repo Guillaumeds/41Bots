@@ -330,6 +330,7 @@ fn the_manifests_parse() {
         "student-t2-dealtest-mech.manifest.json",
         "student-t2-plain-arm.manifest.json",
         "student-t2-plain-2.manifest.json",
+        "student-t2-losssearch.manifest.json",
         "student-t2-g2arm-50k.manifest.json",
         "student-t2-plainarm-50k.manifest.json",
     ] {
