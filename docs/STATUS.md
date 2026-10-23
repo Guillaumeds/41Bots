@@ -87,12 +87,12 @@ and `runs/student-t2-gv2-250k-6/out/rules/000000-,000001-...`; use `skip_parts`/
 found and fixed (ordered-writer window; a decision's 64 deals on one thread: now blocks of 8, byte-identical).
 **Session 1 result (S2 teacher A/B), 2026-10-23 (E12-E14):** the **decision-aware loss is the win** (`rank_weight` 1, `rank_temperature`
 0.01, `stop_on` decision): on the exact golden set the trick-2 student's loss halves, 0.0587% (3 seeds, SD 0.003) against 0.1195% for
-plain at 250,000 decisions, and at 1,000,000 decisions it reaches 0.0389% alone, 0.080% at seat 1 and 0.0030% for the top-3 pick
-(the existing S2: 0.0733%, 0.179%, 0.0073%). Its integer network is in R2 (key in E12). **G2 labels were no help at 50,000 decisions (E13)**
+plain at 250,000 decisions, and at 1,000,000 decisions it reaches 0.0456% alone over 3 seeds (0.0389 / 0.0491 / 0.0487, SD 0.006), 0.090% at seat 1 and 0.0037% for the top-3 pick
+(the existing S2: 0.0733%, 0.179%, 0.0073%); seed 1 was the luckiest, all three beat the existing S2. Its integer network is in R2 (key in E12). **G2 labels were no help at 50,000 decisions (E13)**
 (plain loss -0.006 +/- 0.017, decision-aware loss +0.024 +/- 0.009 worse, 3 seeds); the G2 labelling was cancelled at 60,000 decisions
 (12 parts, $3.49; 28 minutes a part after the two throughput fixes), and S2 goes on with the plain H_3 teacher (owner, 2026-10-23).
 **To check on S1 (trick 1) later:** the same loss, plain against decision-aware at 250,000 decisions, 3 seeds.
-**S2, next (owner chooses):** (1) [done, E16: the new network alone beats any search up to 25 deals; no router worth building] [loss search done, E17: weight 1, temperature 0.01 stays; no cell is clearly better]; (2) 1M seeds 2-3 of the best setting (about $0.5); (3) [done as E16] the app-side checks with the new network (shortlist + search, router); (4) the export check (`method: "student"`, native against WASM,
+**S2, next (owner chooses):** (1) [done, E16: the new network alone beats any search up to 25 deals; no router worth building] [loss search done, E17: weight 1, temperature 0.01 stays; no cell is clearly better]; (2) [done: 1M seeds 2-3 give 0.0491 / 0.0487, mean 0.0456 over 3 seeds, E12; run `student-t2-seeds-1m-2`, $0.71]; (3) [done as E16] the app-side checks with the new network (shortlist + search, router); (4) the export check (`method: "student"`, native against WASM,
 `docs/WASM-API.md`) and the owner's decision to replace S2; (5) more plain-teacher data (the plain 64-deal teacher costs about $4-5 per
 million decisions): a 2M-decision point with the new loss.
 

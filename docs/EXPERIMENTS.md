@@ -1126,18 +1126,23 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 | rank W=1, T=0.003, stop on decision loss | 250,000 | 3 | 0.0780 (SD 0.006) | 0.132 | 0.0056 |
 | **rank W=1, T=0.01, stop on decision loss** | 250,000 | 3 | **0.0587 (SD 0.003)** | **0.100** | **0.0045** |
 | rank W=1, T=0.003, stop on decision loss | 1,000,000 | 1 | 0.0495 [0.0601] | 0.092 | 0.0036 |
-| **rank W=1, T=0.01, stop on decision loss** | **1,000,000** | 1 | **0.0389 [0.0467]** | **0.080** | **0.0030 [0.0051]** |
+| **rank W=1, T=0.01, stop on decision loss** | **1,000,000** | 3 | **0.0456 (SD 0.006)** | **0.090** | **0.0037** |
 
   Per seed (alone): plain 0.1217 / 0.1386 / 0.0980; T=0.003 0.0692 / 0.0966 / 0.0907; T=0.003 + stop 0.0770 / 0.0725 / 0.0845;
   T=0.01 + stop 0.0599 / 0.0550 / 0.0613. Retraining noise at the same data and settings is SD 0.020 for the plain loss. T=0.01 with the stop
   rule is below every plain seed and halves the plain mean, at SD 0.003; from 250,000 decisions it is below the existing S2, which used four
-  times the data, and its leader-seat loss is 0.100 against 0.179. At 1,000,000 decisions it reaches 0.0389% alone, 0.080% at seat 1 and 0.0030%
-  for the top-3 pick, the lowest measured. The stop rule alone and plain at 320 deals lie inside the plain noise (one seed each). The same ordering
+  times the data, and its leader-seat loss is 0.100 against 0.179. At 1,000,000 decisions (seeds 1-3, run `student-t2-seeds-1m-2` for seeds 2 and 3) it reaches 0.0456% alone (0.0389 / 0.0491 / 0.0487;
+  seed 1 was the luckiest), 0.090% at seat 1 (0.080 / 0.094 / 0.097) and 0.0037% for the top-3 pick (0.0030 / 0.0025 / 0.0057), the lowest measured; the
+  95% upper bounds alone are 0.0467 / 0.0646 / 0.0580. All three are below the existing S2 (0.0733%, 0.179%, 0.0073%), and the mean is 22% below the
+  best 250,000-decision cell's 0.0587%: four times the data helps, less than the loss change did. The stop rule alone and plain at 320 deals lie inside the plain noise (one seed each). The same ordering
   holds on the runner's fixed 4,096-decision test set (plain seed 1 0.092, rank T=0.01 0.067, 250,000 decisions). Integer networks (content-addressed in R2):
-  1M T=0.01 + stop `3d1189e3042dfc9537b1f575f87e42b15e91628541e2ff90678ba319959c6e03`, 1M T=0.003 + stop
+  1M T=0.01 + stop seed 1 `3d1189e3042dfc9537b1f575f87e42b15e91628541e2ff90678ba319959c6e03`, seed 2 `01c7bd58e339ae5817ec6fde03820253826f61eed8b7323214add8183c5dcff7` and seed 3 `2f269718f62198e97ce0fbb1a063536a6596bb5e2d275e97148c522fb5b76a2b` (the last two in the run's out bundle `runs/student-t2-seeds-1m-2/out/seeds/`), 1M T=0.003 + stop
   `0cd6d08264dd99fe96ba0e6c0b496b6cc96b5604a0ba44302df7764e9d336db7`; the others in the runs' out bundles (`runs/student-t2-plain-{1,2}/out/plain/`).
 - **Cost.** `-plain-1` 45 minutes, about $0.25 (9 networks); `-plain-2` 68 minutes, $0.37 (10 networks); each golden check a few seconds on the build VM.
-- **Limits.** One seed for the 1,000,000-decision networks, the stop rule alone, plain at 320 deals and the learning-curve points; the plain-320 difference
+  `student-t2-seeds-1m-2` (seeds 2 and 3 of the 1,000,000-decision network, taken over onto the hand-rented AMD EPYC 7742 server chip, 256 threads,
+  257 GB RAM, RTX 3070 8 GB, $0.796/h): 53.7 minutes, $0.71, of which 33 minutes were fetching and encoding the 25 GB of labels (once for both seeds) and
+  about 9 minutes training each network. The machine was kept afterwards.
+- **Limits.** Three seeds for the 1,000,000-decision network of T=0.01 (one for T=0.003); one seed for the stop rule alone, plain at 320 deals and the learning-curve points; the plain-320 difference
   (0.094 against 0.119) is within the noise; the weight and temperature were tried on a small grid (W = 1; T = 0.003 and 0.01) only; every network is judged
   on the same 2,000-decision golden set, which the training and the stop rule's validation split never touch; the labels are the plain H_3 teacher's
   (noisy at 64 deals, E4); not yet run through the app's shortlist-plus-search path (E9) or exported to WASM.
@@ -1236,6 +1241,11 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   first run, left without a container, would on a normal cancel have run `stop`, which destroys the instance. It was force-cancelled (`gh run cancel --force`, which
   skips the cleanup steps); the machine, running the O_2 audit, was untouched. Added: a claim (`claims/<instance>.json`, written by `take_instance`, read back after 8 s,
   the last writer wins; a fresh claim of a run that has not ended blocks a second takeover for 45 minutes, also in `take_guard`); four tests (`test_keep.py`).
+  Later the same day, with the claim lock and `force_take` in place: a takeover of the owner's hand-rented, *running* instance 57346368 (AMD EPYC 7742, RTX 3070, no label,
+  the machine of the collision after the owner re-rented it) worked: run `student-t2-seeds-1m-2` was launched at 08:38:52 UTC, `watch.json` and the first heartbeat
+  (`RUN_ID` the new run's) followed at 08:41, the run finished (DONE) and the machine was kept, not destroyed. A second takeover (57349848, a hand-rented unlabelled
+  instance, 09:19 UTC) had relabelled the instance and was recycling its container when the owner stopped it by hand; the workflow was force-cancelled, its claim
+  deleted and the instance relabelled, nothing destroyed. So a takeover of a hand-rented running machine has now worked twice (once per session) and failed to complete never.
 - **Cost.** About $0.05 for the trial machine.
 - **Limits.** One spare machine type; **a takeover of a launcher-created kept machine failed on vast** (above; one of a hand-rented machine was reported to work, stopped or running not recorded); a
   machine with a different disk size is not tried; a boot failure (missing manifest, bad binary hash) still destroys the machine because
