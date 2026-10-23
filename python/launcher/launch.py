@@ -1946,6 +1946,12 @@ def cmd_run(a) -> int:
         # For the workflow's cleanup step (`launch.py stop`), should this process be cancelled.
         with open(f"{a.state_file}.run-id", "w") as fh:
             fh.write(run_id)
+    if a.state_file and getattr(a, "keep", False):
+        # Written up front, not only when the interrupt arrives (the workflow kills this process within seconds of a
+        # cancel, so the interrupt handler may never run): a cancelled run's cleanup then always stops with --keep and the
+        # machine stays up (owner 2026-10-23: rare cheap machines are stopped by hand, never by a cancel).
+        with open(f"{a.state_file}.keep", "w") as fh:
+            fh.write(f"{a.keep_hours}")
     if dkey and a.state_file:
         # For the workflow's cleanup step, should this process not reach its own deletion.
         with open(f"{a.state_file}.destroy-key", "w") as fh:

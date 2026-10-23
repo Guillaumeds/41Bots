@@ -45,6 +45,17 @@ You are building the strongest possible bots for the 8-player card game **41** (
 - **Where compute runs (owner, 2026-10-14):** this VM is for building and testing. Any measurement or calculation expected to take more than about 5 minutes here runs on vast.ai (on-demand, through the runner), not locally.
 - **Parallel rentals (owner, 2026-10-14):** independent jobs may run on several vast.ai machines at once; each is monitored and destroyed when done.
 - **SSH and Jupyter always on (owner, 2026-10-23):** the launcher (`python/launcher/launch.py`, `create_instance`) rents every instance as Jupyter + SSH (`--jupyter --direct`, the console's Connect button) and starts the boot script from the on-start command. Launch every run and every watcher through `vast-run.yml` so it applies; never use `"entrypoint_mode": true` (the old no-SSH mode) except to debug the launcher itself. Keep the `41bots-` label prefix on instances (the cleanup only watches those). To keep a machine after a run use `"keep": true` in the manifest's `machine` block; to reuse one use `"instance_id"`. Details: `docs/STATUS.md`, "SSH and Jupyter on every machine".
+- **Never kill a rare cheap or fast machine automatically (owner, 2026-10-23).** The owner stops those by hand. Manifests that run on one use `"keep": true`
+  (`keep_hours` up to 8); no session cancels a run (`gh run cancel`), writes STOP, or destroys an instance on such a machine without asking the owner first.
+  A cancel has twice ended in a destroyed machine; the launcher now writes the keep marker at the start of a kept run (`launch.py`), but still verify
+  `runs/<run id>/KEPT.json` and the vast instance list after any stop. Never take over a machine another session uses: check its label and the
+  `docs/STATUS.md` note first (two sessions took over the same box within two minutes). Hand-rented machines are taken over with `instance_id`
+  (the manifest's `min_gpu_ram_gb` and `disk_gb` must not exceed the instance's).
+- **Machine labels (owner, 2026-10-23): easy for a person to read, `41bots - <session> (<what>) - ETA <HH:MM Irish>`**, for example
+  `41bots - S2 (1M-2) - ETA` and `41bots - O2 (Network Capacity 11M) - ETA 10:30`. After launching or taking over a machine, relabel it this way
+  (`vastai label instance <id> "..."`, or `PUT /api/v0/instances/<id>/` with `{"label": ...}`) and update the ETA when it changes (Irish time, see above).
+  The launcher's own label is `41bots-<run id>` (no spaces) and only machines with that exact prefix are watched by `vast-cleanup`; the human-readable
+  labels are therefore exempt from the cleanup, so a session that relabels a machine owns its destruction (the run still destroys or keeps it per its manifest).
 - **Host reliability (owner, 2026-10-16):** the launcher accepts vast.ai hosts with reliability of at least 90%.
 - **Verified hosts (owner, 2026-10-16):** prefer vast.ai-verified hosts; unverified or deverified hosts are accepted when no verified offer fits.
 - **Times for the owner (owner, 2026-10-16):** give clock times in Irish time (Europe/Dublin: UTC+1 until Sunday 25 October 2026, then UTC+0), never Mauritius time.
