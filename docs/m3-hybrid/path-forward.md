@@ -41,7 +41,7 @@ here is running. Every number is cited to `docs/EXPERIMENTS.md` (written "E4", "
 
 ### Open (owner's plan, 2026-10-23)
 - Finish the S1 teacher labels (`o2-copper-s1-1`, expected end about 08:15 UTC on 2026-10-24), train S1 with the decision-aware loss, test S1 against the bronze
-  set, then ship (sessions 3-5 below).
+  set (owner, 2026-10-23), then ship (sessions 3-5 below).
 - Open code items: the shared input cache and larger teacher chunks (lesson 5); a stop rule on sibling regret per epoch for oracle training (D12 showed value
   validation is not the decision); reuse of a stored validation shard with `label_parts` above 1 (`crates/runner/src/hybrid/reuse.rs`).
 - The playout yardstick (session 3) needs no O_2 and is not started; the app side of S2 (STATUS) is the owner's.

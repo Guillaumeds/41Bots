@@ -121,7 +121,7 @@ The rented A/B (`o3-sibrank-a`, `-b`) was never launched; no golden-set result e
 measurement is the build-VM A/B in §4. Write-up: `docs/EXPERIMENTS.md` C9.
 
 
-## 6. The rented A/B, ready to run (2026-10-23, owner: "try the decision-aware loss on O_3 first, it is cheaper than O_2")
+## 6. The rented A/B (2026-10-23; run, result in EXPERIMENTS D12: weight 1 clearly worse than its control). Plan as written before the run (owner: "try the decision-aware loss on O_3 first, it is cheaper than O_2")
 
 `docs/vast/o3-pair.manifest.json` (run `o3-pair-1`), judged by `python/tools/o3_pair_score.py`. The O_3 recipe (2048-1024-256, outcome head, cut 3) on the
 stored 40M trick-3 base (random s321, rules s322, harvest s313, validation s401) **plus 6M exact sibling rows** (seed 7911, driven by O_3 f5766a, generated in

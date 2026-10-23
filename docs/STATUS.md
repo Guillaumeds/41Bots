@@ -14,7 +14,7 @@
 - **S1 (trick-1 student), next:** teacher labels (250,000 trick-1 decisions at 64 deals, teacher H_2 + O_2 round 1) are being made as run
   `o2-copper-s1-1` on the cheap machine below; copper (2,000 decisions at 128 deals) is stored; expected end about 08:15 UTC on 2026-10-24, about
   $4.70 in all (D13). Then (owner, 2026-10-23): train S1 with the decision-aware loss of E12 (`rank_weight` 1, `rank_temperature` 0.01, stop on
-  decision loss), test it against the bronze set (the set the owner calls the result of this label run), and ship.
+  decision loss), test S1 against the bronze set (the owner, 2026-10-23: "after this run of the bronze set finishes"), and ship.
 - **Machines:** one is running, instance 57404109 (AMD EPYC 7B12, 245 usable threads, RTX 3060, $0.33/h, label "41bots - S1 ... ETA"); nothing
   else is rented and no watcher is on. Rules (CLAUDE.md): rare cheap machines are stopped by hand, never killed by a cancel; labels read
   `41bots - <session> (<what>) - ETA <HH:MM Irish>`; every rental is Jupyter + SSH. What the launcher and the takeover did on 2026-10-22/23, with
@@ -78,8 +78,8 @@ situations, with every layer below it. The chain, top down:
    solve exactly): trick-2 decisions at 0.0008% (seat 1 0.0022%) on the exact golden set. Done, adopted.
 3. **O_3 alone close to O_3 + G2** (2026-10-21, now): O3G2 rounds (`docs/m3-hybrid/o3-rounds.md`),
    because O_2's training labels and its test set (the bronze set) use O_3 alone.
-4. **O_2** (trick-2 network, used by trick-1 search): provisional; next trained on hybrid labels
-   (exact through trick 2, then O_3) after a label test at equal money against exact labels.
+4. **O_2** (trick-2 network, used by trick-1 search): adopted 2026-10-23, trained on 39.6M hybrid labels
+   (exact through trick 2, then O_3; plain labels won the label test at equal money, D6); round 1 of the audit loop (D11).
 5. **Teachers** (slow, offline): trick 2 = PIMC over 64+ deals with H_3 + G v2; trick 1 = PIMC over 64
    deals (128+ on close calls) with H_2 + O_2 (+ O_2 G v2).
 6. **Students** (fast networks for the app): learn from the teachers; in the app they shortlist their
@@ -91,6 +91,7 @@ The owner wants the teachers and their deal counts decided last.
 |---|---|---|
 | O_3 adopted (2048-1024-256) | f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad | trained on 40M trick-3 positions |
 | O_3 leaf-risk model (G v2) | 20c41678c64681855003e5b8660e0a2e1fb9e8d552f7d898dd956055c767a9d5 | `data/leafrisk/leafrisk-o3-v1.json`; threshold t=277338260 adopted |
+| **O_2 adopted (2048-1024-256, 39.6M plain hybrid labels, 2026-10-23)** | integer 13152c24bc27 (sha256 13152c24bc27b5f8...; in R2 as `inputs/sha256/13152c24...`), float and report under `runs/o2-audit-10/partial/rung/000000/out/hybrid/net/` | error SD 2.60%, bias 0.019%, sibling regret 0.188% on the 250k exact test set; replaces the provisional one below (D11) |
 | O_2 provisional (2048-1024-256) | 505a0c7c65147ffa9565e06059f47664ea9f1bfdf0c5ea2f8d392b0e6e1337b0 | 1.5M exact labels; position error SD 3.6% (O_3: 1.85%) |
 | trick-2 golden set: decisions / worlds | 635e9aef196c816380f3f15c05ede90b38b875fa4817061a57e6d39550065ab0 / 6ddc59b191e1fd534f260f9dfe103f742d6026768ca74acdbbb4fd430eb8265e | 2,000 decisions x 320 exact worlds, seed 1 |
 | exact trick-2 labels, random 1.2M (s511) | shard fb51c217b5406e4b4ba1454f14b8884bced45cff51a0e29bcca7f4440f6f0931, sidecar bc4165ed9408f83ff342ab6fa157992c5910654513e417a9271a700fbbb77117 | O_2's training data |

@@ -519,7 +519,7 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   held-out ordering got worse. Measured facts on sibling groups: 10.7 rows a decision, mean group size
   2.96, 28% of pairs have unequal true values; no two possible outcomes shared a money vector in 44,000
   trick-3 rows (so `--tie-aware` changes nothing at trick 3). **The rented A/B
-  (`o3-sibrank-a/-b`) was never launched**; no golden-set result exists.
+  (`o3-sibrank-a/-b`) was never launched**; no golden-set result existed (it was run on 2026-10-23, D12).
 - **Sources.** `m3-hybrid/sibrank.md`.
 
 ### C10. Exact leaves by race class, G v1 (run `o3-exactleaf-1`, 2026-10-19)
@@ -1428,7 +1428,7 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 |---|---|---|
 | O_3 base curve 50% / 100% (`o3-basecurve-*`) | cancelled at 37 s, 2026-10-19 | nothing |
 | O_3 wider / deeper (`o3-size-*`) | never launched | manifests |
-| Sibling ranking A/B (`o3-sibrank-a/-b`) | never launched | build-VM A/B only (C9) |
+| Sibling ranking A/B (`o3-sibrank-a/-b`) | never launched; run on 2026-10-23 as `o3-pair-1` (D12) | build-VM A/B only (C9) |
 | Four-network ensemble | stopped twice for speed | single-network checks only (C8) |
 | Hybrid-label test (`o2-labeltest-1`) | cancelled at 8 min | the hybrid labels' speed; 20k exact validation shard (s602) |
 | O_2 on G v2 labels (`o2-gv2-labels-2/-3`) | stopped by owner | 5k exact validation shard (s603) |
