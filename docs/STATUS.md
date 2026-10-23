@@ -62,12 +62,34 @@ small capped anchor), 4 S1, 5 ship and the improvements. The solver half of the 
    needs only 5-10% searched. Verdict: do not build the margin router; a risk model needs better
    signals (a second student's disagreement, a G2-style predictor) and a test.
 3. *Root-restricted solve:* built through `exact_world` and the app API (`shortlist`, tested, values
-   identical). Measured **0.64x (2 cards) / 0.70x (3 cards)** of the time at trick 2: a 1.4-1.55x
-   speed-up. With result 1 it is worth about 40% more deals, nothing more. Trick 1 not measured.
-   Consequence for the app: the leader needs 368 ms a deal in WebAssembly, so about 19-27 deals in 7 s
-   on the VM and fewer on a phone, at or below the break-even exactly where S2 loses most: the lever
-   there is the cost of a deal (WebAssembly network kernel), not the shortlist.
+   identical). Cost is **proportional to the cards kept** (nodes and network calls, 4-card trick-2
+   decisions: 1 card 0.24, 2 cards 0.49, 3 cards 0.80 of the full solve). The first timing read
+   0.64 / 0.70 only because it mixed in 3-candidate positions. The catch is that trick-2 decisions
+   have only 2-4 candidates (mean 3.3), so top-3 drops at most one card (1.25x on the 54% of decisions
+   with 4 cards) and top-2 about half (about 40% less work on average). This also explains result 1:
+   top-3 barely differs from searching all cards; top-2 is the real shortlist at trick 2 (it wins at 10-25
+   deals, loses at 100). Trick 1 (5-card hands) not measured.
+   Consequence for the app: the leader needs 368 ms a deal in WebAssembly, so about 19 deals in 7 s on
+   the VM (about 35 with top-2) and fewer on a phone, at or below the break-even exactly where S2
+   loses most: the lever there is the cost of a deal (WebAssembly network kernel) and top-2.
    Next: session 1 (S2 A/B tests) is unaffected; the open question for the app is the cost per leader deal.
+
+**Session 1 (S2 teacher A/B), 2026-10-22/23 (E12-E15, branch `claude/s2-teacher-ab-test-tiv5yj`):** built the
+trainer's rank loss and the `student_train` point options; the G2 teacher run (`docs/vast/student-t2-gv2-250k.manifest.json`,
+250,000 decisions, parts of 5,000) has stored 2 of 50 parts (R2 `runs/student-t2-gv2-250k-4/out/rules/000000-...`
+and `runs/student-t2-gv2-250k-6/out/rules/000000-,000001-...`; use `skip_parts`/`bundles`). Two throughput bugs
+found and fixed (ordered-writer window; a decision's 64 deals on one thread: now blocks of 8, byte-identical).
+**Session 1 result (S2 teacher A/B), 2026-10-23 (E12-E14):** the **decision-aware loss is the win** (`rank_weight` 1, `rank_temperature`
+0.01, `stop_on` decision): on the exact golden set the trick-2 student's loss halves, 0.0587% (3 seeds, SD 0.003) against 0.1195% for
+plain at 250,000 decisions, and at 1,000,000 decisions it reaches 0.0389% alone, 0.080% at seat 1 and 0.0030% for the top-3 pick
+(the existing S2: 0.0733%, 0.179%, 0.0073%). Its integer network is in R2 (key in E12). **G2 labels were no help at 50,000 decisions (E13)**
+(plain loss -0.006 +/- 0.017, decision-aware loss +0.024 +/- 0.009 worse, 3 seeds); the G2 labelling was cancelled at 60,000 decisions
+(12 parts, $3.49; 28 minutes a part after the two throughput fixes), and S2 goes on with the plain H_3 teacher (owner, 2026-10-23).
+**To check on S1 (trick 1) later:** the same loss, plain against decision-aware at 250,000 decisions, 3 seeds.
+**S2, next (owner chooses):** (1) [done, E16: the new network alone beats any search up to 25 deals; no router worth building] a small loss search (weight 0.3/1/3, temperature 0.005/0.01/0.02/0.03, 3 seeds each, 250,000 decisions,
+about $0.5); (2) 1M seeds 2-3 of the best setting (about $0.5); (3) [done as E16] the app-side checks with the new network (shortlist + search, router); (4) the export check (`method: "student"`, native against WASM,
+`docs/WASM-API.md`) and the owner's decision to replace S2; (5) more plain-teacher data (the plain 64-deal teacher costs about $4-5 per
+million decisions): a 2M-decision point with the new loss.
 
 **Records:** `docs/EXPERIMENTS.md` (every experiment and its result), `docs/RESEARCH.md` (the outside
 research), `docs/README.md` (index).
@@ -167,6 +189,31 @@ The owner wants the teachers and their deal counts decided last.
   The golden set, S2 and O_3 are small enough (1.2 MB, 92 MB, 7 MB, 17 MB).
 - **Store a trained network as a manifest input:** `store-input.yml` (the r2-fetch run id, artifact
   name, the member path, the expected SHA-256) puts it in `inputs/sha256/<hex>`.
+- **Deploy onto a kept machine, and keep a machine after a run (owner, 2026-10-22; built in session 1, `python/launcher/test_keep.py`).**
+  Both are keys of the manifest's `machine` object, so the `vast-run.yml` call is the usual one (no new input):
+  - `"keep": true` (and `"keep_hours"`, default 6, at most 72): when the run ends by itself (DONE or FAILED) the runner
+    **parks** instead of destroying its instance (`KEEP_MACHINE=1`, `crates/runner` `end_machine`) and the launcher
+    leaves it running, writes `keep/<instance>.json` (for the cleanup) and `runs/<run>/KEPT.json`, and prints a
+    `::warning::MACHINE KEPT RUNNING, ACTION NEEDED ...` line and a job-summary banner. A **cancelled** workflow keeps
+    it too (`stop --keep`). Not kept: a budget stop, a launcher-forced stop (low CPU, silence, time), a machine that
+    died, and a boot failure (the image's boot script still destroys it: image change needed). The idle machine bills
+    until it is taken over or destroyed; **`vast-cleanup` destroys it at `keep_until_utc`** (+5 min) and deletes the
+    record of a vanished machine.
+  - **Takeover status (2026-10-22):** the owner reports the O2 session's takeover of the stopped instance 57259029
+    (the same physical machine as 57253570) **succeeded** (how it was invoked is not recorded here). My own trial
+    `keep-trial-2`, a takeover of a *running* kept instance, **failed**: the recycled container booted the OLD environment,
+    so the new run never heartbeated (and `o3r-1-1` on 2026-10-21 failed alike). So: a stopped instance (update then start)
+    is known to work; recycling a running one is not. A taken-over machine that does not start is now kept, not destroyed.
+  - `"instance_id": N`: take that instance over instead of renting one (`launch.py` `take_instance`: `vastai update
+    instance` with this run's image, environment and binaries, then `recycle instance`, which rebuilds the container in
+    place; the disk and machine stay; the instance is relabelled `41bots-<run>` and its `keep/` record deleted). Use a
+    **new run id** (a used one is refused). Needs a disk of at least `disk_gb` and the threads asked. **Refused (nothing
+    changed):** another run's machine that heartbeated in the last 15 minutes and has no DONE/FAILED (cancel it with
+    `keep` first, or wait), a machine another run started under an hour ago, a label that is not `41bots-...`; allowed:
+    a kept machine, the machine of an ended run, an unlabelled one rented by hand.
+  - **After a run with `keep`, the session must act** (deploy the next job with `instance_id`, or destroy it with
+    `vast-stop.yml`): `monitor_run.py RUN` prints a banner when `runs/RUN/KEPT.json` exists and `monitor_run.py x --kept`
+    lists every kept machine. Arm a `send_later` for the run's end when launching with `keep`.
 - **Launch pitfalls met 2026-10-22 (each is a refusal before anything is rented, unless said):**
   a run id cannot be reused (a failed attempt leaves `runs/<id>/` in R2; give each attempt a new id);
   a manifest `machine` block takes only gpus, min_gpu_ram_gb, min_compute_cap, min_cores, min_ram_gb,

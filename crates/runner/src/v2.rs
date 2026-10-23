@@ -93,7 +93,7 @@ use crate::sched::{
 };
 use crate::stop;
 use crate::{
-    CpuSampler, Ctx, default_threads, hardware, run_kind, self_destroy, sibling, unix_now,
+    CpuSampler, Ctx, default_threads, end_machine, hardware, run_kind, sibling, unix_now,
     utc_string,
 };
 
@@ -585,7 +585,7 @@ pub fn run(manifest: &Value, work: &Path) -> ExitCode {
         Err(e) => eprintln!("runner: FAILED: {e}"),
     }
     if std::env::var("RUNNER_NO_DESTROY").is_err() {
-        self_destroy();
+        end_machine();
     }
     if ok && uploaded.is_ok() {
         ExitCode::SUCCESS
@@ -1576,6 +1576,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/vast");
         for (file, kinds) in [
             ("student-t2-gv2.manifest.json", 2),
+            ("student-t2-gv2-250k.manifest.json", 2),
             ("student-t2-base.manifest.json", 3),
             ("m3-hybrid-t2-hlabels.manifest.json", 1),
             ("o3-learnedleaf.manifest.json", 1),

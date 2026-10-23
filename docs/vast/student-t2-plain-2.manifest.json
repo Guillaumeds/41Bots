@@ -1,0 +1,549 @@
+{
+  "format": 2,
+  "run_id": "student-t2-plain-2",
+  "run_seed": 1,
+  "threads": null,
+  "benchmark_seconds": 0,
+  "upload_every_s": 300,
+  "heartbeat_every_s": 30,
+  "note": "S2 teacher A/B, follow-up to student-t2-plain-1 (owner 2026-10-22; docs/EXPERIMENTS.md E12): the decision-aware loss was the one clear finding (rank_weight 1 at temperature 0.003, or temperature 0.01 with stopping on the validation decision loss: 0.060-0.069% alone on the golden set against 0.12% plain, one seed each, retraining noise SD 0.021). Here: seeds 2 and 3 for the two best variants, their combination (temperature 0.003 with the stop rule) at three seeds, the stop rule alone, and the two variants at the full 1,000,000 decisions of the existing S2 (base, more-1 and more-2 runs, targets at 64 deals), the real S2 candidate. 250,000-decision points first, so their networks reach R2 early. Same inputs, test set and settings as student-t2-curve-1m.",
+  "machine": {
+    "gpus": 1,
+    "blackwell": true,
+    "min_gpu_ram_gb": 8,
+    "min_compute_cap": 600,
+    "min_cores": 32,
+    "min_ram_gb": 64,
+    "disk_gb": 40,
+    "min_inet_down": 100
+  },
+  "streams": [
+    {
+      "name": "plain",
+      "priority": 1,
+      "kind": "student_train",
+      "chunks": 1,
+      "params": {
+        "threads": "all",
+        "train_inputs": [
+          {
+            "run": "student-t2-base-1",
+            "stream": "rules",
+            "parts": 40
+          },
+          {
+            "run": "student-t2-base-1",
+            "stream": "mixed",
+            "parts": 10
+          },
+          {
+            "run": "student-t2-more-1",
+            "stream": "rules",
+            "parts": 75,
+            "group": 1,
+            "bundles": [
+              {
+                "path": "runs/student-t2-more-1/out/rules/000000-79c57767a3dd82b7.tar.zst",
+                "sha256": "79c57767a3dd82b7e7648b882ad1f60cf5112a8f12badc5f58cdf9263856c364",
+                "bytes": 1250921
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000001-4ad942d9f41352cd.tar.zst",
+                "sha256": "4ad942d9f41352cdbf57ce28d96f2af37a6939d7586be5feefb1cc8a4aec5aa3",
+                "bytes": 1251388
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000002-7c1d53aaa4be28db.tar.zst",
+                "sha256": "7c1d53aaa4be28dbf383644f8f78ff9cc33ec70b6d9571a932cf9997f6bc04a3",
+                "bytes": 1251855
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000003-dbd0a635340ca156.tar.zst",
+                "sha256": "dbd0a635340ca1561177230b511170b1e8714555aeb09eb5dd82e40c5330dafb",
+                "bytes": 1250647
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000004-f3181afadfc6dc79.tar.zst",
+                "sha256": "f3181afadfc6dc79b12759abb97687c75ad06506d82752ebb6037a9846ec638e",
+                "bytes": 1251980
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000005-b4a359d856642abb.tar.zst",
+                "sha256": "b4a359d856642abbbbf5a1679a843a36c80374955fb01429aaa778aae2115db6",
+                "bytes": 1251874
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000006-7a5c359085b67cf0.tar.zst",
+                "sha256": "7a5c359085b67cf067fcf459b9729ce235232b247961be82e93057f0901f5fd6",
+                "bytes": 1251171
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000007-1ff5f7b6a5bf0e57.tar.zst",
+                "sha256": "1ff5f7b6a5bf0e5748ce6c6fee0c65ced85417434a4a4bd3d9c0dad44a231aad",
+                "bytes": 1251180
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000008-b5b990c5db9d97a3.tar.zst",
+                "sha256": "b5b990c5db9d97a393dd957dd55c46226d64db5ad182aeab1dd4534e5853b1de",
+                "bytes": 1250338
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000009-e0977c9addc4f119.tar.zst",
+                "sha256": "e0977c9addc4f1193bd5452b4762dcee0ba42df0c07d3268ee2edf3a3793a249",
+                "bytes": 1252020
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000010-aca20de80804dce0.tar.zst",
+                "sha256": "aca20de80804dce04301fd6be1714b85ee2f149f438d397f7cc3e3926ad912e2",
+                "bytes": 1252199
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000011-9e20a2428537f2ce.tar.zst",
+                "sha256": "9e20a2428537f2ce1b500295863a495fb4e4496c13bd2107c34f55cfab75f800",
+                "bytes": 1249851
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000012-2cbb6afc1b735175.tar.zst",
+                "sha256": "2cbb6afc1b735175e3dcf3245b5c1fc3f5a94bebf24da14657b52321f93dba56",
+                "bytes": 1251905
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000013-d84e6fcf281cdc50.tar.zst",
+                "sha256": "d84e6fcf281cdc5056eeda6553d384ba4e4e93c8e7310f85aceff003d88a5226",
+                "bytes": 1248053
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000014-d3133f4887357c3b.tar.zst",
+                "sha256": "d3133f4887357c3b1b668d8d20fb7821cb97716cf00a93aac25eadd2fe366b2e",
+                "bytes": 1250471
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000015-857821260ccfccc6.tar.zst",
+                "sha256": "857821260ccfccc6d3e78c4f435a8404a472bb88e555cb6e943b23f090c961d9",
+                "bytes": 1251306
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000016-45a6a14881a97b51.tar.zst",
+                "sha256": "45a6a14881a97b516fab11bae0fc003ea1e5f1f91af67fc8f7b43c89896d731c",
+                "bytes": 1250233
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000017-73466169785d8783.tar.zst",
+                "sha256": "73466169785d87833599afbb5522e3c7588479c1f0ca7674c596b6b21211c617",
+                "bytes": 1251436
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000018-8e3460da7f7d85bb.tar.zst",
+                "sha256": "8e3460da7f7d85bb48d3cdc6b72ae51e6b56907fd37235ac06dae5b79850d578",
+                "bytes": 1250879
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000019-357740591585dc36.tar.zst",
+                "sha256": "357740591585dc36c95cc5ae01465fd8ae24bfd2e77ac422ef8e3c3c5a08e00f",
+                "bytes": 1252420
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000020-b6de3a45e084c557.tar.zst",
+                "sha256": "b6de3a45e084c55753dff163255d0f95ccd4c5ae6f258aef857c279e099712ba",
+                "bytes": 1250704
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000021-87e824393c790857.tar.zst",
+                "sha256": "87e824393c7908570818094cb2605bedbc2be3ba702ab09c385c1aa65e5dc66c",
+                "bytes": 1251853
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000022-8b4e313d73f61a4c.tar.zst",
+                "sha256": "8b4e313d73f61a4c3950f3161d1d065ea8b09c1944255a1521c776d190a18daa",
+                "bytes": 1251068
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000023-a699a1804678892d.tar.zst",
+                "sha256": "a699a1804678892d0beb7ca214a4e69549c5d6b7608b3d9a3aff5e715cf2eb76",
+                "bytes": 1252194
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000024-455f66f0386a2d05.tar.zst",
+                "sha256": "455f66f0386a2d05e468a0dcdee2d2ed640dfd0b69617c8c7ee2d3ba8e514b89",
+                "bytes": 1251001
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000025-6ac37476b1de6c3f.tar.zst",
+                "sha256": "6ac37476b1de6c3fb31a454dd30911d284f6d3533ce12965bee18b0b40178452",
+                "bytes": 1253520
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000026-93d04d336e1a62be.tar.zst",
+                "sha256": "93d04d336e1a62bed997e850851b56f7abe5839c9f569b7b9dd7cd1508f35ece",
+                "bytes": 1249397
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000027-5d8b083265209fc2.tar.zst",
+                "sha256": "5d8b083265209fc2b8db6f944f4acd97af3115eb382d59f395adbb5aca9a1ceb",
+                "bytes": 1251973
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000028-937ca8dcf3a17f86.tar.zst",
+                "sha256": "937ca8dcf3a17f865d484243b71ff187d7cec4677b78a9b01e0b79a0630fee52",
+                "bytes": 1249298
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000029-8afdc4676eb0db88.tar.zst",
+                "sha256": "8afdc4676eb0db8809fd6060f9525369fe765a2f3fe967c37ab2f61e272b7cc5",
+                "bytes": 1250104
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000030-c8f5e3c6221262b7.tar.zst",
+                "sha256": "c8f5e3c6221262b72b0d9028584cb1fe1ae36e970355febe0041961efdc7bf3a",
+                "bytes": 1253266
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000031-180006ea813423b3.tar.zst",
+                "sha256": "180006ea813423b34de20128accc4af5527e2ae160f0c658feb3d15be7083e7f",
+                "bytes": 1250778
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000032-b0bdf4d063562ceb.tar.zst",
+                "sha256": "b0bdf4d063562ceba314a5c860560eaaac8a447f763b90edc48a8e5612baa184",
+                "bytes": 1253038
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000033-9d0605c6d2db8f2a.tar.zst",
+                "sha256": "9d0605c6d2db8f2aa17e4878c9dad112e56f04e3d031b8edb54932202d4612b4",
+                "bytes": 1249328
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000034-a53fe9f525d3f059.tar.zst",
+                "sha256": "a53fe9f525d3f059e50d5c598b07d3ece3fcd5d856aaaa8abcffc021e3a4cf18",
+                "bytes": 1252220
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000035-37fc638416b70ff6.tar.zst",
+                "sha256": "37fc638416b70ff6a367fd15b91da075796391b568b955c44810dd3cb3302121",
+                "bytes": 1250145
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000036-f8d767a468a1880d.tar.zst",
+                "sha256": "f8d767a468a1880d6c6112e1b4e21875c0798e56feda70b5e5be192c5ca4338a",
+                "bytes": 1250784
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000037-3ce34b2277e8228d.tar.zst",
+                "sha256": "3ce34b2277e8228d0a926fa36fe97f6ad7d3c0fee75bfc152b8b20add45c7c1f",
+                "bytes": 1247071
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000038-aac2bd97dd807ca5.tar.zst",
+                "sha256": "aac2bd97dd807ca5d220ac076b28a8ad299d40572b6406a308e475ecf1422b7c",
+                "bytes": 1247749
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000039-7ab507f4e10d87b0.tar.zst",
+                "sha256": "7ab507f4e10d87b0e0e7376316c2b2107394e043f5e986b2f52f9c4b77431602",
+                "bytes": 1250607
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000040-cab76dd65fff9ca7.tar.zst",
+                "sha256": "cab76dd65fff9ca719dc14eb9e2e53afc54f6c7a66cd044fa364bb451c3fc74b",
+                "bytes": 1250801
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000041-10090597b6f4ad20.tar.zst",
+                "sha256": "10090597b6f4ad202d68848b370a4589f94ff8f997f06dd697103f09f24bb218",
+                "bytes": 1250761
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000042-bc26cbe941869c41.tar.zst",
+                "sha256": "bc26cbe941869c41d81da2d68fff23d80798c8200dc13230225885e31f253750",
+                "bytes": 1250936
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000043-0dbfcb2434f70bcc.tar.zst",
+                "sha256": "0dbfcb2434f70bcc61ad15eed699e738c2a1f5181ec70060b635c21307fc5326",
+                "bytes": 1248739
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000044-d0651d1bbf93188a.tar.zst",
+                "sha256": "d0651d1bbf93188a0fdd2088013c5ceda85db2bae3d80fbb1c856e72173c5d8d",
+                "bytes": 1256095
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000045-609f8b817c7aad04.tar.zst",
+                "sha256": "609f8b817c7aad04f6b9df968cbd5201be18c585503195fc2df1051a35fb1563",
+                "bytes": 1251552
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000046-92c06e30b206da7b.tar.zst",
+                "sha256": "92c06e30b206da7b0f671bfae81ce07566a9221a4a65dec3ad503bacbb996a83",
+                "bytes": 1251426
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000047-f40bbfeff549364a.tar.zst",
+                "sha256": "f40bbfeff549364a9f38cb5d615cf538add6be39a6b6908f710ff014514d0ba4",
+                "bytes": 1250352
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000048-64105faa46956f9a.tar.zst",
+                "sha256": "64105faa46956f9a3712ff331285ac4be6ec8b9c67643766e32ed9baedbabbfd",
+                "bytes": 1252319
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000049-82f152b8d1d7da16.tar.zst",
+                "sha256": "82f152b8d1d7da161f1d81d34d3883f48f4491e17c0b34bc8c65ef4c2737309c",
+                "bytes": 1250955
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000050-f714d9b4fd4836ca.tar.zst",
+                "sha256": "f714d9b4fd4836ca2fce5a74a85bbcd433010183e2be095178ac2371dde40137",
+                "bytes": 1251950
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000051-b343ac1035db4a55.tar.zst",
+                "sha256": "b343ac1035db4a5594eaee59937a8e50bd787b8b1197b40516d9ce4f131230f1",
+                "bytes": 1252769
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000052-9a9fa5ac98b0030e.tar.zst",
+                "sha256": "9a9fa5ac98b0030e58eac60a177f7564bbfa32a12e4032dce0d0e07007bb6101",
+                "bytes": 1249022
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000053-04cfd450af3fa453.tar.zst",
+                "sha256": "04cfd450af3fa4539785e204e6c2e6e664a2f441b3bf1362e0b77afe8de2b1b5",
+                "bytes": 1249587
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000054-801985988f37d100.tar.zst",
+                "sha256": "801985988f37d100bf649c529ed1e29b3fe7317e11c91b258938d7b759b8cedf",
+                "bytes": 1248424
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000055-0084cd0fa0d1ad88.tar.zst",
+                "sha256": "0084cd0fa0d1ad88e57e8eecc90d4b9c34f0130f379638570b124f297c0376fd",
+                "bytes": 1249166
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000056-f9663ea9e991851f.tar.zst",
+                "sha256": "f9663ea9e991851f9534a3872f3a8ac06da67d125f080ca53932dfaf8ef87fab",
+                "bytes": 1248959
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000057-e57e90913f09f93a.tar.zst",
+                "sha256": "e57e90913f09f93ad3760bbaa566974aea962e216d5bf1c43789be3e7edfa293",
+                "bytes": 1248604
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000058-04d2efe983288613.tar.zst",
+                "sha256": "04d2efe983288613410a501b4da875f4dac089683b811277f1652674962baae0",
+                "bytes": 1249319
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000059-11844b731d3fdf4a.tar.zst",
+                "sha256": "11844b731d3fdf4a634428a3cbf178e0b54bf0a951c61a87efe8f086a6fec4fc",
+                "bytes": 1252764
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000060-b88ee9e6c80407ea.tar.zst",
+                "sha256": "b88ee9e6c80407eaf0e097ec224a08463c0fbbd8fc687fa06d99b896f0bfb798",
+                "bytes": 1247411
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000061-df178c41c54be3b5.tar.zst",
+                "sha256": "df178c41c54be3b501b6b00c224614cd3d132236aecac7c1fd2123aa89b1b576",
+                "bytes": 1252552
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000062-4a8a25024068925f.tar.zst",
+                "sha256": "4a8a25024068925f290af76cea3126f9fb844928a9f5e792123a4d2bb7ead996",
+                "bytes": 1252718
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000063-aad7580098207e3a.tar.zst",
+                "sha256": "aad7580098207e3a7e39e0f1f164e05a813f3ef0f74975813209b40f51bf98aa",
+                "bytes": 1250336
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000064-95109ee18ac7fab7.tar.zst",
+                "sha256": "95109ee18ac7fab79d7da45abbebba6c995da990b2daeb8ce200ee8325f63a5a",
+                "bytes": 1249895
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000065-898cdc214451cee5.tar.zst",
+                "sha256": "898cdc214451cee54866262da323bb07326b0c919d758bda8e45bcdc4a20f47f",
+                "bytes": 1250056
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000066-a1b8974da34b67e3.tar.zst",
+                "sha256": "a1b8974da34b67e31a1f7c3961184ad375db9185acdfb458eef2c8eb9b0bc44f",
+                "bytes": 1251019
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000067-5d5c01ff07a8e40b.tar.zst",
+                "sha256": "5d5c01ff07a8e40b30a479fb45001c0a43a7971feb1c47cfd1694705525c49d4",
+                "bytes": 1249589
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000068-79fd059256da07cb.tar.zst",
+                "sha256": "79fd059256da07cb28d483c682f8300d06f75f350bfb918720600631586455f7",
+                "bytes": 1252731
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000069-718c766e14a99780.tar.zst",
+                "sha256": "718c766e14a99780bce57bb85649404dfeb5e0e76b5c0928fb49483e12a7a0a8",
+                "bytes": 1248950
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000070-e80bec94e08d77b7.tar.zst",
+                "sha256": "e80bec94e08d77b7a572bbbc9d7c1d8007a406e352d9b31a74a340723f08ec3f",
+                "bytes": 1249288
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000071-ced4337a8c645ac3.tar.zst",
+                "sha256": "ced4337a8c645ac365a16547db622361c8cdb1b78a375d0b8723bf282acd372c",
+                "bytes": 1248241
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000072-970509b7eac65878.tar.zst",
+                "sha256": "970509b7eac6587822500d76057d9b2846308bb5b0844110caee57c015e46e82",
+                "bytes": 1250342
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000073-c4f8e784c4a9af2b.tar.zst",
+                "sha256": "c4f8e784c4a9af2b2879dd3f9c25280dd8aeac3049ca73763e216def72f01647",
+                "bytes": 1251458
+              },
+              {
+                "path": "runs/student-t2-more-1/out/rules/000074-64fefeb4dded1613.tar.zst",
+                "sha256": "64fefeb4dded1613a3b6c0e779cb32f19db8afca6d75b3339696b33f42c24033",
+                "bytes": 1249713
+              }
+            ]
+          },
+          {
+            "run": "student-t2-more-2",
+            "stream": "rules",
+            "parts": 45,
+            "group": 2
+          },
+          {
+            "run": "student-t2-more-2",
+            "stream": "mixed",
+            "parts": 30,
+            "group": 2
+          }
+        ],
+        "test_inputs": [
+          {
+            "run": "student-t2-base-1",
+            "stream": "test",
+            "parts": 2
+          }
+        ],
+        "order": "spread",
+        "epochs": 40,
+        "batch": 256,
+        "lr": 0.001,
+        "patience": 4,
+        "seed": 1,
+        "val_permille": 50,
+        "device": "cuda",
+        "baselines": [
+          "rules",
+          "random"
+        ],
+        "table": {
+          "hands": 1000000,
+          "seed": 1
+        },
+        "points": [
+          {
+            "size": 250000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 2,
+            "rank_weight": 1,
+            "rank_temperature": 0.003
+          },
+          {
+            "size": 250000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 3,
+            "rank_weight": 1,
+            "rank_temperature": 0.003
+          },
+          {
+            "size": 250000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 2,
+            "rank_weight": 1,
+            "rank_temperature": 0.01,
+            "stop_on": "decision"
+          },
+          {
+            "size": 250000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 3,
+            "rank_weight": 1,
+            "rank_temperature": 0.01,
+            "stop_on": "decision"
+          },
+          {
+            "size": 250000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 1,
+            "rank_weight": 1,
+            "rank_temperature": 0.003,
+            "stop_on": "decision"
+          },
+          {
+            "size": 250000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 2,
+            "rank_weight": 1,
+            "rank_temperature": 0.003,
+            "stop_on": "decision"
+          },
+          {
+            "size": 250000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 3,
+            "rank_weight": 1,
+            "rank_temperature": 0.003,
+            "stop_on": "decision"
+          },
+          {
+            "size": 250000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 1,
+            "stop_on": "decision"
+          },
+          {
+            "size": 1000000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 1,
+            "rank_weight": 1,
+            "rank_temperature": 0.003,
+            "stop_on": "decision"
+          },
+          {
+            "size": 1000000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 1,
+            "rank_weight": 1,
+            "rank_temperature": 0.01,
+            "stop_on": "decision"
+          }
+        ]
+      }
+    }
+  ]
+}

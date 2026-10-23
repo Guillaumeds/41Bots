@@ -1,0 +1,129 @@
+{
+  "format": 2,
+  "run_id": "student-t2-plain-1",
+  "run_seed": 1,
+  "threads": null,
+  "benchmark_seconds": 0,
+  "upload_every_s": 300,
+  "heartbeat_every_s": 30,
+  "note": "S2 teacher A/B, the plain arm and its controls (session 1, owner 2026-10-22; docs/EXPERIMENTS.md E12): 512-256 students trained on the first N decisions of the base run's stored trick-2 shards (student-t2-base-1: 40 rules and 10 mixed parts of 5,000 decisions at 320 deals, spread four rules to one mixed), targets cut to the first 64 deals (exact subsets, E3) unless a point says 320: the plain baseline (seed 1) and two more seeds for the retraining noise, plain at 320 deals, three decision-aware-loss variants (rank_weight 1 at temperature 0.01 and 0.003, and with stopping on the validation decision loss), and the 64-deal learning curve at 100,000 and 50,000. Each point is also measured on the fixed 4,096-decision test set by the runner; the judge is the exact golden set, run on the build VM from the stored integer networks (search student-check --golden-decisions --golden-worlds). Fetches about 9.3 GB of shards, encodes them once per deal count, then trains 9 networks on one GPU; each finished point survives a lost machine.",
+  "machine": {
+    "gpus": 1,
+    "blackwell": true,
+    "min_gpu_ram_gb": 8,
+    "min_compute_cap": 600,
+    "min_cores": 32,
+    "min_ram_gb": 64,
+    "disk_gb": 40,
+    "min_inet_down": 100
+  },
+  "streams": [
+    {
+      "name": "plain",
+      "priority": 1,
+      "kind": "student_train",
+      "chunks": 1,
+      "params": {
+        "threads": "all",
+        "train_inputs": [
+          {
+            "run": "student-t2-base-1",
+            "stream": "rules",
+            "parts": 40
+          },
+          {
+            "run": "student-t2-base-1",
+            "stream": "mixed",
+            "parts": 10
+          }
+        ],
+        "test_inputs": [
+          {
+            "run": "student-t2-base-1",
+            "stream": "test",
+            "parts": 2
+          }
+        ],
+        "order": "spread",
+        "epochs": 40,
+        "batch": 256,
+        "lr": 0.001,
+        "patience": 4,
+        "seed": 1,
+        "val_permille": 50,
+        "device": "cuda",
+        "baselines": [
+          "rules",
+          "random"
+        ],
+        "table": {
+          "hands": 1000000,
+          "seed": 1
+        },
+        "points": [
+          {
+            "size": 250000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 1
+          },
+          {
+            "size": 250000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 2
+          },
+          {
+            "size": 250000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 3
+          },
+          {
+            "size": 250000,
+            "widths": "512,256",
+            "deals": 320,
+            "seed": 1
+          },
+          {
+            "size": 250000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 1,
+            "rank_weight": 1,
+            "rank_temperature": 0.01
+          },
+          {
+            "size": 250000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 1,
+            "rank_weight": 1,
+            "rank_temperature": 0.003
+          },
+          {
+            "size": 250000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 1,
+            "rank_weight": 1,
+            "rank_temperature": 0.01,
+            "stop_on": "decision"
+          },
+          {
+            "size": 100000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 1
+          },
+          {
+            "size": 50000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 1
+          }
+        ]
+      }
+    }
+  ]
+}

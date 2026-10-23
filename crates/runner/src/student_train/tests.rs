@@ -35,11 +35,7 @@ fn shard_entry(records: &[u8], values: &[u8], n: u64, role: &str) -> Value {
 #[test]
 fn settings_are_checked() {
     let q = parse(&base()).expect("parses");
-    let pt = |size, widths: &str, deals| Point {
-        size,
-        widths: widths.into(),
-        deals,
-    };
+    let pt = |size, widths: &str, deals| Point::plain(size, widths.into(), deals);
     assert_eq!(
         q.points,
         vec![
@@ -87,6 +83,40 @@ fn settings_are_checked() {
         q.points.iter().map(Point::name).collect::<Vec<_>>(),
         ["n100-w16x8-d32", "n40-w8", "n40-w8-d320"]
     );
+    // Variants: a seed, a rank term (thousandths, millionths), the stop rule; each its own directory.
+    let mut vp = p.clone();
+    vp["points"] = json!([
+        { "size": 40, "widths": "8", "seed": 2 },
+        { "size": 40, "widths": "8", "rank_weight": 0.5, "rank_temperature": 0.003 },
+        { "size": 40, "widths": "8", "rank_weight": 1, "stop_on": "decision" },
+        { "size": 40, "widths": "8", "stop_on": "val_loss", "rank_weight": 0 }
+    ]);
+    let q = parse(&vp).expect("parses");
+    assert_eq!(
+        q.points.iter().map(Point::name).collect::<Vec<_>>(),
+        [
+            "n40-w8-s2",
+            "n40-w8-r500t3000",
+            "n40-w8-r1000t10000-sd",
+            "n40-w8"
+        ]
+    );
+    assert_eq!(q.points[3], Point::plain(40, "8".into(), None));
+    for bad in [
+        json!({ "rank_weight": -1 }),
+        json!({ "rank_weight": 0.0001 }),
+        json!({ "rank_temperature": 0 }),
+        json!({ "stop_on": "agree" }),
+        json!({ "seed": -3 }),
+    ] {
+        let mut pt = json!({ "size": 40, "widths": "8" });
+        pt.as_object_mut()
+            .expect("object")
+            .extend(bad.as_object().expect("object").clone());
+        let mut q = p.clone();
+        q["points"] = json!([pt]);
+        assert!(parse(&q).is_err(), "point {pt}");
+    }
     for v in [
         json!([]),
         json!([{ "size": 0, "widths": "8" }]),
@@ -261,6 +291,34 @@ fn the_spread_order_interleaves_in_proportion_and_sizes_are_prefixes() {
     );
 }
 
+/// The plain arm of the S2 teacher A/B (E12): nine distinct points, every one inside the base run's 250,000
+/// decisions, the baseline and its controls named as expected.
+#[test]
+fn the_plain_arm_manifest_has_its_points() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/vast");
+    let v: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("student-t2-plain-arm.manifest.json")).expect("read"),
+    )
+    .expect("JSON");
+    let q = parse(&v["streams"][0]["params"]).expect("parses");
+    let names: Vec<String> = q.points.iter().map(Point::name).collect();
+    assert_eq!(
+        names,
+        [
+            "n250000-w512x256-d64-s1",
+            "n250000-w512x256-d64-s2",
+            "n250000-w512x256-d64-s3",
+            "n250000-w512x256-d320-s1",
+            "n250000-w512x256-d64-s1-r1000t10000",
+            "n250000-w512x256-d64-s1-r1000t3000",
+            "n250000-w512x256-d64-s1-r1000t10000-sd",
+            "n100000-w512x256-d64-s1",
+            "n50000-w512x256-d64-s1",
+        ]
+    );
+    assert_eq!(q.points.iter().map(|p| p.size).max(), Some(250_000));
+}
+
 /// The manifests in docs/vast parse, and a student_train stream is one chunk.
 #[test]
 fn the_manifests_parse() {
@@ -270,6 +328,11 @@ fn the_manifests_parse() {
         "student-t2-curve-mech.manifest.json",
         "student-t2-dealtest.manifest.json",
         "student-t2-dealtest-mech.manifest.json",
+        "student-t2-plain-arm.manifest.json",
+        "student-t2-plain-2.manifest.json",
+        "student-t2-losssearch.manifest.json",
+        "student-t2-g2arm-50k.manifest.json",
+        "student-t2-plainarm-50k.manifest.json",
     ] {
         let text = fs::read_to_string(root.join(name)).expect(name);
         let v: Value = serde_json::from_str(&text).expect(name);

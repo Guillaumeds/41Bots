@@ -1455,7 +1455,7 @@ fn run(manifest_path: &Path, work: &Path) -> ExitCode {
     if !uploaded {
         eprintln!("runner: some uploads failed");
     }
-    self_destroy();
+    end_machine();
     if ok && uploaded {
         ExitCode::SUCCESS
     } else {
@@ -1502,6 +1502,44 @@ fn final_uploads(r: &dyn remote::Remote, root: &Path, prefix: &str, marker: &str
 /// (documented as able to start, stop or destroy only this instance), then the destroy-only key
 /// the launcher creates for the run and passes with `--env` (`python/launcher/launch.py`).
 const DESTROY_KEYS: [&str; 2] = ["CONTAINER_API_KEY", "VAST_DESTROY_KEY"];
+
+/// Whether this machine is kept for the next worker (`KEEP_MACHINE=1` in the instance's
+/// environment, set by the launcher for a run whose manifest says `machine.keep`): the run's last
+/// step is then not the self-destroy but [`park`].
+pub(crate) fn keep_machine() -> bool {
+    keep_machine_value(std::env::var("KEEP_MACHINE").ok().as_deref())
+}
+
+/// [`keep_machine`] on a given value: exactly `1` keeps the machine.
+fn keep_machine_value(v: Option<&str>) -> bool {
+    v == Some("1")
+}
+
+/// The run's last step: destroy this instance, or when it is kept for the next worker, stay up
+/// (the machine's container keeps running with its disk, image and tables, an idle process
+/// printing a line every 10 minutes) until the launcher, `vast-cleanup.yml` at the keep time's
+/// end, or a takeover (`python/launcher/launch.py`, `machine.instance_id`) replaces the container.
+pub(crate) fn end_machine() {
+    if keep_machine() {
+        park();
+    } else {
+        self_destroy();
+    }
+}
+
+/// Stays up, idle, for ever: a SIGTERM (a stopped or recycled instance) ends it.
+fn park() -> ! {
+    println!(
+        "runner: KEEP_MACHINE=1: the machine stays up for the next worker; it is billed until it is \
+         taken over or destroyed (keep/<instance>.json in the bucket says until when)"
+    );
+    let _ = std::io::stdout().flush();
+    loop {
+        std::thread::sleep(Duration::from_secs(600));
+        println!("runner: parked (KEEP_MACHINE=1), waiting for a takeover");
+        let _ = std::io::stdout().flush();
+    }
+}
 
 /// Asks vast.ai to destroy this instance, as the very last step. Nothing to do off vast.ai
 /// (`CONTAINER_ID` unset). Each key goes to `vastai` through its `VAST_API_KEY` environment
@@ -1557,6 +1595,26 @@ fn self_destroy() {
          instance 10 minutes after its run's marker. With neither running, destroy it in the \
          vast.ai console."
     );
+}
+
+#[cfg(test)]
+mod keep_tests {
+    use super::keep_machine_value;
+
+    #[test]
+    fn only_one_keeps_the_machine() {
+        assert!(keep_machine_value(Some("1")));
+        for v in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("true"),
+            Some("yes"),
+            Some(" 1"),
+        ] {
+            assert!(!keep_machine_value(v), "{v:?}");
+        }
+    }
 }
 
 /// Whether `vastai destroy instance <id>` succeeded, from what it printed: vastai 1.8.3 exits

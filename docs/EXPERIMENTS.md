@@ -912,105 +912,295 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   trick 3, `ENGINEERING-2026-10-17.md`, so cost should follow the number of root cards kept).
 - **Sources.** `docs/m3-hybrid/path-forward.md`.
 
-### E9. Shortlist + search at the app's deal counts (`search student-check --sub-deals`, 2026-10-22, build VM, no rental)
-- **Question.** At the 25-100 deals a phone can afford, does "the student shortlists 3 cards, a short
-  search picks" beat the student alone?
-- **Method.** S2 (954223e2) and O_3 (f5766aa9) on the 2,000-decision exact trick-2 golden set (320 exact
-  worlds each). Per decision and per repeat (8, seed 1) a seeded shuffle of the 320 worlds; the first N
-  are the sample (N = 10, 25, 50, 100; nested, so one shuffle serves every N), the method picks on the
-  sample and is **scored on the other 320-N worlds**. Methods: the student alone, search over all cards,
-  top-2 and top-3 of the student searched. "Corrected loss" = the student's loss on all 320 worlds less
-  the method's gain over the student on the scoring worlds, so it is on the golden check's scale (the
-  student's own is 0.0733%, the golden check's number to the digit); the raw numbers (best of the scoring
-  worlds less the pick) are in the JSON. Bounds: bootstrap 95% over decisions (1,000 replicates, seed 1).
-  `crates/search/src/shortlist.rs`, 4 unit tests; the run takes 6 s.
-- **Result** (loss in % of the money chance; 95% bounds in brackets):
+### E9. Shortlist plus search at the app's deal counts (`search student-check --sub-deals`, 2026-10-22, build VM)
+- **Question.** At the 10-100 deals [worlds searched per decision] a phone can afford, does "the
+  student names its top 2 or 3 cards and a short search picks among them" lose less money chance than
+  the student alone?
+- **Method.** The trick-2 student S2 (954223e2…) and O_3 (f5766aa9…) on the exact trick-2 golden set
+  (2,000 decisions x 320 exact worlds). For each decision, 8 repeats (seed 1) of a seeded shuffle of its
+  320 worlds; the first N form the sample (N = 10, 25, 50, 100; the samples are nested, so one shuffle
+  serves every N). A method picks a card from the sample and is **scored on the other 320-N worlds**,
+  so a lucky sample cannot flatter its own pick. Methods: the student alone; search over all cards;
+  top-2 and top-3 of the student searched. Losses are put on the golden check's scale: the student's
+  loss on all 320 worlds less the method's gain over the student on the scoring worlds (the student
+  alone then reads 0.0733%, the same as the plain golden check; the uncorrected figures are in the
+  run's JSON). Bounds: bootstrap 95% over decisions (1,000 replicates, seed 1). Code
+  `crates/search/src/shortlist.rs` (4 unit tests), run as `search student-check ... --sub-deals
+  10,25,50,100 --sub-repeats 8 --sub-seed 1`.
+- **Result** (loss in % of money chance; the student alone is 0.0733% at every N):
 
-| deals | student alone | search all cards | top-2 + search | top-3 + search |
-|---|---|---|---|---|
-| 10 | 0.0733 | 0.1164 | 0.0836 | 0.1030 |
-| 25 | 0.0733 | 0.0619 | **0.0542** | 0.0596 |
-| 50 | 0.0733 | **0.0384** | 0.0422 | 0.0402 |
-| 100 | 0.0733 | **0.0254** | 0.0338 | 0.0293 |
+| deals | search all cards | top-2 + search | top-3 + search |
+|---|---|---|---|
+| 10 | 0.1164 | 0.0836 | 0.1030 |
+| 25 | 0.0619 | 0.0542 | 0.0596 |
+| 50 | 0.0384 | 0.0422 | 0.0402 |
+| 100 | 0.0254 | 0.0338 | 0.0293 |
 
-  Gain over the student alone (positive = better): top-3 + search +0.0137 [+0.0018, +0.0259] at 25
-  deals, +0.0331 [+0.0210, +0.0459] at 50, +0.0441 [+0.0319, +0.0570] at 100; at 10 deals it is
-  **worse** by 0.0297 [0.0175, 0.0427]. Seat 1 (the leader, where the student loses most): student
-  0.179; top-3 + search 0.146 / 0.097 / 0.073 / 0.061 at 10 / 25 / 50 / 100 deals. Stratum S4: student
-  0.120; top-3 + search 0.171 / 0.100 / 0.072 / 0.055.
-  **The shortlist against searching every card:** top-2 beats search-all at 10 deals (+0.033) and 25
-  deals (+0.0077 [+0.0013, +0.0138]), no difference at 50, and is **worse** at 100 (-0.0084 [-0.0149,
-  -0.0027]); top-3 is within noise of search-all at 25-100 (+0.0023, -0.0018, -0.0039, every bound
-  across zero). So at the app's deal counts a shortlist buys cost only, not accuracy.
-- **Verdict.** Yes: at 25 deals top-3 + search is better than S2 alone (by 0.014 points, bound just
-  above zero), clearly at 50 and 100, no at 10. It stays far above the "perfect pick" 0.0073% of E5,
-  which needed all 320 worlds. The break-even lies between 10 and 25 deals a decision.
-- **Limits.** Exact world values: no leaf error, optimistic for any real search. The sample is drawn
-  from 320 worlds without replacement (31% of them at N = 100), which lowers its variance by about
-  17% against independent draws, so the 100-deal numbers are a little optimistic. The truth proxy
-  (320-world means) is itself noisy (a 512-deal teacher's floor is 0.008%, E4). The stored golden set
-  is trick 2 only. The phone cost is a separate matter: the leader's trick-2 deal is 368 ms in
-  WebAssembly on the build VM (`WASM-API.md` §8), so 7 s on one thread is about 19 deals for the
-  leader (27 with a 3-card shortlist, E11), and a phone is 2-4 times slower: the leader may not reach
-  the break-even at all, exactly where the student loses most.
-- **Sources.** `docs/m3-hybrid/path-forward.md` section 3 step 0a.
+  Gain of top-3 + search over the student alone (positive = better): -0.0297 [-0.0427, -0.0175] at 10
+  deals, +0.0137 [+0.0018, +0.0259] at 25, +0.0331 [+0.0210, +0.0459] at 50, +0.0441 [+0.0319, +0.0570]
+  at 100. Seat 1 (the leader), student 0.179: top-3 + search 0.146 / 0.097 / 0.073 / 0.061 at 10 / 25 /
+  50 / 100 deals. Stratum S4, student 0.120: 0.171 / 0.100 / 0.072 / 0.055. Top-2 against searching all
+  cards (positive = top-2 better): +0.0328 [+0.0256, +0.0400] at 10, +0.0077 [+0.0013, +0.0138] at 25,
+  -0.0038 [-0.0103, +0.0023] at 50, -0.0084 [-0.0149, -0.0027] at 100. Top-3 against all cards:
+  +0.0134 [+0.0077, +0.0186] at 10, then +0.0023, -0.0018, -0.0039, each with its bound across zero.
+- **Cost.** No rental; the run takes 6 s on the build VM.
+- **Limits.** The values are exact world values, so no leaf-network error is included: any real search
+  does worse. Trick-2 decisions have only 2-4 candidates (493 with 2, 421 with 3, 1,086 with 4, mean
+  3.3), so top-3 differs from "all cards" only in the 4-candidate decisions, by one card (E11). The
+  sample is drawn from 320 worlds without replacement (31% of them at N = 100), which lowers its
+  variance by about 17% against independent draws. The truth proxy, a 320-world mean, is itself
+  noisy (a 512-deal teacher's floor is 0.008%, E4). Trick 2 only. WebAssembly cost per deal is
+  separate: the leader's trick-2 deal is 368 ms on the build VM (`WASM-API.md` §8), about 19 deals in 7 s
+  on one thread, and a phone is expected to be 2-4 times slower.
+- **Sources.** `docs/m3-hybrid/path-forward.md` section 3 (step 0a).
 
-### E10. How concentrated is S2's loss, and can a router find the risky decisions? (same run as E9, plus `tools/router_fit.py`, 2026-10-22)
-- **Question.** If the loss sits in a few decisions, the app can spend its 7 seconds only there.
-- **Concentration** (2,000 decisions; 547 have any loss, 1,453 (72.7%) lose nothing): the worst 1% of
-  decisions hold 38.8% of S2's total loss, the worst 5% hold 75.1%, 10% hold 90.9%, 20% hold 99.1%,
-  40% hold all of it. Concentrated, as G2's idea assumed.
-- **The margin does not find them.** Sorting by S2's own margin (top value less second, for the
-  deciding pair) and searching the lowest f% with top-3 + N deals, at 100 deals (all searched: 0.0293):
-  f = 10% 0.0711, 30% 0.0671, 50% 0.0588, against the student alone 0.0733. The correlation of margin
-  and loss is 0.01 and the 10% with the lowest margin hold 5.4% of the loss, below their share: a low
-  margin is a near-tie, and a near-tie costs little either way.
-- **A learned router does a little better, nowhere near the oracle.** Gradient boosting on what the
-  student shows (place, stratum, candidate count, its top values, margins and spread; 5-fold
-  cross-validation, 5 seeds; `tools/router_fit.py`): correlation with the true loss 0.048; the
-  predicted-riskiest 10% / 20% / 50% hold 23.9% / 40.4% / 72.1% of the loss. Router at 100 deals
-  (loss %; searched share, 95% bounds of the model router): 10% 0.0613 [0.052, 0.071], 20% 0.0548, 30%
-  0.0504 [0.044, 0.063], 50% 0.0423 [0.035, 0.051], 100% 0.0293; i.e. 30% of the searches give 52% of the
-  gain, 50% give 70%. At 25 deals: 30% gives 71% of the gain (0.0636 against 0.0596 for all). The
-  oracle router (search the decisions with the largest true loss): 5% 0.0267, 10% 0.0193, 20% 0.0174,
-  better than searching everything (0.0293) because a search cannot hurt where the student is already
-  right.
-- **Verdict.** The concentration is real and large (the oracle needs to search 5-10% of decisions to
-  beat searching all of them), but nothing the student shows on its own finds them: do **not** build
-  the margin router. A risk model is worth testing only with better signals (a second student's
-  disagreement, a G2-style predictor trained on the student's losses on held-out teacher decisions);
-  the cheap-feature model above is the floor. This router is the assistant's idea (not a published
-  recipe): by the project's rule a duplicate tournament would decide before it ships.
-- **Limits.** One golden set, 2,000 decisions (the router was fitted and scored by cross-validation on
-  the same set); trick 2 only; the router's cost (a fast network call) is not counted.
-- **Sources.** `tools/router_fit.py`; the JSON of the run (`per_decision`) is regenerated by the E9
-  command with `--json`.
+### E10. How concentrated is S2's loss, and does a router find the risky decisions? (same run as E9, `tools/router_fit.py`, 2026-10-22)
+- **Question.** If S2's loss sits in a few decisions, a search could be spent only on those. Is the
+  loss concentrated, and can a rule or a model that sees only what the student shows find them?
+- **Method.** The 2,000 golden decisions of E9. Concentration: the share of the total loss held by the
+  worst 1, 5, 10, 20, 40% of decisions. Router: decisions ranked by a score; the top f% by risk get
+  top-3 + N deals (E9's corrected losses), the rest keep the student's card. Scores: (a) the student's
+  margin [its best value less its second-best, for the deciding team]; (b) a gradient-boosted model
+  [an ensemble of small decision trees] on place, stratum, candidate count, the student's top values,
+  margins and spread, scored by 5-fold cross-validation over 5 seeds (every decision is predicted by a
+  model that never saw it); (c) an oracle that knows the true loss (the upper bound). Bounds:
+  bootstrap over decisions, 1,000 replicates.
+- **Result.** 547 of 2,000 decisions have any loss (1,453, or 72.7%, lose nothing). The worst 1% of
+  decisions hold 38.8% of S2's loss, the worst 5% hold 75.1%, 10% hold 90.9%, 20% hold 99.1%, 40% hold
+  all of it. The margin does not find them: its correlation with the loss is 0.01 and the 10% of
+  decisions with the lowest margin hold 5.4% of the loss (a low margin is a near-tie, which costs little
+  either way). The model's correlation is 0.048; its predicted-riskiest 10% / 20% / 50% hold 23.9% /
+  40.4% / 72.1% of the loss. Loss in % of money chance with f% of decisions searched at 100 deals
+  (student alone 0.0733, all searched 0.0293):
 
-### E11. The root-restricted solve (2026-10-22, build VM)
-- **Question.** Does searching only the shortlisted cards make the exact solve cheaper (E8 said the
-  candidate list alone changes nothing)?
-- **Built.** `FastOptions::root_keep` in the solver (earlier commit) is now passed by
-  `search::pimc::exact_world` from the candidates' cards (all legal cards = the full solve; burns pass
-  none), and the app API takes an optional `shortlist` of plays (`WASM-API.md` §3; refusals; the key
-  includes it; shards of one shortlist merge byte for byte; test
-  `a_shortlist_values_its_cards_exactly_as_the_full_search_does`).
-- **Method.** `tools/shortlist_time.py` over the API's bench requests (`engine-native bench`, 16 deals,
-  4 positions a place; native x86-64, one thread; real O_3 and the pinned equity table): value each
-  position in full, then with a shortlist of its best 2 or 3 cards, assert that every shortlisted card
-  has the same sums as the full run, and time both (best of 2).
-- **Result.** Values identical in every case. Time as a ratio of the full search: **trick 2, 2 cards
-  0.64, 3 cards 0.70** (summed over places); by place for 2 / 3 cards: leader 0.66 / 0.71, second 0.57 /
-  0.65, third 0.41, 4th-5th 0.57-0.76; seats 6-8 are too cheap to matter (about 0.1 ms a deal, ratio
-  0.85-1.08, within noise). Trick 3 (exact), 2 cards: 0.69 (leader 0.64). Absolute, leader at trick 2:
-  100 ms a deal falls to 66 (2 cards); 116 to 82 (3 cards).
-- **Verdict.** Exact, but a **1.4-1.55 times** speed-up, not the 2-3 times the share of cards kept
-  suggests: most of the work below the root is not specific to one root card. With E9 (a 3-card
-  shortlist is no more accurate than searching all cards at the same deals) the shortlist is worth
-  about 40% more deals in the same time, nothing more. Trick 1 was not measured (no bench request
-  exists for it and a trick-1 deal is minutes on this VM, E8).
-- **Limits.** 3-4 positions per place and trick; timings on a shared build VM (best of 2); the
-  shortlists were the true best cards, the cost depends on which cards are kept.
-- **Sources.** `tools/shortlist_time.py`, `crates/wasm/tests/api.rs`.
+| searched | margin router | model router (95% range) | oracle |
+|---|---|---|---|
+| 10% | 0.0711 | 0.0613 (0.052-0.071) | 0.0193 |
+| 30% | 0.0671 | 0.0504 (0.044-0.063) | 0.0186 |
+| 50% | 0.0588 | 0.0423 (0.035-0.051) | 0.0208 |
+
+  At 100 deals the model router gets 52% of the gain for 30% of the searches and 70% for 50%; at 25
+  deals 71% for 30% (0.0636 against 0.0596 for all). The oracle at 5% / 10% / 20% searched reads
+  0.0267 / 0.0193 / 0.0174, below searching everything (0.0293), because a search cannot hurt where the
+  student is already right.
+- **Cost.** No rental; seconds on the build VM.
+- **Limits.** One golden set of 2,000 decisions, and the model was fitted and scored by
+  cross-validation on that same set; trick 2 only; the cost of the router's own network call is not
+  counted. The router is the assistant's idea, not a published recipe (PLAN §9: duplicate tournaments
+  would decide between it and a proven option). The margin router was not built into any bot.
+- **Sources.** `tools/router_fit.py`; the per-decision records are in the E9 run's JSON
+  (`sub_deals.per_decision`, written with `--json`).
+
+### E11. The root-restricted solve: exactness and cost (2026-10-22, build VM)
+- **Question.** E8 found that cutting the candidate list changes nothing, because one solve values every
+  root card. Once the solver searches only chosen root cards, does it cost less, and how much?
+- **Built.** `FastOptions::root_keep` in the solver (an earlier commit, tested) is now passed by
+  `search::pimc::exact_world` from the candidates' cards (all legal cards = the full solve, burns pass
+  none). The app API takes an optional `shortlist` of plays (`WASM-API.md` §3): each listed card keeps
+  the full search's sums byte for byte, the search key includes the shortlist, shards of one shortlist
+  merge to the whole, and bad lists are refused (test `a_shortlist_values_its_cards_exactly_as_the_full_search_does`).
+- **Method 1 (first timing).** `tools/shortlist_time.py` on the API's bench positions (`engine-native
+  bench`, 16 deals, 4 positions a place; native x86-64, one thread; real O_3): each position valued in
+  full, then with a shortlist of its best 2 or 3 cards; every shortlisted card's sums checked equal to
+  the full run's; both timed (best of 2).
+- **Result 1.** Values identical in every case. Time as a ratio of the full search, summed over places:
+  trick 2, 2 cards 0.64 and 3 cards 0.70 (leader 0.66 / 0.71); trick 3 (exact), 2 cards 0.69.
+- **Method 2 (breakdown).** `crates/wasm/src/bin/shortlist_cost.rs`: trick-2 bench positions with at
+  least 4 candidates (36 positions, 8 deals each, 144 deals). Each variant run as a request of its own
+  (cold network memo, fresh table); solver nodes, network (frontier) calls and time counted; the setup
+  no root card changes (belief preparation once, the draw of each deal) timed apart. Kept cards = the
+  best by mean over those deals.
+- **Result 2.** Ratio to the full solve:
+
+| cards kept | solver nodes | network calls | time (two runs) |
+|---|---|---|---|
+| 1 | 0.24 | 0.25 | 0.25 / 0.29 |
+| 2 | 0.49 | 0.49 | 0.55 / 0.58 |
+| 3 | 0.80 | 0.80 | 0.86 / 0.90 |
+
+  Cost follows the number of cards kept. The bench positions list 2-4 candidates (leader [4, 4, 4, 4];
+  trick 3: 2-3 everywhere), so 2 kept cards are half of 4 and 3 kept are three quarters; Result 1's
+  summed ratios included positions with 3 candidates, where 2 kept cards are 0.67 of the cards and 3
+  kept are all of them. The setup costs 0.02-0.3 ms a deal: under 1% of a deal at seats 1-4 and 23% at
+  the 8th seat, where the whole solve is 0.5 ms. In the golden set (E9) the mix is 493 / 421 / 1,086
+  decisions with 2 / 3 / 4 candidates, so keeping 2 cards saves about 40% of the work over the mix and
+  keeping 3 about 15%.
+- **Cost.** No rental; a few minutes on the build VM.
+- **Limits.** 3-4 positions a place and trick on a shared VM (timings vary by a few percent between
+  runs; node and call counts are exact); the kept cards were the best ones, and cost depends on which
+  cards are kept; no trick-3 position had 4 candidates, so the breakdown is trick 2 only; trick 1 (hands
+  of 5) not measured.
+- **Sources.** `tools/shortlist_time.py`, `crates/wasm/src/bin/shortlist_cost.rs`,
+  `crates/wasm/tests/api.rs`, E8.
+
+### E12. A decision-aware loss for the trick-2 student (runs `student-t2-plain-1` and `-plain-2`, 2026-10-22/23)
+- **Question.** Does training the student on the ordering of a decision's candidate cards, and stopping on its card
+  choices, lower its loss against the exact golden set, and by how much against the retraining noise?
+- **Method.** Student 512-256 (3,292 inputs, `student-v1`), labels from the plain H_3 teacher (O_3 f5766a, 64 deals): the first
+  250,000 decisions of the stored base shards (320 deals cut to 64, exact subsets, E3), and for the 1,000,000-decision networks the base,
+  more-1 and more-2 shards the existing S2 was trained on. The decision-aware term (`fortyone_nn.student --rank-weight W
+  --rank-temperature T`) adds W times the per-decision KL divergence from the teacher's softmax over the candidates to the student's,
+  both on the deciding pair's money chance divided by T; W = 0 is the old loss bit for bit; `--stop-on decision` stops on the validation
+  decision loss instead of the value cross-entropy (tests: `python/nn/tests/test_student.py`). `student_train` points take `seed`,
+  `rank_weight`, `rank_temperature` and `stop_on`. Two GPU runs (`docs/vast/student-t2-plain-arm.manifest.json`, `student-t2-plain-2.manifest.json`;
+  AMD EPYC 7502, RTX 5070 Ti, $0.325/h). Each integer network judged on the exact trick-2 golden set (2,000 decisions x 320 worlds) with
+  `search student-check --golden-decisions --golden-worlds --top-k 3`: loss alone, at seat 1 (the leader), and with the teacher's perfect
+  pick among the student's top 3. The stored S2 (954223e2) reproduced its recorded 0.0733% on this check.
+- **Result.** Loss in % of the money chance (95% upper bound in brackets); seeds 1-3 where three were trained:
+
+| network | decisions | seeds | alone | seat 1 | top-3 |
+|---|---|---|---|---|---|
+| existing S2 (plain loss) | 1,000,000 | 1 | 0.0733 [0.0876] | 0.179 | 0.0073 [0.0130] |
+| plain loss, 64 deals | 250,000 | 3 | 0.1195 (SD 0.020) | 0.161 | 0.0100 |
+| plain loss, 320 deals | 250,000 | 1 | 0.0936 [0.1089] | 0.140 | 0.0083 |
+| plain loss, 64 deals, 100,000 / 50,000 decisions | 100,000 / 50,000 | 1 | 0.1314 / 0.2320 | 0.168 / 0.252 | 0.0087 / 0.0150 |
+| stop on decision loss, no rank term | 250,000 | 1 | 0.1001 | 0.120 | 0.0219 |
+| rank W=1, T=0.01, no stop rule | 250,000 | 1 | 0.0951 [0.1319] | 0.126 | 0.0235 [0.0564] |
+| rank W=1, T=0.003 | 250,000 | 3 | 0.0855 (SD 0.014) | 0.132 | 0.0073 |
+| rank W=1, T=0.003, stop on decision loss | 250,000 | 3 | 0.0780 (SD 0.006) | 0.132 | 0.0056 |
+| **rank W=1, T=0.01, stop on decision loss** | 250,000 | 3 | **0.0587 (SD 0.003)** | **0.100** | **0.0045** |
+| rank W=1, T=0.003, stop on decision loss | 1,000,000 | 1 | 0.0495 [0.0601] | 0.092 | 0.0036 |
+| **rank W=1, T=0.01, stop on decision loss** | **1,000,000** | 1 | **0.0389 [0.0467]** | **0.080** | **0.0030 [0.0051]** |
+
+  Per seed (alone): plain 0.1217 / 0.1386 / 0.0980; T=0.003 0.0692 / 0.0966 / 0.0907; T=0.003 + stop 0.0770 / 0.0725 / 0.0845;
+  T=0.01 + stop 0.0599 / 0.0550 / 0.0613. Retraining noise at the same data and settings is SD 0.020 for the plain loss. T=0.01 with the stop
+  rule is below every plain seed and halves the plain mean, at SD 0.003; from 250,000 decisions it is below the existing S2, which used four
+  times the data, and its leader-seat loss is 0.100 against 0.179. At 1,000,000 decisions it reaches 0.0389% alone, 0.080% at seat 1 and 0.0030%
+  for the top-3 pick, the lowest measured. The stop rule alone and plain at 320 deals lie inside the plain noise (one seed each). The same ordering
+  holds on the runner's fixed 4,096-decision test set (plain seed 1 0.092, rank T=0.01 0.067, 250,000 decisions). Integer networks (content-addressed in R2):
+  1M T=0.01 + stop `3d1189e3042dfc9537b1f575f87e42b15e91628541e2ff90678ba319959c6e03`, 1M T=0.003 + stop
+  `0cd6d08264dd99fe96ba0e6c0b496b6cc96b5604a0ba44302df7764e9d336db7`; the others in the runs' out bundles (`runs/student-t2-plain-{1,2}/out/plain/`).
+- **Cost.** `-plain-1` 45 minutes, about $0.25 (9 networks); `-plain-2` 68 minutes, $0.37 (10 networks); each golden check a few seconds on the build VM.
+- **Limits.** One seed for the 1,000,000-decision networks, the stop rule alone, plain at 320 deals and the learning-curve points; the plain-320 difference
+  (0.094 against 0.119) is within the noise; the weight and temperature were tried on a small grid (W = 1; T = 0.003 and 0.01) only; every network is judged
+  on the same 2,000-decision golden set, which the training and the stop rule's validation split never touch; the labels are the plain H_3 teacher's
+  (noisy at 64 deals, E4); not yet run through the app's shortlist-plus-search path (E9) or exported to WASM.
+- **Sources.** `python/nn/fortyone_nn/student.py`, `crates/runner/src/student_train.rs`, `docs/vast/student-t2-plain-arm.manifest.json`,
+  `docs/vast/student-t2-plain-2.manifest.json`, R2 `runs/student-t2-plain-{1,2}/`, E2-E5.
+
+### E13. Does a G2-labelled teacher give a better trick-2 student? (runs `student-t2-g2arm-50k-1` and `student-t2-plainarm-50k-1`, 2026-10-23)
+- **Question.** Labelled by H_3 with G2's learned exact leaves instead of plain H_3 (same positions, same 64 deals), does the trick-2 student get a lower
+  golden-set loss, with the plain loss and with the decision-aware loss of E12?
+- **Method.** The first 10 parts of 5,000 decisions of the rules stream (seed 401, decisions 0-49,999), the same positions in both arms. Plain labels:
+  the base run's shards cut to 64 deals. G2 labels: `docs/vast/student-t2-gv2-250k.manifest.json` (O_3 f5766a, G v2 t=277338260, 64 deals), parts from runs
+  `student-t2-gv2-250k-4`, `-6` and `-8` (E14); a part of 1,000 decisions holds exactly the records of the same decisions inside a part of 5,000 (every field
+  equal except the offset into the values file). Each arm: 512-256, 50,000 decisions, seeds 1-3, with the plain loss and with the decision-aware
+  loss (W=1, T=0.01, stop on decision loss); judged on the golden set as in E12 (`docs/vast/student-t2-{g2,plain}arm-50k.manifest.json`; the G2 arm
+  needs `allow_stamps: teacher` against the plain test set). The planned 250,000-decision arm was not made: the G2 labelling was cancelled at 60,000 decisions.
+- **Result.** Loss alone in % of the money chance (seat 1 and top-3 are means over the three seeds):
+
+| labels | loss | alone, per seed | alone, mean (SD) | seat 1 | top-3 |
+|---|---|---|---|---|---|
+| plain H_3 | plain | 0.2718 / 0.2436 / 0.2140 | 0.2431 (0.029) | 0.342 | 0.0167 |
+| H_3 + G2 | plain | 0.2392 / 0.2312 / 0.2406 | 0.2370 (0.005) | 0.272 | 0.0139 |
+| plain H_3 | decision-aware | 0.1095 / 0.1306 / 0.1249 | **0.1217 (0.011)** | 0.143 | 0.0089 |
+| H_3 + G2 | decision-aware | 0.1323 / 0.1545 / 0.1505 | 0.1458 (0.012) | 0.150 | 0.0132 |
+
+  G2 labels minus plain labels (difference of means, standard error): plain loss -0.006 (0.017), no difference; decision-aware loss +0.024 (0.009),
+  the G2-labelled network worse by about 2.6 standard errors, its top-3 pick worse too (0.0132 against 0.0089). The decision-aware loss halves the
+  loss on both label sets (0.122 against 0.243 on plain labels, 0.146 against 0.237 on G2 labels).
+- **Cost.** The G2 arm 13 minutes, $0.05; the plain arm about 20 minutes, about $0.2; the G2 labels used here are part of the $5.3 of E14.
+- **Limits.** 50,000 decisions only and three seeds per cell, so an effect that appears with more data is not excluded (the second look at 100,000 decisions was
+  not made); one teacher setting (G v2 at t=277338260, 64 deals); the labels differ only in the teacher; judged on the 2,000-decision golden set only.
+- **Sources.** `docs/vast/student-t2-g2arm-50k.manifest.json`, `docs/vast/student-t2-plainarm-50k.manifest.json`, R2 `runs/student-t2-{g2arm,plainarm}-50k-1/`, E7, E12, E14.
+
+### E14. Throughput of the G2 teacher on rented machines (runs `student-t2-gv2-250k-3`, `-4`, `-6`, `-8`, 2026-10-22/23)
+- **Question.** What does a trick-2 decision at 64 deals cost with G2, and does the teacher keep a 245-thread
+  machine busy?
+- **Method.** Four rentals of the same manifest (`docs/vast/student-t2-gv2-250k.manifest.json`), each with
+  every usable thread: `-3` AMD EPYC 7B12, 245 threads, $0.708/h, parts of 1,000 decisions; `-4` AMD EPYC
+  7742, 245 threads, $0.735/h, parts of 5,000; `-6` AMD EPYC 7B12, 245 threads, $0.723/h, parts of 5,000, the
+  ordered writer's window widened to the whole part (binaries 258ef77). A local smoke test (4 vCPU build VM): 6
+  decisions at 8 deals, plain against G2. Part times from the stored parts' timestamps in R2, CPU use from the
+  30-second heartbeats.
+- **Result.**
+
+| run | machine and price | part | part time | CPU use | outcome |
+|---|---|---|---|---|---|
+| build VM | 4 vCPU | 6 decisions x 8 deals | 3.0 s plain, 45.9 s G2 (15 times) | - | smoke test |
+| `-3` | 7B12, $0.708/h | 1,000 decisions | not finished in 28 min | 100% for 5 min, then falling to 2%; average 58% | stopped by the idle watchdog, $0.33, nothing stored |
+| `-4` | 7742, $0.735/h | part 0, 5,000 | 41 min | 100% swinging to 0-5% (ordered window of 4 x threads + 16) | part 0 stored; part 1 not finished in 28 min; cancelled, about $0.93 in all |
+| `-6` | 7B12, $0.723/h | part 1, 5,000 | 38 min | 100% for about 25 min, then one straggler decision at about 0.5% | part 1 stored; part 2 cancelled; about $0.55 in all |
+| `-8` | 7B12, $0.723/h, both fixes (binaries c6d8c08) | parts 2-12, 5,000 each | 28 min (median 1,683 s) | steady 100% | 12 parts stored (60,000 decisions) in 4.9 h, $3.49; cancelled at 02:47 UTC on 2026-10-23 by someone other than the assistant (stop and no-replacement markers) |
+
+  From `-8` (both fixes): 5,000 decisions in 28 minutes on 245 threads, 10,700 decisions an hour, **$68 per million decisions** at $0.723/h
+  (the fixes cut a part from 38 to 28 minutes, 27%), so about $17 and 23 hours for 250,000. From `-6`: 5,000 decisions in 38 minutes on 245 threads is 112 thread-seconds a decision, 1.75 thread-seconds
+  a deal (the docs' 1.55 on a 7B12 plus the idle tail): about 7,900 decisions an hour and $92 per million
+  decisions at $0.723/h, so about $23 and 32 hours for 250,000. Causes found: (1) the ordered writer let workers
+  run only 4 x threads + 16 decisions ahead, so one slow decision stalled every worker behind it (fixed:
+  window = the whole part); (2) a decision's 64 deals ran on one thread, so the heaviest decisions (leader
+  seats) leave the machine idle for the last 10-20 minutes of a part (fixed: a decision's deals are worked in
+  blocks of 8 on any thread and joined, `DEAL_BLOCK`; records byte-identical, test
+  `blocks_of_deals_join_into_the_whole_decisions_records` for 19, 8, 3 and 16 deals on 1-4 threads).
+- **Cost.** `-3` $0.33, `-4` about $0.93, `-6` about $0.55, `-8` $3.49; about $5.3 in all, 60,000 decisions stored.
+- **Limits.** The block fix's effect is measured only together with the window fix (`-8` against `-6`: 28 against 38 minutes a part); part times include about 1 minute of setup; one machine type (Zen 2)
+  measured; the estimate in E1/path-forward ($15-30 per million) was for a Zen 4 machine at $1.34/h.
+- **Sources.** R2 `runs/student-t2-gv2-250k-{3,4,6}/` (`report.json`, `heartbeat/`, `out/`), `crates/search/src/student_teacher.rs`,
+  `crates/search/src/ordered.rs`, `docs/VAST-MACHINES.md` section 5.
+
+### E15. Keeping a machine after a run and taking it over (session 1, 2026-10-22)
+- **Question.** Can the next job be deployed onto a machine without renting another (an hour's search found the
+  one cheap 245-thread machine), and can a run leave its machine up when it ends or fails?
+- **Method.** `machine.keep` / `machine.keep_hours` / `machine.instance_id` in the manifest (`launch.py`
+  `keep_machine`, `take_instance`; the runner parks on `KEEP_MACHINE=1`, `crates/runner` `end_machine`;
+  `cleanup.py` `decide_kept`): the machine is left running when a run ends (DONE or FAILED) or the workflow is
+  cancelled, recorded in `keep/<instance>.json` and `runs/<run>/KEPT.json` with a warning and a job-summary
+  banner; the hourly cleanup destroys it at its keep time; a takeover updates the instance's image,
+  environment and binaries and recycles the container (a stopped instance is updated and started). Refused: another run's live
+  machine (heartbeat within 15 minutes), a machine another run started under an hour ago, a label that is not
+  `41bots-`. Tested with 25 tests against the launcher's fake vast and R2 (`python/launcher/test_keep.py`, 36
+  cleanup tests) and tried on a spare machine (GTX TITAN X, Xeon E5-2630 v4, 20 threads, $0.04/h) with
+  `difftest` jobs: run `keep-trial-1` with `keep: true`, then `keep-trial-2` with `instance_id` of that machine.
+- **Result.** `keep-trial-1` ended DONE after 20.5 minutes (mostly the image pull on a 278 Mbps link), $0.014:
+  its machine stayed up (instance 57255649 running afterwards), `keep/57255649.json`, `runs/keep-trial-1/KEPT.json`
+  and the warning were written. **`keep-trial-2` (the takeover of that machine) failed:** the instance was
+  updated, recycled and relabelled `41bots-keep-trial-2` and its keep record deleted, but the recycled container
+  booted the **old** environment (its log: `boot: run keep-trial-1 ... runner: run keep-trial-1`, re-running the
+  first job and failing to upload over its immutable files), so no heartbeat came for `keep-trial-2`; after 15
+  minutes the launcher destroyed the machine ($0.013). The same takeover method (`vastai update instance --env`
+  then `recycle instance`, built for `o3-round.yml`, `--instance-id`) had also failed on 2026-10-21 (`o3r-1-1`,
+  cause then not found); so the stored environment is not what the recycled container receives. Cause not
+  found (trials 3 and 4 were stopped before they could be probed). The owner then reported that the O2 session's takeover of the
+  stopped instance 57259029 succeeded (details not recorded here), so the stopped-instance path works and only the recycle of a
+  running one is known to fail. Afterwards added: a taken-over machine that never starts is kept and recorded, never
+  destroyed (tested against the fake vast). Starting a *stopped* instance is tested against the fake vast only.
+- **Cost.** About $0.05 for the trial machine.
+- **Limits.** One spare machine type; **recycling a running instance fails on vast** (above; a stopped instance was taken over by the O2 session, reported); a
+  machine with a different disk size is not tried; a boot failure (missing manifest, bad binary hash) still destroys the machine because
+  the image's boot script does (an image change would be needed); the runner image and run workflow were not
+  changed beyond the manifest keys and the cancel steps in `vast-run.yml`.
+- **Sources.** `python/launcher/launch.py`, `cleanup.py`, `test_keep.py`, `monitor_run.py`, `.github/workflows/vast-run.yml`,
+  R2 `runs/keep-trial-{1,2}/`.
+
+### E16. The new trick-2 student in the app's shortlist-plus-search path, and the router (`search student-check --sub-deals`, `tools/router_fit.py`, 2026-10-23, build VM)
+- **Question.** With the decision-aware network of E12 (1,000,000 decisions, `rank_weight` 1, `rank_temperature` 0.01, stop on decision loss), at how many
+  deals does "the student shortlists, a short search picks" beat the student alone (E9), and can the app find the decisions where the student loses and search only
+  those (E10)?
+- **Method.** As E9 and E10, with the new network (`3d1189e3...`, E12) and, as a check, the old S2 (954223e2) on the same settings: the 2,000-decision exact
+  golden set (320 exact worlds each), per decision and repeat (8, seed 1) a seeded shuffle of the worlds, the first N (10, 25, 50, 100) the sample, the method picks on
+  the sample and is scored on the other 320 - N worlds; methods: the student alone, search over all cards, top-2 and top-3 of the student searched; 95% bounds by
+  bootstrap over decisions. The router: `tools/router_fit.py` (gradient-boosted risk model on the student's own values, 5-fold cross-validation, 3 seeds).
+- **Result.** Loss in % of the money chance (corrected, on the golden check's scale); the old S2 reproduced E9's numbers (alone 0.0733; top-3 + search 0.1030 / 0.0596 / 0.0402 / 0.0293):
+
+| deals | new S2 alone | search all cards | top-2 + search | top-3 + search | old S2 top-3 + search |
+|---|---|---|---|---|---|
+| 10 | **0.0389** | 0.1165 | 0.0746 | 0.0983 | 0.1030 |
+| 25 | **0.0389** | 0.0623 | 0.0476 | 0.0554 | 0.0596 |
+| 50 | 0.0389 | 0.0389 | 0.0360 | 0.0360 | 0.0402 |
+| 100 | 0.0389 | 0.0265 | 0.0286 | **0.0258** | 0.0293 |
+
+  At seat 1 (the leader) the new S2 alone loses 0.0795 (the old: 0.1794); top-2 + search 0.1062 / 0.0739 / 0.0556 / 0.0489 and top-3 + search 0.1427 / 0.0916 /
+  0.0606 / 0.0499 at 10 / 25 / 50 / 100 deals; search over all cards 0.1996 / 0.1193 / 0.0782 / 0.0642. The loss is still concentrated: the worst 1 / 5 / 10 / 20% of
+  decisions hold 38.9 / 78.8 / 93.1 / 99.8% of it (old S2 38.8 / 75.1 / 90.9 / 99.1%); 465 of the 2,000 decisions lose anything. The risk model's cross-validated correlation
+  with the true loss is 0.055 (the student's margin: 0.037); its predicted-riskiest 10 / 20 / 50% of decisions hold 20.0 / 36.5 / 71.3% of the loss (the margin's lowest 10 / 20 / 50%: 8.1 /
+  17.3 / 49.6%). Router, loss when the f% predicted riskiest are searched (top-3 + N deals) and the rest keep the student's card: at 10 deals 0.0438 (5%) rising to 0.0983
+  (100%); at 25 deals 0.0400 (5%), 0.0419 (20%), 0.0554 (100%); at 50 deals 0.0366 (10%), 0.0356 (20%), **0.0338 (50%)**, 0.0360 (100%); at 100 deals 0.0331 (20%), 0.0284
+  (50%), 0.0258 (100%); the oracle router (sorted by true loss) 0.0145 at 10% at 50 deals and 0.0124 at 10% at 100 deals.
+- **Cost.** No rental; a few minutes on the build VM (the router fit about 10 minutes).
+- **Limits.** Exact world values: no leaf error, optimistic for any real search (E9); the sample is drawn without replacement from 320 worlds, which lowers its variance by
+  about 17% at 100 deals; the router was fitted on one network and one golden set with cross-validation, not on fresh decisions; its features are the student's values, place,
+  stratum and candidate count only; one seed of the network (E12); the phone's cost of a deal is separate (a leader deal is 368 ms in WebAssembly, `WASM-API.md` section 8).
+- **Sources.** `crates/search/src/shortlist.rs`, `tools/router_fit.py`, E9, E10, E12.
 
 ---
 

@@ -1,0 +1,159 @@
+{
+  "format": 2,
+  "run_id": "student-t2-plainarm-50k-1",
+  "run_seed": 1,
+  "threads": null,
+  "benchmark_seconds": 0,
+  "upload_every_s": 300,
+  "heartbeat_every_s": 30,
+  "note": "S2 teacher A/B, the early comparison at 50,000 decisions (owner 2026-10-23; docs/EXPERIMENTS.md E12): the plain arm. Both arms train 512-256 students on the same 10 parts of 5,000 decisions (the rules stream, seed 401, decisions 0-49,999), targets at 64 deals, three seeds each with the plain loss and with the winning decision-aware loss (rank_weight 1, temperature 0.01, stop on the validation decision loss). The labels differ only in the teacher: plain H_3 (base run shards cut to 64 deals) or H_3 + G2 (runs student-t2-gv2-250k-4/-6/-8).",
+  "machine": {
+    "gpus": 1,
+    "blackwell": true,
+    "min_gpu_ram_gb": 8,
+    "min_compute_cap": 600,
+    "min_cores": 32,
+    "min_ram_gb": 64,
+    "disk_gb": 40,
+    "min_inet_down": 100
+  },
+  "streams": [
+    {
+      "name": "early",
+      "priority": 1,
+      "kind": "student_train",
+      "chunks": 1,
+      "params": {
+        "threads": "all",
+        "test_inputs": [
+          {
+            "run": "student-t2-base-1",
+            "stream": "test",
+            "parts": 2
+          }
+        ],
+        "order": "given",
+        "epochs": 40,
+        "batch": 256,
+        "lr": 0.001,
+        "patience": 4,
+        "seed": 1,
+        "val_permille": 50,
+        "device": "cuda",
+        "baselines": [
+          "rules",
+          "random"
+        ],
+        "table": {
+          "hands": 1000000,
+          "seed": 1
+        },
+        "train_inputs": [
+          {
+            "run": "student-t2-base-1",
+            "stream": "rules",
+            "bundles": [
+              {
+                "path": "runs/student-t2-base-1/out/rules/000000-33b7247c27bd4fb2.tar.zst",
+                "sha256": "33b7247c27bd4fb230149616efdff3876ce399c0cc46e41ba6e64821cd9bfb81",
+                "bytes": 1251622
+              },
+              {
+                "path": "runs/student-t2-base-1/out/rules/000001-a843ec3b9f7235f9.tar.zst",
+                "sha256": "a843ec3b9f7235f9b5479ecde66519c4f3604638f06ad250ddc486f54c317dbc",
+                "bytes": 1253398
+              },
+              {
+                "path": "runs/student-t2-base-1/out/rules/000002-d80dc9b5641c004c.tar.zst",
+                "sha256": "d80dc9b5641c004cbc74d1aae984750707705e89606f0b8fe43cfad64e0516f6",
+                "bytes": 1250909
+              },
+              {
+                "path": "runs/student-t2-base-1/out/rules/000003-16ddf48d99e8c3e7.tar.zst",
+                "sha256": "16ddf48d99e8c3e77d7fdb0ead23f6488ec0cd029b20efceebad29bed7c397ea",
+                "bytes": 1252906
+              },
+              {
+                "path": "runs/student-t2-base-1/out/rules/000004-ba5c5f9d52d87841.tar.zst",
+                "sha256": "ba5c5f9d52d87841e473302c49fa753e1779907e7a37a2a105e5ebe0279852f7",
+                "bytes": 1251582
+              },
+              {
+                "path": "runs/student-t2-base-1/out/rules/000005-040224eb89b88cf4.tar.zst",
+                "sha256": "040224eb89b88cf4a66d7e6f6858cbf7365d03fad9b70b579648b5e6f0c25d00",
+                "bytes": 1250115
+              },
+              {
+                "path": "runs/student-t2-base-1/out/rules/000006-222cc96a786b6df2.tar.zst",
+                "sha256": "222cc96a786b6df2cbcacf996a5a8c6398a9e6b8e0268d4ac6098d27d3e6a843",
+                "bytes": 1250576
+              },
+              {
+                "path": "runs/student-t2-base-1/out/rules/000007-8f400964a03a2d5e.tar.zst",
+                "sha256": "8f400964a03a2d5e00c4b35d5c101f31f9d5f82eca31ab33dda1c7bf951bb7c5",
+                "bytes": 1252295
+              },
+              {
+                "path": "runs/student-t2-base-1/out/rules/000008-c06c45d2b6301b05.tar.zst",
+                "sha256": "c06c45d2b6301b05691b67adc354d5a35f2e6b2fee78c92e359bfd34dc5ef96a",
+                "bytes": 1250552
+              },
+              {
+                "path": "runs/student-t2-base-1/out/rules/000009-ea218e71cf725681.tar.zst",
+                "sha256": "ea218e71cf7256819a139b7377d7b3177e5a7c90e67b06066a04e594e9e58bbc",
+                "bytes": 1252558
+              }
+            ]
+          }
+        ],
+        "points": [
+          {
+            "size": 50000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 1
+          },
+          {
+            "size": 50000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 2
+          },
+          {
+            "size": 50000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 3
+          },
+          {
+            "size": 50000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 1,
+            "rank_weight": 1,
+            "rank_temperature": 0.01,
+            "stop_on": "decision"
+          },
+          {
+            "size": 50000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 2,
+            "rank_weight": 1,
+            "rank_temperature": 0.01,
+            "stop_on": "decision"
+          },
+          {
+            "size": 50000,
+            "widths": "512,256",
+            "deals": 64,
+            "seed": 3,
+            "rank_weight": 1,
+            "rank_temperature": 0.01,
+            "stop_on": "decision"
+          }
+        ]
+      }
+    }
+  ]
+}

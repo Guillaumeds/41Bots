@@ -290,6 +290,22 @@ pub fn make_record(
     teacher: Teacher,
     mem: &mut SolveMem,
 ) -> TeacherRecord {
+    make_record_part(job, i, job.deal_from, job.deals, starts, ctx, teacher, mem)
+}
+
+/// Decision `i`'s record over deals `from..from + n` only (a block of its deals: the deals are
+/// independent, so blocks put side by side in deal order are the whole record).
+#[allow(clippy::too_many_arguments)]
+pub fn make_record_part(
+    job: &TeacherJob,
+    i: u64,
+    from: u32,
+    n: u32,
+    starts: &[Vec<HandStartState>; 4],
+    ctx: &Ctx,
+    teacher: Teacher,
+    mem: &mut SolveMem,
+) -> TeacherRecord {
     let (pos, stratum, place) = decision_position(job, i, starts);
     let r = pos.replay().expect("a generated position replays");
     let (kind, cands) = app_candidates(&r.view, &r.legal);
@@ -298,8 +314,8 @@ pub fn make_record(
         &r.view,
         &cands,
         dseed,
-        job.deal_from,
-        job.deals,
+        from,
+        n,
         ctx,
         &teacher_config(job.tt_mb),
         teacher,
@@ -320,11 +336,16 @@ pub fn make_record(
         },
         cands: cands.iter().map(|&(a, p)| -> Cand { (a, p) }).collect(),
         dseed,
-        deal_from: job.deal_from,
+        deal_from: from,
         log2_worlds_q8: count.map_or(0, belief::log2_q8),
         values,
     }
 }
+
+/// Deals per unit of work in [`teacher_records`]: a decision's deals are cut into blocks this big
+/// so that the few heavy decisions (a G2 teacher's leader seats take minutes on one thread) are
+/// spread over every thread at the end of a part instead of leaving the machine idle behind them.
+pub const DEAL_BLOCK: u32 = 8;
 
 /// A stored golden decision with its exact worlds as a student check reads a teacher decision
 /// (`search student-check --golden-decisions D --golden-worlds W`): the position, the app's
@@ -512,20 +533,48 @@ pub fn teacher_records(
     progress: Option<&AtomicUsize>,
     mut take: impl FnMut(TeacherRecord) -> Result<(), String>,
 ) -> Result<(), String> {
+    // A unit is one block of a decision's deals (`DEAL_BLOCK`), handed on in index order, so a
+    // decision's blocks arrive one after the other and are joined into its record.
+    let blocks = u64::from(job.deals.div_ceil(DEAL_BLOCK).max(1));
+    let units = job.count * blocks;
+    let mut joined: Option<TeacherRecord> = None;
     ordered(
         job.threads,
-        Some(job.count),
-        window_for(job.threads),
+        Some(units),
+        // A window of the whole part: a few decisions cost minutes (G2 teachers), and a window of
+        // 4 x threads + 16 let every worker run dry behind one of them (CPU use fell to a few
+        // percent for minutes on end, run student-t2-gv2-250k-4). A unit is a few kilobytes, so
+        // holding a part's worth of finished ones costs nothing; the order and the bytes are the
+        // same for any window.
+        window_for(job.threads).max(units),
         SolveMem::new,
-        |mem, k| {
-            let r = make_record(job, job.first + k, starts, ctx, teacher, mem);
-            if let Some(p) = progress {
+        |mem, u| {
+            let (k, b) = (u / blocks, (u % blocks) as u32);
+            let from = job.deal_from + b * DEAL_BLOCK;
+            let n = DEAL_BLOCK.min(job.deals - b * DEAL_BLOCK);
+            let r = make_record_part(job, job.first + k, from, n, starts, ctx, teacher, mem);
+            if u64::from(b) + 1 == blocks
+                && let Some(p) = progress
+            {
                 p.fetch_add(1, Ordering::Relaxed);
             }
             r
         },
-        |_, r| {
-            take(r)?;
+        |u, part| {
+            let mut record = match joined.take() {
+                None => part,
+                Some(mut r) => {
+                    r.values.extend(part.values);
+                    r
+                }
+            };
+            if u % blocks + 1 == blocks {
+                // The first block holds the first deal's index; the record is the whole decision.
+                record.deal_from = job.deal_from;
+                take(record)?;
+            } else {
+                joined = Some(record);
+            }
             Ok(true)
         },
     )
@@ -682,6 +731,36 @@ mod tests {
             assert_eq!(r.own_sd(), sds);
             assert_eq!(r.trick, 3);
             assert_eq!(rp.view.public.trick_cards.len(), usize::from(r.place));
+        }
+    }
+
+    /// A decision's deals are worked in blocks of `DEAL_BLOCK` on any thread and joined: the records
+    /// are exactly the whole-decision ones, for deals that are not a multiple of the block, from a
+    /// first deal other than 0, and for any thread count.
+    #[test]
+    fn blocks_of_deals_join_into_the_whole_decisions_records() {
+        let starts = collect_starts(400, 5);
+        let l = leaf();
+        let source = BeliefSource::new();
+        let ctx = belief_ctx(&*l, &source);
+        for (deals, from, threads) in [(19, 0, 3), (19, 5, 1), (8, 0, 2), (3, 2, 4), (16, 0, 3)] {
+            let mut j = job(3, 5, deals, SOURCE_RULES, threads);
+            j.deal_from = from;
+            let mut mem = SolveMem::new();
+            let whole: Vec<_> = (0..j.count)
+                .map(|i| make_record(&j, i, &starts, &ctx, Teacher::Exact, &mut mem))
+                .collect();
+            let mut got = Vec::new();
+            teacher_records(&j, &starts, &ctx, Teacher::Exact, None, |r| {
+                got.push(r);
+                Ok(())
+            })
+            .expect("records");
+            assert_eq!(got, whole, "{deals} deals from {from} on {threads} threads");
+            assert!(
+                got.iter()
+                    .all(|r| r.deal_from == from && r.values.len() == deals as usize)
+            );
         }
     }
 

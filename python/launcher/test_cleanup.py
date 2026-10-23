@@ -285,6 +285,65 @@ class SweepTest(unittest.TestCase):
         self.assertIsNone(r2.get("runs/r1/closed.json"))
         self.assertIsNotNone(r2.get("watch/r1.json"))
 
+class KeptTest(SweepTest):
+    """A machine with a keep record (keep/<instance>.json) is left for the next worker until its keep time."""
+
+    def record(self, until_min_from_now: float, run="r1", iid=9) -> bytes:
+        until = cleanup.utc(NOW + until_min_from_now * MIN)
+        return json.dumps({"instance_id": iid, "run_id": run, "keep_until_utc": until}).encode()
+
+    def test_decide_kept(self):
+        rec = json.loads(self.record(60))
+        self.assertEqual(cleanup.decide_kept(inst(300), rec, NOW)[0], "keep")
+        old = json.loads(self.record(-10))  # 10 minutes past: beyond the 5-minute grace
+        self.assertEqual(cleanup.decide_kept(inst(300), old, NOW)[0], "destroy")
+        soon = json.loads(self.record(-2))  # inside the grace
+        self.assertEqual(cleanup.decide_kept(inst(300), soon, NOW)[0], "keep")
+        self.assertEqual(cleanup.decide_kept(inst(300, "exited"), rec, NOW)[0], "destroy")
+        self.assertEqual(cleanup.decide_kept(inst(300), {"run_id": "r1"}, NOW)[0], "destroy")
+        self.assertEqual(cleanup.decide_kept(inst(300), rec, NOW, everything=True)[0], "destroy")
+
+    def test_a_kept_machine_of_a_finished_run_is_not_destroyed(self):
+        # Without the record the run's DONE marker, 30 minutes old, would have it destroyed.
+        r2 = FakeR2()
+        r2.put("runs/r1/DONE", b"{}", NOW - 30 * MIN)
+        r2.put("keep/9.json", self.record(120))
+        rows = self.sweep(r2, [inst(600)])
+        self.assertEqual((self.destroyed, rows[0][3]), ([], "keep"))
+        self.assertIn("kept for the next worker", rows[0][4])
+        r2b = FakeR2()
+        r2b.put("runs/r1/DONE", b"{}", NOW - 30 * MIN)
+        rows = self.sweep(r2b, [inst(600)])
+        self.assertEqual((self.destroyed, rows[0][3]), ([9], "destroy"))
+
+    def test_a_kept_machine_past_its_time_is_destroyed_after_a_second_reading(self):
+        r2 = FakeR2()
+        r2.put("keep/9.json", self.record(-30))
+        rows = self.sweep(r2, [inst(600)])
+        self.assertEqual((self.destroyed, rows[0][3]), ([9], "destroy"))
+        self.destroyed.clear()
+        self.fresh = None  # vast unreadable on the second reading: nothing is destroyed
+        rows = self.sweep(r2, [inst(600)])
+        self.assertEqual((self.destroyed, rows[0][3]), ([], "keep"))
+
+    def test_a_record_of_a_vanished_machine_is_deleted(self):
+        r2 = FakeR2()
+        r2.put("keep/9.json", self.record(120))
+        self.fresh = {"actual_status": "exited"}
+        self.sweep(r2, [])
+        self.assertIn("keep/9.json", r2.deleted)
+        r3 = FakeR2()
+        r3.put("keep/9.json", self.record(120))
+        self.fresh = {"actual_status": "running"}  # missing from the listing but alive: kept
+        self.sweep(r3, [])
+        self.assertEqual(r3.deleted, [])
+
+    def test_a_kept_machine_of_someone_elses_label_is_never_touched(self):
+        r2 = FakeR2()
+        r2.put("keep/9.json", self.record(-300))
+        rows = self.sweep(r2, [inst(600, label="mine-not-41bots")])
+        self.assertEqual((rows, self.destroyed), ([], []))
+
 
 if __name__ == "__main__":
     unittest.main()

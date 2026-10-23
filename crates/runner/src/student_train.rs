@@ -148,7 +148,15 @@ const SHARD_KEYS: [&str; 8] = [
 ];
 
 /// The keys of a curve point and of a listed bundle.
-const POINT_KEYS: [&str; 3] = ["size", "widths", "deals"];
+const POINT_KEYS: [&str; 7] = [
+    "size",
+    "widths",
+    "deals",
+    "seed",
+    "rank_weight",
+    "rank_temperature",
+    "stop_on",
+];
 const BUNDLE_KEYS: [&str; 3] = ["path", "sha256", "bytes"];
 
 /// The baselines `search student-check` knows.
@@ -178,18 +186,56 @@ pub(crate) struct Bundle {
 }
 
 /// One point of the curve: a training size, the hidden widths and the teacher deals per
-/// decision its targets are built from (`None`: every stored deal).
+/// decision its targets are built from (`None`: every stored deal), and the trainer's variant
+/// settings (all default: the run's own seed, the value loss alone, stopping on its validation
+/// value).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Point {
     pub size: u64,
     pub widths: String,
     pub deals: Option<u32>,
+    /// A seed of its own (`--seed`), instead of the run's.
+    pub seed: Option<u64>,
+    /// `--rank-weight` in thousandths (0: no decision-aware term).
+    pub rank_milli: u64,
+    /// `--rank-temperature` in millionths.
+    pub rank_temp_micro: u64,
+    /// `--stop-on decision`.
+    pub stop_decision: bool,
 }
 
+/// The default `--rank-temperature`, in millionths (0.01).
+pub(crate) const RANK_TEMP_MICRO: u64 = 10_000;
+
 impl Point {
-    /// Its directory name, the resume key: `n<size>-w<w1>x<w2>…`, then `-d<deals>` when cut.
+    /// A point with the run's own training settings.
+    pub fn plain(size: u64, widths: String, deals: Option<u32>) -> Point {
+        Point {
+            size,
+            widths,
+            deals,
+            seed: None,
+            rank_milli: 0,
+            rank_temp_micro: RANK_TEMP_MICRO,
+            stop_decision: false,
+        }
+    }
+
+    /// Its directory name, the resume key: `n<size>-w<w1>x<w2>…`, then `-d<deals>` when cut, `-s<seed>`
+    /// for a seed of its own, `-r<weight>t<temperature>` with a rank term (thousandths, millionths),
+    /// `-sd` when it stops on the decision loss.
     pub fn name(&self) -> String {
-        pair_name(self.size, &self.widths, self.deals)
+        let mut n = pair_name(self.size, &self.widths, self.deals);
+        if let Some(s) = self.seed {
+            n.push_str(&format!("-s{s}"));
+        }
+        if self.rank_milli > 0 {
+            n.push_str(&format!("-r{}t{}", self.rank_milli, self.rank_temp_micro));
+        }
+        if self.stop_decision {
+            n.push_str("-sd");
+        }
+        n
     }
 }
 
@@ -456,10 +502,52 @@ fn parse_points(v: &Value) -> Result<Vec<Point>, String> {
                     as u32,
             ),
         };
+        let seed = match o.get("seed") {
+            None | Some(Value::Null) => None,
+            Some(d) => Some(
+                d.as_u64()
+                    .ok_or_else(|| err(format!("{what}: seed must be a whole number")))?,
+            ),
+        };
+        // A decimal setting as a whole number of `unit`ths, refused when it is not one.
+        let scaled = |k: &str, unit: f64, d: Option<f64>| -> Result<u64, String> {
+            let Some(x) = o.get(k).filter(|v| !v.is_null()) else {
+                return d
+                    .map(|d| (d * unit).round() as u64)
+                    .ok_or_else(|| err(format!("{what}: {k} is needed")));
+            };
+            let x = x
+                .as_f64()
+                .filter(|x| x.is_finite() && *x >= 0.0)
+                .ok_or_else(|| err(format!("{what}: {k} must be a number, 0 or more")))?;
+            let n = (x * unit).round();
+            if (n / unit - x).abs() > 1e-9 {
+                return Err(err(format!(
+                    "{what}: {k} {x} is finer than 1/{unit} (it names the point's directory)"
+                )));
+            }
+            Ok(n as u64)
+        };
+        let rank_milli = scaled("rank_weight", 1e3, Some(0.0))?;
+        let rank_temp_micro = scaled("rank_temperature", 1e6, Some(0.01))?;
+        if rank_temp_micro == 0 {
+            return Err(err(format!("{what}: rank_temperature must be above 0")));
+        }
+        let stop_decision = match o.get("stop_on").and_then(Value::as_str) {
+            None | Some("val_loss") => false,
+            Some("decision") => true,
+            Some(x) => {
+                return Err(err(format!("{what}: stop_on {x:?} (val_loss or decision)")));
+            }
+        };
         let p = Point {
             size,
             widths,
             deals,
+            seed,
+            rank_milli,
+            rank_temp_micro,
+            stop_decision,
         };
         if out.contains(&p) {
             return Err(err(format!("{what}: the same point twice")));
@@ -621,11 +709,9 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
             sizes
                 .iter()
                 .flat_map(|&size| {
-                    normal.iter().map(move |w| Point {
-                        size,
-                        widths: w.clone(),
-                        deals: None,
-                    })
+                    normal
+                        .iter()
+                        .map(move |w| Point::plain(size, w.clone(), None))
                 })
                 .collect()
         }
@@ -1486,13 +1572,26 @@ impl Train<'_> {
             .args(["--batch", &self.q.batch.to_string()])
             .args(["--lr", &self.q.lr.to_string()])
             .args(["--patience", &self.q.patience.to_string()])
-            .args(["--seed", &self.q.seed.to_string()])
+            .args(["--seed", &point.seed.unwrap_or(self.q.seed).to_string()])
             .args(["--val-permille", &self.q.val_permille.to_string()])
             .args(["--threads", &threads.to_string()])
             .args(["--device", device])
             .args(["--max-minutes", &self.q.max_minutes.to_string()])
             .arg("--progress")
             .arg(&prog);
+        if point.rank_milli > 0 {
+            c.args([
+                "--rank-weight",
+                &(point.rank_milli as f64 / 1e3).to_string(),
+            ])
+            .args([
+                "--rank-temperature",
+                &(point.rank_temp_micro as f64 / 1e6).to_string(),
+            ]);
+        }
+        if point.stop_decision {
+            c.args(["--stop-on", "decision"]);
+        }
         let base = self.progress(
             "train",
             json!({ "size": size, "widths": widths, "deals": deals, "parts": n,
@@ -1580,7 +1679,10 @@ impl Train<'_> {
             files.insert(f.into(), json!(sha256_file(&dest.join(f))?.0));
         }
         let done = json!({
-            "size": size, "widths": widths, "deals": deals, "parts": n,
+            "size": size, "widths": widths, "deals": deals, "parts": n, "variant": name,
+            "seed": point.seed, "rank_weight": point.rank_milli as f64 / 1e3,
+            "rank_temperature": point.rank_temp_micro as f64 / 1e6,
+            "stop_on": if point.stop_decision { "decision" } else { "val_loss" },
             "part_files": feats[..n].iter().map(|(f, d)| json!({
                 "features": f.file_name().map(|x| x.to_string_lossy().into_owned()),
                 "decisions": d })).collect::<Vec<_>>(),
@@ -1663,7 +1765,7 @@ pub(crate) fn write_curve(out: &Path) -> Result<Value, String> {
             ));
         }
     }
-    found.sort_by(|a, b| (a.0, &a.1, a.2).cmp(&(b.0, &b.1, b.2)));
+    found.sort_by(|a, b| (a.0, &a.1, a.2, &a.3).cmp(&(b.0, &b.1, b.2, &b.3)));
     let mut rows = Vec::new();
     let mut baselines = Value::Null;
     for (size, widths, deals, dir) in &found {
@@ -1692,7 +1794,7 @@ pub(crate) fn write_curve(out: &Path) -> Result<Value, String> {
             by.insert(g.clone(), brief(group_row(&check["rows"], &g)));
         }
         rows.push(json!({
-            "size": size, "widths": widths,
+            "size": size, "widths": widths, "variant": done["variant"],
             "deals": if *deals == u64::MAX { Value::Null } else { json!(deals) },
             "train_decisions": report["data"]["train_rows"], "val_decisions": report["data"]["val_rows"],
             "epochs_run": report["history"].as_array().map_or(0, Vec::len),
@@ -1716,6 +1818,25 @@ pub(crate) fn write_curve(out: &Path) -> Result<Value, String> {
 
 fn brief_report(r: &Value) -> Value {
     json!({ "n": r["decisions"], "loss_pct": r["decision_loss_pct"], "agreement": r["agreement"] })
+}
+
+/// What a point's directory name adds to `n<size>-w<…>[-d<deals>]` (a seed, a rank term, the stop
+/// rule), for the curve's player column; empty for a plain point.
+fn variant_tag(r: &Value) -> String {
+    let v = r["variant"].as_str().unwrap_or_default();
+    let tail: Vec<&str> = v
+        .split('-')
+        .filter(|x| {
+            (x.starts_with('s') && x[1..].chars().all(|c| c.is_ascii_digit()) && x.len() > 1)
+                || x.starts_with('r') && x.contains('t')
+                || *x == "sd"
+        })
+        .collect();
+    if tail.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", tail.join(" "))
+    }
 }
 
 /// The curve as text: the overall table, then the loss by place and by score class.
@@ -1757,7 +1878,11 @@ pub(crate) fn curve_text(curve: &Value) -> String {
     for r in &rows {
         s.push_str(&format!(
             "{:<22} {:>9} {:>6} {:>9} {:>9} {:>7} {:>7} {:>8}\n",
-            format!("student {}", r["widths"].as_str().unwrap_or("?")),
+            format!(
+                "student {}{}",
+                r["widths"].as_str().unwrap_or("?"),
+                variant_tag(r)
+            ),
             r["size"].to_string(),
             deals(r),
             num(&r["test"]["loss_pct"]),
