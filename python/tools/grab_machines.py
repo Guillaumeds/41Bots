@@ -60,7 +60,7 @@ def generic_offer(exclude_machines):
     $1.20/h, reliability 0.90, 100 Mbps, 200 GB disk), not one of `exclude_machines` and not a CPU known to give far fewer threads."""
     body = json.dumps({"type": "on-demand", "rentable": {"eq": True}, "num_gpus": {"gte": 1}, "gpu_ram": {"gte": 6000},
                        "cpu_cores_effective": {"gte": GENERIC_MIN_THREADS}, "dph_total": {"lte": GENERIC_MAX_DPH},
-                       "reliability": {"gte": 0.90}, "inet_down": {"gte": 100}, "disk_space": {"gte": 200},
+                       "reliability": {"gte": 0.90}, "inet_down": {"gte": 500}, "disk_space": {"gte": 200},
                        "order": [["dph_total", "asc"]], "limit": 60})
     p = subprocess.run(["curl", "-sSL", "-m", "30", "-X", "POST", "https://console.vast.ai/api/v0/bundles/",
                         "-H", "Content-Type: application/json", "-d", body], capture_output=True, text=True)
