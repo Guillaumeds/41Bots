@@ -2,6 +2,12 @@
 
 **Current checkpoint: M3 (in progress)** (PLAN §13, as revised on 2026-10-13): PIMC bots, the exact early-trick yardstick and its N-curves, the trick-1 runs on rented machines, the gate against rules-v1. M0 (engine, reference, RNG, CI), M1 (equity table, arena, launcher) and M2 (solver spike) are done; see `docs/history/STATUS-history.md`.
 
+**SSH and Jupyter on every machine (owner 2026-10-23, `python/launcher/launch.py` `create_instance`):** the launcher rents every instance as
+`--jupyter --direct` (vast runtype `jupyter_direc ssh_direc ssh_proxy`: Jupyter and SSH together, the Connect button) and starts the boot
+script from the on-start command (`TAKE_ONSTART`), because vast's own init replaces the image's ENTRYPOINT. `"entrypoint_mode": true` in a
+manifest's `machine` block keeps the old mode. Trial `ssh-trial-1` (cheap CPU box, `keep: true`): DONE in 80 s, `ssh_host`/`ssh_port` and
+port 22 present in vast's instance record, Connect button shown, machine kept. Runs launched before this change (and from other branches) are in the old mode.
+
 ## O_2 Stage A (2026-10-22): plain labels win; G2 is no bulk source; volume run next
 Results in EXPERIMENTS D6 (`docs/m3-hybrid/o2-stagea-netcmp*.json`): on the 250k exact test set plain 1.5M ties exact 1.5M
 (SD 3.67% against 3.64%), plain 6M is clearly better (3.13%) at about 1/30 of the label cost, and G2 labels (0.42M) score the same as

@@ -1,0 +1,281 @@
+{
+ "format": 2,
+ "run_id": "o2-volnet-9k",
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "O_2 Stage B: the 2048-1024-256 network (seed 1, outcome head, early stopping on the exact s601 shard) on the 19,800,000 plain hybrid labels stored by the first 9 streams of o2-vol-3 (random + rules-v1 + harvested positions). Judged on the 250k exact test set with fortyone_nn.netcmp against p60 (plain 6M, SD 3.13%). Launched while the label run's last stream was still going: trains on the nine stored streams (19.8M rows). It searches every 30 s for up to 3 hours for an AMD EPYC 7742 machine (256 threads) under $0.90/h, the machine class of the label run (owner 2026-10-23: pick the label machine up again when its run ends). Relaunch as o2-volnet-9k with the Jupyter+SSH launcher and keep:true (keep_hours 8): the machine stays up after the run (owner 2026-10-23).",
+ "machine": {
+  "gpus": 1,
+  "min_gpu_ram_gb": 6,
+  "min_cores": 240,
+  "min_ram_gb": 64,
+  "min_inet_down": 100,
+  "max_dph": 0.9,
+  "disk_gb": 200,
+  "price_steps": [
+   0.9
+  ],
+  "wait_for_offer_min": 180,
+  "offer_poll_s": 30,
+  "tries_per_step": 3,
+  "keep": true,
+  "keep_hours": 8
+ },
+ "inputs": {},
+ "streams": [
+  {
+   "name": "volnet",
+   "priority": 1,
+   "kind": "hybrid_rung",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "cut": 2,
+    "check": false,
+    "widths": "2048,1024,256",
+    "head": "outcome",
+    "epochs": 40,
+    "patience": 6,
+    "batch": 1024,
+    "lr": 0.001,
+    "train_seed": 1,
+    "max_minutes": 0,
+    "device": "cuda",
+    "overlap": false,
+    "upload_shards": false,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    },
+    "label_inputs": [
+     {
+      "label_source": "hybrid",
+      "rows": 1600000,
+      "seed": 5711,
+      "set": "random",
+      "shard": "inputs/sha256/1c5a9dd82cb42a9e5177e819b236cb3fb8a25fdaca897f02e5b2489b007702c7",
+      "sidecar": "inputs/sha256/bb1b88a55a4e9b500427bd51764a2227157765fdbed79c6dbaec3e384d13fa69"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 400000,
+      "seed": 5731,
+      "set": "rules",
+      "shard": "inputs/sha256/c9c9aaeb58896457bc510a27fb4cf27533991092855e1db5176d96e889fa8a3e",
+      "sidecar": "inputs/sha256/a6d61972a930af0860db789030fdffb183c2751ec1bd34c76eb2dc440852ac1c"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 200000,
+      "seed": 5751,
+      "set": "harvest",
+      "shard": "inputs/sha256/e3724f02e40fde0b12d6f3c794c26a6b9482fbe4c915457a9cb4e8a6137e38c9",
+      "sidecar": "inputs/sha256/4604d351543832d064996af98cb458f1df4ef66de3a7bb6aa3bd55fa90cd4c06"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 1600000,
+      "seed": 5712,
+      "set": "random",
+      "shard": "inputs/sha256/aa8d2612a5a69270ffc34efb0d9023f1c4cca32c256421af87612322dad1f8ac",
+      "sidecar": "inputs/sha256/6e1b9298aab2391cb4b6df963109914fb83593802bf8701c5c0b25cb7b44f3b5"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 400000,
+      "seed": 5732,
+      "set": "rules",
+      "shard": "inputs/sha256/e290c41e1e5983664e9718f259b4f450b28d8c1fa3144632b464c31e3ba385eb",
+      "sidecar": "inputs/sha256/5bddeb2e08578defd2d1bbab4ec7678266a087b9c90baca63061577c215eae87"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 200000,
+      "seed": 5752,
+      "set": "harvest",
+      "shard": "inputs/sha256/6807eea49880d0343b72a2277460cff1dfa0995e5a9167592c7fdbd382e54a82",
+      "sidecar": "inputs/sha256/3a518b957246bf3ada6c39f084a8f6969694ee1f94b8254a2924f5596dbc1b74"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 1600000,
+      "seed": 5713,
+      "set": "random",
+      "shard": "inputs/sha256/58d5df192dfb9c96b5e72f89cffc26a7a31de845882f45ce83f5bb73dfba7db1",
+      "sidecar": "inputs/sha256/f69e49fe50560d1984d12b1e153ed1b247435ee338cbc4e24e341e21b89afa19"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 400000,
+      "seed": 5733,
+      "set": "rules",
+      "shard": "inputs/sha256/63f99383651699a6e196d08b156f20c63a6319fbeff888b848fc0faf865d9aae",
+      "sidecar": "inputs/sha256/27e6af8f8cb7a18b00f4735275e4a467b2f03d61ba858dce004b6378d5cdfedb"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 200000,
+      "seed": 5753,
+      "set": "harvest",
+      "shard": "inputs/sha256/302683327e5780c7e75ff77b3c148cb6d37372c9b411847a13467b884281eef4",
+      "sidecar": "inputs/sha256/4cc8a5798f5b8c5bcff72b3db9ba357283f07fb9ccefb1a918edaf589245040f"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 1600000,
+      "seed": 5714,
+      "set": "random",
+      "shard": "inputs/sha256/be9b582e9b46a145983e7c98bd14d7debad3f670a23533e3e38dcad9dcbdd143",
+      "sidecar": "inputs/sha256/15a273dd9a6df3f86ae7abe8894e190945883a43cc204a2d8f87037c4bbb5ad8"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 400000,
+      "seed": 5734,
+      "set": "rules",
+      "shard": "inputs/sha256/f4b2847a95ff92379c3187d6725c4da74aa7b6483a0efa849db099db040132ed",
+      "sidecar": "inputs/sha256/61b4932bec08f66cbe8c53341f347d183430941c62ed778f208cef3825d2e765"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 200000,
+      "seed": 5754,
+      "set": "harvest",
+      "shard": "inputs/sha256/d5d4e067850f01fa69fc7abcd1ff604a2d78007c7ca1fa0efb174123bfc02e40",
+      "sidecar": "inputs/sha256/aa225b8fb954c0a40adbb5ee556d68ee89d00951dcda51c2d2030fd6e8037d4b"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 1600000,
+      "seed": 5715,
+      "set": "random",
+      "shard": "inputs/sha256/3b51b17984661304893bfa10d40eae4e610c3699c4fbba3804916e0d06e4799a",
+      "sidecar": "inputs/sha256/11175bf94846e21dd18029fb1989d5496ef6cd7b594155c45b00bc7a68c6086e"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 400000,
+      "seed": 5735,
+      "set": "rules",
+      "shard": "inputs/sha256/76bbb364a35eea2097cd8570091fd257fdca03cd684e33fd72feb5c85687cce2",
+      "sidecar": "inputs/sha256/6fa25a99dca7cc4c1a353a1cfd04da230b8d721ae0cc5f1b82754a3bee4c4e43"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 200000,
+      "seed": 5755,
+      "set": "harvest",
+      "shard": "inputs/sha256/665d341ec9458f3a9fedb4a165c5d8ba0f3eb4f20fcd4e527c7bc2abfd863bfa",
+      "sidecar": "inputs/sha256/1ad4a8ce2b1fbdc51bc8bbd4cd36f0b4e992e62ca08caef8d40086eaa9ab38de"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 1600000,
+      "seed": 5716,
+      "set": "random",
+      "shard": "inputs/sha256/98da017059ad9f1b903ae84803fdc764fca6fdb428edb7e49a84f706e842390d",
+      "sidecar": "inputs/sha256/a4d1798320ffb38a3b6bbdd3da83c04e38b25360df52f39f94e89525518b9172"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 400000,
+      "seed": 5736,
+      "set": "rules",
+      "shard": "inputs/sha256/70648bc26e9e6000e7c8b697151591b1a5af55cc32c74aca1722c89638ed7c53",
+      "sidecar": "inputs/sha256/e1c8512f23f370487967ecfafcc00b9e243e179a620a455845eb75e65c04ae41"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 200000,
+      "seed": 5756,
+      "set": "harvest",
+      "shard": "inputs/sha256/cabe3828029ddf16f05fceb9def926fdaa75228e4010af5e458ec75fb7065684",
+      "sidecar": "inputs/sha256/ee870dde13a4e249c4930a199b68dd10931c8ebef2eb797ad841d7bce4bf339c"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 1600000,
+      "seed": 5717,
+      "set": "random",
+      "shard": "inputs/sha256/a49d52012a41b553fa6202ea3c0c8515d1433d2ff00c71189e6c033779786f55",
+      "sidecar": "inputs/sha256/6901c4aafeb3c8ff8827c4fd2ac2f58f17631288ee67a562c307c34d420c5549"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 400000,
+      "seed": 5737,
+      "set": "rules",
+      "shard": "inputs/sha256/9d35560bab24ae53a099b3f63b067d67d0feea9d01b8bfb7f84146922cdc18c0",
+      "sidecar": "inputs/sha256/fdf448cdcddf4ce2696dd62deef7e8834b9f5e120b6b02e2dd91d74d3dc4c05a"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 200000,
+      "seed": 5757,
+      "set": "harvest",
+      "shard": "inputs/sha256/b251dd301c52a76b45bcd89b1b160a5d957a339de5f7585aebccbbba233f7f4f",
+      "sidecar": "inputs/sha256/20b7789963b9b364bb79b3428d83624ad029b3f7ae13dd61f6addf3424e3a6e6"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 1600000,
+      "seed": 5718,
+      "set": "random",
+      "shard": "inputs/sha256/e5844aea25a3cc27fb5ca15e1ac6f6b8de4e14b15d9691c235aac2baa6d1015b",
+      "sidecar": "inputs/sha256/716c29fd5b740292f759f66f260224386d6e8e95bf75387703d04946fa7aa1a0"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 400000,
+      "seed": 5738,
+      "set": "rules",
+      "shard": "inputs/sha256/83ed92e806841085e7217205ed8999ede7a90fd856505a5eb4ce1a32fedb716c",
+      "sidecar": "inputs/sha256/ad8f6f4a68533e69b11cb5bbbf9256cd215ef2d4e2fa29e5ae9e5d7ae1615ae7"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 200000,
+      "seed": 5758,
+      "set": "harvest",
+      "shard": "inputs/sha256/34d48695e51552da2da94c703ced583e7933b465778eab9297be90809ed6fbd5",
+      "sidecar": "inputs/sha256/6ba564031307e4c5f8309968a69e3adfa80225546f93fbfff6282640ae82d067"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 1600000,
+      "seed": 5719,
+      "set": "random",
+      "shard": "inputs/sha256/35e15c862841cd49e63212d39c10a0356c6b34667029eda8fa20b999b8f38969",
+      "sidecar": "inputs/sha256/baf9baf457126b43e4dd694c4d1db3f7e08d27ae95a40bbb69656ad71a08991f"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 400000,
+      "seed": 5739,
+      "set": "rules",
+      "shard": "inputs/sha256/cda2b4a598025dd5cfaf4e8707157698f5dadf64fb2a936f3b7c041700aed5fa",
+      "sidecar": "inputs/sha256/b8f15536e62929ff7dbb042d5f73b3be2d31095f17da11230a9c0ef511e38bce"
+     },
+     {
+      "label_source": "hybrid",
+      "rows": 200000,
+      "seed": 5759,
+      "set": "harvest",
+      "shard": "inputs/sha256/e04a47db83a6ccbb9341134d42e1008bcfe5bfe4fefb860441272b7868e38268",
+      "sidecar": "inputs/sha256/f93a101f1ad1ac7e5c82deacc1abf2c32ed461cd754b93ef5e48a15981ac16d1"
+     },
+     {
+      "rows": 50000,
+      "seed": 601,
+      "set": "val",
+      "shard": "inputs/sha256/38de48356209cbec0f9ce41ceba28e6d5df52428abc0c866d443f9eb57964327",
+      "sidecar": "inputs/sha256/8833775c975aa4a5aedd806aac541363def78810db292d0bdd8fb15773989f93"
+     }
+    ]
+   }
+  }
+ ]
+}
