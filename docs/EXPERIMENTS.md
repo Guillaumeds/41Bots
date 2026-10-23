@@ -1161,11 +1161,12 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   then `recycle instance`, built for `o3-round.yml`, `--instance-id`) had also failed on 2026-10-21 (`o3r-1-1`,
   cause then not found); so the stored environment is not what the recycled container receives. Cause not
   found (trials 3 and 4 were stopped before they could be probed). The owner then reported that the O2 session's takeover of the
-  stopped instance 57259029 succeeded (details not recorded here), so the stopped-instance path works and only the recycle of a
-  running one is known to fail. Afterwards added: a taken-over machine that never starts is kept and recorded, never
+  hand-rented instance 57259029 succeeded; whether it was stopped or running at the time, and which calls were made, is not recorded here. So a
+  takeover of a hand-rented machine has worked once and one of a launcher-created kept machine has failed once; the cause of the difference is
+  not established (an untested guess: the kept machine's environment was fixed when the launcher created it). Afterwards added: a taken-over machine that never starts is kept and recorded, never
   destroyed (tested against the fake vast). Starting a *stopped* instance is tested against the fake vast only.
 - **Cost.** About $0.05 for the trial machine.
-- **Limits.** One spare machine type; **recycling a running instance fails on vast** (above; a stopped instance was taken over by the O2 session, reported); a
+- **Limits.** One spare machine type; **a takeover of a launcher-created kept machine failed on vast** (above; one of a hand-rented machine was reported to work, stopped or running not recorded); a
   machine with a different disk size is not tried; a boot failure (missing manifest, bad binary hash) still destroys the machine because
   the image's boot script does (an image change would be needed); the runner image and run workflow were not
   changed beyond the manifest keys and the cancel steps in `vast-run.yml`.
