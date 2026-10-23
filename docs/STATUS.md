@@ -16,7 +16,7 @@ rules-v1 + 2M harvested) in ten stored streams; then the real 2048-1024-256 netw
 (`python/tools/o2_train_manifest.py`, to be generalised), scored by `netcmp` against `p60`, followed by the audit loop. A
 trainer race on a late sidecar (killed `o2-g2arm-2`) is fixed in `train.py` (new binaries needed for streamed-parts runs).
 **To do before the audit loop:** reused validation with label_parts (path-forward.md, Session 2). Takeover of a hand-rented
-machine works (`vast-run.yml` `instance_id`, disk at least 80 GB).
+machine works (`vast-run.yml` `instance_id`; the instance's disk must be at least the run's own `disk_gb`, checked in `launch.py` `take_check`: 20 by default, 80 in the O_2 manifests; there is no fixed 80 GB limit; the disk is fixed when the instance is rented).
 
 ## START HERE (2026-10-22): more training data does not move O_3; choose the next lever
 
@@ -205,11 +205,13 @@ The owner wants the teachers and their deal counts decided last.
     died, and a boot failure (the image's boot script still destroys it: image change needed). The idle machine bills
     until it is taken over or destroyed; **`vast-cleanup` destroys it at `keep_until_utc`** (+5 min) and deletes the
     record of a vanished machine.
-  - **Takeover status (2026-10-22):** the owner reports the O2 session's takeover of the stopped instance 57259029
+  - **Takeover status (2026-10-22):** the owner reports the O2 session's takeover of the hand-rented instance 57259029
     (the same physical machine as 57253570) **succeeded** (how it was invoked is not recorded here). My own trial
     `keep-trial-2`, a takeover of a *running* kept instance, **failed**: the recycled container booted the OLD environment,
-    so the new run never heartbeated (and `o3r-1-1` on 2026-10-21 failed alike). So: a stopped instance (update then start)
-    is known to work; recycling a running one is not. A taken-over machine that does not start is now kept, not destroyed.
+    so the new run never heartbeated (and `o3r-1-1` on 2026-10-21 failed alike). **What is established:** a takeover of a hand-rented machine
+    worked once (O2 session; whether it was stopped or running is not recorded), one of a launcher-created kept machine failed once, and starting a
+    *stopped* instance (update then start) is tested only against the fake vast. The cause of the difference is not found. A taken-over machine that
+    does not start is now kept, not destroyed.
   - `"instance_id": N`: take that instance over instead of renting one (`launch.py` `take_instance`: `vastai update
     instance` with this run's image, environment and binaries, then `recycle instance`, which rebuilds the container in
     place; the disk and machine stay; the instance is relabelled `41bots-<run>` and its `keep/` record deleted). Use a
