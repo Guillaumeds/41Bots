@@ -73,8 +73,9 @@ found and fixed (ordered-writer window; a decision's 64 deals on one thread: now
 trick-2 student's golden-set loss halves: 0.0587% (3 seeds, SD 0.003) against 0.1195% for plain at 250,000 decisions, and at
 1,000,000 decisions 0.0389% alone, 0.080% at seat 1 (the existing S2: 0.0733% / 0.179%), top-3 pick 0.0030%. Integer network
 in R2 (E12). **Not yet in the app:** the new loss's 1M network is not adopted as S2 (needs the owner's decision and the
-`method: "student"` export check). **Next:** the G2 labelling (run `student-t2-gv2-250k-8` has a machine; parts 0-1 stored) then the
-G2 arm with the new loss; a loss search (weight, temperature) and 1M seeds are cheap follow-ups (about $0.4 each).
+`method: "student"` export check). **Early G2 look (E12, 50,000 decisions, 3 seeds):** G2 labels are not better than plain ones (plain loss -0.006 +/- 0.017) and are
+worse with the decision-aware loss (+0.024 +/- 0.009). The labelling (run `student-t2-gv2-250k-8`, 11+ of 50 parts, $0.72/h, about $15 in
+all) is still running for a second look at 100,000 decisions; stopping it saves about $10. **Next:** a loss search (weight, temperature) and 1M seeds are cheap follow-ups (about $0.4 each).
 
 **Records:** `docs/EXPERIMENTS.md` (every experiment and its result), `docs/RESEARCH.md` (the outside
 research), `docs/README.md` (index).

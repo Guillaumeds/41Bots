@@ -956,7 +956,7 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 - **Sources.** `tools/shortlist_time.py`, `crates/wasm/src/bin/shortlist_cost.rs`,
   `crates/wasm/tests/api.rs`, E8.
 
-### E12. S2 teacher A/B: plain H_3 against H_3 + G2 (session 1, started 2026-10-22; plain arm and decision-aware loss done, G2 arm open)
+### E12. S2 teacher A/B: plain H_3 against H_3 + G2 (session 1, started 2026-10-22; plain arm and decision-aware loss done, G2 arm: early look at 50,000 decisions done, continuing)
 - **Question.** Does a cleaner teacher (the same PIMC at trick 2 over 64 deals, but with G2's learned exact
   leaves) give a better trick-2 student than the plain H_3 teacher? Also: does the decision-aware loss
   (`rank_weight`) help, and how large is the retraining noise?
@@ -1013,14 +1013,30 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   inside the plain range (one seed). At 1,000,000 decisions that loss reaches 0.0389% alone (the existing S2: 0.0733%) and 0.080% at
   the leader seat (0.179%); the top-3 pick 0.0030% is the lowest measured. Networks (integer, content-addressed in R2):
   1M T=0.01 + stop `3d1189e3042dfc9537b1f575f87e42b15e91628541e2ff90678ba319959c6e03`, 1M T=0.003 + stop `0cd6d08264dd99fe96ba0e6c0b496b6cc96b5604a0ba44302df7764e9d336db7`; the others in the run's out bundle (`runs/student-t2-plain-2/out/plain/`).
+- **Result of the early G2 comparison at 50,000 decisions** (runs `student-t2-g2arm-50k-1` and `student-t2-plainarm-50k-1`, 2026-10-23;
+  each arm one GPU for 13-20 minutes, about $0.05-0.2; the same 10 parts of the rules stream, decisions 0-49,999, targets at 64 deals,
+  3 seeds, same golden-set check; labels differ only in the teacher):
+
+| labels | loss | alone, per seed | alone, mean (SD) | seat 1 | top-3 |
+|---|---|---|---|---|---|
+| plain H_3 | plain | 0.2718 / 0.2436 / 0.2140 | 0.2431 (0.029) | 0.342 | 0.0167 |
+| H_3 + G2 | plain | 0.2392 / 0.2312 / 0.2406 | 0.2370 (0.005) | 0.272 | 0.0139 |
+| plain H_3 | decision-aware (W=1, T=0.01, stop on decision loss) | 0.1095 / 0.1306 / 0.1249 | **0.1217 (0.011)** | 0.143 | 0.0089 |
+| H_3 + G2 | decision-aware (same) | 0.1323 / 0.1545 / 0.1505 | 0.1458 (0.012) | 0.150 | 0.0132 |
+
+  G2 labels minus plain labels (alone, difference of means with its standard error): plain loss -0.006 (0.017), i.e. no difference;
+  decision-aware loss **+0.024 (0.009)**, i.e. the G2-labelled network is worse by about 2.6 standard errors, and its top-3 pick is
+  worse too (0.0132 against 0.0089). The decision-aware loss beats the plain loss on both label sets (0.122 against 0.243 on plain
+  labels, 0.146 against 0.237 on G2 labels), as at 250,000 decisions.
 - **Cost.** The plain arm about $0.25 (45 minutes at $0.325/h); the golden checks took seconds each on the build VM. The G2
   labelling so far about $1.8 (E13); budget $30.
 - **Limits.** One seed for the 1,000,000-decision networks, the stop rule alone, plain at 320 deals and the learning-curve points; the
   noise (SD 0.020 for plain, 0.003-0.014 for the rank variants) is as large as the plain-320 difference; the rank settings (W = 1, T
   0.003 and 0.01, the stop rule) were tried on a small grid only (no other weight or temperature); every network is judged on the
   same 2,000-decision golden set (the stop rule's validation split is separate from it); the 1,000,000-decision runs use the base,
-  more-1 and more-2 shards as the existing S2 did; the G2 arm (the question of this entry) is not yet run, and all these results
-  were made with the plain H_3 teacher.
+  more-1 and more-2 shards as the existing S2 did; the G2 arm (the question of this entry) is not yet run, and all the 250,000- and
+  1,000,000-decision results were made with the plain H_3 teacher; the G2 comparison is at 50,000 decisions only (3 seeds per cell), where a
+  larger effect might still appear with more data.
 - **Sources.** `docs/vast/student-t2-gv2-250k.manifest.json`, `docs/m3-hybrid/path-forward.md` section 6
   session 1, `python/nn/fortyone_nn/student.py`, R2 `runs/student-t2-gv2-250k-{4,6}/out/rules/`.
 
