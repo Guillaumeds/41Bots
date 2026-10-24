@@ -557,6 +557,50 @@ fn parse_points(v: &Value) -> Result<Vec<Point>, String> {
     Ok(out)
 }
 
+/// One part bundle: fetched into `dir`, checked (SHA-256 and size), its `.inputs.json` read, the local copy removed.
+fn part_of(
+    r: &dyn Remote,
+    run: &str,
+    stream: &str,
+    dir: &Path,
+    index: u64,
+    b: &Bundle,
+) -> Result<Shard, String> {
+    let (path, sha, bytes) = (b.path.clone(), b.sha256.clone(), b.bytes);
+    let local = dir.join(format!("{stream}-{index:06}.tar.zst"));
+    if !retry(3, || r.get(&path, &local))? {
+        return Err(err(format!("{path} not found")));
+    }
+    let (h, n) = sha256_file(&local)?;
+    if h != sha || n != bytes {
+        return Err(err(format!(
+            "{path}: SHA-256 {h} and {n} bytes, its listing says {sha} and {bytes}"
+        )));
+    }
+    let data = fs::read(&local).map_err(|e| e.to_string())?;
+    let result = read_member(&data, "result.json")?
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .unwrap_or(Value::Null);
+    let file = result["file"].as_str().unwrap_or_default();
+    let name = format!("student/{file}.inputs.json");
+    let inputs = read_member(&data, &name)?.ok_or_else(|| {
+        err(format!(
+            "{run}/{stream} part {}: the bundle has no {name}: its shard was not shared \
+             content-addressed ({})",
+            result["part"], result["warning"]
+        ))
+    })?;
+    let v: Value = serde_json::from_slice(&inputs).map_err(|e| err(format!("{name}: {e}")))?;
+    let label = format!("{run}/{stream}/part {}", v["part"]);
+    let obj = v
+        .as_object()
+        .ok_or_else(|| err(format!("{name}: not an object")))?;
+    let shard = shard_of(obj, &label)?;
+    let _ = fs::remove_file(&local);
+    Ok(shard)
+}
+
+
 /// A stored shard from a part's `.inputs.json` (or a manifest entry of that form), checked: its
 /// keys, sizes and sidecar agree.
 fn shard_of(o: &Map<String, Value>, label: &str) -> Result<Shard, String> {
@@ -1142,7 +1186,9 @@ impl Train<'_> {
     }
 
     /// The stored shards of a stream's part bundles (`(chunk index, bundle)`, in order): each
-    /// bundle fetched and checked (SHA-256 and size), its part's `.inputs.json` read.
+    /// bundle fetched and checked (SHA-256 and size), its part's `.inputs.json` read. The bundles
+    /// are read `fetch_jobs` at a time (each is a separate small download, so one at a time took
+    /// about a second each: 2026-10-24, 500 bundles); the shards come back in the listed order.
     fn parts_of(
         &mut self,
         run: &str,
@@ -1150,41 +1196,32 @@ impl Train<'_> {
         dir: &Path,
         list: &[(u64, Bundle)],
     ) -> Result<Vec<Shard>, String> {
+        let jobs = (self.q.fetch_jobs as usize).max(1);
         let mut out = Vec::new();
-        for (index, b) in list {
-            let (index, path, sha, bytes) = (*index, b.path.clone(), b.sha256.clone(), b.bytes);
-            let local = dir.join(format!("{stream}-{index:06}.tar.zst"));
-            let (p2, l2) = (path.clone(), local.clone());
-            if !self.remote_call(move |r| retry(3, || r.get(&p2, &l2)))? {
-                return Err(err(format!("{path} not found")));
+        for batch in list.chunks(jobs) {
+            let r = Arc::clone(&self.remote);
+            let (run2, stream2, dir2) = (run.to_string(), stream.to_string(), dir.to_path_buf());
+            let batch: Vec<(u64, Bundle)> = batch.to_vec();
+            let done: Vec<Result<Shard, String>> = self.ctx.blocking(move || {
+                std::thread::scope(|sc| {
+                    let hs: Vec<_> = batch
+                        .iter()
+                        .map(|(index, b)| {
+                            let (r, run2, stream2, dir2) = (Arc::clone(&r), &run2, &stream2, &dir2);
+                            sc.spawn(move || part_of(&*r, run2, stream2, dir2, *index, b))
+                        })
+                        .collect();
+                    hs.into_iter()
+                        .map(|h| {
+                            h.join()
+                                .unwrap_or_else(|_| Err("a bundle-reading thread panicked".into()))
+                        })
+                        .collect()
+                })
+            });
+            for d in done {
+                out.push(d?);
             }
-            let (h, n) = sha256_file(&local)?;
-            if h != sha || n != bytes {
-                return Err(err(format!(
-                    "{path}: SHA-256 {h} and {n} bytes, its listing says {sha} and {bytes}"
-                )));
-            }
-            let data = fs::read(&local).map_err(|e| e.to_string())?;
-            let result = read_member(&data, "result.json")?
-                .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-                .unwrap_or(Value::Null);
-            let file = result["file"].as_str().unwrap_or_default();
-            let name = format!("student/{file}.inputs.json");
-            let inputs = read_member(&data, &name)?.ok_or_else(|| {
-                err(format!(
-                    "{run}/{stream} part {}: the bundle has no {name}: its shard was not shared \
-                     content-addressed ({})",
-                    result["part"], result["warning"]
-                ))
-            })?;
-            let v: Value =
-                serde_json::from_slice(&inputs).map_err(|e| err(format!("{name}: {e}")))?;
-            let label = format!("{run}/{stream}/part {}", v["part"]);
-            let obj = v
-                .as_object()
-                .ok_or_else(|| err(format!("{name}: not an object")))?;
-            out.push(shard_of(obj, &label)?);
-            let _ = fs::remove_file(&local);
         }
         Ok(out)
     }
