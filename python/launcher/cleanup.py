@@ -124,6 +124,13 @@ def decide(inst: dict, state: dict, now: float, everything: bool = False) -> tup
         return "destroy", "the 'all' option"
     status = inst.get("actual_status")
     start = parse_time(inst.get("start_date")) or now
+    # A taken-over instance keeps its original start_date (the earlier rental), but its new run's container only
+    # started when the run was launched (runs/<run>/manifest.json is written then): the silence rules count from
+    # there. Without this a takeover of an old machine was destroyed as "no heartbeat in 928 min of life" while
+    # its container was still booting (2026-10-24, the 3060 box, S1 training).
+    run_start = state.get("run_start")
+    if run_start is not None:
+        start = max(start, run_start)
     # Heartbeats of an earlier machine of the same run do not count as this one's.
     beats = [t for t in state.get("heartbeats") or [] if t >= start - 60]
     # Offline means vast has lost touch with the host; a run that still heartbeats to R2 is
@@ -249,6 +256,7 @@ def run_state(r2, run_id: str) -> dict:
     return {
         "markers": {m: r2.mtime(f"runs/{run_id}/{m}") for m in ("DONE", "FAILED")},
         "stop": r2.mtime(f"runs/{run_id}/STOP"),
+        "run_start": r2.mtime(f"runs/{run_id}/manifest.json"),
         "heartbeats": [t for k, t in r2.list(f"runs/{run_id}/heartbeat/") if k.endswith(".json")],
         "watch": get_json(r2, f"runs/{run_id}/watch.json"),
     }

@@ -26,8 +26,9 @@ def inst(start_min_ago: float, status: str = "running", dph: float = 1.0, label:
             "cpu_util": cpu}
 
 
-def state(beat_min_ago=None, markers=None, stop_min_ago=None, watch=None):
+def state(beat_min_ago=None, markers=None, stop_min_ago=None, watch=None, run_start_min_ago=None):
     return {"markers": {k: NOW - v * MIN for k, v in (markers or {}).items()},
+            "run_start": None if run_start_min_ago is None else NOW - run_start_min_ago * MIN,
             "stop": None if stop_min_ago is None else NOW - stop_min_ago * MIN,
             "heartbeats": [] if beat_min_ago is None else [NOW - beat_min_ago * MIN],
             "watch": watch or {}}
@@ -79,6 +80,14 @@ class DecideTest(unittest.TestCase):
         self.assertEqual(self.d(inst(59), state()), "keep")
         self.assertEqual(self.d(inst(61), state()), "destroy")
         self.assertIn("no heartbeat at all in its 61 min of life", cleanup.decide(inst(61), state(), NOW)[1])
+
+    def test_taken_over_old_machine_counts_from_its_runs_launch(self):
+        # 2026-10-24: a machine rented 928 minutes ago and taken over by a new run (runs/<run>/manifest.json written 8 minutes
+        # ago) was destroyed as "no heartbeat at all in its 928 min of life" while its new container was booting.
+        self.assertEqual(self.d(inst(928), state(run_start_min_ago=8)), "keep")
+        self.assertEqual(self.d(inst(928), state(run_start_min_ago=59)), "keep")
+        self.assertEqual(self.d(inst(928), state(run_start_min_ago=61)), "destroy")  # a takeover that never starts is still caught
+        self.assertEqual(self.d(inst(928), state()), "destroy")  # no record of the run's launch: the old rule
 
     def test_never_heartbeated_limit_covers_the_launchers_slowest_start(self):
         # The launcher waits for an advancing image pull up to PULL_CEILING_MIN minutes from renting and
