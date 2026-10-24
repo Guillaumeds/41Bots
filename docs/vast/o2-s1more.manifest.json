@@ -1,12 +1,12 @@
 {
  "format": 2,
- "run_id": "o2-s1more-3",
+ "run_id": "o2-s1more-4",
  "run_seed": 1,
  "threads": null,
  "benchmark_seconds": 0,
  "upload_every_s": 300,
  "heartbeat_every_s": 30,
- "note": "Owner 2026-10-24: 250,000 more S1 teacher labels at 64 deals (decisions 250,001-500,000 of S1's learning curve), so that S1 can be trained at 500,000 decisions: D14 shows the loss still falling (0.0689 / 0.0564 / 0.0404% on copper at 50,000 / 100,000 / 250,000). Same teacher as o2-copper-s1-1 (H_2 + the adopted O_2 13152c24, 64 deals, rules-v1 150,000 + mixed 100,000), new generator seeds 7821 and 7822, chunks of 1,000 decisions (a 500-decision chunk spent about 40 of its 105 s on setup that every chunk repeats). Estimated 12 h and about $5 on a 245-thread EPYC 7B12 at $0.328/h (D13: 21,000 decisions an hour at 1,000-decision chunks); about 18 h and $10 on a 192-thread EPYC 7K62 at $0.563/h. Rented directly (PUT asks) as instance 57517251 because vast-run.yml's own offer lookup reported the Thailand offer 36863856 as not on offer, then taken over. Attempt o2-s1more-2: the takeover did not start (the instance kept running vastai's base image; its Jupyter log: no such preferred dir /workspace), the machine was kept; this attempt o2-s1more-3 repeats the takeover 20 minutes later.",
+ "note": "Owner 2026-10-24: 250,000 more S1 teacher labels at 64 deals (decisions 250,001-500,000 of S1's learning curve), so that S1 can be trained at 500,000 decisions: D14 shows the loss still falling (0.0689 / 0.0564 / 0.0404% on copper at 50,000 / 100,000 / 250,000). Same teacher as o2-copper-s1-1 (H_2 + the adopted O_2 13152c24, 64 deals, rules-v1 150,000 + mixed 100,000), new generator seeds 7821 and 7822, chunks of 1,000 decisions (a 500-decision chunk spent about 40 of its 105 s on setup that every chunk repeats). Estimated 12 h and about $5 on a 245-thread EPYC 7B12 at $0.328/h (D13: 21,000 decisions an hour at 1,000-decision chunks); about 18 h and $10 on a 192-thread EPYC 7K62 at $0.563/h. Rented directly (PUT asks) as instance 57517251 because vast-run.yml's own offer lookup reported the Thailand offer 36863856 as not on offer, then taken over. Attempt o2-s1more-2: the takeover did not start (the instance kept running vastai's base image; its Jupyter log: no such preferred dir /workspace), the machine was kept; this attempt o2-s1more-3 repeats the takeover 20 minutes later. Attempt o2-s1more-3: the container ran our image but gave no heartbeat in 15 minutes (its log showed only the Jupyter server); o2-s1more-4 repeats the takeover on the same instance.",
  "machine": {
   "min_cores": 190,
   "min_ram_gb": 96,
