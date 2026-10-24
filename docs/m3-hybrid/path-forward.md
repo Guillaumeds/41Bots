@@ -40,8 +40,8 @@ here is running. Every number is cited to `docs/EXPERIMENTS.md` (written "E4", "
 7. **The watcher needs a CPU allow-list** (AMD EPYC or Threadripper): a thread-count rule alone took a Xeon Phi box. Direct rent bypasses the launcher's own refusals.
 
 ### Open (owner's plan, 2026-10-23)
-- Finish the S1 teacher labels (`o2-copper-s1-1`, expected end about 08:15 UTC on 2026-10-24), train S1 with the decision-aware loss, test S1 against the bronze
-  set (owner, 2026-10-23), then ship (sessions 3-5 below).
+- S1 labels (250,000 decisions) and test set are stored and S1 is trained at 250,000 decisions (EXPERIMENTS D13-D14): decision-aware 0.0472% against plain 0.0853% on its
+  test set. Remaining: test S1 against the bronze set (on Cloudflare per the owner; key to be given), then ship; more data (the curve is still falling) only if wanted.
 - Open code items: the shared input cache and larger teacher chunks (lesson 5); a stop rule on sibling regret per epoch for oracle training (D12 showed value
   validation is not the decision); reuse of a stored validation shard with `label_parts` above 1 (`crates/runner/src/hybrid/reuse.rs`).
 - The playout yardstick (session 3) needs no O_2 and is not started; the app side of S2 (STATUS) is the owner's.

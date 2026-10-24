@@ -11,49 +11,32 @@
   helps the value error slowly and not the decisions, capacity does not help, the audit loop's targeted round did not (D6-D11).
 - **O_3 (trick 3) unchanged:** f5766a. The sibling ranking loss at weight 1 was clearly worse than its control (D12).
 - **S2 (trick-2 student) shipped** (2026-10-23): `3d1189e3...`, golden loss 0.0389% (3-seed mean 0.0456%); open items in "S2, state" below.
-- **S1 (trick-1 student), next:** teacher labels (250,000 trick-1 decisions at 64 deals, teacher H_2 + O_2 round 1) are being made as run
-  `o2-copper-s1-1` on the cheap machine below; copper (2,000 decisions at 128 deals) is stored; expected end about 08:15 UTC on 2026-10-24, about
-  $4.70 in all (D13). Then (owner, 2026-10-23): train S1 with the decision-aware loss of E12 (`rank_weight` 1, `rank_temperature` 0.01, stop on
-  decision loss), test S1 against the bronze set (the owner, 2026-10-23: "after this run of the bronze set finishes"), and ship.
-- **Machines:** one is running, instance 57404109 (AMD EPYC 7B12, 245 usable threads, RTX 3060, $0.33/h, label "41bots - S1 ... ETA"); nothing
-  else is rented and no watcher is on. Rules (CLAUDE.md): rare cheap machines are stopped by hand, never killed by a cancel; labels read
-  `41bots - <session> (<what>) - ETA <HH:MM Irish>`; every rental is Jupyter + SSH. What the launcher and the takeover did on 2026-10-22/23, with
-  the failures and fixes: `docs/EXPERIMENTS.md` A10.
+- **S1 (trick-1 student), first results (2026-10-24, D13-D14):** the 250,000 teacher labels (H_2 + O_2 round 1, 64 deals) are stored (run
+  `o2-copper-s1-1`, $4.95); S1 trained at 250,000 decisions: the decision-aware loss gives **0.0472% (3 seeds) against 0.0853% plain** on the S1 test set
+  (2,000 decisions, 128 deals; copies-its-teacher, not truth), rules-v1 0.343%, random 0.770%. Decision-aware seed 1 at 50,000 / 100,000 / 250,000 decisions:
+  0.0824 / 0.0679 / 0.0469, still falling (about 0.03% extrapolated at 1M, one seed); half the deals (32) 0.0512. Not yet judged against the bronze set;
+  not shipped. Next: the handoff below.
+- **Machines:** none rented, no watcher on (2026-10-24 12:30 UTC). Rules (CLAUDE.md): rare cheap machines are stopped by hand, never killed by a cancel;
+  labels read `41bots - <session> (<what>) - ETA <HH:MM Irish>`; every rental is Jupyter + SSH. **Binaries: `bin_sha` dd19e4d66cef (the 2c0774d of 2026-10-22
+  refuses the S2/S1 trainer options).** What the launcher and the takeover did on 2026-10-22/24, with the failures and fixes: `docs/EXPERIMENTS.md` A10.
 - **Records of these sessions:** `docs/EXPERIMENTS.md` D6-D13, A10 and the tables in parts F-H; `docs/RESEARCH.md` sections 8, 10, 12;
   `docs/m3-hybrid/path-forward.md` section 0; the older state paragraphs moved to `docs/history/STATUS-history.md` ("Moved from STATUS on 2026-10-23").
 
-### Handoff: the line in the sand (2026-10-23, written for the next session)
-Everything up to here is finished, documented and on `main`. What is open, in order:
-1. **S1 teacher labels are still being made** by run `o2-copper-s1-1` (manifest `docs/vast/o2-copper-s1.manifest.json`) on the kept machine, instance
-   57404109 (AMD EPYC 7B12 server chip, 245 usable threads, RTX 3060, $0.33/h). It is 504 chunks in all: `copper` 4 (done), `s1rules` 300, `s1mixed` 200,
-   each of 500 decisions at 64 deals (copper at 128). Measured at 20:16 UTC on 2026-10-23: 78 chunks done, 105 s median per chunk, about 15 h in all, so
-   the end is **about 08:15-09:15 UTC on 2026-10-24** (9:15-10:15 Irish). Look: `launch.latest_heartbeat('o2-copper-s1-1')` (queue shows done/left per
-   stream) and `launch.r2_list('runs/o2-copper-s1-1/out/')` (one `.tar.zst` per finished chunk, `out/<stream>/<chunk>-<hash>.tar.zst`; 504 when done).
-   **The machine is kept** (`keep: true`, `keep_hours: 8`) after the run ends and keeps billing $0.33/h until destroyed. Per CLAUDE.md the owner stops a
-   rare cheap machine by hand: tell the owner it has finished, do not destroy it yourself. If the run dies before the end, the finished chunks are in R2
-   and training can use whatever is stored (a smaller first point), or the missing chunks can be re-run by relaunching with the finished ones skipped
-   (`skip_parts`/`bundles`, as in the S2 manifests); the launch recipe is in "How to run things" below and in `docs/EXPERIMENTS.md` A10.
-2. **Train S1** (a new session, owner's plan): a `student_train` run on the stored labels, the template being the S2 manifests
-   `docs/vast/student-t2-plainarm-50k.manifest.json` (settings) and `student-t2-seeds-1m.manifest.json` (how stored teacher parts are listed as
-   `train_inputs` with `bundles`). Settings that won for S2 (E12): `rank_weight` 1, `rank_temperature` 0.01, `stop_on` `decision`, 512-256, batch 256,
-   lr 0.001, patience 4, 3 seeds; first point 250,000 decisions (the 250,000 labels above), plain loss against decision-aware, **before any more data is
-   bought** (path-forward Session 4). Two things nobody has done yet, so check them with a small run first: a trick-1 `student_train` (the code accepts
-   `trick` 1 or 2 in `student_teacher`; `student_train` has only been run on trick-2 data) and using `copper` (stream `copper` of `o2-copper-s1-1`,
-   seed 7801, 128 deals) as the `test_inputs`. It needs a GPU (the 3060 box above would do, taken over with `instance_id`, or any rental under the floors).
-3. **Judge S1** against the bronze set, as the owner asked (2026-10-23, "after this run of the bronze set finishes"). What the repo knows about it:
-   the bronze set was planned as O_2's test set, trick-1 decisions valued exactly through tricks 1 and 2 and then by O_3 alone (`docs/m3-hybrid/o3-rounds.md`
-   top); the nearest thing built was the trick-1 silver set (valued by H_3; `docs/m3-hybrid/silver.md`, EXPERIMENTS D4), whose attempts stopped at 143-471
-   of 32,000 worlds, so **no trick-1 golden, silver or bronze set is stored**. The owner's bronze run is outside this repo's records: ask the owner where
-   its results are before running anything. Without it, the cheap yardsticks in `path-forward.md` Session 3 are: **copper** (stored: how well S1 copies
-   its teacher) and a capped small silver/bronze anchor ($5-15). Report results as "copies its teacher to X%" and as an estimate against truth, never
-   "proven 0.01%" (no trick-1 golden set; owner, 2026-10-16).
-4. **Ship** S1 with S2 (`method: "student"`, `docs/WASM-API.md` section 7); the app side of S2 is still the owner's (item (a) in "S2, state").
-5. **Record** each result in `docs/EXPERIMENTS.md` (D13 holds the teacher-data entry and says "in progress"; fill in the final rows, rates and cost
-   there, then add the S1 training under E and the ship record), update this page, `docs/README.md` and `path-forward.md`.
-
-**State of the machine room on 2026-10-23:** one rental (57404109), no watcher running, no other session using a machine (S2's was destroyed by the
-owner). Check `vast-status.yml` before renting, and read `docs/EXPERIMENTS.md` A10 first: it lists every launcher and takeover failure of these two days
-with its fix (wait several minutes before the recycle, `force_take` for hand-labelled machines, direct rent, CPU allow-list for the watcher).
+### Handoff (2026-10-24, after the first S1 results)
+Done and documented: O_2 adopted; S1 teacher labels (250,000 decisions) and test set stored; S1 trained at 250,000 decisions (D13, D14). Open, in order:
+1. **Judge S1 against the bronze set.** The owner says the bronze results are on Cloudflare (R2); no object or run named bronze was found (searched
+   `runs/` since 2026-10-22 and `inputs/`), so ask the owner for the run id or key. The planned definition: O_2's test set, trick-1 decisions valued exactly
+   through tricks 1 and 2 and then by O_3 alone (`docs/m3-hybrid/o3-rounds.md`). Report the result as an estimate (no trick-1 golden set; owner, 2026-10-16).
+2. **Pick the S1 candidate and ship it:** the decision-aware seeds 1-3 (`6ec1b9cc...`, `97df2a54...`, `b20445c3...`, D14) are the candidates; ship with S2
+   (`method: "student"`, `docs/WASM-API.md` section 7); the app side is the owner's (item (a) in "S2, state").
+3. **More data for S1, if wanted:** the curve is still falling (D14). Teacher cost on the cheap EPYC 7B12 box is $19.5 per million decisions, 17,000 an hour
+   (D13): the next 250,000 take about 12-15 h and $5. A prepared manifest is not committed; copy `docs/vast/o2-copper-s1.manifest.json` with new seeds
+   (7821, 7822), chunks of 1,000 decisions (a 500-decision chunk spends 40 of 105 s on setup). Then retrain with `fetch_jobs` 32 on a machine with one good GPU
+   and 32-64 threads (~$0.15-0.40/h); training 9 networks at 250,000 decisions is 25 minutes after about 10 minutes of reading and encoding.
+4. **Rentals:** launch with `vast-run.yml` and `bin_sha` dd19e4d66cef. Taking over a hand-rented instance works (the S1 failures were the old binaries,
+   not the takeover), but the cleanup job destroyed one taken-over machine before 2026-10-24 09:25 (fixed). Do not relabel or call a machine while the
+   launcher rebuilds its container unless needed. Check `vast-status.yml` before renting.
+5. **Record** each result in `docs/EXPERIMENTS.md`, this page, `docs/README.md` and `path-forward.md`.
 
 **Session 0 (free checks) done, 2026-10-22, no rental (E9-E11, branch `claude/confident-albattani-sck9ru`):**
 1. *Shortlist + search at 25-100 deals* (S2, O_3, exact golden set): top-3 + search beats S2 alone

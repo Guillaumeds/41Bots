@@ -994,19 +994,62 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   sibling rows (principal lines driven by f5766a); a smaller weight and a stop rule on sibling regret were not tried.
 - **Sources.** R2 `runs/o3-pair-1/out/base_s1/`, `out/w1_s1/`; `docs/m3-hybrid/o3-pair-score.json`; `docs/m3-hybrid/sibrank.md` section 6.
 
-### D13. Trick-1 teacher data with the adopted O_2 (run `o2-copper-s1-1`, 2026-10-23, in progress)
+### D13. Trick-1 teacher data with the adopted O_2 (run `o2-copper-s1-1`, 2026-10-23/24)
 - **Question.** What does the trick-1 teacher cost on a cheap machine with the adopted O_2, and what do the copper set and the first S1 training
   labels look like?
 - **Method.** `docs/vast/o2-copper-s1.manifest.json`: `student_teacher` chunks of 500 trick-1 decisions, teacher H_2 with O_2 round 1 of D11 (integer
   `13152c24`, `inputs/sha256/13152c24...`); copper = 4 chunks at 128 deals (seed 7801, rules-v1 positions); S1 labels = 300 chunks of rules-v1
   positions (seed 7811) and 200 chunks of mixed positions (seed 7812), 64 deals each, 250,000 decisions. AMD EPYC 7B12 (245 usable threads), RTX 3060,
-  $0.328/h, taken over by hand (instance 57404109; takeover 3 min).
-- **Result so far.** Copper (2,000 decisions at 128 deals) finished: chunks of 107-124 s, about 15,600 decisions an hour. Rules-v1 chunks at 64 deals
-  (13 read): median 65 s of compute for 500 decisions (about 29,700 decisions an hour); with about 40 s of setup between chunks (`setup: table v0`,
-  the equity table is rebuilt in every chunk) the wall time is 103-107 s a chunk, 16,800 decisions an hour. The earlier measurement (E6) was 12,489
-  decisions an hour at 64 deals on an EPYC 7B13. At 36 chunks of 500 at 19:07 UTC: $0.41, estimate for all 500 chunks about 13 h more.
-- **Limits.** Mixed positions were not yet measured; the run is not finished, its final numbers are not recorded here.
-- **Sources.** R2 `runs/o2-copper-s1-1/out/{copper,s1rules,s1mixed}/`; E6.
+  $0.328/h, taken over by hand (instance 57404109; takeover 3 min). The S1 test set (`docs/vast/o2-s1test.manifest.json`, run `o2-s1test-2`): 4 chunks of
+  500 decisions at 128 deals, role test (the trainer's test seed 32343; copper has role train and cannot serve), rules-v1 positions, same teacher, on an
+  AMD EPYC 7K62 (192 usable threads), $1.05/h.
+- **Result.** All 504 chunks finished (copper 4, `s1rules` 300, `s1mixed` 200); the run's elapsed time was 54,385 s (15.1 h), about $4.95 at $0.328/h
+  (the launcher's report shows only its first 331 minutes, $1.81, before it handed the machine over). Chunks of 105 s median for 500 decisions at 64
+  deals; copper chunks 107-124 s. Rules-v1 chunks: 65 s of compute for 500 decisions (about 29,700 decisions an hour) plus about 40 s of setup
+  (`setup: table v0`, the equity table is rebuilt in every chunk): 16,800-17,100 decisions an hour, **$19.5 per million decisions** on this machine.
+  The earlier measurement (E6) was 12,489 decisions an hour at 64 deals on an EPYC 7B13 ($1.05/h, about $84 per million). The test set took 20.6
+  minutes and $0.36 (the first attempt, `o2-s1test-1`, was stopped by the low-CPU watchdog after one chunk, 15.5 minutes, $0.27).
+- **Limits.** One machine type; the rate holds for rules-v1 and mixed positions at 64 deals without racing or the restricted solve; the cost per
+  million decisions assumes the same machine is available.
+- **Sources.** R2 `runs/o2-copper-s1-1/out/{copper,s1rules,s1mixed}/`, `runs/o2-s1test-2/out/test/`; E6.
+
+### D14. S1, the trick-1 student: plain against decision-aware loss, and the first learning-curve points (run `student-t1-250k-10`, 2026-10-24)
+- **Question.** Does the decision-aware loss of E12 (`rank_weight` 1, `rank_temperature` 0.01, stop on the validation decision loss) lower a trick-1
+  student's loss against its teacher as it did at trick 2, and how does that loss fall with the number of decisions and of teacher deals?
+- **Method.** `docs/vast/student-t1-250k.manifest.json`: `student_train` on the 250,000 stored decisions of D13 (300 `s1rules` + 200 `s1mixed` parts,
+  spread order), students 512,256 (`student-v1` inputs), batch 256, lr 0.001, patience 4, 40 epochs at most, 5% validation split. Nine networks: plain
+  loss and decision-aware loss, seeds 1-3, at 250,000 decisions and 64 deals; the decision-aware loss at seed 1 with 50,000 and 100,000 decisions
+  (64 deals) and with 250,000 decisions cut to 32 deals. Judged by `search student-check` on the 2,000-decision test set of D13 (128 deals, role test),
+  beside the rules-v1 and random baselines. Nevada machine, 4x RTX 5070 Ti (one used), AMD EPYC 7K62 (192 usable threads), $1.34/h, rented by offer
+  id, not kept; binaries `dd19e4d66cef` (2026-10-23).
+- **Result.** Loss = the teacher's best mean value less the value of the player's card, % of the deciding pair's money chance (95% upper bound in
+  brackets; agree = % of decisions on the teacher's best card):
+
+| player | decisions | deals | seeds | loss % | agree % |
+|---|---|---|---|---|---|
+| random | | | | 0.770 [0.876] | 30.9 |
+| rules-v1 | | | | 0.343 [0.392] | 47.7 |
+| S1 plain loss | 250,000 | 64 | 1 / 2 / 3 | 0.0735 / 0.0876 / 0.0947, mean 0.0853 (SD 0.011) | 60.2 / 58.5 / 58.7 |
+| **S1 decision-aware loss** | 250,000 | 64 | 1 / 2 / 3 | **0.0469 / 0.0445 / 0.0503, mean 0.0472 (SD 0.003)** | 65.5 / 64.6 / 64.8 |
+| S1 decision-aware loss | 100,000 | 64 | 1 | 0.0679 [0.0808] | 61.7 |
+| S1 decision-aware loss | 50,000 | 64 | 1 | 0.0824 [0.1029] | 60.1 |
+| S1 decision-aware loss | 250,000 | 32 | 1 | 0.0512 [0.0607] | 63.3 |
+
+  Every decision-aware seed is below every plain seed; the mean is 45% lower. By place in the trick the decision-aware leader-seat loss is 0.063 / 0.057 /
+  0.067 against 0.107 / 0.112 / 0.135 plain; in score class S4, 0.094 / 0.082 / 0.097 against 0.110 / 0.113 / 0.178. The decision-aware loss at seed 1
+  falls from 0.0824 (50,000) to 0.0679 (100,000) to 0.0469 (250,000): a power-law slope of about 0.35-0.40 in the number of decisions, not flattened.
+  Halving the deals (64 to 32) raised it from 0.0469 to 0.0512. Integer networks (content-addressed in R2, `runs/student-t1-250k-10/out/s1/`):
+  decision-aware seeds 1 `6ec1b9cc38b4...`, 2 `97df2a54e1c3...`, 3 `b20445c31bde...` (full keys in the run's `done.json` files); plain seeds 1
+  `70812487304221...`, 2 `b591b5d90571...`, 3 `bf8f5082049e...`; 100,000-decision `8e01a3e74fe9...`, 50,000-decision `31643f7f6b49...`, 32-deal `0e6e233dfe5b...`.
+- **Cost.** 84.2 minutes, $1.87: 20 minutes reading the 504 part bundles one at a time (about 2 s each), 30 minutes encoding 4 parts at a time
+  (`fetch_jobs` default 4 of 192 threads; 32 is allowed), 2.5-3.4 minutes training each network. Both steps are fixed afterwards: the inputs step reads
+  `fetch_jobs` at a time (commit `f08888c`) and the manifest sets `fetch_jobs` 32.
+- **Limits.** The loss is measured against the teacher's own values (H_2 + O_2, 128 deals on 2,000 decisions), not against exact truth: no trick-1
+  golden set exists, and the bronze set was not used; a student better than its teacher scores worse on it. One seed for the three slope points; the
+  slope is from one seed per size; no 500,000 or 1,000,000-decision point has been trained. The 32-deal difference (0.0043) is about the size of the
+  decision-aware seed spread of the 250,000 points together (SD 0.003).
+- **Sources.** `docs/vast/student-t1-250k.manifest.json`, R2 `runs/student-t1-250k-10/out/s1/` (`student/curve.txt` and the per-network `done.json`),
+  E12, D13. Nine earlier launches of this run failed for a reason unrelated to training: A10.
 
 ---
 
