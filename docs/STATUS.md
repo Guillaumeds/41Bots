@@ -14,8 +14,8 @@
 - **S1 (trick-1 student), first results (2026-10-24, D13-D14):** the 250,000 teacher labels (H_2 + O_2 round 1, 64 deals) are stored (run
   `o2-copper-s1-1`, $4.95); S1 trained at 250,000 decisions: the decision-aware loss gives **0.0472% (3 seeds) against 0.0853% plain** on the S1 test set
   (2,000 decisions, 128 deals; copies-its-teacher, not truth), rules-v1 0.343%, random 0.770%. Decision-aware seed 1 at 50,000 / 100,000 / 250,000 decisions:
-  0.0824 / 0.0679 / 0.0469, still falling (about 0.03% extrapolated at 1M, one seed); half the deals (32) 0.0512. Not yet judged against the bronze set;
-  not shipped. Next: the handoff below.
+  0.0824 / 0.0679 / 0.0469, still falling (about 0.03% extrapolated at 1M, one seed); half the deals (32) 0.0512. On the copper set (owner, 2026-10-24: the bronze set never finished, one complete decision):
+  decision-aware 0.0416% (seeds 0.0404 / 0.0386 / 0.0457) against plain 0.0766%, rules-v1 0.371%. Not shipped. Next: the handoff below.
 - **Machines:** none rented, no watcher on (2026-10-24 12:30 UTC). Rules (CLAUDE.md): rare cheap machines are stopped by hand, never killed by a cancel;
   labels read `41bots - <session> (<what>) - ETA <HH:MM Irish>`; every rental is Jupyter + SSH. **Binaries: `bin_sha` dd19e4d66cef (the 2c0774d of 2026-10-22
   refuses the S2/S1 trainer options).** What the launcher and the takeover did on 2026-10-22/24, with the failures and fixes: `docs/EXPERIMENTS.md` A10.
@@ -24,9 +24,8 @@
 
 ### Handoff (2026-10-24, after the first S1 results)
 Done and documented: O_2 adopted; S1 teacher labels (250,000 decisions) and test set stored; S1 trained at 250,000 decisions (D13, D14). Open, in order:
-1. **Judge S1 against the bronze set.** The owner says the bronze results are on Cloudflare (R2); no object or run named bronze was found (searched
-   `runs/` since 2026-10-22 and `inputs/`), so ask the owner for the run id or key. The planned definition: O_2's test set, trick-1 decisions valued exactly
-   through tricks 1 and 2 and then by O_3 alone (`docs/m3-hybrid/o3-rounds.md`). Report the result as an estimate (no trick-1 golden set; owner, 2026-10-16).
+1. **Judging S1: done on copper** (2026-10-24, D14; `docs/m3-hybrid/s1-copper-check.json`). The bronze set never finished (one complete decision; owner), so there is no
+   trick-1 yardstick against exact play; copper and the S1 test set measure how well S1 copies its teacher. Report any result as an estimate (owner, 2026-10-16).
 2. **Pick the S1 candidate and ship it:** the decision-aware seeds 1-3 (`6ec1b9cc...`, `97df2a54...`, `b20445c3...`, D14) are the candidates; ship with S2
    (`method: "student"`, `docs/WASM-API.md` section 7); the app side is the owner's (item (a) in "S2, state").
 3. **More data for S1, if wanted:** the curve is still falling (D14). Teacher cost on the cheap EPYC 7B12 box is $19.5 per million decisions, 17,000 an hour

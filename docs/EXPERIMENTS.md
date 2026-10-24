@@ -1041,6 +1041,24 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   Halving the deals (64 to 32) raised it from 0.0469 to 0.0512. Integer networks (content-addressed in R2, `runs/student-t1-250k-10/out/s1/`):
   decision-aware seeds 1 `6ec1b9cc38b4...`, 2 `97df2a54e1c3...`, 3 `b20445c31bde...` (full keys in the run's `done.json` files); plain seeds 1
   `70812487304221...`, 2 `b591b5d90571...`, 3 `bf8f5082049e...`; 100,000-decision `8e01a3e74fe9...`, 50,000-decision `31643f7f6b49...`, 32-deal `0e6e233dfe5b...`.
+- **Copper check (owner, 2026-10-24: "test against the copper set"; the bronze set never finished, one complete decision).** The nine integer networks on
+  the stored copper set (2,000 trick-1 decisions, 128 deals, seed 7801, role train, never in any training input), `search student-check --boot 1000` on the
+  build VM (0.7 s a network; `docs/m3-hybrid/s1-copper-check.json`). Loss % (95% upper bound), agreement with the teacher:
+
+| player | decisions | seeds | loss % | agree % |
+|---|---|---|---|---|
+| random | | | 0.762 [0.874] | 31.9 |
+| rules-v1 | | | 0.371 [0.454] | 48.7 |
+| S1 plain loss | 250,000 | 1 / 2 / 3 | 0.0784 / 0.0805 / 0.0709, mean 0.0766 | 60.8 / 60.4 / 60.6 |
+| **S1 decision-aware loss** | 250,000 | 1 / 2 / 3 | **0.0404 [0.0461] / 0.0386 [0.0442] / 0.0457 [0.0524], mean 0.0416** | 66.1 / 65.9 / 65.3 |
+| S1 decision-aware loss | 100,000 | 1 | 0.0564 [0.0653] | 62.6 |
+| S1 decision-aware loss | 50,000 | 1 | 0.0689 [0.0790] | 60.4 |
+| S1 decision-aware loss | 250,000, 32 deals | 1 | 0.0472 [0.0549] | 65.8 |
+
+  The ordering is the same as on the test set above: the decision-aware mean is 46% below the plain mean, each decision-aware seed below each plain seed;
+  the leader-seat loss of the decision-aware seeds is 0.082 / 0.065 / 0.074 against 0.127 / 0.106 / 0.113 plain. The slope in the number of decisions is
+  0.0689 (50,000), 0.0564 (100,000), 0.0404 (250,000). Copper's teacher is the same H_2 + O_2 at the same 128 deals as the test set: copper measures how
+  well S1 copies the teacher, and says nothing about the teacher's own error against exact play (no trick-1 golden set exists).
 - **Cost.** 84.2 minutes, $1.87: 20 minutes reading the 504 part bundles one at a time (about 2 s each), 30 minutes encoding 4 parts at a time
   (`fetch_jobs` default 4 of 192 threads; 32 is allowed), 2.5-3.4 minutes training each network. Both steps are fixed afterwards: the inputs step reads
   `fetch_jobs` at a time (commit `f08888c`) and the manifest sets `fetch_jobs` 32.

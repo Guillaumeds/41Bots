@@ -41,7 +41,7 @@ here is running. Every number is cited to `docs/EXPERIMENTS.md` (written "E4", "
 
 ### Open (owner's plan, 2026-10-23)
 - S1 labels (250,000 decisions) and test set are stored and S1 is trained at 250,000 decisions (EXPERIMENTS D13-D14): decision-aware 0.0472% against plain 0.0853% on its
-  test set. Remaining: test S1 against the bronze set (on Cloudflare per the owner; key to be given), then ship; more data (the curve is still falling) only if wanted.
+  test set. Judged on copper too (decision-aware 0.0416% against plain 0.0766%; the bronze set never finished: one complete decision, owner 2026-10-24). Remaining: ship; more data (the curve is still falling) only if wanted.
 - Open code items: the shared input cache and larger teacher chunks (lesson 5); a stop rule on sibling regret per epoch for oracle training (D12 showed value
   validation is not the decision); reuse of a stored validation shard with `label_parts` above 1 (`crates/runner/src/hybrid/reuse.rs`).
 - The playout yardstick (session 3) needs no O_2 and is not started; the app side of S2 (STATUS) is the owner's.

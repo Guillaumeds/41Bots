@@ -1,0 +1,150 @@
+{
+ "n100000-w512x256-d64-s1-r1000t10000-sd": {
+  "loss_pct": 0.05636,
+  "upper95_pct": 0.06528,
+  "agreement": 0.626,
+  "by_place": {
+   "place 1": 0.0804,
+   "place 2": 0.0151,
+   "place 3": 0.0339,
+   "place 4": 0.0567,
+   "place 5": 0.1192,
+   "place 6": 0.0536,
+   "place 7": 0.0456,
+   "place 8": 0.047
+  }
+ },
+ "n250000-w512x256-d32-s1-r1000t10000-sd": {
+  "loss_pct": 0.04719,
+  "upper95_pct": 0.05494,
+  "agreement": 0.6575,
+  "by_place": {
+   "place 1": 0.082,
+   "place 2": 0.016,
+   "place 3": 0.0166,
+   "place 4": 0.0664,
+   "place 5": 0.0605,
+   "place 6": 0.0388,
+   "place 7": 0.0327,
+   "place 8": 0.0645
+  }
+ },
+ "n250000-w512x256-d64-s1-r1000t10000-sd": {
+  "loss_pct": 0.04036,
+  "upper95_pct": 0.04608,
+  "agreement": 0.661,
+  "by_place": {
+   "place 1": 0.082,
+   "place 2": 0.0164,
+   "place 3": 0.0136,
+   "place 4": 0.0188,
+   "place 5": 0.0666,
+   "place 6": 0.0622,
+   "place 7": 0.0217,
+   "place 8": 0.0419
+  }
+ },
+ "n250000-w512x256-d64-s1": {
+  "loss_pct": 0.07839,
+  "upper95_pct": 0.08848,
+  "agreement": 0.608,
+  "by_place": {
+   "place 1": 0.1269,
+   "place 2": 0.0308,
+   "place 3": 0.062,
+   "place 4": 0.0918,
+   "place 5": 0.1189,
+   "place 6": 0.0921,
+   "place 7": 0.0587,
+   "place 8": 0.0458
+  }
+ },
+ "n250000-w512x256-d64-s2-r1000t10000-sd": {
+  "loss_pct": 0.03863,
+  "upper95_pct": 0.04421,
+  "agreement": 0.659,
+  "by_place": {
+   "place 1": 0.0652,
+   "place 2": 0.0144,
+   "place 3": 0.0231,
+   "place 4": 0.0497,
+   "place 5": 0.0431,
+   "place 6": 0.0507,
+   "place 7": 0.0267,
+   "place 8": 0.0362
+  }
+ },
+ "n250000-w512x256-d64-s2": {
+  "loss_pct": 0.0805,
+  "upper95_pct": 0.09139,
+  "agreement": 0.6035,
+  "by_place": {
+   "place 1": 0.1055,
+   "place 2": 0.0464,
+   "place 3": 0.0474,
+   "place 4": 0.0862,
+   "place 5": 0.1617,
+   "place 6": 0.1027,
+   "place 7": 0.0484,
+   "place 8": 0.0463
+  }
+ },
+ "n250000-w512x256-d64-s3-r1000t10000-sd": {
+  "loss_pct": 0.04574,
+  "upper95_pct": 0.05239,
+  "agreement": 0.6535,
+  "by_place": {
+   "place 1": 0.0737,
+   "place 2": 0.0144,
+   "place 3": 0.0234,
+   "place 4": 0.0507,
+   "place 5": 0.0793,
+   "place 6": 0.0472,
+   "place 7": 0.0293,
+   "place 8": 0.0482
+  }
+ },
+ "n250000-w512x256-d64-s3": {
+  "loss_pct": 0.07093,
+  "upper95_pct": 0.07994,
+  "agreement": 0.6055,
+  "by_place": {
+   "place 1": 0.113,
+   "place 2": 0.0399,
+   "place 3": 0.0395,
+   "place 4": 0.0544,
+   "place 5": 0.1239,
+   "place 6": 0.0704,
+   "place 7": 0.0924,
+   "place 8": 0.0345
+  }
+ },
+ "n50000-w512x256-d64-s1-r1000t10000-sd": {
+  "loss_pct": 0.06889,
+  "upper95_pct": 0.07902,
+  "agreement": 0.604,
+  "by_place": {
+   "place 1": 0.1212,
+   "place 2": 0.027,
+   "place 3": 0.0258,
+   "place 4": 0.0626,
+   "place 5": 0.1086,
+   "place 6": 0.0929,
+   "place 7": 0.036,
+   "place 8": 0.0775
+  }
+ },
+ "_baselines": {
+  "rules-v1": {
+   "loss_pct": 0.37144,
+   "upper95_pct": 0.45359,
+   "agreement": 0.4865
+  },
+  "random": {
+   "loss_pct": 0.76172,
+   "upper95_pct": 0.87395,
+   "agreement": 0.3185
+  }
+ },
+ "_set": "copper: runs/o2-copper-s1-1/out/copper/ (4 parts), 2000 trick-1 decisions, 128 deals, seed 7801, teacher H_2 + O_2 13152c24; networks of runs/student-t1-250k-10; search student-check --boot 1000, equity table 64740dab"
+}
