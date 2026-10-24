@@ -206,6 +206,28 @@ pub extern "C" fn load_student(len: u32) -> u32 {
     status(r)
 }
 
+/// Load a student network for one trick (1 or 2) from the input buffer: 0 (the output holds
+/// `{"sha256":…,"trick":…,"bytes":…}`) or 1 (the output holds a refusal). It serves
+/// `"method": "student"` at that trick, ahead of the default network of `load_student`.
+#[allow(unsafe_code)] // An export needs the `no_mangle` attribute; nothing else here is unsafe.
+#[unsafe(no_mangle)]
+pub extern "C" fn load_student_trick(len: u32, trick: u32) -> u32 {
+    let r = take_file(len).and_then(|bytes| {
+        let t = u8::try_from(trick).unwrap_or(0);
+        engine_mut()
+            .as_mut()
+            .expect("made above")
+            .load_student_for(&bytes, t)
+            .map(|sha| {
+                format!(
+                    "{{\"sha256\":\"{sha}\",\"trick\":{t},\"bytes\":{}}}",
+                    bytes.len()
+                )
+            })
+    });
+    status(r)
+}
+
 /// Value the request in the input buffer; the result (or refusal) JSON goes to the output.
 /// Returns its length.
 #[allow(unsafe_code)] // An export needs the `no_mangle` attribute; nothing else here is unsafe.

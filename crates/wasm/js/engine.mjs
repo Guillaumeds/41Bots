@@ -48,7 +48,7 @@ export class Engine {
   }
 
   /** Run export `name` on `bytes` (or with no input when `bytes` is null); [status, output text]. */
-  #call(name, bytes) {
+  #call(name, bytes, ...extra) {
     if (this.#dead) throw new Error(`engine_dead: ${this.#dead}`);
     const x = this.#x;
     try {
@@ -58,7 +58,7 @@ export class Engine {
       } else {
         const at = x.inbox(bytes.length);
         new Uint8Array(x.memory.buffer, at, bytes.length).set(bytes);
-        status = x[name](bytes.length);
+        status = x[name](bytes.length, ...extra);
       }
       const out = new Uint8Array(x.memory.buffer, x.outbox(), x.outbox_len());
       return [status, decoder.decode(out)];
@@ -68,13 +68,13 @@ export class Engine {
     }
   }
 
-  #load(name, bytes, sha256) {
+  #load(name, bytes, sha256, ...extra) {
     const data = toBytes(bytes, "the file");
     if (sha256 !== undefined && sha256 !== null) {
       if (!/^[0-9a-f]{64}$/.test(sha256)) throw new Error("bad_request: the SHA-256 must be 64 lowercase hex digits");
       this.#call("expect_sha256", encoder.encode(sha256));
     }
-    const [status, text] = this.#call(name, data);
+    const [status, text] = this.#call(name, data, ...extra);
     const j = JSON.parse(text);
     if (status !== 0) throw new Error(`${j.code}: ${j.reason}`);
     return j;
@@ -90,9 +90,16 @@ export class Engine {
     return this.#load("load_net", bytes, sha256);
   }
 
-  /** Load the student network (.safetensors bytes): requests with `method: "student"` at tricks 1-2. -> { sha256, bytes } */
-  loadStudent(bytes, sha256) {
-    return this.#load("load_student", bytes, sha256);
+  /**
+   * Load a student network (.safetensors bytes) for `method: "student"`. With `trick` (1 or 2) it serves
+   * that trick only (S1 for trick 1, S2 for trick 2), ahead of the default network; without it, it is
+   * the default network, which serves every trick that has none of its own. -> { sha256, bytes } (with
+   * `trick` when given)
+   */
+  loadStudent(bytes, sha256, trick) {
+    if (trick === undefined || trick === null) return this.#load("load_student", bytes, sha256);
+    if (trick !== 1 && trick !== 2) throw new Error("bad_request: a student serves trick 1 or 2");
+    return this.#load("load_student_trick", bytes, sha256, trick);
   }
 
   /** Value a decision: the request (object or JSON text) -> the result or refusal (JSON text). */

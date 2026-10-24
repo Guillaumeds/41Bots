@@ -68,8 +68,12 @@ pub struct Engine {
     leaf: Option<(Arc<dyn Leaf + Send + Sync>, String)>,
     /// Oracle networks by the trick at whose start they take over.
     nets: BTreeMap<u8, Oracle>,
-    /// The student network (`"method": "student"`).
+    /// The default student network (`"method": "student"`): serves every trick that has no student
+    /// of its own.
     student: Option<StudentNet>,
+    /// Student networks by the trick (1 or 2) they were trained for; they take precedence over
+    /// the default one.
+    students: BTreeMap<u8, StudentNet>,
 }
 
 impl Default for Engine {
@@ -298,6 +302,7 @@ impl Engine {
             leaf: None,
             nets: BTreeMap::new(),
             student: None,
+            students: BTreeMap::new(),
         }
     }
 
@@ -308,6 +313,7 @@ impl Engine {
             leaf: Some((leaf, name.to_string())),
             nets: BTreeMap::new(),
             student: None,
+            students: BTreeMap::new(),
         }
     }
 
@@ -364,6 +370,29 @@ impl Engine {
         Ok(sha)
     }
 
+    /// Load a student network for one trick (1 or 2: the network was trained on that trick's
+    /// decisions, S1 and S2); returns its SHA-256. It serves `"method": "student"` requests at
+    /// that trick, ahead of the default network of [`Engine::load_student`]. A second one for the
+    /// same trick replaces the first. Refused like `load_student`, and for any other trick.
+    pub fn load_student_for(&mut self, bytes: &[u8], trick: u8) -> Result<String, Refusal> {
+        if !(1..=2).contains(&trick) {
+            return Err(Refusal::new(
+                "bad_request",
+                format!("a student serves trick 1 or 2, not trick {trick}"),
+            ));
+        }
+        let n = StudentNet::from_bytes(bytes)
+            .map_err(|e| Refusal::new("bad_file", format!("student network: {e}")))?;
+        let sha = n.sha256.clone();
+        self.students.insert(trick, n);
+        Ok(sha)
+    }
+
+    /// The student that values a decision at `trick`: its own, else the default one.
+    fn student_for(&self, trick: u8) -> Option<&StudentNet> {
+        self.students.get(&trick).or(self.student.as_ref())
+    }
+
     /// The loaded files and the engine's version, as JSON.
     pub fn info(&self, memory_bytes: Option<u64>) -> String {
         let mut s = format!(
@@ -385,6 +414,16 @@ impl Engine {
         s.push('}');
         if let Some(st) = &self.student {
             s.push_str(&format!(",\"student\":{}", json_str(&st.sha256)));
+        }
+        if !self.students.is_empty() {
+            s.push_str(",\"students\":{");
+            for (i, (t, n)) in self.students.iter().enumerate() {
+                if i > 0 {
+                    s.push(',');
+                }
+                s.push_str(&format!("\"{t}\":{}", json_str(&n.sha256)));
+            }
+            s.push('}');
         }
         if let Some(m) = memory_bytes {
             s.push_str(&format!(",\"memoryBytes\":{m}"));
@@ -455,10 +494,13 @@ impl Engine {
         let method = if cands.len() <= 1 {
             Method::Forced
         } else if req.student && (1..=2).contains(&p.trick_no) && turned == 0 {
-            if self.student.is_none() {
+            if self.student_for(p.trick_no).is_none() {
                 return Err(Refusal::new(
                     "no_student",
-                    "method student needs the student network, not loaded",
+                    format!(
+                        "method student at trick {} needs a student network, not loaded",
+                        p.trick_no
+                    ),
                 ));
             }
             Method::Student
@@ -491,8 +533,7 @@ impl Engine {
             Method::Hybrid(cut)
         };
         let student_sha = self
-            .student
-            .as_ref()
+            .student_for(p.trick_no)
             .map(|n| format!("student:{}", n.sha256));
         let net_sha = match method {
             Method::Hybrid(cut) => Some(self.nets[&cut].sha256.as_str()),
@@ -547,7 +588,9 @@ impl Engine {
         };
         if method == Method::Student {
             // The student values every candidate from the seat's view: no deal is drawn.
-            let net = self.student.as_ref().expect("checked above");
+            let net = self
+                .student_for(view.public.trick_no)
+                .expect("checked above");
             let f =
                 encode_view(&view, &**leaf).map_err(|e| Refusal::new("inconsistent_view", e))?;
             let cf: Vec<Vec<u16>> = cands.iter().map(|&c| encode_cand(&view, c)).collect();

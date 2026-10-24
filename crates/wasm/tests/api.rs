@@ -921,6 +921,55 @@ fn student_bytes(seed: u64) -> Vec<u8> {
     student::net::write_net(net.layers(), &BTreeMap::new())
 }
 
+/// Per-trick students (S1 for trick 1, S2 for trick 2; docs/WASM-API.md section 7): a student loaded
+/// for a trick serves that trick only, ahead of the default one; a trick with neither is refused
+/// `no_student`; `info` lists them; only tricks 1 and 2 are accepted.
+#[test]
+fn per_trick_students_serve_their_trick() {
+    let req_of = |m: &Match| {
+        let mut r = app_request(m, 4, 77, Mask::SeatOwnBurns);
+        r["method"] = json!("student");
+        r.to_string()
+    };
+    let plain = |m: &Match| !any_turned(m) && m.reneges().is_empty();
+    let t2 = find(41, 0, &|m| plain(m) && playing(m, 2));
+    let t1 = find(43, 0, &|m| plain(m) && playing(m, 1));
+    let engine_of = |out: &str| parse(out)["engine"].as_str().expect("a string").to_string();
+
+    let mut e = engine(false);
+    assert_eq!(
+        e.load_student_for(b"nonsense", 1).map_err(|r| r.code),
+        Err("bad_file")
+    );
+    assert_eq!(
+        e.load_student_for(&student_bytes(5), 3).map_err(|r| r.code),
+        Err("bad_request")
+    );
+    // Only trick 2 has a student: trick 1 is refused, trick 2 is valued by it.
+    let sha2 = e.load_student_for(&student_bytes(5), 2).expect("loads");
+    assert_eq!(code(&e.evaluate(&req_of(&t1))), "no_student");
+    let out2 = e.evaluate(&req_of(&t2));
+    assert_eq!(parse(&out2)["status"], "ok", "{out2}");
+    assert!(engine_of(&out2).contains(&format!("student:{sha2}")));
+    // Both loaded: each trick has its own.
+    let sha1 = e.load_student_for(&student_bytes(6), 1).expect("loads");
+    assert_ne!(sha1, sha2);
+    let out1 = e.evaluate(&req_of(&t1));
+    assert_eq!(parse(&out1)["status"], "ok", "{out1}");
+    assert!(engine_of(&out1).contains(&format!("student:{sha1}")));
+    assert!(engine_of(&e.evaluate(&req_of(&t2))).contains(&format!("student:{sha2}")));
+    assert_eq!(
+        parse(&e.info(None))["students"],
+        json!({"1": sha1, "2": sha2})
+    );
+    // The default student serves a trick that has none of its own.
+    let mut e = engine(false);
+    let shad = e.load_student(&student_bytes(7)).expect("loads");
+    let sha2 = e.load_student_for(&student_bytes(5), 2).expect("loads");
+    assert!(engine_of(&e.evaluate(&req_of(&t1))).contains(&format!("student:{shad}")));
+    assert!(engine_of(&e.evaluate(&req_of(&t2))).contains(&format!("student:{sha2}")));
+}
+
 /// `method: "student"` (docs/STUDENT.md, docs/WASM-API.md §3): at tricks 1-2 with all eight seats
 /// in play each candidate's values are the student's own (the native encoder and integer network on
 /// the seat's view), best first, with no deals; at trick 3, a forced card or a pair turned, the

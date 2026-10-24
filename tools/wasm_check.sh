@@ -13,7 +13,7 @@
 # pair turned; and seven of them again with `method: "student"` and a seeded random student network)
 # are valued natively and as WebAssembly, and the results must be the same bytes;
 # every request is also split into 2, 3, 4 and 7 shards in Node and merged, and must give the
-# same bytes again. WASM_STUDENT=<file> uses a real student network for the `-student` requests. WASM_SIMD=1 also builds the module with simd128 and compares it the same way.
+# same bytes again. WASM_STUDENT=<file> uses a real student network for the `-student` requests; WASM_STUDENT1 / WASM_STUDENT2 load per-trick students (S1, S2) too. WASM_SIMD=1 also builds the module with simd128 and compares it the same way.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -74,9 +74,14 @@ if [ -n "${WASM_STUDENT:-}" ]; then
 else
   "$api_native" random-student "$work/student.safetensors" 2> /dev/null
 fi
+# WASM_STUDENT1 / WASM_STUDENT2=<student .safetensors>: also load a student for trick 1 / trick 2 only (S1, S2), which then serve their
+# trick ahead of the default student above.
+student_args=(--student "$work/student.safetensors")
+[ -n "${WASM_STUDENT1:-}" ] && student_args+=(--student1 "$WASM_STUDENT1")
+[ -n "${WASM_STUDENT2:-}" ] && student_args+=(--student2 "$WASM_STUDENT2")
 files=("$work"/req/*.json)
 echo "API check: ${#files[@]} requests ($(cd "$work/req" && echo *.json))"
-"$api_native" --equity "$WASM_EQUITY" --net "$WASM_NET3" --student "$work/student.safetensors" eval "${files[@]}" \
+"$api_native" --equity "$WASM_EQUITY" --net "$WASM_NET3" "${student_args[@]}" eval "${files[@]}" \
   > "$work/native.txt" 2> /dev/null
 modules=("$module")
 if [ "${WASM_SIMD:-0}" = "1" ]; then
@@ -85,7 +90,7 @@ if [ "${WASM_SIMD:-0}" = "1" ]; then
   modules+=("$target_dir/wasm-simd/wasm32-unknown-unknown/release/wasm.wasm")
 fi
 for m in "${modules[@]}"; do
-  node tools/wasm_api_run.mjs "$m" --equity "$WASM_EQUITY" --net "$WASM_NET3" --student "$work/student.safetensors" \
+  node tools/wasm_api_run.mjs "$m" --equity "$WASM_EQUITY" --net "$WASM_NET3" "${student_args[@]}" \
     eval "${files[@]}" > "$work/wasm.txt" 2> /dev/null
   if cmp -s "$work/native.txt" "$work/wasm.txt"; then
     echo "$m: every result the same bytes as native"
@@ -95,7 +100,7 @@ for m in "${modules[@]}"; do
   fi
 done
 for k in 2 3 4 7; do
-  node tools/wasm_api_run.mjs "$module" --equity "$WASM_EQUITY" --net "$WASM_NET3" --student "$work/student.safetensors" \
+  node tools/wasm_api_run.mjs "$module" --equity "$WASM_EQUITY" --net "$WASM_NET3" "${student_args[@]}" \
     shards "$k" "${files[@]}" > "$work/shards.txt" 2> /dev/null
   if cmp -s "$work/native.txt" "$work/shards.txt"; then
     echo "$k shards merged: the same bytes"

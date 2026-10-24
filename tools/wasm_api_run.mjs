@@ -29,12 +29,18 @@ let repeat = 1;
 const args = [];
 for (let i = 0; i < rest.length; i++) {
   const a = rest[i];
-  if (a === "--equity" || a === "--net" || a === "--student") {
+  if (a === "--equity" || a === "--net" || a === "--student" || a === "--student1" || a === "--student2") {
     const f = rest[++i] ?? fail(`${a} needs a file`);
     const bytes = readFileSync(f);
     const t = performance.now();
     const j =
-      a === "--equity" ? engine.loadEquity(bytes) : a === "--student" ? engine.loadStudent(bytes) : engine.loadNet(bytes);
+      a === "--equity"
+        ? engine.loadEquity(bytes)
+        : a === "--student"
+          ? engine.loadStudent(bytes)
+          : a === "--student1" || a === "--student2"
+            ? engine.loadStudent(bytes, undefined, a === "--student1" ? 1 : 2)
+            : engine.loadNet(bytes);
     console.error(`loaded ${f} in ${(performance.now() - t).toFixed(0)} ms: ${JSON.stringify(j)}`);
   } else if (a === "--repeat") {
     repeat = Number(rest[++i]);

@@ -27,6 +27,8 @@ fn load(flag: &str, path: &str) -> Result<(), String> {
     let status = match flag {
         "--equity" => ffi::load_equity(n),
         "--student" => ffi::load_student(n),
+        "--student1" => ffi::load_student_trick(n, 1),
+        "--student2" => ffi::load_student_trick(n, 2),
         _ => ffi::load_net(n),
     };
     let out = String::from_utf8(ffi::output()).unwrap_or_default();
@@ -50,7 +52,7 @@ fn run(args: &[String]) -> Result<(), String> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            f @ ("--equity" | "--net" | "--student") => {
+            f @ ("--equity" | "--net" | "--student" | "--student1" | "--student2") => {
                 let p = args.get(i + 1).ok_or(format!("{f} needs a file"))?;
                 load(f, p)?;
                 i += 2;
