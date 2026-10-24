@@ -1,0 +1,68 @@
+{
+ "format": 2,
+ "run_id": "o2-s1more2-1",
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "Owner 2026-10-24 (asleep, so unattended): the next 250,000 S1 teacher labels at 64 deals (decisions 500,001-750,000), same settings as o2-s1more (seeds 7831 and 7832, chunks of 1,000 decisions, H_2 + the adopted O_2 13152c24). Started on its own machine through the launcher's normal path, which waits for an offer: up to $0.40/h for the first 3 hours (the cheap Thailand/Taiwan EPYC boxes, about $0.30-0.35/h), then up to $0.60/h; at most 340 minutes of waiting. Kept for 8 hours after it ends. The first 250,000 (o2-s1more-3, heartbeats under that name) run on instance 57517251 in parallel.",
+ "machine": {
+  "min_cores": 190,
+  "min_ram_gb": 96,
+  "disk_gb": 100,
+  "keep": true,
+  "keep_hours": 8,
+  "max_dph": 0.6,
+  "price_steps": [
+   0.4
+  ],
+  "tries_per_step": 180,
+  "wait_for_offer_min": 340
+ },
+ "inputs": {
+  "o2": "sha256:13152c24bc27b5f8f29c167be04caa86bf2c8dc4d17e686f3c86991101a28c1d"
+ },
+ "streams": [
+  {
+   "name": "s1rules3",
+   "priority": 1,
+   "kind": "student_teacher",
+   "chunks": 150,
+   "params": {
+    "threads": "all",
+    "trick": 1,
+    "count": 1000,
+    "deals": 64,
+    "seed": 7831,
+    "source": "rules",
+    "net_input": "o2",
+    "tt_mb": 64,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  },
+  {
+   "name": "s1mixed3",
+   "priority": 2,
+   "kind": "student_teacher",
+   "chunks": 100,
+   "params": {
+    "threads": "all",
+    "trick": 1,
+    "count": 1000,
+    "deals": 64,
+    "seed": 7832,
+    "source": "mixed",
+    "net_input": "o2",
+    "tt_mb": 64,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  }
+ ]
+}

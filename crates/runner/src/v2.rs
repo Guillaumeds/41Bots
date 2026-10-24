@@ -1588,6 +1588,7 @@ mod tests {
             ("o2-copper-s1.manifest.json", 3),
             ("o2-s1test.manifest.json", 1),
             ("o2-s1more.manifest.json", 2),
+            ("o2-s1more2.manifest.json", 2),
             ("o2-audit-4.manifest.json", 1),
             ("o3-learnedleaf.manifest.json", 1),
             ("o2-leafrisk.manifest.json", 1),
