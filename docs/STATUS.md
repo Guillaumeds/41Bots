@@ -101,7 +101,7 @@ the `s:NET` expert in `search::exact_leaves`; runner kinds `hybrid_rung` with `r
 (`crates/runner/src/hybrid/round.rs`), `specialist`, `net_error`; `fortyone_nn.labelcmp`;
 `launch.py round-manifest` and `--instance-id`; workflows `o3-round.yml` (now with
 `min_reliability`), `store-input.yml`, `r2-peek.yml` (now with `show`), `repo-archive.yml`,
-`r2-inventory.yml`. Latest released binaries: `2c0774db7b576dccd405240746065cd6f39766fd`.
+`r2-inventory.yml`. Latest released binaries: `dd19e4d66cefbd60eb0f0b662e94f828d5c189a0` (2026-10-23 06:50; the older `2c0774db...` of 2026-10-22 06:48 does NOT know the trainer's `rank_weight` / `rank_temperature` / `stop_on` point options and refuses such manifests: see EXPERIMENTS A10, "Nine failed S1 launches").
 
 ### The goal and the chain (owner)
 One objective: the chance of the money. Target: about 0.01% decision loss even at the hardest trick-1
@@ -148,7 +148,7 @@ The owner wants the teachers and their deal counts decided last.
   `max_dollars` (the cap; the launcher stops and destroys at it), `any_host` ("true"), optionally
   `offer_id` (an owner-found offer: the `Type #` number) or `cpu_match` (e.g. "7B12"), `low_cpu_pct`
   ("1" for jobs with GPU-training or other single-thread phases, else the idle watchdog kills them),
-  `bin_sha` (a commit with released binaries: **2c0774db7b576dccd405240746065cd6f39766fd** is the
+  `bin_sha` (a commit with released binaries: **dd19e4d66cefbd60eb0f0b662e94f828d5c189a0** is the
   latest; dispatch `release-binaries.yml` on `main` for a newer commit and wait for
   `bin/<sha>/manifest.json` in R2), `image` **ghcr.io/guillaumeds/41bots-base:20261017-bc692e446939**,
   `dry_run` **"false"** (the default is true!). A Blackwell GPU (RTX 50xx) needs `"blackwell": true` in
@@ -161,7 +161,7 @@ The owner wants the teachers and their deal counts decided last.
 - **From a laptop (no R2 or vast keys there):** everything goes through GitHub Actions with the `gh` CLI:
   `gh workflow run vast-run.yml --ref main -f manifest="$(jq -c . docs/vast/NAME.manifest.json)"
   -f min_cores=190 -f min_ram_gb=64 -f disk_gb=60 -f cpu_only=true -f max_dollars=3 -f any_host=true
-  -f bin_sha=2c0774db7b576dccd405240746065cd6f39766fd -f image=ghcr.io/guillaumeds/41bots-base:20261017-bc692e446939
+  -f bin_sha=dd19e4d66cefbd60eb0f0b662e94f828d5c189a0 -f image=ghcr.io/guillaumeds/41bots-base:20261017-bc692e446939
   -f dry_run=false` (GPU jobs: `-f cpu_only=false -f gpus=1 -f min_gpu_ram_gb=8 -f low_cpu_pct=1`);
   `gh run list --workflow vast-run.yml`, `gh run view <id> --log` (the launcher's log shows the machine,
   price and progress lines), `gh run cancel <id>` (stop and destroy); `gh workflow run vast-status.yml`

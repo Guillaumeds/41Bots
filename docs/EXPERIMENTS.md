@@ -235,9 +235,28 @@ load (§A8).
     start containers (`failed to inject CDI devices: unresolvable CDI devices`); the EPYC 9B45 gave 46 threads again (A8).
   - **Every chunk fetches its inputs again** (a finished chunk's folder, inputs included, is deleted): in `o3-pair-1` each of the five arms read the
     same 62 GB (about 20 minutes at 50-65 MB/s, GPU idle). A `student_teacher` chunk of 500 decisions spends about 40 s of its 105 s in setup (D13).
+  - **Nine failed S1 training launches (2026-10-24, `student-t1-250k-1` to `-9`).** Machines on the Thailand 3060 host (taken over three times,
+    rented once), a Hungary P100 box, a UK 2080 Ti box and the Nevada 4x RTX 5070 Ti offer each disappeared from the account 1-7 minutes after
+    their container started, in both launch modes (Jupyter + SSH and `entrypoint_mode`). Cause: the launches used `bin_sha` 2c0774d (2026-10-22
+    06:48); the trainer's per-point `rank_weight`, `rank_temperature` and `stop_on` options came in commit cf47745 (2026-10-22 13:16) and are in
+    `bin_sha` dd19e4d (2026-10-23 06:50), which the S2 runs used. The older runner refused the manifest (exit status 2), `deploy/docker/boot.sh`
+    wrote `runs/<id>/FAILED` (`{"stage":"manifest", ...}`) and the machine destroyed itself; the launcher reports that as "instance gone before the
+    first heartbeat" or "destroyed itself (not listed)". The first of these machines was also destroyed by the cleanup job (below). The
+    manifest-resolution test `manifests_resolve_into_settings_their_chunks_accept` does not cover `student_train`, and the local `runner run` check
+    that would have shown the refusal was made with the current source, not with the released binary.
+  - **The cleanup job destroyed a taken-over machine (2026-10-24 09:10 UTC).** `python/launcher/cleanup.py` counted silence from the instance's
+    `start_date`, which a takeover keeps from the original rental: "no heartbeat at all in its 928 min of life", with the new container still
+    booting and vast showing CPU 0%. Now the count starts at the run's launch (`runs/<run>/manifest.json`); test
+    `test_taken_over_old_machine_counts_from_its_runs_launch`. Machines whose label does not begin `41bots-` are never touched by the cleanup.
+  - **Other launcher facts from that day.** A cancelled launcher with `machine.keep` leaves the machine up (verified on three cancels); the launcher
+    marks a machine "bad" for 24 hours after a start failure, and a named offer on such a machine is still rented ("because the owner named it");
+    `offer_id` fails with "not on offer any more" when the offer was rented in the meantime; the cancelled generic search had already rented a UK
+    box before the cancel reached it.
 - **Cost.** About $3 of rentals went to failed or abandoned launches of `o2-audit-4` to `-9`; the Xeon Phi box billed $1.14/h until it was destroyed.
-- **Limits.** Counts are from one session; the causes of the two takeover failures are read from vast's status records and the launcher log, not from
-  inside the machines.
+  The nine S1 launches cost under $1 in rentals; the owner re-rented the Thailand box three times.
+- **Limits.** Counts are from one session; the causes of the two takeover failures of 2026-10-22/23 are read from vast's status records and the launcher
+  log, not from inside the machines. For the nine S1 launches the cause is read from the `FAILED` marker and the commit dates; the container logs of the
+  destroyed machines were empty.
 - **Sources.** `python/launcher/launch.py`, `python/launcher/test_keep.py`, `python/tools/grab_machines.py`, `.github/workflows/vast-run.yml`, GitHub
   runs 39925013210, 39926028226, 39975581166, 39979256595; R2 `runs/o2-audit-*/KEPT.json`, `runs/o3-pair-*/`; `CLAUDE.md` (machine rules).
 
