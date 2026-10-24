@@ -600,7 +600,6 @@ fn part_of(
     Ok(shard)
 }
 
-
 /// A stored shard from a part's `.inputs.json` (or a manifest entry of that form), checked: its
 /// keys, sizes and sidecar agree.
 fn shard_of(o: &Map<String, Value>, label: &str) -> Result<Shard, String> {
