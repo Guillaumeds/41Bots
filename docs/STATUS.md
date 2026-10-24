@@ -26,8 +26,12 @@
 Done and documented: O_2 adopted; S1 teacher labels (250,000 decisions) and test set stored; S1 trained at 250,000 decisions (D13, D14). Open, in order:
 1. **Judging S1: done on copper** (2026-10-24, D14; `docs/m3-hybrid/s1-copper-check.json`). The bronze set never finished (one complete decision; owner), so there is no
    trick-1 yardstick against exact play; copper and the S1 test set measure how well S1 copies its teacher. Report any result as an estimate (owner, 2026-10-16).
-2. **Pick the S1 candidate and ship it:** the decision-aware seeds 1-3 (`6ec1b9cc...`, `97df2a54...`, `b20445c3...`, D14) are the candidates; ship with S2
-   (`method: "student"`, `docs/WASM-API.md` section 7); the app side is the owner's (item (a) in "S2, state").
+2. **S1 is ready to wire into the app (another session does it):** candidate `97df2a54e1c368a13d69ffd887de62f45c6c3f244605450579b803f31f00e134` (decision-aware,
+   seed 2, 250,000 decisions; copper 0.0386%, D14), 7,349,312 bytes in R2 `inputs/sha256/<key>`. The engine now takes one student per trick: host the new
+   `crates/wasm/dist/engine.wasm` (`8366f7d2...`) and `engine.mjs` (`d0d8ab56...`), then `engine.loadStudent(s1Bytes, s1Sha, 1)` and
+   `engine.loadStudent(s2Bytes, s2Sha, 2)` (S2 `3d1189e3...`); `method: "student"` then serves both tricks. Export check passed with both loaded (D14). The
+   app side (merge of the fivefingers branch `engine41-bots`, student switched on for tricks 1-2, a real-browser check with `?bots=engine41`) is the owner's;
+   the app's student config today points at S2 for trick 2 only. A network trained on more labels (item 3) replaces S1 by its hash.
 3. **More data for S1, if wanted:** the curve is still falling (D14). Teacher cost on the cheap EPYC 7B12 box is $19.5 per million decisions, 17,000 an hour
    (D13): the next 250,000 take about 12-15 h and $5. A prepared manifest is not committed; copy `docs/vast/o2-copper-s1.manifest.json` with new seeds
    (7821, 7822), chunks of 1,000 decisions (a 500-decision chunk spends 40 of 105 s on setup). Then retrain with `fetch_jobs` 32 on a machine with one good GPU
@@ -114,6 +118,7 @@ The owner wants the teachers and their deal counts decided last.
 | exact trick-2 validation 50k (s601) | shard 38de48356209cbec0f9ce41ceba28e6d5df52428abc0c866d443f9eb57964327, sidecar b39dbd6bf8f00a9b71fa800ccdaf9dd7de0ef25bc5dd3fa7b8b9e718fe895df8 | |
 | exact trick-2 validation 20k (s602) | shard 855ba467ee6bd7521a442cf668980af8cefacf00701939237895d7c749dfdeea, sidecar 6e346cbf05b9f2cc0d4368e224e4dd81a11a7c2aaab1fd5af0c52a8ad177c86d | made 2026-10-20 |
 | exact trick-2 validation 5k (s603) | shard 46ba92fcdf8e… (see `runs/o2-gv2-labels-3/partial/.../shards.json`) | made 2026-10-20 |
+| **trick-1 student S1, shipping candidate 2026-10-24** (512-256, 250,000 decisions, decision-aware loss, seed 2) | 97df2a54e1c368a13d69ffd887de62f45c6c3f244605450579b803f31f00e134 | copper loss 0.0386% (3-seed mean 0.0416%; plain 0.0766%), S1 test set 0.0445%; copies its teacher H_2 + O_2, not judged against exact play (no trick-1 golden set; the bronze set never finished); 7,349,312 bytes in R2 `inputs/sha256/<key>`; export check passed with S2 beside it; load with `loadStudent(bytes, sha, 1)` (D14, WASM-API §7); seeds 1 and 3 `6ec1b9cc38b4...`, `b20445c31bde...` |
 | **trick-2 student S2, shipped 2026-10-23** (512-256, 1M decisions, decision-aware loss, seed 1) | 3d1189e3042dfc9537b1f575f87e42b15e91628541e2ff90678ba319959c6e03 | golden-set loss 0.0389% (3-seed mean 0.0456%); export check passed; `inputs/sha256/<sha>` in R2, 7,306,112 bytes; the app swaps by its manifest (WASM-API §7); app side: manifest key changed on branch `claude/dreamy-franklin-irw8kk` (fivefingers, d0ca40f, no PR), checked by loading, 875 decisions and 4 whole matches; **not live**: the engine is not on the app's `main`, its bots are off by default and its trick 2 uses search |
 | previous S2 (512-256, 1M lessons, plain H_3 teacher) | 954223e2f56ecade906ba28ad2ea07ff70fee70b841e0743d4c911217afb6ce6 | replaced; 0.0733% |
 | equity table v0 | sha256 64740dab7845f0502c93ce195d721e1ffb8aa6ab141739ef43f754690de16808 | rebuilt by every run from `table: {hands: 1000000, seed: 1}` |

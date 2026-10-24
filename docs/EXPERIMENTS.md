@@ -1059,6 +1059,14 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   the leader-seat loss of the decision-aware seeds is 0.082 / 0.065 / 0.074 against 0.127 / 0.106 / 0.113 plain. The slope in the number of decisions is
   0.0689 (50,000), 0.0564 (100,000), 0.0404 (250,000). Copper's teacher is the same H_2 + O_2 at the same 128 deals as the test set: copper measures how
   well S1 copies the teacher, and says nothing about the teacher's own error against exact play (no trick-1 golden set exists).
+- **Ship preparation (2026-10-24).** Candidate: the decision-aware seed 2 network `97df2a54e1c368a13d69ffd887de62f45c6c3f244605450579b803f31f00e134`
+  (7,349,312 bytes, `inputs/sha256/<key>` in R2): the lowest loss on both sets (copper 0.0386%, test set 0.0445%); seeds 1 and 3 are within noise of it. The
+  engine had one student slot for tricks 1 and 2; it now has one per trick (`load_student_trick`, `loadStudent(bytes, sha, trick)`; a default student still
+  serves a trick without its own; test `per_trick_students_serve_their_trick`, 11 + 16 wasm tests pass, clippy clean). Export check
+  (`tools/wasm_check.sh` with `WASM_STUDENT1` = this S1 and `WASM_STUDENT2` = S2 `3d1189e3...`, build VM, with the equity table and O_3): the 21 requests of the
+  API check, including the trick-1 play and rob requests valued by S1, and 250 random matches give the same bytes natively and in WebAssembly, and again for
+  2, 3, 4 and 7 shards; PASS. The same check with S1 alone as the default student also passed. New module `crates/wasm/dist/engine.wasm`
+  `8366f7d2...` (913,674 bytes, built from 6e8c5f6a2afc) and `engine.mjs` `d0d8ab56...`; the app session's steps are in STATUS and `docs/WASM-API.md` section 7.
 - **Cost.** 84.2 minutes, $1.87: 20 minutes reading the 504 part bundles one at a time (about 2 s each), 30 minutes encoding 4 parts at a time
   (`fetch_jobs` default 4 of 192 threads; 32 is allowed), 2.5-3.4 minutes training each network. Both steps are fixed afterwards: the inputs step reads
   `fetch_jobs` at a time (commit `f08888c`) and the manifest sets `fetch_jobs` 32.

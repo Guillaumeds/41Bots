@@ -23,7 +23,7 @@ the work (tested, §10).
 | Tricks 3–5 | exact solve to the end of the hand | none |
 | After a pair was turned | exact among the seats still in play (networks never see these); trick 1 with six seats in play is refused (`too_slow`) | none |
 | One legal action | nothing searched (`method: "forced"`) | none |
-| Tricks 1–2, all 8 seats in play, with `method: "student"` | the student network (docs/STUDENT.md): every candidate valued from the seat's view in milliseconds, no deals | the student |
+| Tricks 1–2, all 8 seats in play, with `method: "student"` | the student network of that trick (S1 at trick 1, S2 at trick 2; docs/STUDENT.md): every candidate valued from the seat's view in milliseconds, no deals | the student of the trick |
 
 The search is the engine's own PIMC [Perfect-Information Monte Carlo: value every candidate in many
 guessed deals as if the cards were face up, and average], exactly as the native search runs it:
@@ -40,10 +40,12 @@ import { load } from "./engine.mjs";
 const engine = await load(wasmBytesOrModule);          // ArrayBuffer | typed array | WebAssembly.Module
 engine.loadEquity(equityBytes, "64740dab…");            // -> { sha256, bytes }; SHA-256 checked when given
 engine.loadNet(o3Bytes, "f5766aa9…");                   // -> { sha256, trick: 3, bytes }
-engine.loadStudent(studentBytes);                        // -> { sha256, bytes } (method "student")
+engine.loadStudent(s2Bytes, "3d1189e3…", 2);             // -> { sha256, trick: 2, bytes }; S2, serves method "student" at trick 2
+engine.loadStudent(s1Bytes, "97df2a54…", 1);             // -> { sha256, trick: 1, bytes }; S1, serves method "student" at trick 1
+engine.loadStudent(studentBytes);                        // -> { sha256, bytes }; a default student: serves a trick that has none of its own
 const resultJson = engine.evaluate(requestObjectOrJson); // -> string (JSON)
 const mergedJson = engine.merge([result0, result1]);     // objects or JSON strings -> string (JSON)
-engine.info();  // -> { engine, api: 1, valuesVersion: 2, equity, nets: { "3": sha }, memoryBytes }
+engine.info();  // -> { engine, api: 1, valuesVersion: 2, equity, nets: { "3": sha }, students: { "1": sha, "2": sha }, student: sha (the default one, when loaded), memoryBytes }
 ```
 
 - `load` is the only asynchronous call. Every other call is synchronous: run `evaluate` in a Web
@@ -78,7 +80,8 @@ one copy each way, so even the 26 MB table loads in a quarter of a second.
 | `expect_sha256` | `(len) -> u32` | the input (64 lowercase hex digits) is the SHA-256 the next loaded file must have: 0, or 1 with a refusal in the output |
 | `load_equity` | `(len) -> u32` | the input is the equity table: 0 (output `{sha256, bytes}`) or 1 (output: a refusal) |
 | `load_net` | `(len) -> u32` | the input is a network: 0 (output `{sha256, trick, bytes}`) or 1 (output: a refusal) |
-| `load_student` | `(len) -> u32` | the input is the student network: 0 (output `{sha256, bytes}`) or 1 (output: a refusal) |
+| `load_student` | `(len) -> u32` | the input is a student network, the default one (it serves every trick that has none of its own): 0 (output `{sha256, bytes}`) or 1 (output: a refusal) |
+| `load_student_trick` | `(len, trick) -> u32` | the input is a student network for `trick` 1 or 2 only (S1, S2): 0 (output `{sha256, trick, bytes}`) or 1 (output: a refusal; any other trick is `bad_request`). It serves that trick ahead of the default student. Added 2026-10-24, API version unchanged (nothing existing changed) |
 | `evaluate` | `(len) -> u32` | the input is a request (UTF-8 JSON); the result goes to the output; returns its length |
 | `merge` | `(len) -> u32` | the input is a JSON array of results; the merged result goes to the output |
 | `info` | `() -> u32` | the engine's version, the loaded files and the memory in use, as JSON in the output |
@@ -283,7 +286,7 @@ The app's own bot plays any refused decision.
 | `not_to_act` | `seat` is not the seat to act (a view from another seat: coming) |
 | `no_equity` | the equity table is not loaded |
 | `no_network_for_trick` | the decision needs a network not loaded: trick 1 needs O_2, trick 2 (all eight seats in play) needs O_3 |
-| `no_student` | `method: "student"` at trick 1 or 2 without the student network loaded |
+| `no_student` | `method: "student"` at trick 1 or 2 without a student for that trick (its own or the default one) loaded |
 | `not_built` | the dealer's burn before trick 1 (`steal`, or robbing a turned ace at once) |
 | `too_slow` | after a turn, a trick-1 decision with six seats in play (an exact deal takes about 17 s natively) |
 | `led_trick_in_progress` | contract §7.1 Q1: the view needs a pair turned while the trick it led is being played (open rules question) |
@@ -308,12 +311,13 @@ Deal *w* (0 ≤ *w* < N) is drawn from `seed` and *w* only, and every value is a
 
 | File | SHA-256 | Bytes | Note |
 |---|---|---|---|
-| `engine.wasm` | `b53e09fb515cd4cf465330bd9fbb1b3d1f0998442afb4afa3f70b185c375fbf7` (built from 490b45eed5e9, Stage B; the current one is always in `crates/wasm/dist/SHA256SUMS`) | 834,515 | built by `tools/wasm_build.sh` from a committed tree; committed in `crates/wasm/dist/` |
-| `engine.mjs` | `512882afaa788b08c0c067dbdaebb1f954cb4a2d5282cc8e61f3461cf007400e` | 4,691 | the loader (`crates/wasm/js/engine.mjs`) |
+| `engine.wasm` | `8366f7d21f484e50b98c1909748791fe6efd4ae0088bdde16f61ca8737d1f69f` (built 2026-10-24 from 6e8c5f6a2afc, with per-trick students; the current one is always in `crates/wasm/dist/SHA256SUMS`) | 913,674 | built by `tools/wasm_build.sh` from a committed tree; committed in `crates/wasm/dist/` |
+| `engine.mjs` | `d0d8ab56e2b9035cd3fc4777cc2b6f68cad285f9cdb336a9d4afa1df3bc64cb9` | 5,497 | the loader (`crates/wasm/js/engine.mjs`) |
 | equity table `equity-v0.npy` | `64740dab7845f0502c93ce195d721e1ffb8aa6ab141739ef43f754690de16808` | 25,920,128 (24.7 MiB) | under Cloudflare's 25 MiB static-file limit; rebuilding it takes 25 s natively, so it is downloaded, not rebuilt |
 | O_3, the trick-3 network (2048-1024-256) | `f5766aa98a1d769e31122c94cc4da9790c84508fab5c432d0c0358fe3124faad` | 16,936,384 | from R2 `inputs/sha256/<sha>`; serves trick-2 decisions |
 | O_2, the trick-2 network | when its run delivers | about 17 MB | serves trick-1 decisions |
-| S2, the trick-2 student (512-256, decision-aware loss, 1M decisions, seed 1; E12) | `3d1189e3042dfc9537b1f575f87e42b15e91628541e2ff90678ba319959c6e03` | 7,306,112 | from R2 `inputs/sha256/<sha>`; for `method: "student"`, loaded with `expect_sha256` then `loadStudent`; **shipped 2026-10-23; replaces the first S2 `954223e2…` in the engine repo's own record; the app's config (branch `engine41-bots`, `src/ai/engine41/config.ts`) pointed at an earlier student v0 `50d24cd8064ff3356cb9f104efc63f47a7bb69768607ad24557300da97b24feb`, 7,284,512 bytes, also in R2, and now points at this one (commit d0ca40f on `claude/dreamy-franklin-irw8kk`, not merged). The app's engine bots are off for players on that branch (only with `?bots=engine41`) and its trick 2 is set to search, not the student: shipping to players also needs the branch merged and the student switched on** (golden-set loss 0.0389% against 0.0733%; same bytes natively and in WebAssembly, E12). Native: `search student-check`; swap in the app by changing its manifest's student hash |
+| **S1, the trick-1 student** (512-256, decision-aware loss, 250,000 decisions, seed 2; EXPERIMENTS D14) | `97df2a54e1c368a13d69ffd887de62f45c6c3f244605450579b803f31f00e134` | 7,349,312 | from R2 `inputs/sha256/<sha>`; load with `loadStudent(bytes, sha, 1)`: it serves `method: "student"` at trick 1 only (it was trained on trick-1 decisions). **Shipping candidate, 2026-10-24**: loss against its teacher 0.0386% on the copper set (3-seed mean 0.0416%; plain loss 0.0766%), 0.0445% on the S1 test set; the same bytes natively and in WebAssembly with S2 loaded beside it (EXPERIMENTS D14). Seeds 1 and 3 (`6ec1b9cc38b4…`, `b20445c31bde…`) are within noise of it; a network trained on more labels will replace it. Not yet in the app |
+| S2, the trick-2 student (512-256, decision-aware loss, 1M decisions, seed 1; E12) | `3d1189e3042dfc9537b1f575f87e42b15e91628541e2ff90678ba319959c6e03` | 7,306,112 | from R2 `inputs/sha256/<sha>`; for `method: "student"`, loaded with `expect_sha256` then `loadStudent(bytes, sha, 2)` (as the trick-2 student; without the trick it is the default student and also serves trick 1); **shipped 2026-10-23; replaces the first S2 `954223e2…` in the engine repo's own record; the app's config (branch `engine41-bots`, `src/ai/engine41/config.ts`) pointed at an earlier student v0 `50d24cd8064ff3356cb9f104efc63f47a7bb69768607ad24557300da97b24feb`, 7,284,512 bytes, also in R2, and now points at this one (commit d0ca40f on `claude/dreamy-franklin-irw8kk`, not merged). The app's engine bots are off for players on that branch (only with `?bots=engine41`) and its trick 2 is set to search, not the student: shipping to players also needs the branch merged and the student switched on** (golden-set loss 0.0389% against 0.0733%; same bytes natively and in WebAssembly, E12). Native: `search student-check`; swap in the app by changing its manifest's student hash |
 
 The network and the table are not in the repo; the engine's main session hands them over from R2.
 
@@ -425,6 +429,10 @@ table of deals by trick and place that its slowest supported phone meets, e.g. f
 
 ## Changes since the Stage 0 draft
 
+- Per-trick students (2026-10-24): the new export `load_student_trick(len, trick)` and the loader's `loadStudent(bytes, sha256, trick)` load S1 for
+  trick 1 and S2 for trick 2; `info()` lists `students`; `load_student` / `loadStudent(bytes)` still load a default student (serves a trick without one
+  of its own, as before); `no_student` names the trick. `API_VERSION` stays 1. Test `per_trick_students_serve_their_trick`; `tools/wasm_check.sh` takes
+  `WASM_STUDENT1` / `WASM_STUDENT2`. For the app: `loadStudent(s1Bytes, s1Sha, 1)` and `loadStudent(s2Bytes, s2Sha, 2)`, then `method: "student"` works at both tricks.
 - New refusal codes `not_built` (the dealer's burn before trick 1), `bad_file`,
   `sha256_mismatch`; the loader's `api_mismatch` and `engine_dead`; the export `expect_sha256`.
 - Trick 1 is valued as soon as O_2 is loaded (it was "coming").
