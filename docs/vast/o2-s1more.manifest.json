@@ -1,0 +1,64 @@
+{
+ "format": 2,
+ "run_id": "o2-s1more-1",
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "Owner 2026-10-24: the next 250,000 S1 teacher labels (decisions 250,001-500,000 of S1's learning curve), so that S1 can be trained at 500,000 and 1,000,000 decisions if the 50,000 / 100,000 / 250,000 points of student-t1-250k show more data still pays. Same teacher as o2-copper-s1-1 (H_2 + the adopted O_2 13152c24, 64 deals, rules-v1 150,000 + mixed 100,000), new generator seeds 7821 and 7822, chunks of 1,000 decisions instead of 500 (a 500-decision chunk spent about 40 of its 105 s on setup that every chunk repeats). Run on the hand-rented Thailand machine 57494549 (AMD EPYC 7B12, 256 threads, RTX 3060, $0.328/h); abort it if the curve shows more data is not needed.",
+ "machine": {
+  "min_cores": 190,
+  "min_ram_gb": 96,
+  "disk_gb": 100,
+  "keep": true,
+  "keep_hours": 8,
+  "instance_id": 57494549,
+  "force_take": true
+ },
+ "inputs": {
+  "o2": "sha256:13152c24bc27b5f8f29c167be04caa86bf2c8dc4d17e686f3c86991101a28c1d"
+ },
+ "streams": [
+  {
+   "name": "s1rules2",
+   "priority": 1,
+   "kind": "student_teacher",
+   "chunks": 150,
+   "params": {
+    "threads": "all",
+    "trick": 1,
+    "count": 1000,
+    "deals": 64,
+    "seed": 7821,
+    "source": "rules",
+    "net_input": "o2",
+    "tt_mb": 64,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  },
+  {
+   "name": "s1mixed2",
+   "priority": 2,
+   "kind": "student_teacher",
+   "chunks": 100,
+   "params": {
+    "threads": "all",
+    "trick": 1,
+    "count": 1000,
+    "deals": 64,
+    "seed": 7822,
+    "source": "mixed",
+    "net_input": "o2",
+    "tt_mb": 64,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  }
+ ]
+}
