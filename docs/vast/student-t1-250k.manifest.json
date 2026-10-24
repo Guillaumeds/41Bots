@@ -6,7 +6,7 @@
  "benchmark_seconds": 0,
  "upload_every_s": 300,
  "heartbeat_every_s": 30,
- "note": "Owner 2026-10-24: S1, the trick-1 student, first learning-curve point. 512-256 students on the 250,000 stored trick-1 teacher decisions of o2-copper-s1-1 (150,000 rules-v1 + 100,000 mixed, H_2 + adopted O_2, 64 deals), plain loss against the decision-aware loss of E12 (rank_weight 1, temperature 0.01, stop on the validation decision loss), seeds 1-3 each, judged on the 2,000-decision test set of o2-s1test-1 (role test, 128 deals: how well S1 copies its teacher). Taken over onto the kept machine 57404109 (AMD EPYC 7B12, 245 threads, RTX 3060 12 GB) and kept afterwards.",
+ "note": "Owner 2026-10-24: S1, the trick-1 student, first learning-curve point. 512-256 students on the 250,000 stored trick-1 teacher decisions of o2-copper-s1-1 (150,000 rules-v1 + 100,000 mixed, H_2 + adopted O_2, 64 deals), plain loss against the decision-aware loss of E12 (rank_weight 1, temperature 0.01, stop on the validation decision loss), seeds 1-3 each, judged on the 2,000-decision test set of o2-s1test-2 (role test, 128 deals: how well S1 copies its teacher). Taken over onto the kept machine 57404109 (AMD EPYC 7B12, 245 threads, RTX 3060 12 GB) and kept afterwards.",
  "machine": {
   "gpus": 1,
   "min_gpu_ram_gb": 8,
@@ -42,7 +42,7 @@
     ],
     "test_inputs": [
      {
-      "run": "o2-s1test-1",
+      "run": "o2-s1test-2",
       "stream": "test",
       "parts": 4
      }
