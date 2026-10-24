@@ -1,20 +1,18 @@
 {
  "format": 2,
- "run_id": "o2-s1more-1",
+ "run_id": "o2-s1more-2",
  "run_seed": 1,
  "threads": null,
  "benchmark_seconds": 0,
  "upload_every_s": 300,
  "heartbeat_every_s": 30,
- "note": "Owner 2026-10-24: the next 250,000 S1 teacher labels (decisions 250,001-500,000 of S1's learning curve), so that S1 can be trained at 500,000 and 1,000,000 decisions if the 50,000 / 100,000 / 250,000 points of student-t1-250k show more data still pays. Same teacher as o2-copper-s1-1 (H_2 + the adopted O_2 13152c24, 64 deals, rules-v1 150,000 + mixed 100,000), new generator seeds 7821 and 7822, chunks of 1,000 decisions instead of 500 (a 500-decision chunk spent about 40 of its 105 s on setup that every chunk repeats). Run on the hand-rented Thailand machine 57494549 (AMD EPYC 7B12, 256 threads, RTX 3060, $0.328/h); abort it if the curve shows more data is not needed.",
+ "note": "Owner 2026-10-24: 250,000 more S1 teacher labels at 64 deals (decisions 250,001-500,000 of S1's learning curve), so that S1 can be trained at 500,000 decisions: D14 shows the loss still falling (0.0689 / 0.0564 / 0.0404% on copper at 50,000 / 100,000 / 250,000). Same teacher as o2-copper-s1-1 (H_2 + the adopted O_2 13152c24, 64 deals, rules-v1 150,000 + mixed 100,000), new generator seeds 7821 and 7822, chunks of 1,000 decisions (a 500-decision chunk spent about 40 of its 105 s on setup that every chunk repeats). Estimated 12 h and about $5 on a 245-thread EPYC 7B12 at $0.328/h (D13: 21,000 decisions an hour at 1,000-decision chunks); about 18 h and $10 on a 192-thread EPYC 7K62 at $0.563/h.",
  "machine": {
   "min_cores": 190,
   "min_ram_gb": 96,
   "disk_gb": 100,
   "keep": true,
-  "keep_hours": 8,
-  "instance_id": 57494549,
-  "force_take": true
+  "keep_hours": 8
  },
  "inputs": {
   "o2": "sha256:13152c24bc27b5f8f29c167be04caa86bf2c8dc4d17e686f3c86991101a28c1d"
