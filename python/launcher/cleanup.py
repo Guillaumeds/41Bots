@@ -167,6 +167,16 @@ def decide(inst: dict, state: dict, now: float, everything: bool = False) -> tup
     if str(inst.get("intended_status")) == "stopped":
         # The owner stopped it from the console: theirs to keep or destroy (EXPERIMENTS A11).
         return "keep", "stopped by the owner (intended_status stopped): left as it is"
+    if status == "exited" and not beats and now - start <= NO_HEARTBEAT_S:
+        # A stopped instance that a run has just taken over shows `exited` (the old container) with intended_status
+        # `running` until its new container boots: not a dead run but one that has not started yet. 2026-10-25 23:21 UTC:
+        # the owner stopped his box for the takeover, the launcher relabelled and started it, and this sweep destroyed
+        # it one minute later as "vast shows it exited" (the labels box, the third machine lost to automation). It is
+        # left to the no-heartbeat rule below (NO_HEARTBEAT_S from the run's launch), like a container still pulling
+        # its image; the launcher that owns it gives up and keeps it well before then.
+        return "keep", (f"vast shows it exited but its run started {(now - start) / 60:.0f} min ago and has not "
+                        f"heartbeated yet: a container that is still starting (a takeover of a stopped instance), "
+                        f"left for the no-heartbeat rule")
     if status in DEAD_STATES and not working_offline:
         return "destroy", f"vast shows it {status}"
     w = state.get("watch") or {}

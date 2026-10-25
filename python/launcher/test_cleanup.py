@@ -98,6 +98,18 @@ class DecideTest(unittest.TestCase):
 
     def test_exited_or_offline(self):
         self.assertEqual(self.d(inst(5, "exited"), state(1)), "destroy")
+        # 2026-10-25 23:21 UTC: a stopped box taken over by a new run (manifest written 1 min ago, no heartbeat yet)
+        # shows `exited` with intended_status `running` until its new container boots; the sweep destroyed it.
+        # Left alone until the no-heartbeat rule (60 min from the run's launch) catches a takeover that never starts.
+        booting = {**inst(928, "exited"), "intended_status": "running"}
+        self.assertEqual(self.d(booting, state(run_start_min_ago=1)), "keep")
+        self.assertIn("still starting", cleanup.decide(booting, state(run_start_min_ago=1), NOW)[1])
+        self.assertEqual(self.d(booting, state(run_start_min_ago=59)), "keep")
+        self.assertEqual(self.d(booting, state(run_start_min_ago=61)), "destroy")
+        # A fresh rental whose container exited at once is the same case (its launcher gives up first).
+        self.assertEqual(self.d(inst(5, "exited"), state()), "keep")
+        # A machine that heartbeated and then exited is dead, however young its run.
+        self.assertEqual(self.d({**inst(928, "exited"), "intended_status": "running"}, state(1, run_start_min_ago=5)), "destroy")
         # Offline in vast's eyes but still heartbeating to R2: working, kept (review E).
         self.assertEqual(self.d(inst(300, "offline"), state(1)), "keep")
         self.assertEqual(self.d(inst(300, "offline"), state(21)), "destroy")
