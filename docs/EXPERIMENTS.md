@@ -262,7 +262,10 @@ load (§A8).
     `runs/C/ already exists`); that recycle builds the container from B's stored settings, B's manifest is read from R2 and B heartbeats. Done at
     01:47-01:56 UTC on 2026-10-25 (`python/tools/chain_next_batch.py` waits for the running batch's `merged.json`; its second step used the same run name and
     was refused, so the correcting takeover `o2-s1more3-2` was sent by hand). The stored settings now name `o2-s1more3-2`: never recycle that machine
-    again while a run is going.
+    again while a run is going. Two more things the same night: (1) `o2-s1more3-1` started and stopped after 16 s, because cancelling its first launcher had left
+    `runs/o2-s1more3-1/STOP` in R2 and the run reads that; a run name whose launcher was cancelled is spoiled, so the next takeover used a new name
+    (`o2-s1more3-3`); (2) that takeover's recycle used its OWN update (no lag), so the container ran `o2-s1more3-3`, not the name stored before it: the lag is
+    not reliable, and the only certain way to know which run a container has is the heartbeat name in R2.
   - **A directly rented instance (PUT `/api/v0/asks/<offer>/`, `grab_machines.direct_rent`) took two takeovers** (the first left vast's base image),
     where the console-rented 57404109 took one. The cleanup job destroys any instance labelled `41bots-<run>` whose run never heartbeats within 60 minutes
     of the run's manifest upload; a label with a space after `41bots` (`41bots - ...`) is never touched by it.
@@ -1027,8 +1030,8 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   and 7822, 150 + 100 chunks of 1,000 decisions, same teacher), on the Thailand AMD EPYC 7B12 (245 usable threads, RTX 3060, $0.350/h as billed, rented
   directly through the API): 250 chunks, median 158.6 s a chunk (22,700 decisions an hour with the larger chunk), 40,035 s on the run's own clock, about
   $3.89, **$15.6 per million decisions**; chunks under R2 `runs/o2-s1more-3/out/{s1rules2,s1mixed2}/`, merged report `runs/o2-s1more-3/merged.json`.
-  With the first batch S1 now has 500,000 labelled decisions. A third batch (seeds 7831 / 7832, run name `o2-s1more3-1`) started on the same machine
-  at 01:56 UTC on 2026-10-25.
+  With the first batch S1 now has 500,000 labelled decisions. A third batch (seeds 7831 / 7832, run name `o2-s1more3-3`) started on the same machine
+  at 02:01 UTC on 2026-10-25 (the names `o2-s1more3-1` and `-2` did not run it: see A10).
 - **Limits.** One machine type; the rate holds for rules-v1 and mixed positions at 64 deals without racing or the restricted solve; the cost per
   million decisions assumes the same machine is available.
 - **Sources.** R2 `runs/o2-copper-s1-1/out/{copper,s1rules,s1mixed}/`, `runs/o2-s1test-2/out/test/`; E6.
