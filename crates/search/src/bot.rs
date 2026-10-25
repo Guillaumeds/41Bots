@@ -19,9 +19,11 @@ use equity::MoneyChance;
 use student::encode::{encode_cand, encode_view};
 use student::net::{StudentNet, choose};
 
+use crate::inference::Inference;
 use crate::labels;
 use crate::pimc::{
-    BeliefMode, Ctx, DecisionValues, Early, Method, SearchConfig, SharedLeaf, evaluate,
+    BeliefMode, Ctx, DecisionValues, Early, Method, SearchConfig, SharedLeaf, Students, evaluate,
+    evaluate_weighted,
 };
 use crate::student_teacher::app_candidates;
 use crate::worlds::{BeliefSource, WorldSource};
@@ -174,6 +176,44 @@ pub struct AppPlay {
     pub deals3: [u32; 8],
     /// Exact deals at tricks 4 and 5, any place.
     pub deals45: u32,
+    /// Weight the exact searches' deals by the other seats' plays under the students
+    /// (`crate::inference`; PLAN §6.4 point 3): `None` plays as the app does today.
+    pub inference: Option<InferenceCfg>,
+}
+
+/// The world weighting's settings in a bot: the temperature and the floor of
+/// [`crate::inference::Inference`] (units of 2^-32 of the money).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InferenceCfg {
+    /// The softmax temperature in money units of 2^-32.
+    pub tau_q32: u64,
+    /// The floor in units of 2^-32.
+    pub floor_q32: u64,
+}
+
+impl InferenceCfg {
+    /// The first arena arm's settings (tau 1% of the money, floor 5%).
+    pub const DEFAULT: InferenceCfg = InferenceCfg {
+        tau_q32: Inference::TAU_DEFAULT_Q32,
+        floor_q32: Inference::FLOOR_DEFAULT_Q32,
+    };
+
+    /// From permille of the money (the manifest's unit).
+    pub fn from_permille(tau: u32, floor: u32) -> Result<InferenceCfg, String> {
+        if tau == 0 || tau > 1000 {
+            return Err(format!(
+                "inference tau {tau}: 1 to 1000 permille of the money"
+            ));
+        }
+        if floor > 1000 {
+            return Err(format!("inference floor {floor}: 0 to 1000 permille"));
+        }
+        let q = |x: u32| (u64::from(x) << 32) / 1000;
+        Ok(InferenceCfg {
+            tau_q32: q(tau),
+            floor_q32: q(floor),
+        })
+    }
 }
 
 impl AppPlay {
@@ -199,6 +239,25 @@ impl AppPlay {
             s2: Arc::new(s2),
             deals3,
             deals45,
+            inference: None,
+        })
+    }
+
+    /// The same player with its exact searches' deals weighted by the other seats' plays.
+    pub fn with_inference(mut self, cfg: InferenceCfg) -> AppPlay {
+        self.inference = Some(cfg);
+        self
+    }
+
+    /// The weighting, with the students as the play model.
+    fn inference(&self) -> Option<Inference<'_>> {
+        self.inference.map(|c| Inference {
+            students: Students {
+                s1: &self.s1,
+                s2: &self.s2,
+            },
+            tau_q32: c.tau_q32,
+            floor_q32: c.floor_q32,
         })
     }
 
@@ -224,8 +283,11 @@ impl AppPlay {
     /// hex digits of their SHA-256.
     pub fn name(&self) -> String {
         let d3: Vec<String> = self.deals3.iter().map(u32::to_string).collect();
+        let inf = self
+            .inference()
+            .map_or(String::new(), |i| format!(",{}", i.name()));
         format!(
-            "app:s1={},s2={},deals3={},deals45={}",
+            "app:s1={},s2={},deals3={},deals45={}{inf}",
             &self.s1.sha256[..12.min(self.s1.sha256.len())],
             &self.s2.sha256[..12.min(self.s2.sha256.len())],
             d3.join("/"),
@@ -350,7 +412,10 @@ impl PimcBot {
                 w34: app.deals_for(p.trick_no, p.trick_cards.len()),
                 ..self.cfg
             };
-            return evaluate(view, legal, dseed, &ctx, &cfg);
+            return match app.inference() {
+                Some(inf) => evaluate_weighted(view, legal, dseed, &ctx, &cfg, &inf),
+                None => evaluate(view, legal, dseed, &ctx, &cfg),
+            };
         }
         evaluate(view, legal, dseed, &ctx, &self.cfg)
     }
@@ -464,9 +529,13 @@ pub fn app_factory(
     s2: &[u8],
     deals3: [u32; 8],
     deals45: u32,
+    inference: Option<InferenceCfg>,
 ) -> Result<PimcFactory, String> {
     let spec = PimcSpec::parse(base)?;
-    let app = AppPlay::from_bytes(s1, s2, deals3, deals45)?;
+    let mut app = AppPlay::from_bytes(s1, s2, deals3, deals45)?;
+    if let Some(c) = inference {
+        app = app.with_inference(c);
+    }
     let table = equity()?;
     let leaf: Arc<SharedLeaf> = table;
     Ok(PimcFactory::app(&spec, app, leaf, default_source()))
@@ -619,6 +688,7 @@ mod tests {
             s2: Arc::new(s2),
             deals3: [1, 1, 2, 1, 1, 1, 1, 2],
             deals45: 1,
+            inference: None,
         }
     }
 
@@ -703,12 +773,52 @@ mod tests {
                 Method::ExactPimc => exact += 1,
                 Method::Forced => forced += 1,
                 Method::RolloutPimc => {} // the dealer's burn, or a turned pair at tricks 1-2
+                Method::PlayoutPimc => panic!("a bot never values by the playout teacher"),
             }
         }
         assert!(students > 100, "{students} student decisions");
         assert!(joint > 0, "a robber's joint decision went to the student");
         assert!(exact > 50, "{exact} exact decisions");
         assert!(forced > 0);
+    }
+
+    /// With the deal weighting on, the exact decisions mix their deals by the other seats' plays
+    /// (`BeliefMode::Policy`), the students' decisions are as before, every action is legal over
+    /// whole matches, and the name says so.
+    #[test]
+    fn the_app_player_with_inference_weights_its_exact_decisions() {
+        let app = Arc::new(tiny_app().with_inference(InferenceCfg::DEFAULT));
+        assert!(app.name().ends_with(",inf=tau10/floor50"), "{}", app.name());
+        let l = leaf();
+        let source = default_source();
+        let make = || {
+            PimcBot::new("app".into(), tiny_cfg(), l.clone(), source.clone()).with_app(app.clone())
+        };
+        let decisions = play_matches(&make, 31..34);
+        let (mut policy, mut students) = (0, 0);
+        for (_, dv) in &decisions {
+            match dv.method {
+                Method::ExactPimc => {
+                    assert_eq!(dv.belief, BeliefMode::Policy);
+                    policy += 1;
+                }
+                Method::Student => {
+                    assert_eq!(dv.belief, BeliefMode::Uniform);
+                    students += 1;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            policy > 20 && students > 50,
+            "{policy} weighted, {students} student decisions"
+        );
+        assert_eq!(
+            InferenceCfg::from_permille(10, 50).expect("ok"),
+            InferenceCfg::DEFAULT
+        );
+        assert!(InferenceCfg::from_permille(0, 50).is_err());
+        assert!(InferenceCfg::from_permille(10, 1001).is_err());
     }
 
     /// With the app off the bot is byte-identical to the plain PIMC bot: the same actions and

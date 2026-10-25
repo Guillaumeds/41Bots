@@ -1616,6 +1616,7 @@ mod tests {
             ("golden-routed-s2.manifest.json", 1),
             ("net-error-o3-val.manifest.json", 1),
             ("arena-students.manifest.json", 1),
+            ("arena-inference.manifest.json", 1),
             ("playout-labels.manifest.json", 6),
             ("playout-labels-2.manifest.json", 10),
         ] {
@@ -1689,6 +1690,35 @@ mod tests {
                             .unwrap_or_else(|e| panic!("{what}: {e}"));
                         for n in crate::arena_bots::input_names(&p).expect("names") {
                             assert!(inputs.contains_key(&n), "{what}: input {n}");
+                        }
+                        // The inference gate: the same students and deals, the weighting on one arm.
+                        if file.starts_with("arena-inference") {
+                            let (
+                                crate::arena_bots::BotSpec::App {
+                                    inference: ia,
+                                    student1: s1a,
+                                    deals3: d3a,
+                                    ..
+                                },
+                                crate::arena_bots::BotSpec::App {
+                                    inference: ib,
+                                    student1: s1b,
+                                    deals3: d3b,
+                                    ..
+                                },
+                            ) = (&a, &b)
+                            else {
+                                panic!("{what}: both arms are app bots");
+                            };
+                            assert!(
+                                ia.is_some() && ib.is_none(),
+                                "{what}: the weighting on arm a only"
+                            );
+                            assert_eq!(
+                                (s1a, d3a),
+                                (s1b, d3b),
+                                "{what}: the same students and deals"
+                            );
                         }
                         // The gate's two arms: the same deals, the new students against the old.
                         if file.starts_with("arena-students") {

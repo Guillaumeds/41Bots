@@ -304,6 +304,29 @@ Measured on one thread of the build VM: one 14-way block at the cheaper table 64
 and 256 took **164 s**; the app's table is about four times the deals, so about 10 minutes a block
 and 3,000 blocks about 500 core-hours (a few hours on a 256-thread machine).
 
+### 6.2 Deal weighting by the other seats' plays (inference; built 2026-10-25)
+
+PLAN §6.4 point 3 in its first form (`crates/search/src/inference.rs`): at an exact decision
+(tricks 3-5) each sampled deal is weighted by how likely the other seats' tricks 1-2 plays were,
+had the deal been true, under the students: the seat's student values every candidate from the
+view it would have had in that deal, the probability of the play it made is a softmax over its
+own team's values at a temperature `tau` (1% of the money) with a floor (5% spread evenly), the
+deal's weight is the product over those plays, and the candidates' means are the weighted mixes
+(`MoneyChance::mix`, `BeliefMode::Policy`). The dealer's burn and every decision from trick 3 on
+carry no model (weight 1); a robber's burn and first card are one choice; a play outside the app's
+candidates (a robber burning the card it took) gets the floor's share. Even a flat model weighs a
+deal by how many cards each seat could choose from (1/n a play). Everything is integer (the oracle
+head's `exp_weight` rule, a mantissa-and-exponent product, the likeliest deal scaled to 2^60), so
+the same bytes on any machine; one student call per modelled play per deal (at most about 16).
+Precedents and the caution: RESEARCH §6 and §15 (Skat +2 to +9 points a game from inference;
+Jass nothing). In the arena: `"inference": {"tau": 10, "floor": 50}` (permille) on an app bot
+(`AppPlay::with_inference`, name part `inf=tau10/floor50`); the gate is
+`docs/vast/arena-inference.manifest.json` (run 3: the same students, the weighting on one arm).
+Tests: the floored softmax, the exact product and scaling, a hand played by a ranked student
+whose true deal weighs at least the median sample in two thirds of the hands, legal play with the
+weighting on, the manifest. Not yet: the weighting inside the playout teacher's deals (one trick
+of history at trick 2) and a model for the trick 3-5 plays (the exact bots have no cheap policy).
+
 ## 7. The fixed test set and the measure
 
 - **Test set:** decisions from the reserved seed `STUDENT_TEST_SEED` (`crates/student`), trick 1
