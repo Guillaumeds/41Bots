@@ -105,6 +105,10 @@ def decide_kept(inst: dict, rec: dict, now: float, everything: bool = False) -> 
     if everything:
         return "destroy", "the 'all' option"
     status = inst.get("actual_status")
+    if str(inst.get("intended_status")) == "stopped":
+        # Stopped on purpose (the owner's console stop): the rental and its disk are the owner's to keep at the
+        # storage rate; the cleanup never destroys it (EXPERIMENTS A11, 2026-10-25).
+        return "keep", "stopped by the owner (intended_status stopped): left as it is"
     if status in DEAD_STATES:
         return "destroy", f"kept machine, but vast shows it {status}"
     until = parse_time(rec.get("keep_until_utc"))
@@ -113,6 +117,23 @@ def decide_kept(inst: dict, rec: dict, now: float, everything: bool = False) -> 
     if now > until + KEEP_GRACE_S:
         return "destroy", f"kept machine idle past its keep time {rec.get('keep_until_utc')} (run {rec.get('run_id')})"
     return "keep", f"kept for the next worker until {rec.get('keep_until_utc')} (run {rec.get('run_id')})"
+
+
+def keep_record_of(run_id: str, instance_id: int, state: dict, inst: dict, marker_t: float) -> dict:
+    """keep/<instance>.json for a handed-over kept run that ended at `marker_t` (the same shape as launch.py
+    keep_record: the launcher is gone, so the cleanup writes it)."""
+    watch = state.get("watch") or {}
+    hours = keep_asked(state)[1]
+    dph = float(watch.get("dph") or inst.get("dph_total") or 0)
+    until = marker_t + hours * 3600
+    return {"instance_id": int(instance_id), "run_id": run_id, "dph": round(dph, 5),
+            "why": "run ended after the launcher's handover (kept by the cleanup)",
+            "cpu_name": watch.get("cpu_name") or inst.get("cpu_name") or "", "hours": hours,
+            "kept_utc": utc(marker_t), "keep_until_utc": utc(until),
+            "next": (f"deploy the next job onto it: a manifest with \"machine\": {{\"instance_id\": {int(instance_id)}}} "
+                     f"through the vast-run workflow (docs/STATUS.md, 'Deploy onto a kept machine'), or destroy it "
+                     f"(vast-stop workflow). Until then it bills ${dph:.3f}/h; the vast-cleanup workflow destroys it at "
+                     f"keep_until_utc.")}
 
 
 def decide(inst: dict, state: dict, now: float, everything: bool = False) -> tuple[str, str]:
@@ -137,12 +158,20 @@ def decide(inst: dict, state: dict, now: float, everything: bool = False) -> tup
     # working (review E, 2026-10-16: destroying it lost the work since its last upload). It goes
     # through the other rules (silence, markers, cap) like a running machine.
     working_offline = status == "offline" and bool(beats) and now - max(beats) <= SILENT_S
+    if str(inst.get("intended_status")) == "stopped":
+        # The owner stopped it from the console: theirs to keep or destroy (EXPERIMENTS A11).
+        return "keep", "stopped by the owner (intended_status stopped): left as it is"
     if status in DEAD_STATES and not working_offline:
         return "destroy", f"vast shows it {status}"
+    w = state.get("watch") or {}
     for marker, t in sorted((state.get("markers") or {}).items()):
         if t is not None and now - t > MARKER_GRACE_S:
+            if keep_asked(state)[0]:
+                # A kept run (machine.keep) that ended after its launcher had handed it over: the runner parked
+                # (KEEP_MACHINE=1); the machine is the next job's, so the keep record is written now (the sweep)
+                # and the keep time runs from the marker (2026-10-25: before, such a run was destroyed here).
+                return "kept", f"its run wrote {marker} {(now - t) / 60:.0f} min ago and asked to keep the machine (machine.keep)"
             return "destroy", f"its run wrote {marker} {(now - t) / 60:.0f} min ago and the machine did not destroy itself"
-    w = state.get("watch") or {}
     # The run's own idea of busy (launch.py busy_threshold): a run declared to use few cores
     # (--low-cpu-pct 1) is busy at 17% CPU, so a hang of its uploads is not taken for a dead run.
     try:
@@ -259,7 +288,24 @@ def run_state(r2, run_id: str) -> dict:
         "run_start": r2.mtime(f"runs/{run_id}/manifest.json"),
         "heartbeats": [t for k, t in r2.list(f"runs/{run_id}/heartbeat/") if k.endswith(".json")],
         "watch": get_json(r2, f"runs/{run_id}/watch.json"),
+        # The run's own manifest (its `machine` block says keep): read for runs whose launcher wrote its watch record
+        # before the record carried keep (any run launched before 2026-10-25 and handed over).
+        "manifest": get_json(r2, f"runs/{run_id}/manifest.json"),
     }
+
+
+def keep_asked(state: dict) -> tuple[bool, float]:
+    """Whether the run asked to keep its machine (watch.json keep, else the manifest's machine.keep), and for how
+    many hours (watch.json keep_hours, else the manifest's machine.keep_hours, else 6)."""
+    w = state.get("watch") or {}
+    m = ((state.get("manifest") or {}).get("machine") or {}) if isinstance(state.get("manifest"), dict) else {}
+    keep = w.get("keep") if isinstance(w.get("keep"), bool) else m.get("keep") is True
+    hours = w.get("keep_hours") if w.get("keep_hours") is not None else m.get("keep_hours")
+    try:
+        hours = float(hours) if hours is not None else 6.0
+    except (TypeError, ValueError):
+        hours = 6.0
+    return bool(keep), hours
 
 
 def instance_now(instance_id) -> dict | None:
@@ -389,6 +435,15 @@ def sweep(r2, instances: list[dict], now: float, everything: bool, dry_run: bool
         rows.append((inst["id"], run_id, inst.get("actual_status"), action, why))
         log(f"instance {inst['id']} run {run_id} ({inst.get('actual_status')}): {action.upper()} - {why}")
         if dry_run or action == "keep":
+            continue
+        if action == "kept":
+            # The keep record of a handed-over kept run, from the marker's time (launch.py keep_record's shape).
+            marker_t = min(t for t in (state.get("markers") or {}).values() if t is not None)
+            rec = keep_record_of(run_id, int(inst["id"]), state, inst, marker_t)
+            r2.put(f"keep/{inst['id']}.json", json.dumps(rec, indent=2).encode())
+            r2.put(f"runs/{run_id}/KEPT.json", json.dumps(rec, indent=2).encode())
+            log(f"::warning::MACHINE KEPT RUNNING, ACTION NEEDED: instance {inst['id']} (run {run_id}) is kept until "
+                f"{rec['keep_until_utc']}; deploy the next job onto it (machine.instance_id) or destroy it (vast-stop)")
             continue
         if action == "stop":
             r2.put(f"runs/{run_id}/STOP", json.dumps({"reason": f"cleanup: {why}", "utc": utc(now)}).encode())

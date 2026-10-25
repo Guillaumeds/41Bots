@@ -153,6 +153,12 @@ class World:
         if kind == "die" and inst["polls"] > n:
             inst["alive"] = False
             return
+        if kind == "stop" and inst["polls"] > n:
+            # The owner stops it from the console: vast keeps the instance (and its disk) with
+            # intended_status "stopped"; a crash or an exit leaves intended_status "running".
+            inst["alive"] = False
+            inst["stopped"] = True
+            return
         self.store[f"runs/{RUN}/heartbeat/{self.hb_seq:06}.json"] = json.dumps(
             {"seq": self.hb_seq, "phase": "chunks", "cpu_util_pct": 99.0}).encode()
         self.hb_seq += 1
@@ -239,7 +245,7 @@ class World:
                 hide = max(self.instances)
             return [{"id": iid, "label": inst["label"],
                      "actual_status": None if self.listed_status_none else "running" if inst["alive"] else "exited",
-                     "intended_status": "running" if inst["alive"] else "stopped"}
+                     "intended_status": "stopped" if inst.get("stopped") else "running"}
                     for iid, inst in self.instances.items() if not inst.get("destroyed") and iid != hide]
         if cmd == ("create", "api-key"):
             with open(args[args.index("--permission_file") + 1]) as fh:
@@ -260,7 +266,9 @@ class World:
                 return {"actual_status": None, "intended_status": "running", "status_msg": ""}
             inst = self.instances.get(int(args[2]))
             if not inst or not inst["alive"]:
-                return {"actual_status": "exited", "intended_status": "stopped"}
+                # Dead by itself (a crash, an exit): intended_status stays "running"; only the owner's
+                # console stop reads "stopped".
+                return {"actual_status": "exited", "intended_status": "stopped" if inst and inst.get("stopped") else "running"}
             cpu = {"silentbusy": 95.0, "hiccup": 97.0, "silentidle": 2.0, "silentlow": 17.0,
                    "stuck": 95.0}.get(inst["script"].split(":")[0])
             if cpu is not None:
@@ -1367,6 +1375,78 @@ class LauncherTest(unittest.TestCase):
             self.run_launch(w, self.FORMAT1, "--offer-id", "500")
         self.assertIn("listed but not rentable now", str(e.exception))
         self.assertEqual(w.created_on, [])
+
+    @contextlib.contextmanager
+    def public_market(self, rows: list[dict]):
+        """The public market list (bundles API) answers `rows` for every query; no network."""
+        saved = launch.public_bundles
+        launch.public_bundles = lambda query: [dict(r) for r in rows]
+        try:
+            yield
+        finally:
+            launch.public_bundles = saved
+
+    def test_a_named_offer_both_searches_miss_is_rented_from_the_public_market_list(self):
+        # 2026-10-25 (EXPERIMENTS A11): offer 36863856 on machine 68507 was rentable in the public market list while
+        # vast's search by id and the launcher's market listing (512 offers a search) both said it was gone; the run
+        # failed and the owner rented the box by hand. The public list, matched by id, decides; every check runs.
+        row = offer(500, 50, 1.0, cpu_cores_effective=384, rentable=True, rented=False)
+        w = World([], ["done:1"])  # no search finds it
+        with self.public_market([row, offer(501, 51, 0.5)]):
+            code, _ = self.run_launch(w, self.FORMAT1, "--offer-id", "500")
+        self.assertEqual((code, w.created_on), (0, [500]))
+        self.assertIn("vast's search by id missed it; found in the public market list (bundles API)", self.log)
+        # Rented or unrentable there: refused, as from the listing.
+        w = World([], ["done:1"])
+        with self.public_market([offer(500, 50, 1.0, rentable=True, rented=True)]):
+            with self.assertRaises(SystemExit) as e:
+                self.run_launch(w, self.FORMAT1, "--offer-id", "500")
+        self.assertIn("listed but not rentable now", str(e.exception))
+        # Missing there too: gone, with the reasons as before.
+        w = World([], ["done:1"])
+        with self.public_market([]):
+            with self.assertRaises(SystemExit) as e:
+                self.run_launch(w, self.FORMAT1, "--offer-id", "500")
+        self.assertIn("offer 500 is not on offer (on-demand) any more", str(e.exception))
+        self.assertEqual(w.created_on, [])
+
+    def test_a_machine_id_rents_the_machines_cheapest_rentable_offer(self):
+        # The owner names the machine (machine.machine_id or --machine-id), not an offer: the cheapest rentable, unrented
+        # offer on it in the public market list becomes the named offer, then every check runs on it as usual.
+        rows = [{"id": 501, "machine_id": 68507, "dph_total": 0.20, "rentable": True, "rented": True},
+                {"id": 500, "machine_id": 68507, "dph_total": 0.33, "rentable": True, "rented": False},
+                {"id": 502, "machine_id": 68507, "dph_total": 0.10, "rentable": False, "rented": False},
+                {"id": 503, "machine_id": 99, "dph_total": 0.05, "rentable": True, "rented": False}]
+        w = World([offer(500, 68507, 0.33)], ["done:1"])
+        with self.public_market(rows):
+            code, _ = self.run_launch(w, self.FORMAT1, "--machine-id", "68507")
+        self.assertEqual((code, w.created_on), (0, [500]))
+        self.assertIn("machine 68507: its cheapest rentable offer now is 500 ($0.330/h)", self.log)
+        # The manifest's machine block names it too.
+        w = World([offer(500, 68507, 0.33)], ["done:1"])
+        with self.public_market(rows):
+            code, _ = self.run_launch(w, {**self.FORMAT1, "machine": {"machine_id": 68507}})
+        self.assertEqual((code, w.created_on), (0, [500]))
+        # Nothing rentable on the machine: refused, nothing rented.
+        w = World([offer(500, 68507, 0.33)], ["done:1"])
+        with self.public_market([rows[0], rows[2]]):
+            with self.assertRaises(SystemExit) as e:
+                self.run_launch(w, self.FORMAT1, "--machine-id", "68507")
+        self.assertIn("machine 68507 has no rentable on-demand offer", str(e.exception))
+        self.assertEqual(w.created_on, [])
+        # The pure parts: the public offer by id, the machine's cheapest; a failed call is None, never an error.
+        with self.public_market(rows):
+            self.assertEqual(launch.public_offer(500)["dph_total"], 0.33)
+            self.assertIsNone(launch.public_offer(7))
+            self.assertEqual(launch.public_machine_offer(68507)["id"], 500)
+            self.assertIsNone(launch.public_machine_offer(1))
+        saved = launch.PUBLIC_BUNDLES_URL
+        launch.PUBLIC_BUNDLES_URL = "nowhere://bundles"  # an unknown scheme: urllib fails without the network
+        try:
+            self.assertIsNone(launch.public_bundles({"id": {"eq": 1}}))
+            self.assertIsNone(launch.public_offer(1))
+        finally:
+            launch.PUBLIC_BUNDLES_URL = saved
 
     def test_container_error_is_replaced_at_once(self):
         # The container cannot start: destroyed at the first poll (not after --startup-minutes)

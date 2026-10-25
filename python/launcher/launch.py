@@ -244,6 +244,9 @@ MAX_DOLLARS = 20.0  # the default dollar cap of a run (owner, 2026-10-16)
 # before that: the machine keeps working and the run-aware cleanup (cleanup.py, every 15 minutes)
 # watches it from then on, through runs/<run>/watch.json and watch/<run>.json.
 HANDOVER = "handed over to the cleanup"
+# A watched instance the owner stopped from the console (vast intended_status "stopped"): never destroyed,
+# never replaced; recorded as kept (EXPERIMENTS A11, 2026-10-25).
+STOPPED_BY_OWNER = "stopped by the owner (vast intended_status stopped)"
 MAURITIUS = timezone(timedelta(hours=4))
 
 
@@ -424,7 +427,7 @@ def parse_gpu_names(text: str) -> list[str]:
 MACHINE_KEYS = ("gpus", "min_gpu_ram_gb", "min_compute_cap", "min_cores", "min_ram_gb", "disk_gb", "min_inet_down",
                 "min_inet_up",
                 "max_dph", "wait_for_offer_min", "offer_poll_s", "price_steps", "tries_per_step", "gpu_names", "blackwell",
-                "keep", "keep_hours", "instance_id", "entrypoint_mode", "force_take")
+                "keep", "keep_hours", "instance_id", "entrypoint_mode", "force_take", "machine_id")
 
 KEEP_HOURS = 6.0  # default machine.keep_hours: how long a kept machine may idle before the cleanup destroys it
 KEEP_HOURS_MAX = 72.0
@@ -470,11 +473,15 @@ def apply_machine(a, manifest: dict) -> None:
     if "instance_id" in m and (isinstance(m["instance_id"], bool) or not isinstance(m["instance_id"], int)
                                or m["instance_id"] <= 0):
         sys.exit(f"launch: machine.instance_id must be a vast instance number (got {m['instance_id']!r})")
+    if "machine_id" in m and (isinstance(m["machine_id"], bool) or not isinstance(m["machine_id"], int)
+                              or m["machine_id"] <= 0):
+        sys.exit(f"launch: machine.machine_id must be a vast machine number (got {m['machine_id']!r})")
     if "keep_hours" in m and not (isinstance(m["keep_hours"], (int, float)) and not isinstance(m["keep_hours"], bool)
                                   and 0 < m["keep_hours"] <= KEEP_HOURS_MAX):
         sys.exit(f"launch: machine.keep_hours must be above 0 and at most {KEEP_HOURS_MAX:g} (got {m['keep_hours']!r})")
     for k, v in m.items():
-        if k in ("price_steps", "gpu_names", "blackwell", "keep", "instance_id", "entrypoint_mode", "force_take"):
+        if k in ("price_steps", "gpu_names", "blackwell", "keep", "instance_id", "entrypoint_mode", "force_take",
+                 "machine_id"):
             continue
         if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
             sys.exit(f"launch: machine.{k} must be a number, 0 or more (got {v!r})")
@@ -519,6 +526,8 @@ def apply_machine(a, manifest: dict) -> None:
         a.keep_hours = float(m["keep_hours"])
     if "instance_id" in m and getattr(a, "instance_id", None) is None:
         a.instance_id = int(m["instance_id"])
+    if "machine_id" in m and getattr(a, "machine_id", None) is None:
+        a.machine_id = int(m["machine_id"])
     if gpu_job(a) and a.cpu_only:
         log(f"the run needs {a.gpus} GPU(s): the GPU filters apply (--cpu-only is ignored)")
         a.cpu_only = False
@@ -778,6 +787,42 @@ def why_offer_missing(oid: int) -> str:
     return "; " + "; ".join(found)
 
 
+PUBLIC_BUNDLES_URL = "https://console.vast.ai/api/v0/bundles/"
+
+
+def public_bundles(query: dict) -> list[dict] | None:
+    """The public market list (`POST /api/v0/bundles/`, no key): the offers matching `query`, or None when the
+    call fails or the answer is not JSON. `vastai search offers` answers at most 512 offers a search, so a live
+    offer can be missing from it (2026-10-25: offer 36863856 on machine 68507 was listed here, rentable and not
+    rented, while both of the launcher's searches said it was gone; EXPERIMENTS A11)."""
+    import urllib.error
+    import urllib.request
+    body = json.dumps({**query, "type": query.get("type", "on-demand"), "limit": query.get("limit", 5)}).encode()
+    req = urllib.request.Request(PUBLIC_BUNDLES_URL, data=body, method="POST",
+                                 headers={"Content-Type": "application/json", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            offers = json.loads(r.read().decode("utf-8", "replace")).get("offers")
+    except (urllib.error.URLError, OSError, ValueError, AttributeError):
+        return None
+    return offers if isinstance(offers, list) else None
+
+
+def public_offer(oid: int) -> dict | None:
+    """Offer `oid` as the public market list has it, or None (missing, or the list could not be read)."""
+    rows = public_bundles({"id": {"eq": oid}}) or []
+    return next((o for o in rows if isinstance(o, dict) and o.get("id") == oid), None)
+
+
+def public_machine_offer(machine_id: int) -> dict | None:
+    """The cheapest rentable, unrented on-demand offer on machine `machine_id` in the public market list, or None
+    (`python/tools/grab_machines.py` reads the market the same way)."""
+    rows = public_bundles({"machine_id": {"eq": machine_id}, "rentable": {"eq": True}}) or []
+    rows = [o for o in rows if isinstance(o, dict) and o.get("machine_id") == machine_id
+            and o.get("rentable") is not False and o.get("rented") is not True and o.get("dph_total") is not None]
+    return min(rows, key=lambda o: float(o["dph_total"])) if rows else None
+
+
 def market_offer(oid: int) -> dict | None:
     """The offer `oid` as the on-demand market listing has it, matched by id here, or None. vast answers at most
     512 offers a search, so the big machines (150+ threads) are read first, then the whole listing; a failed
@@ -813,13 +858,18 @@ def lookup_offer(a) -> dict:
         # vast's `id=N` filter misses some live offers (2026-10-19: offer 56041192, rentable and not rented in
         # the market listing, read as gone twice and was lost); the market listing, matched by id here, decides.
         row = market_offer(oid)
+        where = "the market listing"
+        if row is None:
+            # The public market list reads every offer by id without the 512-offer cap of the searches above.
+            row = public_offer(oid)
+            where = "the public market list (bundles API)"
         if row is None:
             sys.exit(f"launch: offer {oid} is not on offer (on-demand) any more; nothing was rented"
                      f"{why_offer_missing(oid)}")
         if row.get("rentable") is False or row.get("rented") is True:
             sys.exit(f"launch: offer {oid} is listed but not rentable now (rentable {row.get('rentable')}, rented "
                      f"{row.get('rented')}); nothing was rented")
-        log(f"named offer {oid}: vast's search by id missed it; found in the market listing, checked as usual")
+        log(f"named offer {oid}: vast's search by id missed it; found in {where}, checked as usual")
     log(f"named offer {oid}: {named_text(row)}")
     verified_only = bool(getattr(a, "verified_only", False))
     failed = offer_check_failures(row, float(a.min_reliability), verified_only)
@@ -884,6 +934,16 @@ def lookup_offer(a) -> dict:
 def choose(a, quiet: bool = False) -> dict | None:
     """The best offer for the run's filters, or None. `quiet` (repeat searches while waiting for an offer)
     leaves out the log lines about the verified/unverified fallback and the empty list when nothing matches."""
+    if getattr(a, "machine_id", None) and not getattr(a, "offer_id", None):
+        # A machine the owner named (--machine-id, or machine.machine_id in the manifest): its cheapest rentable
+        # offer in the public market list becomes the named offer, checked like one the owner picked by id.
+        mid = int(a.machine_id)
+        row = public_machine_offer(mid)
+        if row is None:
+            sys.exit(f"launch: machine {mid} has no rentable on-demand offer in the public market list now; "
+                     f"nothing was rented")
+        a.offer_id = int(row["id"])
+        log(f"machine {mid}: its cheapest rentable offer now is {a.offer_id} (${float(row['dph_total']):.3f}/h)")
     if getattr(a, "offer_id", None):
         # An offer the owner picked on vast's own website (2026-10-15): one search by its id checks it
         # like any other (reliability, whole machine; a verified host only with --verified-only), nothing else is searched. It is offered
@@ -1408,6 +1468,13 @@ def instance_state(instance_id: int) -> tuple[str, dict | None]:
     return "alive", info
 
 
+def owner_stopped(info: dict | None) -> bool:
+    """Whether vast's record says the instance was stopped on purpose (intended_status "stopped"):
+    the owner's console stop, not a crash (a crashed container reads exited with intended_status
+    "running"; a destroyed instance is absent from the listing)."""
+    return bool(info) and str(info.get("intended_status")) == "stopped"
+
+
 class Liveness:
     """Whether one instance is still there, read so that no single answer from vast can say
     "gone": it is declared gone only after GONE_CONFIRMATIONS consecutive readings showing it dead
@@ -1420,6 +1487,11 @@ class Liveness:
         self.count = 0
         self.first: float | None = None
         self.detail = ""
+        # Whether the dead readings say the owner STOPPED the instance (vast intended_status
+        # "stopped"): a stopped instance is the owner's doing, never a dead machine (2026-10-25:
+        # the owner stopped the Thailand box from the console to free it and the launcher
+        # destroyed it as "died before DONE", EXPERIMENTS A11).
+        self.owner_stopped = False
 
     def check(self) -> tuple[str, dict | None]:
         """("alive" | "gone" | "dying" | "unknown", vast's record); dying = dead by this reading
@@ -1432,11 +1504,14 @@ class Liveness:
         if state == "alive":
             self.count, self.first = 0, None
             self.detail = ""
+            self.owner_stopped = False
             return "alive", info
+        self.owner_stopped = owner_stopped(info)
         self.count += 1
         self.first = now if self.first is None else self.first
         span = now - self.first
-        self.detail = f"{info_word(info)}: reading {self.count} of {GONE_CONFIRMATIONS} over {span:.0f} s"
+        word = f"{info_word(info)}, intended_status stopped" if self.owner_stopped else info_word(info)
+        self.detail = f"{word}: reading {self.count} of {GONE_CONFIRMATIONS} over {span:.0f} s"
         if self.count >= GONE_CONFIRMATIONS and span >= GONE_SPAN_S:
             return "gone", info
         return "dying", info
@@ -2159,6 +2234,10 @@ def watch_record(a, run_id: str, instance_id: int, best: dict, dph: float, spent
             "created_utc": datetime.fromtimestamp(created, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "deadline_utc": getattr(a, "deadline_utc", None), "handed_over": handed_over,
             "busy_cpu_pct": busy_threshold(a), "low_cpu_pct": a.low_cpu_pct,
+            # machine.keep: a run the launcher has handed over (330 min) ends after the launcher is gone, so the
+            # cleanup must leave its machine up at DONE/FAILED and write the keep record itself (cleanup.py
+            # `decide`, action "kept"); before 2026-10-25 a kept run longer than the handover lost its keep.
+            "keep": bool(getattr(a, "keep", False)), "keep_hours": float(getattr(a, "keep_hours", None) or KEEP_HOURS),
             "destroy_key_id": getattr(a, "destroy_key_id", None),
             "github_run": os.environ.get("GITHUB_RUN_ID"),
             "utc": datetime.fromtimestamp(time.time(), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
@@ -2214,7 +2293,10 @@ def write_keep(run_id: str, instance_id: int, dph: float, why: str, hours: float
 def keep_applies(a, final: str, reason: str) -> bool:
     """Whether the machine is left up: the run asked for it (machine.keep) and the runner ended the run by itself
     (DONE or FAILED). A machine the launcher had to stop (budget, time, low CPU, silence) or that never ran is
-    destroyed as before."""
+    destroyed as before. A machine the owner stopped from the console is always left as it is, keep or not
+    (EXPERIMENTS A11)."""
+    if reason.startswith(STOPPED_BY_OWNER):
+        return True
     if getattr(a, "instance_id", None) and not final and start_failure_kind(reason):
         # A taken-over machine whose container never started or never heartbeated is the owner's machine, not
         # one this run rented: it is left up (and recorded), never destroyed for the failure (trial keep-trial-2,
@@ -2226,9 +2308,15 @@ def keep_applies(a, final: str, reason: str) -> bool:
 
 def keep_machine(a, run_id: str, instance_id: int, dph: float, final: str, cpu_name: str = "", reason: str = "") -> str:
     """Leaves the instance running (the runner parks: KEEP_MACHINE=1) and records it. The workflow's safety-net steps
-    must not destroy it, so the state files go."""
-    write_keep(run_id, instance_id, dph, f"run {final}" if final else f"takeover did not start: {reason[:160]}",
-               float(a.keep_hours), cpu_name)
+    must not destroy it, so the state files go. A machine the owner stopped is recorded the same way (the cleanup
+    leaves a stopped instance alone, `cleanup.decide_kept`)."""
+    if reason.startswith(STOPPED_BY_OWNER):
+        why = f"stopped by the owner from the console: {reason[:160]}"
+    elif final:
+        why = f"run {final}"
+    else:
+        why = f"takeover did not start: {reason[:160]}"
+    write_keep(run_id, instance_id, dph, why, float(getattr(a, "keep_hours", None) or KEEP_HOURS), cpu_name)
     a.kept = True
     if a.state_file:
         for suffix in ("", ".run-id", ".keep"):
@@ -2731,6 +2819,8 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
                 log(f"::warning::no new heartbeat for {silent_s / 60:.1f} minutes; vast: {redact(status_line(info))}; "
                     f"{state}: {redact(detail)}")
                 print_logs(instance_id, 100)
+            if state == "gone" and live.owner_stopped:
+                return "", f"{STOPPED_BY_OWNER} ({redact(detail)})", False, False
             if state in ("gone", "idle"):
                 return "", f"heartbeat missing for {silent_s / 60:.0f} minutes and the instance is {state} ({redact(detail)})", True, False
             # Busy (an upload problem), dying (dead by one reading, not yet confirmed) or unknown
@@ -2748,6 +2838,10 @@ def watch(a, run_id: str, instance_id: int, created: float, run_start: float,
             log("heartbeats resumed")
         state, _ = live.check()
         if state == "gone":
+            if live.owner_stopped:
+                # Stopped from the console on purpose: the machine (and its disk) is the owner's to
+                # keep; it is never destroyed and never replaced (EXPERIMENTS A11).
+                return "", f"{STOPPED_BY_OWNER} ({live.detail})", False, False
             return "", f"instance died before DONE ({live.detail})", True, False
         if state == "dying":
             log(f"instance {instance_id} looks dead ({live.detail}); not yet confirmed")
@@ -2941,6 +3035,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="rent only from vast.ai-verified hosts (the strict behaviour). Without it, verified hosts are "
                             "still preferred, but when no verified offer fits, unverified or deverified hosts are searched "
                             "too (owner rule 2026-10-16); this also applies to --offer-id")
+        s.add_argument("--machine-id", type=int, default=None,
+                       help="rent the cheapest rentable on-demand offer on this vast.ai machine (read from the public "
+                            "market list, which has no 512-offer cap), then checked exactly like --offer-id")
         s.add_argument("--offer-id", type=int, default=None,
                        help="rent exactly this vast.ai offer: one search by its id checks it (reliability >= 0.90, whole "
                             "machine, on-demand; an unverified or deverified host is accepted unless --verified-only) and "
