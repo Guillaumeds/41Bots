@@ -31,6 +31,7 @@ Old branches are tags (`git tag -l 'archive/*'`; `git checkout archive/<name>` r
 | `m3-hybrid/vast.md`, `VAST-MACHINES.md`, `vast/` | running on rented machines; **measured cost per unit of work of every machine we rented** (`VAST-MACHINES.md`, first section); run manifests | **adopted** (A8). `vast/*.manifest.json` are the runs' inputs and are checked by the runner's tests |
 | `APP-ENGINE-CONTRACT.md`, `WASM-API.md` | the engine API for the app | **done** |
 | `STUDENT.md` | the student pipeline | **done** (E1) |
+| `STUDENT.md` §3.1, `docs/vast/playout-labels.manifest.json` | the playout teacher: deals played out by S1/S2 from each seat's own view, exact from trick 3 (PLAN §6.8) | **built** 2026-10-25 (review session, EXPERIMENTS I1-I2); first labels run pending |
 
 ## Measurements of the game and the solver
 | document | what | outcome |

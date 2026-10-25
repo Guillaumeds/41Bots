@@ -149,11 +149,56 @@ What the record makes possible without a new solve:
 Data is selected by filters on the stamps (trick, source, teacher, equity, rules); a shard whose
 stamps differ from the run's is refused unless explicitly allowed (`--allow-stamp KEY`).
 
+### 3.1 The playout teacher (2026-10-25; PLAN §6.8, a recursive rollout at depth one)
+
+The search teachers above value each deal with every card face up (exact search, then a network
+that copies the exact solver). The review of 2026-10-25 (EXPERIMENTS I1-I2) measured what that
+costs on one decision class: the live S1 leads the J of trumps without the 5 expecting +0.6% of
+the money and loses 0.45% against players who cash the 5, because in a face-up deal the
+5-holder is never surprised. The **playout teacher** values each deal by playing it with
+hidden-card players instead:
+
+1. the candidate is played (a robber's joint burn-then-play as one candidate, as always);
+2. then every seat to act, the decider included, chooses from **its own `SeatView`** with the
+   student network of its trick: S1 at trick 1, S2 at trick 2 (`search::pimc::student_candidate`:
+   the app's candidates, `net.evaluate`, the team's best, ties to the first candidate; exactly the
+   app's `method: "student"` decision); a seat with one legal action plays it without the
+   network;
+3. at the start of trick `cut` (default 3) the deal, now fully known, is solved exactly to the end
+   of the hand (`search::pimc::exact_value`: the root mover's best under the solver's tie rule); a
+   hand that ended first is valued by the leaf rule. `cut` 6 plays every trick out; `cut` at the
+   decision's own trick plays nothing out and equals the exact teacher byte for byte (tested).
+
+The values are averaged over the same deals for every candidate, in deal order, with
+`MoneyChance::mix`, so a shard is byte-identical for any thread count (tested). Furtak and Buro
+(2013) and Bouzy, Rimbaud and Ventos (2020) are the precedents (RESEARCH §7, §15); the inner
+players are today's students, lean included, so a second round replays the deals with the
+retrained ones.
+
+- Rust: `search::pimc::{Students, student_candidate, playout_value, playout_world}`,
+  `search::student_teacher::Teacher::Playout { students, cut, sha1, sha2 }`, stamp
+  `playout:<S1 sha256>:<S2 sha256>:cut<k>` in the sidecar (`Method::PlayoutPimc` in records).
+- CLI: `search teacher --trick 1|2 ... --playout --student1 S1 --student2 S2 [--playout-cut 3]`
+  (no `--net`).
+- Runner (`student_teacher` streams): `"teacher": "playout"`, `"student1"`, `"student2"` (manifest
+  input names of the student files), `"playout_cut"` (3); no `net_input`. Shards are named
+  `t<trick>-<role>-<source>-s<seed>-d<deals>-pl<cut>-p<part>.npy`. The first run is
+  `docs/vast/playout-labels.manifest.json` (launched 2026-10-25 07:28 UTC on the owner's Thailand
+  box, run id `playout-labels-1`); the students' retraining on its labels is
+  `docs/vast/student-playout-train.manifest.json` (S1' and S2', decision-aware loss, three seeds,
+  judged on run 1's own playout test sets), and the money gate `docs/vast/arena-students.manifest.json`
+  (§6.1, branch `arena-app-bot`).
+- Cost per deal (estimate, to be measured in that run): up to 16 student calls and one exact solve
+  from trick 3, tens of milliseconds, against 0.2-0.6 s for an H_2 deal natively; so 256-512 deals
+  a decision instead of 64.
+- Judge: never copper or the exact golden sets (they are labelled face up); the paired playout
+  yardstick (EXPERIMENTS I1) and the arena in money.
+
 ## 4. The generator (`search teacher --trick 1|2`)
 
 ```text
 search teacher --trick 1|2 --count N --deals D --seed S --net WEIGHTS|exact --equity TABLE
-               --out SHARD.npy [--source rules|mixed|random] [--first I] [--deal-from W]
+               --out SHARD.npy [--source rules|mixed|random|student] [--first I] [--deal-from W]
                [--role train|test] [--threads T] [--tt-mb 64] [--start-hands 20000]
                [--progress FILE]
 ```
@@ -164,8 +209,13 @@ search teacher --trick 1|2 --count N --deals D --seed S --net WEIGHTS|exact --eq
   decision `i` from stratum `i mod 4 + 1` at place `(i div 4) mod 8`, so strata and places are
   equally represented. `mixed`: the same with every action before the decision a uniformly random
   legal one with probability 1/4 (exploration: positions the rules bot would not reach). `random`:
-  every action random. Later rounds add the student's own games (DAgger) and the app's recorded
-  hands (§6).
+  every action random. `student` (2026-10-25, with the playout teacher only): the students play
+  every action before the decision from their own view (S1 at trick 1, S2 at trick 2, a robber's
+  burn and first card as one choice; the dealer's burn by `rules-v1`), so the positions are the
+  ones the students themselves reach (DAgger, §6 step 1; `student_teacher::Inner`); the decision's
+  own seed sequence is unchanged, so a `student` set and a `rules` set at the same seed share
+  their start states and decks and differ only where the students play otherwise. Later: the app's
+  recorded hands (§6).
 - **Values:** D deals per decision, every candidate in every deal by H_k; deals in index order.
 - **Determinism:** decision `i` depends only on (seed, source, trick, `i`); decisions are made on
   any number of threads and written in order (`search::ordered`), so a shard is byte-identical for
@@ -208,7 +258,9 @@ Round 0: one big base run of teacher records from the self-play sources (§4). T
 Round r ≥ 1 (DAgger, Ross, Gordon & Bagnell 2011; Expert Iteration's loop):
 1. Play games with the student at tricks 1–2 (exact search from trick 3) from stratified start
    states, and record the decisions it meets (the positions the student itself causes: the
-   reason DAgger converges where plain copying drifts).
+   reason DAgger converges where plain copying drifts). Built 2026-10-25 as the generator's
+   source `student` (§4), for the playout teacher: round 2's labels take `"source": "student"`
+   beside `rules` and `mixed`.
 2. Label a sample of them with the teacher (new shards only).
 3. Train on **all** shards selected so far (the old ones included: training on new data alone
    makes a network forget), warm-started from the previous student with shrink-and-perturb.

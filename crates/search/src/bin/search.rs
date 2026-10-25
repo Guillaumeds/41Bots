@@ -33,7 +33,7 @@
 //!                  [--boot 1000] [--seed 1] [--allow-silver]
 //! search teacher   --hands N --out DIR --equity TABLE [--seed S] [--config NAME] [--start-hands H]
 //! search teacher   --trick 1|2 --count N --deals D --seed S --net WEIGHTS|exact --equity TABLE
-//!                  --out SHARD.npy [--source rules|mixed|random] [--first I] [--deal-from W]
+//!                  --out SHARD.npy [--source rules|mixed|random|student] [--first I] [--deal-from W]
 //!                  [--role train|test] [--threads T] [--tt-mb 64] [--start-hands 20000]
 //!                  [--progress FILE]
 //! search labels    --trick K --count N --seed S --source random|rules|harvest --out FILE.npy
@@ -1748,7 +1748,30 @@ fn student_teacher(a: &Args) -> Result<(), String> {
     };
     let (table, equity_sha) = load_equity_sha(a.req("--equity")?)?;
     let leaf: Arc<SharedLeaf> = Arc::new(table);
-    let net_arg = a.req("--net")?;
+    // The playout teacher (`--playout --student1 S1 --student2 S2 [--playout-cut 3]`): the
+    // students play every seat from its own view to the start of the cut trick, exact from there.
+    let playout = a.has("--playout");
+    let students_files = if playout {
+        if a.has("--net") {
+            return Err("--playout values deals by the students, not a network: no --net".into());
+        }
+        let load = |k: &str| -> Result<(student::net::StudentNet, String), String> {
+            let path = a.req(k)?;
+            let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+            let net = student::net::StudentNet::from_bytes(&bytes)?;
+            Ok((net, equity::sha256::sha256_hex(&bytes)))
+        };
+        Some((load("--student1")?, load("--student2")?))
+    } else {
+        for k in ["--student1", "--student2", "--playout-cut"] {
+            if a.has(k) {
+                return Err(format!("{k} is for the playout teacher (--playout)"));
+            }
+        }
+        None
+    };
+    let playout_cut = a.num("--playout-cut", 3)? as u8;
+    let net_arg = if playout { "exact" } else { a.req("--net")? };
     let oracle = if net_arg == "exact" {
         None
     } else {
@@ -1772,9 +1795,15 @@ fn student_teacher(a: &Args) -> Result<(), String> {
     {
         return Err(format!("--exact-leaves: {m}"));
     }
-    let teacher = match &oracle {
-        None => Teacher::Exact,
-        Some(o) => Teacher::Hybrid {
+    let teacher = match (&oracle, &students_files) {
+        (_, Some(((s1, sha1), (s2, sha2)))) => Teacher::Playout {
+            students: search::pimc::Students { s1, s2 },
+            cut: playout_cut,
+            sha1,
+            sha2,
+        },
+        (None, None) => Teacher::Exact,
+        (Some(o), None) => Teacher::Hybrid {
             net: o,
             cut: o.trick,
             sha256: &o.sha256,
