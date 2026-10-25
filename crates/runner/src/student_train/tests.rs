@@ -335,13 +335,42 @@ fn the_manifests_parse() {
         "student-t2-seed3-1m.manifest.json",
         "student-t2-g2arm-50k.manifest.json",
         "student-t2-plainarm-50k.manifest.json",
+        "student-playout-train.manifest.json",
     ] {
         let text = fs::read_to_string(root.join(name)).expect(name);
         let v: Value = serde_json::from_str(&text).expect(name);
         crate::sched::parse_v2(&v).unwrap_or_else(|e| panic!("{name}: {e}"));
-        let p = &v["streams"][0]["params"];
-        let q = parse(p).expect(name);
-        assert!(!q.train.is_empty() && !q.test.is_empty(), "{name}");
+        for st in v["streams"].as_array().expect("streams") {
+            let q = parse(&st["params"]).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(!q.train.is_empty() && !q.test.is_empty(), "{name}");
+        }
+    }
+    // The playout students' training (STUDENT.md 3.1): two streams, S1' on run 1's trick-1 labels
+    // and S2' on its trick-2 labels, each judged on that run's own playout test set, three seeds
+    // of the decision-aware loss at the labels' 256 deals.
+    let v: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("student-playout-train.manifest.json")).expect("read"),
+    )
+    .expect("JSON");
+    for (i, trick, size) in [(0, 1, 250_000), (1, 2, 300_000)] {
+        let q = parse(&v["streams"][i]["params"]).expect("parses");
+        assert_eq!(q.points.len(), 3);
+        assert!(
+            q.points
+                .iter()
+                .all(|p| p.size == size && p.deals == Some(256))
+        );
+        let runs: Vec<String> = v["streams"][i]["params"]["train_inputs"]
+            .as_array()
+            .expect("inputs")
+            .iter()
+            .map(|e| e["stream"].as_str().expect("stream").to_string())
+            .collect();
+        assert_eq!(runs, [format!("t{trick}rules"), format!("t{trick}mixed")]);
+        assert_eq!(
+            v["streams"][i]["params"]["test_inputs"][0]["stream"],
+            json!(format!("t{trick}test"))
+        );
     }
     let mut v: Value = serde_json::from_str(
         &fs::read_to_string(root.join("student-t2-curve.manifest.json")).expect("read"),

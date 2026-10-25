@@ -656,6 +656,7 @@ pub fn method_name(m: Method) -> &'static str {
     match m {
         Method::ExactPimc => "exact",
         Method::RolloutPimc => "rollout",
+        Method::PlayoutPimc => "playout",
         Method::Forced => "forced",
         Method::Student => "student",
     }

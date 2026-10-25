@@ -29,6 +29,8 @@ use solver::{
     FastOptions, FrontierCut, Leaf, ParProgress, SolveMem, Stats, from_match, solve_fast_cut,
     solve_fast_par_cut,
 };
+use student::encode::{encode_cand, encode_view};
+use student::net::{StudentNet, choose};
 
 use crate::worlds::{WorldSource, Worlds, rebuild, world_rng};
 
@@ -64,6 +66,9 @@ pub enum Method {
     RolloutPimc,
     /// Exact open-hand solves.
     ExactPimc,
+    /// Playouts by the student networks (each seat from its own view) to the start of a cut
+    /// trick, exact open-hand solves from there ([`playout_value`]).
+    PlayoutPimc,
     /// A single legal action; nothing computed.
     Forced,
     /// The student network's values from the seat's own view, no deal drawn (the app's player at
@@ -245,7 +250,7 @@ pub fn rollout(m: &mut Match, leaf: &SharedLeaf, rules: Rules) -> MoneyChance {
     leaf_now(m, leaf)
 }
 
-fn apply_candidate(m: &mut Match, cand: Candidate) {
+pub(crate) fn apply_candidate(m: &mut Match, cand: Candidate) {
     m.apply(cand.0).expect("candidate is legal");
     if let Some(c) = cand.1 {
         m.apply(Action::Play(c)).expect("joint play is legal");
@@ -260,6 +265,133 @@ fn rollout_world(m: &Match, cands: &[Candidate], ctx: &Ctx) -> Vec<MoneyChance> 
             let mut mm = m.clone();
             apply_candidate(&mut mm, cand);
             rollout(&mut mm, ctx.leaf, ctx.rules)
+        })
+        .collect()
+}
+
+/// The hidden-card players of a playout (docs/STUDENT.md, "The playout teacher"; PLAN §6.8, a
+/// recursive rollout at depth one): the student networks by the trick each serves. Inside a
+/// playout every seat chooses from its own view, so no seat sees another's cards.
+#[derive(Clone, Copy)]
+pub struct Students<'a> {
+    /// The trick-1 student (S1).
+    pub s1: &'a StudentNet,
+    /// The trick-2 student (S2).
+    pub s2: &'a StudentNet,
+}
+
+impl<'a> Students<'a> {
+    /// The network that plays trick `t`; none for other tricks (the dealer's burn before trick 1
+    /// is played by `rules-v1`, as nothing else exists for it).
+    pub fn for_trick(&self, t: u8) -> Option<&'a StudentNet> {
+        match t {
+            1 => Some(self.s1),
+            2 => Some(self.s2),
+            _ => None,
+        }
+    }
+}
+
+/// The action the student makes from `view` (the app's candidates, `app_candidates`; the
+/// team's best value, ties to the first candidate: exactly the app's `method: "student"`
+/// decision in `crates/wasm`). A seat with one candidate plays it without the network.
+pub fn student_candidate(
+    view: &SeatView,
+    legal: &[Action],
+    net: &StudentNet,
+    leaf: &SharedLeaf,
+) -> Result<Candidate, String> {
+    let (_, cands) = crate::student_teacher::app_candidates(view, legal);
+    if cands.len() == 1 {
+        return Ok(cands[0]);
+    }
+    let f = encode_view(view, leaf)?;
+    let cf: Vec<Vec<u16>> = cands.iter().map(|&c| encode_cand(view, c)).collect();
+    let values = net.evaluate(&f, &cf);
+    Ok(cands[choose(&values, team_of(view.seat))])
+}
+
+/// The exact value of the position awaiting a play in `m`, solved to the end of the hand
+/// (the root mover's best under the solver's tie rule; a later rob in trick 1 is a decision
+/// node of the solve, as in [`exact_world`]).
+fn exact_value(
+    m: &Match,
+    ctx: &Ctx,
+    cfg: &SearchConfig,
+    mem: &mut SolveMem,
+    run: &mut WorldSolve,
+) -> MoneyChance {
+    let (pos, mctx, robber) = solver_position(m, ctx.rules, cfg.rules_robber_burn);
+    if robber.is_some() {
+        run.robber = robber;
+    }
+    let opts = FastOptions {
+        tt_mb: cfg.tt_mb,
+        root_keep: 0,
+        ..FastOptions::default()
+    };
+    let leaf = DynLeaf(ctx.leaf);
+    let sol = solve_fast_cut(&pos, mctx, &leaf, opts, None, mem, None);
+    run.add(&sol.stats);
+    sol.value.expect("nothing stops a solve here")
+}
+
+/// Play `m` on with the students at every seat, each from its own view, until the start of
+/// trick `cut` (or the end of the hand), then value it: exactly from the cut (the world is fully
+/// known), or by the leaf rule if the hand ended first. With `cut` at or below the current trick
+/// nothing is played out and the value is the position's exact value.
+pub fn playout_value(
+    m: &mut Match,
+    students: &Students,
+    cut: u8,
+    ctx: &Ctx,
+    cfg: &SearchConfig,
+    mem: &mut SolveMem,
+    run: &mut WorldSolve,
+) -> MoneyChance {
+    let h = m.hand_index();
+    loop {
+        if m.phase() == Phase::MatchOver || m.hand_index() != h {
+            return leaf_now(m, ctx.leaf);
+        }
+        let seat = m.to_act().expect("someone acts");
+        let view = m.view(seat);
+        if view.public.trick_no >= cut {
+            break;
+        }
+        let legal = m.legal_actions();
+        let cand = if legal.len() == 1 {
+            (legal[0], None)
+        } else {
+            match students.for_trick(view.public.trick_no) {
+                Some(net) => student_candidate(&view, &legal, net, ctx.leaf)
+                    .expect("a playout view is consistent and all eight seats are in play"),
+                None => (decide(&view, &ctx.rules, &legal).0, None),
+            }
+        };
+        apply_candidate(m, cand);
+    }
+    exact_value(m, ctx, cfg, mem, run)
+}
+
+/// The playout value of every candidate in one rebuilt world ([`playout_value`] after each).
+#[allow(clippy::too_many_arguments)]
+pub fn playout_world(
+    m: &Match,
+    cands: &[Candidate],
+    students: &Students,
+    cut: u8,
+    ctx: &Ctx,
+    cfg: &SearchConfig,
+    mem: &mut SolveMem,
+    run: &mut WorldSolve,
+) -> Vec<MoneyChance> {
+    cands
+        .iter()
+        .map(|&cand| {
+            let mut mm = m.clone();
+            apply_candidate(&mut mm, cand);
+            playout_value(&mut mm, students, cut, ctx, cfg, mem, run)
         })
         .collect()
 }
@@ -550,6 +682,9 @@ pub fn world_row(
         .expect("nothing stops a solve here"),
         Method::Forced => vec![MoneyChance::even(); cands.len()],
         Method::Student => panic!("a student values a decision from its view, not a world"),
+        Method::PlayoutPimc => {
+            panic!("playout worlds are valued by the teacher (`student_teacher::deal_values`)")
+        }
     }
 }
 

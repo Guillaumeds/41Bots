@@ -1616,6 +1616,8 @@ mod tests {
             ("golden-routed-s2.manifest.json", 1),
             ("net-error-o3-val.manifest.json", 1),
             ("arena-students.manifest.json", 1),
+            ("playout-labels.manifest.json", 6),
+            ("playout-labels-2.manifest.json", 10),
         ] {
             let v: Value = serde_json::from_str(&fs::read_to_string(root.join(file)).expect(file))
                 .expect(file);
@@ -1639,11 +1641,13 @@ mod tests {
                         if let Some(l) = leaves {
                             assert!(l.starts_with("learned:/in/"), "{what}: {l}");
                         }
+                        let nets = crate::student::nets_of(&p, &q)
+                            .unwrap_or_else(|e| panic!("{what}: {e}"));
                         let c = crate::student::command(
                             Path::new("search"),
                             &q,
                             0,
-                            p["net"].as_str().expect("net"),
+                            nets,
                             leaves.map(|l| (l, p.get("defer_expert_path").and_then(Value::as_str))),
                             Path::new("/in/equity"),
                             Path::new("o.npy"),

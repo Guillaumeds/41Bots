@@ -1,0 +1,165 @@
+{
+ "format": 2,
+ "run_id": "playout-labels-1",
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "Review session 2026-10-25 (owner: 'go'; EXPERIMENTS I1-I2, docs/STUDENT.md 'The playout teacher'). The first teacher that values each sampled deal by playing it out with hidden-card players: the candidate, then S1/S2 at every seat from its own view for tricks 1-2, exact from trick 3 (PLAN 6.8, a recursive rollout at depth one; Bouzy 2020, Furtak and Buro 2013). Trick-1 labels: 250,000 decisions at 256 deals (150,000 rules-v1 positions, 100,000 mixed) and a 2,000-decision test set (role test, 512 deals); trick-2 labels: 300,000 decisions at 256 deals (200,000 rules, 100,000 mixed) and a 2,000-decision test set at 512 deals. New seeds 9101-9106. Teacher inputs: the shipped students S1 97df2a54 and S2 3d1189e3 (the lean they carry is what the retrain is meant to remove; a second round replays with the new students). Runs on the owner's hand-rented Thailand box (instance 57615744, AMD EPYC 7B12, 256 threads, 129 GB, RTX 3060, $0.33/h) by takeover; kept afterwards for the training run.",
+ "machine": {
+  "instance_id": 57615744,
+  "min_cores": 190,
+  "min_ram_gb": 96,
+  "disk_gb": 100,
+  "keep": true,
+  "keep_hours": 8,
+  "force_take": true
+ },
+ "inputs": {
+  "s1": "sha256:97df2a54e1c368a13d69ffd887de62f45c6c3f244605450579b803f31f00e134",
+  "s2": "sha256:3d1189e3042dfc9537b1f575f87e42b15e91628541e2ff90678ba319959c6e03"
+ },
+ "streams": [
+  {
+   "name": "t1test",
+   "priority": 1,
+   "kind": "student_teacher",
+   "chunks": 4,
+   "params": {
+    "threads": "all",
+    "trick": 1,
+    "count": 500,
+    "deals": 512,
+    "seed": 32343,
+    "source": "rules",
+    "role": "test",
+    "teacher": "playout",
+    "student1": "s1",
+    "student2": "s2",
+    "playout_cut": 3,
+    "tt_mb": 64,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  },
+  {
+   "name": "t2test",
+   "priority": 2,
+   "kind": "student_teacher",
+   "chunks": 4,
+   "params": {
+    "threads": "all",
+    "trick": 2,
+    "count": 500,
+    "deals": 512,
+    "seed": 32343,
+    "source": "rules",
+    "role": "test",
+    "teacher": "playout",
+    "student1": "s1",
+    "student2": "s2",
+    "playout_cut": 3,
+    "tt_mb": 64,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  },
+  {
+   "name": "t1rules",
+   "priority": 3,
+   "kind": "student_teacher",
+   "chunks": 300,
+   "params": {
+    "threads": "all",
+    "trick": 1,
+    "count": 500,
+    "deals": 256,
+    "seed": 9103,
+    "source": "rules",
+    "teacher": "playout",
+    "student1": "s1",
+    "student2": "s2",
+    "playout_cut": 3,
+    "tt_mb": 64,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  },
+  {
+   "name": "t1mixed",
+   "priority": 4,
+   "kind": "student_teacher",
+   "chunks": 200,
+   "params": {
+    "threads": "all",
+    "trick": 1,
+    "count": 500,
+    "deals": 256,
+    "seed": 9104,
+    "source": "mixed",
+    "teacher": "playout",
+    "student1": "s1",
+    "student2": "s2",
+    "playout_cut": 3,
+    "tt_mb": 64,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  },
+  {
+   "name": "t2rules",
+   "priority": 5,
+   "kind": "student_teacher",
+   "chunks": 400,
+   "params": {
+    "threads": "all",
+    "trick": 2,
+    "count": 500,
+    "deals": 256,
+    "seed": 9105,
+    "source": "rules",
+    "teacher": "playout",
+    "student1": "s1",
+    "student2": "s2",
+    "playout_cut": 3,
+    "tt_mb": 64,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  },
+  {
+   "name": "t2mixed",
+   "priority": 6,
+   "kind": "student_teacher",
+   "chunks": 200,
+   "params": {
+    "threads": "all",
+    "trick": 2,
+    "count": 500,
+    "deals": 256,
+    "seed": 9106,
+    "source": "mixed",
+    "teacher": "playout",
+    "student1": "s1",
+    "student2": "s2",
+    "playout_cut": 3,
+    "tt_mb": 64,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  }
+ ]
+}
