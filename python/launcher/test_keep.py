@@ -39,6 +39,7 @@ class KWorld(tl.World):
         self.keep = False  # the runner parks (stays alive) after its DONE
         self.preset: dict[int, dict] = {}  # `show instance` of instances that exist before the run
         self.calls: list[tuple] = []  # update / recycle / label calls
+        self.onstarts: list[str] = []  # the on-start command of each update
         self.takeover_script = "done:2"
         self.start_fails = False
 
@@ -59,6 +60,7 @@ class KWorld(tl.World):
             return dict(self.preset[int(args[2])])
         if cmd == ("update", "instance"):
             self.calls.append(("update", int(args[2]), args[args.index("--env") + 1], args[args.index("--image") + 1]))
+            self.onstarts.append(args[args.index("--onstart") + 1])
             return {"success": True}
         if cmd == ("start", "instance"):
             iid = int(args[2])
@@ -407,6 +409,28 @@ class TakeoverTest(KeepTestBase):
         with self.assertRaises(SystemExit):
             self.take(w)
         self.assertEqual(w.calls, [])
+
+    def test_the_takeover_puts_the_runs_environment_on_the_on_start_command(self):
+        # 2026-10-25: vast's `update instance --env` left the container's old RUN_ID in place through a recycle and a
+        # stop-and-start, so a second takeover of the same instance ran the old run. The on-start command now carries
+        # the whole environment itself (`env K=V … 41bots-boot`), which the boot script reads whatever the container says.
+        w = KWorld([], [])
+        w.add_machine(500, "")
+        code, report = self.take(w, keep=True)
+        self.assertEqual(len(w.onstarts), 1)
+        on = w.onstarts[0]
+        self.assertTrue(on.startswith(f"pgrep -f {launch.BOOT_PATH} >/dev/null || env "), on)
+        self.assertIn(f"RUN_ID={RUN} ", on)
+        self.assertIn("BIN_SHA=abc ", on)
+        self.assertIn("KEEP_MACHINE=1 ", on)
+        self.assertIn("RCLONE_CONFIG_R2_SECRET_ACCESS_KEY=", on)
+        self.assertTrue(on.endswith(f"nohup {launch.BOOT_PATH} > /var/log/41bots-boot.log 2>&1 &"), on)
+        # Every key of the environment is on the command line, and values with shell characters are quoted.
+        env = w.calls[0][2]
+        for k in json.loads(env):
+            self.assertIn(f" {k}=", on)
+        quoted = launch.take_onstart("-e A=x -e B=a;b")
+        self.assertIn("B='a;b'", quoted)
 
     def test_a_taken_over_machine_that_never_starts_is_kept_not_destroyed(self):
         w = KWorld([], [])

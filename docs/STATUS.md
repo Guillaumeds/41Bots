@@ -261,7 +261,12 @@ The owner wants the teachers and their deal counts decided last.
     parks, and the launcher gives up after 15 minutes ("no heartbeat"); the machine is kept. **Stop it first** (`vast-instance.yml` with
     action `stop`, or the console), then launch with `instance_id`: a stopped instance is updated and started and boots from the new
     settings. A hand rental with another image can be taken over running (07:28 UTC worked). `vast-instance.yml` also relabels
-    (action `label`, the owner's rule) and starts; it never destroys.
+    (action `label`, the owner's rule) and starts; it never destroys. **Correction, 10:40 UTC:** the stop-and-start (run
+    `playout-labels-1c`, 10:19) booted the old environment too: `vastai update instance --env` never changed the container's
+    RUN_ID (the old run's runner heartbeated under `playout-labels-1` at 10:22 and parked). The takeover now puts the whole
+    environment on the on-start command (`env K=V … 41bots-boot`, `take_onstart`), which the boot script reads whatever the
+    container's own environment says; if vast ignores on-start updates as well, the remaining route is to destroy the instance
+    and rent the machine again (`machine_id`), which creates a fresh instance with the right environment.
   - `"machine_id": M` (or `--machine-id M`): rent the cheapest rentable, unrented on-demand offer on vast machine M,
     read from the **public market list** (`POST console.vast.ai/api/v0/bundles/`, no key, no 512-offer cap), then
     checked exactly like a named offer. A named `offer_id` that both `vastai search offers id=N` and the launcher's

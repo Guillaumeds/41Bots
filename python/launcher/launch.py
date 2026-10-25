@@ -200,6 +200,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import statistics
 import subprocess
 import sys
@@ -2483,6 +2484,18 @@ TAKE_ONSTART = (f"pgrep -f {BOOT_PATH} >/dev/null || "
                 f"nohup {BOOT_PATH} > /var/log/41bots-boot.log 2>&1 &")
 
 
+def take_onstart(env: str) -> str:
+    """The on-start command of a taken-over instance, with this run's whole environment on the command line
+    (`env K=V … 41bots-boot`), so the boot script reads it whatever the container's own environment says.
+    2026-10-25: `vastai update instance --env` did not change the environment of instance 57615744 that an earlier
+    takeover had set (RUN_ID stayed `playout-labels-1` through a recycle at 09:24 UTC and a stop-and-start at 10:19 UTC:
+    the old run's runner came up and parked each time, `runs/playout-labels-1/heartbeat/` seq 241-242 at 10:22), so a
+    second takeover of the same instance never started its run (STATUS, "A machine that already runs our image")."""
+    pairs = " ".join(f"{k}={shlex.quote(v)}" for k, v in env_dict(env).items())
+    return (f"pgrep -f {BOOT_PATH} >/dev/null || "
+            f"env {pairs} nohup {BOOT_PATH} > /var/log/41bots-boot.log 2>&1 &")
+
+
 def env_dict(env: str) -> dict[str, str]:
     """`instance_env`'s "-e K=V -e K2=V2" as a dict (`vastai update instance --env` takes JSON)."""
     toks = env.split()
@@ -2548,7 +2561,7 @@ def take_instance(a, run_id: str, best: dict) -> int | None:
                        a.image, getattr(a, "destroy_key", ""), offer=best, keep=bool(getattr(a, "keep", False)))
     try:
         res = vast("update", "instance", str(iid), "--image", a.image, "--env", json.dumps(env_dict(env)),
-                   "--onstart", TAKE_ONSTART, timeout=None)
+                   "--onstart", take_onstart(env), timeout=None)
     except RuntimeError as e:
         log(f"::error::vast refused to update instance {iid}: {e}")
         return None
