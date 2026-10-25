@@ -16,7 +16,12 @@
     exact at 3-5 at the app's deals by place) and the money gate `docs/vast/arena-students.manifest.json`. One 14-way block at a quarter of the
     app's deals took 164 s on one build-VM thread (the canary scored 0 with the real S1, S2 and equity table through the release runner).
   - **#6 `launcher-keep-fixes`:** a machine the owner stops from the console is never destroyed or replaced (A11: that destroyed the kept labels
-    box); offers both searches miss are read from vast's public market list; `machine.machine_id`. 216 launcher tests.
+    box); offers both searches miss are read from vast's public market list; `machine.machine_id`; a kept run that ends after the launcher's
+    handover keeps its machine (the cleanup writes the record). 218 launcher tests.
+  - **#9 `inference-weighting`** (stacked on #7 and #8): the exact searches' deals weighted by how likely the other seats' tricks 1-2 plays
+    were under the students (STUDENT.md §6.2, integer throughout) and the gate `docs/vast/arena-inference.manifest.json` (run 3). 899 tests.
+  - **I3 (EXPERIMENTS):** against run 1's playout test sets the shipped S1 loses 0.17% a trick-1 decision and S2 0.10% a trick-2 decision
+    (about three times their face-up loss; 0.12% / 0.075% above the sets' noise): the room run 2 is set to measure.
 - **Machines (2026-10-25 07:30 UTC):** the labels box 57517251 is gone (A11, with the third S1 batch `o2-s1more3-3`; whatever parts it uploaded
   before 05:08 UTC are under `runs/o2-s1more3-3/out/`). The owner re-rented the same machine by hand: **instance 57615744** (AMD EPYC 7B12 server
   chip, 256 threads, 129 GB RAM, RTX 3060, $0.328/h), unlabelled, idle, for the runs below; `keep: true` on every manifest that uses it.
@@ -41,9 +46,10 @@
    core-hours at the app's deals, a few hours on the box). Accept = ship (the owner's word), then **round 2**: replay run 1 with the new students
    as the inner players (the lean they carry is what round 1 removes) and a third of the positions from the students' own games
    (`docs/vast/playout-labels-2.manifest.json`, source `student`: DAgger, built on `playout-teacher`).
-4. **Then the inference weighting** (policy-likelihood world weighting with a floor, RESEARCH §15) behind the same gate; and the equity-table refresh.
-5. Merge order: #6 first (the workflow runs from main), #7, then #8 `arena-app-bot` (it touches `Method` in `search::pimc` like #7: a two-line merge),
-   then this docs branch (`review-docs`); record every result in EXPERIMENTS Part I, this page and `docs/README.md`.
+4. **Run 3, the inference gate** (`arena-inference.manifest.json`, built: #9) with whichever students run 2 settles on; then the
+   equity-table refresh.
+5. Merge order: #6 first (the cleanup runs from main; before run 1 ends), #7, then #8 `arena-app-bot` (it touches `Method` in `search::pimc` like #7: a two-line merge),
+   then #9, then this docs branch (`review-docs`); record every result in EXPERIMENTS Part I, this page and `docs/README.md`.
 
 ## Where we are (2026-10-23, end of the O_2 and S2 sessions)
 
