@@ -544,3 +544,40 @@ Primary papers and pages (most also listed with notes in `docs/PLAN.md` §18 and
   Bartlett, Jordan & McAuliffe (JASA 101, 2006)
 - Not readable at the time (2026-10-13): Bounan & Edelkamp ISAIM 2024; full text of Edelkamp KI 2024;
   the Irish 25 app's in-game 41 rules.
+
+## 15. Review of 2026-10-25: which way open-hand play errs, and what fixed it elsewhere
+
+Added after the owner's observation that the bots lead the J of trumps without the 5 (EXPERIMENTS I1-I2). About 45 sources were checked
+on 2026-10-25; the ones that bear on the question:
+
+- **The two documented pulls.** Ginsberg (GIB, JAIR 2001): open-hand sampling "never suggests making an information gathering play" and
+  defers decisions as if the hidden facts will be known later; Frank and Basin (AAAI 1998): the fused value is "over-optimistic" (sampling
+  was wrong on 219 of 650 bridge single-suit problems). Long's thesis (Alberta): PIMC assumes the defenders see everything and under-rated
+  the Skat soloist's wins (predicted 67% in suit games against 80% actual), so plays whose value rests on an opponent not knowing are
+  undervalued. No source isolates "lead the second-best trump early": the direction in any one game is an empirical question, answered for
+  41's trick-1 Jack by the playout pilot (I1: the lead is over-valued by about 1% of the money against players who cash the 5).
+- **Knowing the cards makes a trump player over-commit.** Rebstock, Solinas and Buro 2019: a Skat player handed the true deal as its only
+  sample scored 3.25 tournament points a game worse than the inference-based player in suit games (8.49 worse in grand). Furtak and Buro
+  2013: the recursive player makes more open-hand "errors" in the early tricks than plain PIMC and wins by 7 points a game at 8x cost; a
+  cheating player with perfect inference gains 5.3. Edelkamp 2021: "Monte-Carlo sampling often misses the best playing card in early
+  stages of the game."
+- **Recursion at 5 cards.** Bouzy, Rimbaud and Ventos 2020: plain sampling plateaus at about 20 deals with 5-card hands; one recursion level
+  with the double-dummy player inside adds +0.24 tricks a deal (sigma 0.05), levels 2-3 no more (+0.20, +0.16) at days of compute.
+- **Inference.** Solinas, Rebstock and Buro (AAAI 2019): a card-location network over uniform deals, +7.6 to +9.4 points a game in suit at
+  80-320 worlds, flat in the world count, 3x the time per move; Rebstock 2019: policy-based world weighting +2.3 more in suit. Caution:
+  in Jass (Niklaus et al. 2020) deals drawn from a card-location network did not beat uniform deals, so the gain is game-specific and the
+  arena decides.
+- **Not for us.** Alpha-mu and its 2021 optimisation (Cazenave, Legras, Ventos): a declarer-only fix at 4-13x the cost for 1-3 points of win
+  rate; EPIMC (Arjonilla, Saffidine, Cazenave 2024): no gain from deeper hidden-information reasoning where play is face up; transformer
+  planners (Rebstock et al. 2024) 10 points a game behind the PIMC engine in Skat at 40x the time; self-play beat a search engine only with
+  about 100 GPU-days (DouZero 2021).
+- **What this changes in the plan.** Nothing in the method: the depth-one recursive rollout (section 7, PLAN 6.8) and inference weighting
+  (section 6, PLAN 6.4) were always the next steps. What changes is the judge: decision loss against the open-hand solver cannot see the
+  lean (PLAN A9 said so), so the playout yardstick and the arena in money judge from here on.
+
+Sources added: Frank and Basin, AAAI 1998, https://cdn.aaai.org/AAAI/1998/AAAI98-071.pdf ; Long, PhD thesis, https://era.library.ualberta.ca/files/3t945r31n/jeff-thesis.pdf ;
+Solinas, Rebstock and Buro, AAAI 2019, https://arxiv.org/pdf/1903.09604 ; Cazenave, Legras and Ventos, Optimizing alpha-mu, CoG 2021,
+https://www.lamsade.dauphine.fr/~cazenave/papers/OptimizingAlphaMuCoG2021.pdf ; Arjonilla, Saffidine and Cazenave 2024,
+https://arxiv.org/pdf/2408.02380 ; Niklaus et al., Jass, AAAI-20 RLG workshop, https://rlg.mlanctot.info/papers/AAAI20-RLG_paper_21.pdf ;
+Rebstock, Solinas, Sturtevant and Buro 2024, https://arxiv.org/pdf/2404.13150 ; Edelkamp 2021, https://arxiv.org/pdf/2104.05423 ;
+Bridge Base Online, Introducing GIBBO, 2025-12-18, https://news.bridgebase.com/2025/12/18/introducing-gibbo/ .

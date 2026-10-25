@@ -279,6 +279,21 @@ load (§A8).
 
 ---
 
+### A11. A console stop destroyed the kept labels box (2026-10-25)
+- **What happened.** Run `o2-s1more3-3` (S1 labels, batch 3, `keep: true`) was on the owner's hand-rented Thailand box (instance 57517251,
+  host 92795, machine 68507: AMD EPYC 7B12 server chip, 256 threads, 129 GB RAM, RTX 3060 12 GB, $0.35/h). At about 05:08 UTC the owner
+  stopped the instance from the vast console to free the box for the review's work. The launcher's watch read the stopped instance
+  (`actual_status exited`) as "instance died before DONE" and destroyed it (`destroy: verified` in its record, 188.5 minutes, $1.10). The
+  keep protection covers DONE, FAILED and a cancelled workflow, not a stop by the owner. Of the three S1 label batches the third is lost
+  (its parts in progress); batches 1-2 (500k decisions) are stored.
+- **Renting it back.** The machine was listed again at $0.30/h (offer 36863856, rentable, not rented, in the public bundles API) within
+  minutes. `vast-run.yml` with `offer_id` reported it "not on offer any more": `lookup_offer` reads `vastai search offers id=N` and then a
+  listing capped at 512 offers, which both missed it. A second attempt by `cpu_match 7B12` found "no offer matches" (the launcher's own
+  filters) and was cancelled before it rented anything. The owner rented the box by hand: instance 57615744 ($0.328/h), unlabelled.
+- **Fixes (branch `launcher-keep-fixes`, this session):** a kept run whose instance is stopped by intent is kept, never destroyed; a named
+  offer missed by both searches is read from the public bundles API; a manifest `machine.machine_id` resolves to that machine's cheapest
+  rentable offer.
+
 ## Part B. The trick-4 network O_4 (values the start of trick 4; checked on trick-3 decisions)
 
 ### B1. First networks and the outcome head (rung 1 and 1b, 2026-10-16, build VM)
@@ -1620,3 +1635,51 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 | O_3 ladder networks (1M, 3M, 10M, 20M rows) | runs/o3-ladder-1/out/lad{1,3,10,20}/ |
 | copper and S1 teacher labels with O_2 round 1 | runs/o2-copper-s1-1/out/{copper,s1rules,s1mixed}/ |
 | equity table v0 | 64740dab…6808 |
+
+## Part I. The review of 2026-10-25: the Jack lead, a playout yardstick pilot, and what it says about the chain
+
+### I1. Does the live trick-1 bot lead the Jack without the 5, and does it pay? (2026-10-25, build VM, no rental)
+- **Question.** The owner saw seats 1 and 2 lead the J of trumps at tricks 1-2 without holding the 5 and lose it to the 5. How often does S1
+  do it, what does it expect, and what does the lead earn when the hand is played out by players who cannot see the cards?
+- **Method (the playout yardstick of `docs/m3-hybrid/path-forward.md` section 3, step 3, built as a pilot in the app repo).** Trick-1 leader
+  positions where the leader holds the J of trumps, not the 5, the 5 is not the turned card and no rob is due (the app's own deals, hands 1-6
+  of random matches, so scores and games vary). Each position is played out twice from the same deal with the same players at every other
+  seat and the same per-decision seeds (duplicate): once with the Jack, once with the other card (S1's own card where S1 led the Jack; the
+  Jack where it did not). The leader's pair is scored by its exact chance of the money at the end of the hand (the app's tables, exact from
+  the scoreboard). Downstream players: (a) the app's engine bots (S1 and S2 at tricks 1-2, exact search at tricks 3-5 with 48-128 deals at
+  trick 3, the same in both arms); (b) the app's rule-based bots (they cash the 5 on a Jack and never lead a top trump early). S1's own
+  values are read from the engine (`method: "student"`). Scripts (not committed, sent to the owner): `scripts/jlead-playout.ts`,
+  `scripts/five-on-jack.ts`, `scripts/jlead-study.ts` in the fivefingers checkout; files `playout-*.jsonl` on the build VM.
+- **Result.** S1 leads the Jack in about 30% of such positions (29.7% of 1,385; 31% of 471): in 89 of 99 hands with three or more trumps,
+  52 of 201 with two, 3 of 185 where the Jack is its only trump. Its own margin for the Jack over the next card averages +0.6% of the money
+  (range +0.1 to +1.8%). Realised money, Jack minus the other card, mean and standard error:
+
+  | downstream players | positions | S1 led the Jack | S1 held the Jack (the Jack forced) |
+  |---|---|---|---|
+  | rule-based, hands 1-6 | 1,385 | -0.45% +/- 0.25% (n 411) | -0.83% +/- 0.21% (n 974) |
+  | engine bots, hand 1 only | 107 | +0.07% +/- 0.64% (n 36) | -0.40% +/- 0.46% (n 71) |
+  | engine bots, hands 1-6 | 471 | +0.11% +/- 0.55% (n 147) | -0.84% +/- 0.31% (n 324) |
+
+  Against the rule-based players the money follows the 5: an opponent held it in 260 of the 411 Jack leads and the lead cost 1.31% +/- 0.27%
+  there; with the 5 in the pack (108) it gained 1.05% +/- 0.61%, with the partner (43) 1.03% +/- 0.83%. Against the engine bots the lead
+  breaks even because the engine's 5-holders keep the 5 on the Jack a third to a half of the time (I2). Forcing the Jack where S1 held it
+  loses 0.8% against both: S1 is right to hold a lone Jack. The search behind S1 (O_2 at 24 deals, the app's search arm) agreed with S1 on
+  Jack-or-not in 9 of 10 positions; its margins for the Jack ran from -1.3% to +0.9% with standard errors of 1.1-2.2% per candidate, so these
+  leads are inside the search's own noise at the app's deal counts.
+- **Reading.** The lean is in the reference, not in any layer's copy of it: S1 copies its teacher to 0.04% (D14) and the teacher's expected
+  edge for the Jack (+0.6%) does not appear against players who cash the 5 (-0.45%). One such decision comes about once in forty hands, so
+  the Jack lead itself is small money; it is a sample of every close call open-hand play leans into.
+- **Limits.** The downstream players are bots, not pros; hands 1-6 of fresh matches only; the engine arm used fewer trick-3 deals than the
+  app (same in both arms); a rare class needs thousands of positions for 0.3%; no exact or PIMC value of these positions was used as truth.
+- **Cost.** Build VM only (about 2 hours of two cores).
+
+### I2. After a Jack lead, does the 5-holder take it? (2026-10-25, build VM)
+- **Method.** Trick-1 positions with a Jack led (as I1) played on with S1 to the first seat holding the 5 of trumps; S1's choice there, and
+  the search (O_2, 16 deals) on 24 of them.
+- **Result.** An opponent holding the 5 plays it on the Jack in 66 of 132 positions; partners hold it back in 15 of 18 (rightly: rule 16).
+  S1 keeps the 5 even as its only trump at level scores (hand 2D 8D 8C QH 5S, spades trumps: it threw the 2D). The search leans the same
+  way: on 20 valid positions it kept the 5 in 5 (S1 in 7), once by 3.5% of the money with a pair on 26. In the I1 playouts an opponent with
+  the 5 captured the Jack in 57-66% of the engine hands against nearly always with the rule-based bots.
+- **Reading.** The other side of the same open-hand lean: in a face-up deal the 5 wins 11 whenever it is played and the Jack can be caught
+  later, so the hidden-card value of taking the trick now is not priced. Whether holding is ever right is for the playout yardstick or the
+  arena, not for the solver.
