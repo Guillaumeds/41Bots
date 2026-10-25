@@ -221,6 +221,12 @@ The owner wants the teachers and their deal counts decided last.
     `KEPT.json`, the banner) whether or not the manifest said `keep`, and rents no replacement; `vast-cleanup`
     leaves a stopped instance alone too (kept record or not, past its keep time or not; only its `all` option
     destroys it). Restart it with `instance_id` as before (update, then start).
+  - **A kept run longer than the launcher's handover (330 min) keeps its machine too** (2026-10-25): the launcher is gone when such
+    a run writes DONE, so no keep record existed and the cleanup's marker rule destroyed the machine 10 minutes after DONE (the
+    playout labels run, about 20 hours, would have ended that way). Now `watch.json` carries `keep` and `keep_hours` (and the
+    stored `runs/<run>/manifest.json`'s `machine.keep` counts for runs launched before), and at DONE/FAILED the cleanup keeps the
+    machine, writes `keep/<instance>.json` and `KEPT.json` from the marker's time (action `kept`, a `::warning::` banner) and the
+    keep time then runs as for any kept machine. **The cleanup workflow runs from `main`: this must be merged before such a run ends.**
   - **After a run with `keep`, the session must act** (deploy the next job with `instance_id`, or destroy it with
     `vast-stop.yml`): `monitor_run.py RUN` prints a banner when `runs/RUN/KEPT.json` exists and `monitor_run.py x --kept`
     lists every kept machine. Arm a `send_later` for the run's end when launching with `keep`.
