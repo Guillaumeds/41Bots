@@ -12,7 +12,7 @@
 - **Built, in three PRs (none merged yet):**
   - **#7 `playout-teacher`:** the playout teacher (`docs/STUDENT.md` §3.1): each deal is valued by playing it out with the students at every seat
     from its own view (S1 at trick 1, S2 at trick 2), exact from trick 3; `teacher: "playout"` in a `student_teacher` stream. 884 workspace tests.
-  - **`arena-app-bot`:** the app's player as an arena bot (`search::bot::AppPlay`, STUDENT.md §6.1: students at tricks 1-2 with eight seats in play,
+  - **#8 `arena-app-bot`:** the app's player as an arena bot (`search::bot::AppPlay`, STUDENT.md §6.1: students at tricks 1-2 with eight seats in play,
     exact at 3-5 at the app's deals by place) and the money gate `docs/vast/arena-students.manifest.json`. One 14-way block at a quarter of the
     app's deals took 164 s on one build-VM thread (the canary scored 0 with the real S1, S2 and equity table through the release runner).
   - **#6 `launcher-keep-fixes`:** a machine the owner stops from the console is never destroyed or replaced (A11: that destroyed the kept labels
@@ -22,20 +22,24 @@
   chip, 256 threads, 129 GB RAM, RTX 3060, $0.328/h), unlabelled, idle, for the runs below; `keep: true` on every manifest that uses it.
 
 ### Handoff (2026-10-25): the runs, in order
-1. **Run 1, playout labels** (`docs/vast/playout-labels.manifest.json`, run id `playout-labels-1`): 250k trick-1 and 300k trick-2 decisions at
-   256 deals with the shipped S1/S2 as the inner players, plus 2,000-decision test sets at 512 deals (seed 32343, role test). Launch with
-   `vast-run.yml` **from the `launcher-keep-fixes` ref** (the owner-stop safety) with `bin_sha` = the `playout-teacher` binaries
-   (`release-binaries.yml --ref playout-teacher`, run 40172479893 dispatched 07:21 UTC) and the manifest inline; relabel the box
-   `41bots - Review (playout labels) - ETA HH:MM`. Cost: unmeasured; the estimate is tens of ms a deal (STUDENT.md §3.1), so hours, a few dollars.
-   Read the first finished parts' sidecars (stamp `playout:<S1>:<S2>:cut3`) before trusting the rest.
-2. **Training S1'/S2'** on the playout labels (copy `student-t1-250k.manifest.json`'s shape: decision-aware loss, seeds 1-3, the test sets from
-   `t1test`/`t2test`; a GPU box or this one). Judge **never on copper or the golden sets** (face-up labels): on the playout test sets and in run 3.
+1. **Run 1, playout labels: RUNNING** (`docs/vast/playout-labels.manifest.json`, run id `playout-labels-1`; vast-run 40172870722 from the
+   `launcher-keep-fixes` ref with `bin_sha` ac3e1636 = the `playout-teacher` binaries, launched 07:28 UTC 2026-10-25, the takeover of
+   57615744 done by 07:30, label `41bots-playout-labels-1`, not relabelled: no vast key on the VM). 250k trick-1 and 300k trick-2 decisions at
+   256 deals with the shipped S1/S2 as the inner players, plus 2,000-decision test sets at 512 deals. First heartbeats: 245 usable threads, a
+   512-deal test chunk of 500 decisions in about 133 s, so a 256-deal chunk about 60-70 s and the 1,100 chunks **about 18-20 hours**, done around
+   03:00 UTC 2026-10-26, about $6-7 (`vast-status.yml` with `run_id` playout-labels-1 shows the queue). The run keeps the box (`keep_hours` 8):
+   **within 8 hours of DONE something must take it over (step 2) or vast-cleanup destroys it at `keep_until_utc`**; the owner may also stop it from
+   the console, which the fixed launcher and cleanup now leave alone. Read the first stored parts' sidecars (stamp `playout:<S1>:<S2>:cut3`)
+   before trusting the rest; `runs/playout-labels-1/out/<stream>/`.
+2. **Training S1'/S2'**: `docs/vast/student-playout-train.manifest.json` (on `playout-teacher`; run id `student-playout-1`, two `student_train`
+   streams, decision-aware loss, seeds 1-3, judged on run 1's `t1test`/`t2test`; takeover of the same box with `keep`). Check the stored parts
+   count first (`parts` 300/200/400/200). Judge **never on copper or the golden sets** (face-up labels): on the playout test sets and in run 2.
 3. **Run 2, the money gate** (`arena-students.manifest.json`, run id `arena-students-1`): fill `s1new`/`s2new` with the stored keys
    (`store-input.yml`), then the app's player with the new students against the shipped ones, SPRT [0, 0.01], cap 3,000 blocks (about 500
    core-hours at the app's deals, a few hours on the box). Accept = ship (the owner's word), then **round 2**: replay run 1 with the new students
    as the inner players (the lean they carry is what round 1 removes; DAgger).
 4. **Then the inference weighting** (policy-likelihood world weighting with a floor, RESEARCH §15) behind the same gate; and the equity-table refresh.
-5. Merge order: #6 first (the workflow runs from main), #7, then `arena-app-bot` (it touches `Method` in `search::pimc` like #7: a two-line merge),
+5. Merge order: #6 first (the workflow runs from main), #7, then #8 `arena-app-bot` (it touches `Method` in `search::pimc` like #7: a two-line merge),
    then this docs branch (`review-docs`); record every result in EXPERIMENTS Part I, this page and `docs/README.md`.
 
 ## Where we are (2026-10-23, end of the O_2 and S2 sessions)
