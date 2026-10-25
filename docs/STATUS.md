@@ -256,6 +256,12 @@ The owner wants the teachers and their deal counts decided last.
     changed):** another run's machine that heartbeated in the last 15 minutes and has no DONE/FAILED (cancel it with
     `keep` first, or wait), a machine another run started under an hour ago, a label that is not `41bots-...`; allowed:
     a kept machine, the machine of an ended run, an unlabelled one rented by hand.
+  - **A machine that already runs our image cannot be taken over while running** (2026-10-25, twice: `keep-trial-2` on 2026-10-22 and
+    `playout-labels-1b` at 09:23 UTC): `update instance` then `recycle` boots the old environment, the old run's runner finds its DONE and
+    parks, and the launcher gives up after 15 minutes ("no heartbeat"); the machine is kept. **Stop it first** (`vast-instance.yml` with
+    action `stop`, or the console), then launch with `instance_id`: a stopped instance is updated and started and boots from the new
+    settings. A hand rental with another image can be taken over running (07:28 UTC worked). `vast-instance.yml` also relabels
+    (action `label`, the owner's rule) and starts; it never destroys.
   - `"machine_id": M` (or `--machine-id M`): rent the cheapest rentable, unrented on-demand offer on vast machine M,
     read from the **public market list** (`POST console.vast.ai/api/v0/bundles/`, no key, no 512-offer cap), then
     checked exactly like a named offer. A named `offer_id` that both `vastai search offers id=N` and the launcher's

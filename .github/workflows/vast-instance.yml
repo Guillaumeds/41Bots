@@ -1,0 +1,56 @@
+# Stop, start or relabel one of our vast.ai instances (never destroy: vast-stop.yml does that, through the
+# launcher). Stop and start are what a takeover of a machine that already runs our image needs (2026-10-25: a
+# recycled running container booted the old environment twice; a stopped instance is updated and started by the
+# launcher and boots from the new settings). Label is the owner's human-readable label rule (CLAUDE.md:
+# `41bots - <session> (<what>) - ETA <HH:MM Irish>`; a label without the exact `41bots-` prefix is exempt from
+# vast-cleanup, so whoever relabels owns the machine's end).
+name: vast-instance
+on:
+  workflow_dispatch:
+    inputs:
+      instance_id:
+        description: "The vast instance id (from vast-status)"
+        required: true
+      action:
+        description: "stop | start | label | show"
+        required: true
+        default: "show"
+      label:
+        description: "The new label (action label only)"
+        required: false
+        default: ""
+permissions:
+  contents: read
+jobs:
+  instance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install vastai
+        run: pip install -q vastai==1.8.3
+      - name: Act
+        env:
+          VAST_API_KEY: ${{ secrets.VAST_API_KEY }}
+          INSTANCE_ID: ${{ inputs.instance_id }}
+          ACTION: ${{ inputs.action }}
+          LABEL: ${{ inputs.label }}
+        run: |
+          set -euo pipefail
+          case "$INSTANCE_ID" in ''|*[!0-9]*) echo "bad instance id"; exit 1;; esac
+          show() { vastai show instance "$INSTANCE_ID" --raw --api-key "$VAST_API_KEY" | python3 -c '
+          import json, sys
+          i = json.load(sys.stdin)
+          print(f"instance {i.get(\"id\")} label={i.get(\"label\")!r} {i.get(\"actual_status\")}/{i.get(\"intended_status\")} "
+                f"cpu={i.get(\"cpu_util\")} dph=${i.get(\"dph_total\")} msg={str(i.get(\"status_msg\"))[:120]!r}")'; }
+          echo "before:"; show
+          case "$ACTION" in
+            show) ;;
+            stop) vastai stop instance "$INSTANCE_ID" --api-key "$VAST_API_KEY" ;;
+            start) vastai start instance "$INSTANCE_ID" --api-key "$VAST_API_KEY" ;;
+            label)
+              [ -n "$LABEL" ] || { echo "action label needs a label"; exit 1; }
+              vastai label instance "$INSTANCE_ID" "$LABEL" --api-key "$VAST_API_KEY" ;;
+            *) echo "action must be stop, start, label or show"; exit 1 ;;
+          esac
+          sleep 20
+          echo "after:"; show
