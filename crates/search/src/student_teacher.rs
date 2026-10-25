@@ -41,7 +41,8 @@ use student::record::{
 use crate::measure::{VALUES_VERSION, play_after_own_rob, stratum_of};
 use crate::ordered::{ordered, window_for};
 use crate::pimc::{
-    Candidate, Ctx, DecisionKind, SearchConfig, WorldSolve, candidates, exact_world, world_match,
+    Candidate, Ctx, DecisionKind, SearchConfig, Students, WorldSolve, candidates, exact_world,
+    playout_world, world_match,
 };
 use crate::worlds::WorldSource;
 
@@ -130,6 +131,19 @@ pub enum Teacher<'a> {
         /// hybrid: learned deferral, docs/m3-hybrid/learned-leaves.md).
         leaves: Option<&'a crate::exact_leaves::LeafPolicy>,
     },
+    /// The playout teacher (docs/STUDENT.md, "The playout teacher"; PLAN §6.8): in each deal the
+    /// candidate, then every seat played by the students S1 and S2 from its own view until the
+    /// start of trick `cut`, exact search from there (`crate::pimc::playout_value`).
+    Playout {
+        /// The hidden-card players.
+        students: Students<'a>,
+        /// The trick at whose start the exact solve takes over (3: tricks 1-2 played out).
+        cut: u8,
+        /// S1's file SHA-256.
+        sha1: &'a str,
+        /// S2's file SHA-256.
+        sha2: &'a str,
+    },
 }
 
 impl Teacher<'_> {
@@ -150,6 +164,9 @@ impl Teacher<'_> {
                 }
                 s
             }
+            Teacher::Playout {
+                cut, sha1, sha2, ..
+            } => format!("playout:{sha1}:{sha2}:cut{cut}"),
         }
     }
 }
@@ -242,6 +259,9 @@ pub fn deal_values(
         .map(|w| {
             let m = world_match(view, &*worlds, u64::from(w), dseed, ctx.rules);
             let mut run = WorldSolve::default();
+            if let Teacher::Playout { students, cut, .. } = teacher {
+                return playout_world(&m, cands, &students, cut, ctx, cfg, mem, &mut run);
+            }
             // Exact leaves: one wrapper per deal around the network.
             let x = match teacher {
                 Teacher::Hybrid {
@@ -258,7 +278,7 @@ pub fn deal_values(
                 _ => None,
             };
             let cut = match teacher {
-                Teacher::Exact => None,
+                Teacher::Exact | Teacher::Playout { .. } => None,
                 Teacher::Hybrid { net, cut, .. } => Some(match &x {
                     Some(x) => FrontierCut::new(cut, x),
                     None => FrontierCut::new(cut, net),
@@ -509,6 +529,14 @@ pub fn check_job(job: &TeacherJob, teacher: &Teacher, test_role: bool) -> Result
     } = teacher
     {
         p.check_for(*cut)?;
+    }
+    if let Teacher::Playout { cut, .. } = teacher
+        && !(1..=6).contains(cut)
+    {
+        return Err(format!(
+            "a playout teacher's cut is the trick at whose start the exact solve takes over, \
+             1 to 5, or 6 to play every trick out; not {cut}"
+        ));
     }
     Ok(())
 }
@@ -907,6 +935,160 @@ mod tests {
             }
         }
         assert!(joint > 0, "no rob in 64 trick-1 decisions");
+    }
+
+    fn students() -> (student::net::StudentNet, student::net::StudentNet) {
+        (
+            student::net::random_net(4, &[16, 8], 12),
+            student::net::random_net(5, &[16, 8], 12),
+        )
+    }
+
+    /// With the cut at (or below) the decision's own trick nothing is played out: the playout
+    /// teacher is the exact teacher, byte for byte, joint rob decisions included.
+    #[test]
+    fn playout_cut_at_the_decisions_trick_is_the_exact_teacher() {
+        let starts = collect_starts(400, 5);
+        let l = leaf();
+        let source = BeliefSource::new();
+        let ctx = belief_ctx(&*l, &source);
+        let (s1, s2) = students();
+        for (trick, cut) in [(3, 3), (4, 4), (4, 2)] {
+            let teacher = Teacher::Playout {
+                students: Students { s1: &s1, s2: &s2 },
+                cut,
+                sha1: "a",
+                sha2: "b",
+            };
+            let j = job(trick, 5, 4, SOURCE_RULES, 1);
+            let mut mem = SolveMem::new();
+            for i in 0..j.count {
+                let a = make_record(&j, i, &starts, &ctx, Teacher::Exact, &mut mem);
+                let b = make_record(&j, i, &starts, &ctx, teacher, &mut mem);
+                assert_eq!(a, b, "trick {trick} cut {cut} decision {i}");
+            }
+        }
+        assert_eq!(
+            Teacher::Playout {
+                students: Students { s1: &s1, s2: &s2 },
+                cut: 3,
+                sha1: "a",
+                sha2: "b"
+            }
+            .stamp(),
+            "playout:a:b:cut3"
+        );
+    }
+
+    /// Trick-2 decisions played out by the students to the start of trick 3 and solved exactly
+    /// from there: legal all the way (the playout would panic otherwise), the same bytes on 1 and
+    /// 3 threads, every shard record `make_record`'s, values that are money chances, and not the
+    /// hybrid teacher's values at the same cut (the students' play counts, where the hybrid
+    /// searches the trick open-handed). The exact teacher at trick 2 is a four-trick solve, too
+    /// slow for a unit test; the cut-equals-trick test above proves the exact tail.
+    #[test]
+    fn playout_shards_are_byte_identical_for_any_thread_count() {
+        let starts = collect_starts(400, 7);
+        let l = leaf();
+        let source = BeliefSource::new();
+        let ctx = belief_ctx(&*l, &source);
+        let (s1, s2) = students();
+        let teacher = Teacher::Playout {
+            students: Students { s1: &s1, s2: &s2 },
+            cut: 3,
+            sha1: "a",
+            sha2: "b",
+        };
+        let mut keys = Vec::new();
+        for threads in [1, 3] {
+            let j = job(2, 4, 3, SOURCE_RULES, threads);
+            let p = tmp(&format!("t2-playout-{threads}.npy"));
+            let info =
+                write_teacher_shard(&j, &starts, &ctx, teacher, "eq", "bin", "train", &p, None)
+                    .expect("written");
+            let values = std::fs::read(student::record::values_path(&p)).expect("values");
+            let side = std::fs::read(student::record::sidecar_path(&p)).expect("sidecar");
+            assert!(
+                String::from_utf8_lossy(&side).contains("playout:a:b:cut3"),
+                "the sidecar names the teacher"
+            );
+            keys.push((info.clone(), values, side));
+            let mut rd = ShardReader::open(&p).expect("opens");
+            rd.verify_values_file().expect("values file");
+            let mut mem = SolveMem::new();
+            for k in 0..j.count {
+                let want = make_record(&j, k, &starts, &ctx, teacher, &mut mem);
+                assert_eq!(rd.record(k as usize).expect("record"), want);
+                assert_eq!(want.trick, 2);
+                for row in &want.values {
+                    for v in row {
+                        assert_eq!(
+                            v.0.iter().map(|&x| u128::from(x)).sum::<u128>(),
+                            1u128 << 32
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(keys[0], keys[1]);
+        let o = oracle(3);
+        let hybrid = Teacher::Hybrid {
+            net: &o,
+            cut: 3,
+            sha256: &o.sha256,
+            leaves: None,
+        };
+        let j = job(2, 4, 3, SOURCE_RULES, 1);
+        let mut mem = SolveMem::new();
+        let mut differs = false;
+        for i in 0..j.count {
+            let a = make_record(&j, i, &starts, &ctx, hybrid, &mut mem);
+            let b = make_record(&j, i, &starts, &ctx, teacher, &mut mem);
+            assert_eq!((a.cands.clone(), a.dseed), (b.cands.clone(), b.dseed));
+            differs |= a.values != b.values;
+        }
+        assert!(
+            differs,
+            "the students' play changed no value in 4 trick-2 decisions"
+        );
+    }
+
+    /// Trick-1 decisions: the students play the rest of trick 1 (a later rob in the world is a
+    /// joint decision of theirs) and trick 2, exact from trick 3; a cut of 6 plays every trick
+    /// out and values the end by the leaf rule.
+    #[test]
+    fn playout_from_trick_one_plays_the_robs_and_both_tricks() {
+        let starts = collect_starts(400, 7);
+        let l = leaf();
+        let source = BeliefSource::new();
+        let ctx = belief_ctx(&*l, &source);
+        let (s1, s2) = students();
+        let mut mem = SolveMem::new();
+        for cut in [3u8, 6] {
+            let teacher = Teacher::Playout {
+                students: Students { s1: &s1, s2: &s2 },
+                cut,
+                sha1: "a",
+                sha2: "b",
+            };
+            let j = job(1, 12, 2, SOURCE_RULES, 1);
+            check_job(&j, &teacher, false).expect("a valid job");
+            let mut robs = 0;
+            for i in 0..j.count {
+                let r = make_record(&j, i, &starts, &ctx, teacher, &mut mem);
+                robs += u32::from(r.kind == KIND_JOINT);
+                assert_eq!(r.values.len(), 2);
+                assert!(r.values.iter().all(|row| row.len() == r.cands.len()));
+            }
+            assert!(robs > 0, "no joint rob decision in 12 trick-1 decisions");
+        }
+        let bad = Teacher::Playout {
+            students: Students { s1: &s1, s2: &s2 },
+            cut: 7,
+            sha1: "a",
+            sha2: "b",
+        };
+        assert!(check_job(&job(1, 1, 1, SOURCE_RULES, 1), &bad, false).is_err());
     }
 
     #[test]

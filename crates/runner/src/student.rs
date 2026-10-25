@@ -54,7 +54,7 @@ use crate::{Ctx, sibling};
 
 /// The settings a `student_teacher` chunk takes (after `v2.rs` added the network's path,
 /// `net`); any other key is refused.
-pub(crate) const KEYS: [&str; 19] = [
+pub(crate) const KEYS: [&str; 23] = [
     "trick",
     "count",
     "deals",
@@ -74,11 +74,21 @@ pub(crate) const KEYS: [&str; 19] = [
     "chunk_sizes",
     "exact_leaves",
     "defer_expert",
+    "teacher",
+    "student1",
+    "student2",
+    "playout_cut",
 ];
 
 /// The keys [`resolve`] adds (local paths of the named inputs) before the chunk reads its
 /// settings again.
-const RESOLVED: [&str; 3] = ["net", "exact_leaves_path", "defer_expert_path"];
+const RESOLVED: [&str; 5] = [
+    "net",
+    "exact_leaves_path",
+    "defer_expert_path",
+    "student1_path",
+    "student2_path",
+];
 
 /// The checked settings.
 #[derive(Clone, Debug, PartialEq)]
@@ -103,6 +113,10 @@ pub(crate) struct Params {
     /// networks.
     pub models: Vec<String>,
     pub expert_nets: Vec<String>,
+    /// The playout teacher (`"teacher": "playout"`, docs/STUDENT.md): the input names of the
+    /// students S1 and S2 that play the deals out, and the trick at whose start the exact solve
+    /// takes over (`playout_cut`, default 3). `None`: the search teacher (`net_input`).
+    pub playout: Option<(String, String, u64)>,
 }
 
 /// The test set's seed (`student::STUDENT_TEST_SEED`).
@@ -195,6 +209,54 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         Some(Value::Bool(b)) => *b,
         Some(_) => return Err("student_teacher: upload must be true or false".into()),
     };
+    let teacher = s("teacher", Some("search"))?;
+    let playout = match teacher.as_str() {
+        "search" => {
+            for k in ["student1", "student2", "playout_cut"] {
+                if p.get(k).is_some_and(|v| !v.is_null()) {
+                    return Err(format!(
+                        "student_teacher: {k} is for the playout teacher (\"teacher\": \"playout\")"
+                    ));
+                }
+            }
+            None
+        }
+        "playout" => {
+            if exact_leaves.is_some() || defer_expert.is_some() {
+                return Err(
+                    "student_teacher: exact_leaves and defer_expert are for the search teacher"
+                        .into(),
+                );
+            }
+            let cut = n("playout_cut", Some(3))?;
+            if !(1..=6).contains(&cut) {
+                return Err(format!(
+                    "student_teacher: playout_cut {cut}: the trick at whose start the exact solve \
+                     takes over, 1 to 5, or 6 to play every trick out"
+                ));
+            }
+            Some((s("student1", None)?, s("student2", None)?, cut))
+        }
+        t => {
+            return Err(format!(
+                "student_teacher: teacher {t}: \"search\" (a network at the cut, net_input) or \
+                 \"playout\" (the students play the deals out)"
+            ));
+        }
+    };
+    // The search teacher needs its network; the playout teacher none (`net_input` is left out
+    // or empty there).
+    let net_input = match (&playout, p.get("net_input")) {
+        (Some(_), None | Some(Value::Null)) => String::new(),
+        (Some(_), Some(Value::String(x))) if x.is_empty() => String::new(),
+        (Some(_), Some(_)) => {
+            return Err(
+                "student_teacher: the playout teacher takes no net_input (its students play the deals out)"
+                    .into(),
+            );
+        }
+        (None, _) => s("net_input", None)?,
+    };
     Ok(Params {
         trick,
         count,
@@ -202,7 +264,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         seed,
         source,
         role,
-        net_input: s("net_input", None)?,
+        net_input,
         tt_mb: n("tt_mb", Some(64))?.max(1),
         start_hands: n("start_hands", Some(20_000))?,
         first_part: n("first_part", Some(0))?,
@@ -212,18 +274,23 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         defer_expert,
         models,
         expert_nets,
+        playout,
     })
 }
 
-/// The inputs a stream names (its network).
+/// The inputs a stream names (its network, or the playout teacher's students).
 pub(crate) fn input_names(p: &Value) -> Result<Vec<String>, String> {
     let q = parse(p)?;
-    let mut v = vec![q.net_input];
+    let mut v = match &q.playout {
+        Some((s1, s2, _)) => vec![s1.clone(), s2.clone()],
+        None => vec![q.net_input],
+    };
     for n in q.models.into_iter().chain(q.expert_nets) {
         if !v.contains(&n) {
             v.push(n);
         }
     }
+    v.dedup();
     Ok(v)
 }
 
@@ -252,20 +319,20 @@ pub(crate) fn resolve(
     inputs: &std::collections::BTreeMap<String, String>,
 ) -> Result<Value, String> {
     let q = parse(p)?;
-    let path = inputs.get(&q.net_input).cloned().ok_or_else(|| {
-        format!(
-            "student_teacher needs input `{}` in the manifest's inputs",
-            q.net_input
-        )
-    })?;
-    let mut out = p.clone();
-    out["net"] = json!(path);
     let path_of = |n: &str| -> Result<String, String> {
         inputs
             .get(n)
             .cloned()
             .ok_or_else(|| format!("student_teacher needs input `{n}` in the manifest's inputs"))
     };
+    let mut out = p.clone();
+    match &q.playout {
+        Some((s1, s2, _)) => {
+            out["student1_path"] = json!(path_of(s1)?);
+            out["student2_path"] = json!(path_of(s2)?);
+        }
+        None => out["net"] = json!(path_of(&q.net_input)?),
+    }
     if let Some(l) = &q.exact_leaves {
         out["exact_leaves_path"] = json!(crate::checks::leaves_with_paths(l, &q.models, &path_of)?);
     }
@@ -288,10 +355,23 @@ pub(crate) fn shard_name(q: &Params, part: u64) -> String {
             format!("-x{}", &crate::bundle::sha256_hex(text.as_bytes())[..8])
         }
     };
+    let pl = match &q.playout {
+        Some((_, _, cut)) => format!("-pl{cut}"),
+        None => String::new(),
+    };
     format!(
-        "t{}-{}-{}-s{}-d{}{x}-p{part:05}.npy",
+        "t{}-{}-{}-s{}-d{}{x}{pl}-p{part:05}.npy",
         q.trick, q.role, q.source, q.seed, q.deals
     )
+}
+
+/// The teacher's networks on the command line: the search teacher's `net` (an O_k's path, or
+/// `exact`), or the playout teacher's two students.
+pub(crate) enum Nets<'a> {
+    /// `--net PATH`.
+    Net(&'a str),
+    /// `--playout --student1 S1 --student2 S2 --playout-cut K`.
+    Playout { s1: &'a str, s2: &'a str, cut: u64 },
 }
 
 /// The `search teacher` command of part `part`.
@@ -300,7 +380,7 @@ pub(crate) fn command(
     search: &Path,
     q: &Params,
     part: u64,
-    net: &str,
+    nets: Nets,
     leaves: Option<(&str, Option<&str>)>,
     table: &Path,
     out: &Path,
@@ -315,9 +395,19 @@ pub(crate) fn command(
         .args(["--deals", &q.deals.to_string()])
         .args(["--seed", &q.seed.to_string()])
         .args(["--source", &q.source])
-        .args(["--role", &q.role])
-        .args(["--net", net])
-        .arg("--equity")
+        .args(["--role", &q.role]);
+    match nets {
+        Nets::Net(net) => {
+            c.args(["--net", net]);
+        }
+        Nets::Playout { s1, s2, cut } => {
+            c.arg("--playout")
+                .args(["--student1", s1])
+                .args(["--student2", s2])
+                .args(["--playout-cut", &cut.to_string()]);
+        }
+    }
+    c.arg("--equity")
         .arg(table)
         .arg("--out")
         .arg(out)
@@ -333,6 +423,23 @@ pub(crate) fn command(
         }
     }
     c
+}
+
+/// The networks of a resolved chunk's settings (`resolve` added the paths).
+pub(crate) fn nets_of<'a>(p: &'a Value, q: &Params) -> Result<Nets<'a>, String> {
+    let path = |k: &str| -> Result<&str, String> {
+        p.get(k)
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("student_teacher: {k} is not resolved to a file"))
+    };
+    Ok(match &q.playout {
+        Some((_, _, cut)) => Nets::Playout {
+            s1: path("student1_path")?,
+            s2: path("student2_path")?,
+            cut: *cut,
+        },
+        None => Nets::Net(path("net")?),
+    })
 }
 
 /// Run one `student_teacher` chunk: chunk `index` of its stream (the network's path resolved by
@@ -371,11 +478,7 @@ pub(crate) fn chunk_with(
     if q.skip_parts.contains(&part) {
         return Ok(json!({ "kind": "student_teacher", "part": part, "skipped": true }));
     }
-    let net = p
-        .get("net")
-        .and_then(Value::as_str)
-        .ok_or("student_teacher: the network's path was not resolved")?
-        .to_string();
+    let nets = nets_of(p, &q)?;
     let work = ctx.root.join("student-work");
     let outdir = ctx.root.join("out").join("student");
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
@@ -399,7 +502,7 @@ pub(crate) fn chunk_with(
         search,
         &q,
         part,
-        &net,
+        nets,
         leaves.as_ref().map(|(l, e)| (l.as_str(), e.as_deref())),
         table,
         &shard,
@@ -516,6 +619,62 @@ mod tests {
     }
 
     #[test]
+    fn the_playout_teacher_names_its_students_and_no_network() {
+        let mut p = base();
+        p.as_object_mut().expect("object").remove("net_input");
+        p["teacher"] = json!("playout");
+        p["student1"] = json!("s1");
+        p["student2"] = json!("s2");
+        let q = parse(&p).expect("parses");
+        assert_eq!(q.playout, Some(("s1".into(), "s2".into(), 3)));
+        assert_eq!(q.net_input, "");
+        assert_eq!(input_names(&p).expect("names"), vec!["s1", "s2"]);
+        assert_eq!(shard_name(&q, 3), "t2-train-rules-s401-d320-pl3-p00003.npy");
+        let paths = std::collections::BTreeMap::from([
+            ("s1".to_string(), "/x/s1".to_string()),
+            ("s2".to_string(), "/x/s2".to_string()),
+        ]);
+        let r = resolve(&p, &paths).expect("resolves");
+        assert_eq!(
+            (r["student1_path"].as_str(), r["student2_path"].as_str()),
+            (Some("/x/s1"), Some("/x/s2"))
+        );
+        assert!(r.get("net").is_none());
+        let nets = nets_of(&r, &q).expect("nets");
+        let c = command(
+            Path::new("search"),
+            &q,
+            3,
+            nets,
+            None,
+            Path::new("equity.npy"),
+            Path::new("out.npy"),
+            8,
+            Path::new("p.json"),
+        );
+        let args: Vec<String> = c
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let at = |k: &str| args[args.iter().position(|a| a == k).expect(k) + 1].clone();
+        assert!(args.iter().any(|a| a == "--playout"));
+        assert!(!args.iter().any(|a| a == "--net"));
+        assert_eq!(
+            (at("--student1"), at("--student2"), at("--playout-cut")),
+            ("/x/s1".into(), "/x/s2".into(), "3".into())
+        );
+        // The cut is checked; a network is refused; the search teacher refuses the students.
+        p["playout_cut"] = json!(7);
+        assert!(parse(&p).is_err());
+        p["playout_cut"] = json!(3);
+        p["net_input"] = json!("o3");
+        assert!(parse(&p).is_err());
+        let mut s = base();
+        s["student1"] = json!("s1");
+        assert!(parse(&s).is_err());
+    }
+
+    #[test]
     fn settings_are_checked() {
         let q = parse(&base()).expect("parses");
         assert_eq!((q.trick, q.count, q.deals, q.seed), (2, 5000, 320, 401));
@@ -556,7 +715,7 @@ mod tests {
             Path::new("search"),
             &q,
             12,
-            "o3.safetensors",
+            Nets::Net("o3.safetensors"),
             None,
             Path::new("equity.npy"),
             Path::new("out.npy"),
@@ -619,7 +778,7 @@ mod tests {
             Path::new("search"),
             &q,
             1,
-            "/x/o3",
+            Nets::Net("/x/o3"),
             Some((
                 r["exact_leaves_path"].as_str().expect("path"),
                 Some("h3:/x/o3b"),
