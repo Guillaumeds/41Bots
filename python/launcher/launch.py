@@ -2234,6 +2234,10 @@ def watch_record(a, run_id: str, instance_id: int, best: dict, dph: float, spent
             "created_utc": datetime.fromtimestamp(created, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "deadline_utc": getattr(a, "deadline_utc", None), "handed_over": handed_over,
             "busy_cpu_pct": busy_threshold(a), "low_cpu_pct": a.low_cpu_pct,
+            # machine.keep: a run the launcher has handed over (330 min) ends after the launcher is gone, so the
+            # cleanup must leave its machine up at DONE/FAILED and write the keep record itself (cleanup.py
+            # `decide`, action "kept"); before 2026-10-25 a kept run longer than the handover lost its keep.
+            "keep": bool(getattr(a, "keep", False)), "keep_hours": float(getattr(a, "keep_hours", None) or KEEP_HOURS),
             "destroy_key_id": getattr(a, "destroy_key_id", None),
             "github_run": os.environ.get("GITHUB_RUN_ID"),
             "utc": datetime.fromtimestamp(time.time(), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}

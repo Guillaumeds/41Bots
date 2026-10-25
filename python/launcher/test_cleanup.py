@@ -343,6 +343,70 @@ class KeptTest(SweepTest):
         rows = self.sweep(r2b, [inst(600)])
         self.assertEqual((self.destroyed, rows[0][3]), ([9], "destroy"))
 
+    def test_a_handed_over_kept_run_that_ends_keeps_its_machine_and_gets_its_record(self):
+        # 2026-10-25: a kept run longer than the launcher's 330-minute handover ends after the launcher is gone, so
+        # nobody wrote keep/<instance>.json and the marker rule destroyed the machine 10 minutes after DONE (the
+        # playout labels run on the owner's box was going to end that way). The watch record now carries keep and
+        # keep_hours: at the marker the cleanup keeps the machine, writes the keep record from the marker's time
+        # and the KEPT banner, and the keep time runs out as for any kept machine.
+        done_at = NOW - 30 * MIN
+        watch = {"run_id": "r1", "instance_id": 9, "dph": 0.328, "cpu_name": "EPYC 7B12", "handed_over": True,
+                 "keep": True, "keep_hours": 8}
+        r2 = FakeR2()
+        r2.put("runs/r1/DONE", b"{}", done_at)
+        r2.put("runs/r1/watch.json", json.dumps(watch).encode())
+        rows = self.sweep(r2, [inst(600)])
+        self.assertEqual((self.destroyed, rows[0][3]), ([], "kept"))
+        self.assertIn("asked to keep the machine", rows[0][4])
+        rec = json.loads(r2.get("keep/9.json"))
+        self.assertEqual((rec["instance_id"], rec["run_id"], rec["hours"], rec["dph"]), (9, "r1", 8.0, 0.328))
+        self.assertEqual(rec["kept_utc"], cleanup.utc(done_at))
+        self.assertEqual(rec["keep_until_utc"], cleanup.utc(done_at + 8 * 3600))
+        self.assertEqual(json.loads(r2.get("runs/r1/KEPT.json")), rec)
+        # The next sweeps go by the record: kept until its time, destroyed after.
+        rows = self.sweep(r2, [inst(600)])
+        self.assertEqual((self.destroyed, rows[0][3]), ([], "keep"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            rows = cleanup.sweep(r2, [inst(600)], done_at + 8 * 3600 + cleanup.KEEP_GRACE_S + 60, False, False)
+        self.assertEqual((self.destroyed, rows[0][3]), ([9], "destroy"))
+        # Without keep in the watch record the marker rule destroys as before; a dry run writes nothing.
+        r2b = FakeR2()
+        r2b.put("runs/r1/DONE", b"{}", done_at)
+        r2b.put("runs/r1/watch.json", json.dumps({**watch, "keep": False}).encode())
+        self.destroyed.clear()
+        rows = self.sweep(r2b, [inst(600)])
+        self.assertEqual((self.destroyed, rows[0][3]), ([9], "destroy"))
+        r2c = FakeR2()
+        r2c.put("runs/r1/DONE", b"{}", done_at)
+        r2c.put("runs/r1/watch.json", json.dumps(watch).encode())
+        self.destroyed.clear()
+        rows = self.sweep(r2c, [inst(600)], dry_run=True)
+        self.assertEqual((self.destroyed, rows[0][3], r2c.get("keep/9.json")), ([], "kept", None))
+        # The pure rule: FAILED keeps too; a run still heartbeating with no marker is simply healthy.
+        d = lambda i, s: cleanup.decide(i, s, NOW)[0]  # noqa: E731
+        self.assertEqual(d(inst(600), state(1, markers={"FAILED": 30}, watch=watch)), "kept")
+        self.assertEqual(d(inst(600), state(1, watch=watch)), "keep")
+        self.assertEqual(d(inst(600), state(1, markers={"DONE": 5}, watch=watch)), "keep")  # inside the grace
+        # A run launched before the watch record carried keep (the playout labels run of 2026-10-25): its stored
+        # manifest's machine.keep decides, with its keep_hours.
+        old_watch = {k: v for k, v in watch.items() if k not in ("keep", "keep_hours")}
+        manifest = {"run_id": "r1", "machine": {"instance_id": 9, "keep": True, "keep_hours": 8}}
+        s_old = {**state(1, markers={"DONE": 30}, watch=old_watch), "manifest": manifest}
+        self.assertEqual(d(inst(600), s_old), "kept")
+        self.assertEqual(cleanup.keep_asked(s_old), (True, 8.0))
+        s_no = {**state(1, markers={"DONE": 30}, watch=old_watch), "manifest": {"run_id": "r1", "machine": {}}}
+        self.assertEqual(d(inst(600), s_no), "destroy")
+        self.assertEqual(cleanup.keep_asked({"watch": {}, "manifest": None}), (False, 6.0))
+        self.assertEqual(cleanup.keep_asked({"watch": {"keep": False}, "manifest": manifest}), (False, 8.0))
+        r2d = FakeR2()
+        r2d.put("runs/r1/DONE", b"{}", done_at)
+        r2d.put("runs/r1/manifest.json", json.dumps(manifest).encode(), done_at - 20 * 3600)
+        r2d.put("runs/r1/watch.json", json.dumps(old_watch).encode())
+        self.destroyed.clear()
+        rows = self.sweep(r2d, [inst(600)])
+        self.assertEqual((self.destroyed, rows[0][3]), ([], "kept"))
+        self.assertEqual(json.loads(r2d.get("keep/9.json"))["keep_until_utc"], cleanup.utc(done_at + 8 * 3600))
+
     def test_a_kept_machine_past_its_time_is_destroyed_after_a_second_reading(self):
         r2 = FakeR2()
         r2.put("keep/9.json", self.record(-30))

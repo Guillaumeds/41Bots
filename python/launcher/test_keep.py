@@ -183,6 +183,13 @@ class KeepRunTest(KeepTestBase):
         self.assertEqual(json.loads(w.store[f"runs/{RUN}/KEPT.json"]), rec)
         self.assertIn("MACHINE KEPT RUNNING, ACTION NEEDED", self.log)
         self.assertIn("::warning::MACHINE KEPT", self.log)
+        # The watch record tells the cleanup the run keeps its machine, for a run that ends after the
+        # launcher's handover (cleanup.py decide, "kept").
+        watch = json.loads(w.store[f"runs/{RUN}/watch.json"])
+        self.assertEqual((watch["keep"], watch["keep_hours"]), (True, 3.0))
+        w2 = KWorld([tl.offer(1, 11, 1.0)], ["done:2"])
+        self.run_launch(w2, self.manifest())
+        self.assertEqual(json.loads(w2.store[f"runs/{RUN}/watch.json"])["keep"], False)
 
     def test_without_keep_nothing_is_kept_and_the_runner_is_not_told_to_park(self):
         w = KWorld([tl.offer(1, 11, 1.0)], ["done:2"])
