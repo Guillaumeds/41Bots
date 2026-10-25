@@ -30,14 +30,17 @@
    03:00 UTC 2026-10-26, about $6-7 (`vast-status.yml` with `run_id` playout-labels-1 shows the queue). The run keeps the box (`keep_hours` 8):
    **within 8 hours of DONE something must take it over (step 2) or vast-cleanup destroys it at `keep_until_utc`**; the owner may also stop it from
    the console, which the fixed launcher and cleanup now leave alone. Read the first stored parts' sidecars (stamp `playout:<S1>:<S2>:cut3`)
-   before trusting the rest; `runs/playout-labels-1/out/<stream>/`.
+   before trusting the rest; `runs/playout-labels-1/out/<stream>/`. **The run is longer than the launcher's 330-minute handover:** without
+   PR #6 on `main` the cleanup's marker rule destroys the box 10 minutes after DONE; #6 makes the cleanup keep it (reading run 1's
+   stored manifest), so **merge #6 before about 03:00 UTC 2026-10-26**, or relabel the instance without the `41bots-` prefix.
 2. **Training S1'/S2'**: `docs/vast/student-playout-train.manifest.json` (on `playout-teacher`; run id `student-playout-1`, two `student_train`
    streams, decision-aware loss, seeds 1-3, judged on run 1's `t1test`/`t2test`; takeover of the same box with `keep`). Check the stored parts
    count first (`parts` 300/200/400/200). Judge **never on copper or the golden sets** (face-up labels): on the playout test sets and in run 2.
 3. **Run 2, the money gate** (`arena-students.manifest.json`, run id `arena-students-1`): fill `s1new`/`s2new` with the stored keys
    (`store-input.yml`), then the app's player with the new students against the shipped ones, SPRT [0, 0.01], cap 3,000 blocks (about 500
    core-hours at the app's deals, a few hours on the box). Accept = ship (the owner's word), then **round 2**: replay run 1 with the new students
-   as the inner players (the lean they carry is what round 1 removes; DAgger).
+   as the inner players (the lean they carry is what round 1 removes) and a third of the positions from the students' own games
+   (`docs/vast/playout-labels-2.manifest.json`, source `student`: DAgger, built on `playout-teacher`).
 4. **Then the inference weighting** (policy-likelihood world weighting with a floor, RESEARCH §15) behind the same gate; and the equity-table refresh.
 5. Merge order: #6 first (the workflow runs from main), #7, then #8 `arena-app-bot` (it touches `Method` in `search::pimc` like #7: a two-line merge),
    then this docs branch (`review-docs`); record every result in EXPERIMENTS Part I, this page and `docs/README.md`.
