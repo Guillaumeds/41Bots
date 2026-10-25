@@ -183,7 +183,11 @@ retrained ones.
 - Runner (`student_teacher` streams): `"teacher": "playout"`, `"student1"`, `"student2"` (manifest
   input names of the student files), `"playout_cut"` (3); no `net_input`. Shards are named
   `t<trick>-<role>-<source>-s<seed>-d<deals>-pl<cut>-p<part>.npy`. The first run is
-  `docs/vast/playout-labels.manifest.json`.
+  `docs/vast/playout-labels.manifest.json` (launched 2026-10-25 07:28 UTC on the owner's Thailand
+  box, run id `playout-labels-1`); the students' retraining on its labels is
+  `docs/vast/student-playout-train.manifest.json` (S1' and S2', decision-aware loss, three seeds,
+  judged on run 1's own playout test sets), and the money gate `docs/vast/arena-students.manifest.json`
+  (§6.1, branch `arena-app-bot`).
 - Cost per deal (estimate, to be measured in that run): up to 16 student calls and one exact solve
   from trick 3, tens of milliseconds, against 0.2-0.6 s for an H_2 deal natively; so 256-512 deals
   a decision instead of 64.
