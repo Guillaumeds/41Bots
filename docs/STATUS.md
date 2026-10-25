@@ -27,19 +27,26 @@
   chip, 256 threads, 129 GB RAM, RTX 3060, $0.328/h), unlabelled, idle, for the runs below; `keep: true` on every manifest that uses it.
 
 ### Handoff (2026-10-25): the runs, in order
-1. **Run 1c, playout labels: RUNNING** (`docs/vast/playout-labels.manifest.json`, run id **`playout-labels-1c`**; `bin_sha` eef2d56b, on
-   57615744 since about 10:44 UTC 2026-10-25 with no launcher watching it (its launcher gave up before the late boot); the box is labelled
-   `41bots - Review (playout labels 1c, running) - ETA 00:30`, so the cleanup ignores it: **the owner stops it by hand at the end, or the
-   training run takes it over**; at 14:30 UTC 305 of 1,107 chunks were done at CPU 84-88%, so DONE about 00:30 UTC 2026-10-26, about $4). 250k trick-1 and 300k trick-2 decisions at 256 deals with the shipped S1/S2 as the inner players, plus 2,000-decision test
+1. **Run 1c, playout labels: DONE** (`docs/vast/playout-labels.manifest.json`, run id **`playout-labels-1c`**; `bin_sha` eef2d56b, on
+   57615744 from about 10:44 to **21:46 UTC 2026-10-25, 11.0 h, $3.62**, no error, no partial chunk, no warning; the stored parts match the
+   training manifest exactly: `out/t1rules` 300, `t1mixed` 200, `t2rules` 400, `t2mixed` 200, `t1test` 4, `t2test` 4, 150 MB in all, checked
+   from `r2-inventory`). Pace: the 500 trick-1 chunks by about 18:30 UTC, then about 121 trick-2 chunks an hour at 15 chunks of 16 threads,
+   CPU 72-94% (the lower numbers are the trick-2 chunks' tails turning over). No launcher watched it (its launcher gave up before the late
+   boot); the runner parked with `KEEP_MACHINE=1` and the box is **still running, idle, at $0.328/h**, relabelled
+   `41bots - Review (labels 1c done, idle: stop me for the training takeover) - ETA` (exempt from the cleanup): **the owner stops it in the
+   console, then step 2 takes it over** (a takeover of a running box boots late or not at all, see "A machine that already runs our image"
+   below; the `stop` dispatch of `vast-instance.yml` is refused for a session on auto mode, so the stop is the owner's). 250k trick-1 and 300k trick-2 decisions at 256 deals with the shipped S1/S2 as the inner players, plus 2,000-decision test
    sets at 512 deals; **16 threads a chunk, about fifteen chunks at once** (the owner, 09:01: the box must run full). The first launch
    (`playout-labels-1`, 07:28-09:21 UTC, one chunk at a time on 245 threads) kept the box 55% busy at about 96 s a chunk (27 hours in all) and
    was stopped with `keep` (its 8 test parts and 42 t1rules parts are stored under its own run id; I3 used its test sets); the planner now lets
    fixed-thread teacher chunks share the machine, so the tails overlap and freed threads take the next chunk at once. Expected: about 15-22 h at
    near-full use (`vast-status.yml` with `run_id` playout-labels-1b shows the queue and `cpu_util_pct`). The run keeps the box (`keep_hours` 8)
    and #6 is on `main`, so the cleanup keeps it at DONE too; **within 8 hours of DONE launch step 2 or the cleanup destroys it at `keep_until_utc`.**
-2. **Training S1'/S2'**: `docs/vast/student-playout-train.manifest.json` (on `playout-teacher`; run id `student-playout-1`, two `student_train`
-   streams, decision-aware loss, seeds 1-3, judged on run 1's `t1test`/`t2test`; takeover of the same box with `keep`). Check the stored parts
-   count first (`parts` 300/200/400/200). Judge **never on copper or the golden sets** (face-up labels): on the playout test sets and in run 2.
+2. **Training S1'/S2': NEXT, ready to launch** (`docs/vast/student-playout-train.manifest.json`, on `main`; run id `student-playout-1`, two
+   `student_train` streams, decision-aware loss, seeds 1-3, judged on run 1c's `t1test`/`t2test`; takeover of the same box with `keep`,
+   `bin_sha` eef2d56b). The stored parts match its `parts` (300/200/400/200, tests 4/4, checked 22:00 UTC 2026-10-25). Launch through
+   `vast-run.yml` once the box shows `stopped/stopped`; then check the heartbeats of `student-playout-1` **and** of `playout-labels-1c` (a
+   late boot has started the old run's environment before). Judge **never on copper or the golden sets** (face-up labels): on the playout test sets and in run 2.
 3. **Run 2, the money gate** (`arena-students.manifest.json`, run id `arena-students-1`): fill `s1new`/`s2new` with the stored keys
    (`store-input.yml`), then the app's player with the new students against the shipped ones, SPRT [0, 0.01], cap 3,000 blocks (about 500
    core-hours at the app's deals, a few hours on the box). Accept = ship (the owner's word), then **round 2**: replay run 1 with the new students
