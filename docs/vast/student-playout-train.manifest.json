@@ -6,7 +6,7 @@
  "benchmark_seconds": 0,
  "upload_every_s": 300,
  "heartbeat_every_s": 30,
- "note": "Review session 2026-10-25 (step 2 of the handoff): S1' and S2', the students retrained on the playout teacher's labels of run playout-labels-1 (250,000 trick-1 and 300,000 trick-2 decisions at 256 deals, STUDENT.md 3.1), 512-256 with the decision-aware loss (rank_weight 1, temperature 0.01, stop on the validation decision loss), seeds 1-3 each, judged on run 1's own 2,000-decision playout test sets (t1test, t2test, 512 deals): how well they copy the playout teacher. Never judge them on copper or the golden sets (face-up labels); the money is judged in run 2 (arena-students.manifest.json). Trains by takeover of the owner's Thailand box (instance 57615744, AMD EPYC 7B12, 256 threads, 129 GB, RTX 3060 12 GB, $0.33/h) once run 1 has finished, kept afterwards; binaries with the playout teacher (ac3e1636 or later). The parts counts must match what run 1 stored (use skip_parts or lower parts if a stream fell short).",
+ "note": "Review session 2026-10-25 (step 2 of the handoff): S1' and S2', the students retrained on the playout teacher's labels of run playout-labels-1c (250,000 trick-1 and 300,000 trick-2 decisions at 256 deals, STUDENT.md 3.1), 512-256 with the decision-aware loss (rank_weight 1, temperature 0.01, stop on the validation decision loss), seeds 1-3 each, judged on run 1's own 2,000-decision playout test sets (t1test, t2test, 512 deals): how well they copy the playout teacher. Never judge them on copper or the golden sets (face-up labels); the money is judged in run 2 (arena-students.manifest.json). Trains by takeover of the owner's Thailand box (instance 57615744, AMD EPYC 7B12, 256 threads, 129 GB, RTX 3060 12 GB, $0.33/h) once run 1 has finished, kept afterwards; binaries with the playout teacher (ac3e1636 or later). The parts counts must match what run 1 stored (use skip_parts or lower parts if a stream fell short).",
  "machine": {
   "gpus": 1,
   "min_gpu_ram_gb": 8,
@@ -28,19 +28,19 @@
     "threads": "all",
     "train_inputs": [
      {
-      "run": "playout-labels-1",
+      "run": "playout-labels-1c",
       "stream": "t1rules",
       "parts": 300
      },
      {
-      "run": "playout-labels-1",
+      "run": "playout-labels-1c",
       "stream": "t1mixed",
       "parts": 200
      }
     ],
     "test_inputs": [
      {
-      "run": "playout-labels-1",
+      "run": "playout-labels-1c",
       "stream": "t1test",
       "parts": 4
      }
@@ -102,19 +102,19 @@
     "threads": "all",
     "train_inputs": [
      {
-      "run": "playout-labels-1",
+      "run": "playout-labels-1c",
       "stream": "t2rules",
       "parts": 400
      },
      {
-      "run": "playout-labels-1",
+      "run": "playout-labels-1c",
       "stream": "t2mixed",
       "parts": 200
      }
     ],
     "test_inputs": [
      {
-      "run": "playout-labels-1",
+      "run": "playout-labels-1c",
       "stream": "t2test",
       "parts": 4
      }

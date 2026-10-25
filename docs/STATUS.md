@@ -27,9 +27,10 @@
   chip, 256 threads, 129 GB RAM, RTX 3060, $0.328/h), unlabelled, idle, for the runs below; `keep: true` on every manifest that uses it.
 
 ### Handoff (2026-10-25): the runs, in order
-1. **Run 1b, playout labels: RUNNING** (`docs/vast/playout-labels.manifest.json`, run id `playout-labels-1b`; vast-run 40180442984 from
-   `main` with `bin_sha` eef2d56b, launched 09:23 UTC 2026-10-25 by takeover of 57615744; label `41bots-playout-labels-1b`, not relabelled: no vast
-   key on the VM). 250k trick-1 and 300k trick-2 decisions at 256 deals with the shipped S1/S2 as the inner players, plus 2,000-decision test
+1. **Run 1c, playout labels: RUNNING** (`docs/vast/playout-labels.manifest.json`, run id **`playout-labels-1c`**; `bin_sha` eef2d56b, on
+   57615744 since about 10:44 UTC 2026-10-25 with no launcher watching it (its launcher gave up before the late boot); the box is labelled
+   `41bots - Review (playout labels 1c, running) - ETA 00:30`, so the cleanup ignores it: **the owner stops it by hand at the end, or the
+   training run takes it over**; at 14:30 UTC 305 of 1,107 chunks were done at CPU 84-88%, so DONE about 00:30 UTC 2026-10-26, about $4). 250k trick-1 and 300k trick-2 decisions at 256 deals with the shipped S1/S2 as the inner players, plus 2,000-decision test
    sets at 512 deals; **16 threads a chunk, about fifteen chunks at once** (the owner, 09:01: the box must run full). The first launch
    (`playout-labels-1`, 07:28-09:21 UTC, one chunk at a time on 245 threads) kept the box 55% busy at about 96 s a chunk (27 hours in all) and
    was stopped with `keep` (its 8 test parts and 42 t1rules parts are stored under its own run id; I3 used its test sets); the planner now lets
@@ -268,7 +269,12 @@ The owner wants the teachers and their deal counts decided last.
     RUN_ID (the old run's runner heartbeated under `playout-labels-1` at 10:22 and parked). The takeover now puts the whole
     environment on the on-start command (`env K=V … 41bots-boot`, `take_onstart`), which the boot script reads whatever the
     container's own environment says; if vast ignores on-start updates as well, the remaining route is to destroy the instance
-    and rent the machine again (`machine_id`), which creates a fresh instance with the right environment.
+    and rent the machine again (`machine_id`), which creates a fresh instance with the right environment. **What actually happened
+    (14:30 UTC):** the 1c settings did take, late: after the 1d recycle at 10:44 the box booted **1c's** environment and run
+    `playout-labels-1c` has run since (305 of 1,107 chunks by 14:30, CPU 84-88%, 15 chunks at once), while 1d never started.
+    So vast applies a takeover's settings one update late and after a delay. **After any takeover attempt, read the heartbeats of
+    every recent run id before concluding** (`vast-status.yml` with each `run_id`), and relabel a working box out of the cleanup's
+    watch when no launcher owns it (done: `41bots - Review (playout labels 1c, running) - ETA 00:30`).
   - `"machine_id": M` (or `--machine-id M`): rent the cheapest rentable, unrented on-demand offer on vast machine M,
     read from the **public market list** (`POST console.vast.ai/api/v0/bundles/`, no key, no 512-offer cap), then
     checked exactly like a named offer. A named `offer_id` that both `vastai search offers id=N` and the launcher's

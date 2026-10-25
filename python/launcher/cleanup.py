@@ -119,6 +119,12 @@ def decide_kept(inst: dict, rec: dict, now: float, everything: bool = False) -> 
     return "keep", f"kept for the next worker until {rec.get('keep_until_utc')} (run {rec.get('run_id')})"
 
 
+def working(state: dict, now: float) -> bool:
+    """Whether the run on the machine heartbeated within SILENT_S of `now` (it is working, whatever else is recorded)."""
+    beats = state.get("heartbeats") or []
+    return bool(beats) and now - max(beats) <= SILENT_S
+
+
 def keep_record_of(run_id: str, instance_id: int, state: dict, inst: dict, marker_t: float) -> dict:
     """keep/<instance>.json for a handed-over kept run that ended at `marker_t` (the same shape as launch.py
     keep_record: the launcher is gone, so the cleanup writes it)."""
@@ -417,6 +423,16 @@ def sweep(r2, instances: list[dict], now: float, everything: bool, dry_run: bool
         live_ids.add(int(inst["id"]))
         state = run_state(r2, run_id)
         kept = get_json(r2, f"keep/{inst['id']}.json")
+        if kept and working(state, now):
+            # A keep record left by a launcher that gave up on a takeover while the machine went on to boot the run
+            # anyway (2026-10-25: run playout-labels-1c heartbeated from 10:44 under a record written at 11:00 with a
+            # keep time of 19:00, which would have destroyed the working box): a heartbeating run owns the machine, the
+            # record is stale and goes.
+            log(f"instance {inst['id']} run {run_id}: its keep record (run {kept.get('run_id')}) is stale, the run is "
+                f"heartbeating; deleted")
+            if not dry_run:
+                r2.delete(f"keep/{inst['id']}.json")
+            kept = None
 
         def decide_now(i: dict) -> tuple[str, str]:
             return decide_kept(i, kept, now, everything) if kept else decide(i, state, now, everything)

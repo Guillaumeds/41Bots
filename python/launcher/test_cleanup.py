@@ -407,6 +407,32 @@ class KeptTest(SweepTest):
         self.assertEqual((self.destroyed, rows[0][3]), ([], "kept"))
         self.assertEqual(json.loads(r2d.get("keep/9.json"))["keep_until_utc"], cleanup.utc(done_at + 8 * 3600))
 
+    def test_a_stale_keep_record_on_a_heartbeating_machine_is_deleted_and_the_run_is_watched(self):
+        # 2026-10-25: a takeover's launcher gave up (no heartbeat in 15 minutes) and wrote a keep record, but the box
+        # booted the run late and worked on under the record, which would have destroyed it at its keep time.
+        r2 = FakeR2()
+        r2.put("keep/9.json", self.record(-30))  # past its time: would destroy
+        r2.put("runs/r1/heartbeat/000001.json", b"{}", NOW - MIN)
+        r2.put("runs/r1/manifest.json", json.dumps({"run_id": "r1", "machine": {"keep": True}}).encode(), NOW - 60 * MIN)
+        rows = self.sweep(r2, [inst(600, cpu=90.0)])
+        self.assertEqual((self.destroyed, rows[0][3]), ([], "keep"))
+        self.assertIn("healthy", rows[0][4])
+        self.assertNotIn("keep/9.json", r2.store)
+        self.assertIn("keep/9.json", r2.deleted)
+        # A dry run deletes nothing but decides the same.
+        r2b = FakeR2()
+        r2b.put("keep/9.json", self.record(-30))
+        r2b.put("runs/r1/heartbeat/000001.json", b"{}", NOW - MIN)
+        rows = self.sweep(r2b, [inst(600, cpu=90.0)], dry_run=True)
+        self.assertEqual((self.destroyed, rows[0][3]), ([], "keep"))
+        self.assertIn("keep/9.json", r2b.store)
+        # No recent heartbeat: the record rules as before.
+        r2c = FakeR2()
+        r2c.put("keep/9.json", self.record(-30))
+        r2c.put("runs/r1/heartbeat/000001.json", b"{}", NOW - 40 * MIN)
+        rows = self.sweep(r2c, [inst(600)])
+        self.assertEqual((self.destroyed, rows[0][3]), ([9], "destroy"))
+
     def test_a_kept_machine_past_its_time_is_destroyed_after_a_second_reading(self):
         r2 = FakeR2()
         r2.put("keep/9.json", self.record(-30))
