@@ -218,6 +218,40 @@ Later sources: the app's recorded real hands (`hand_records`, the positions peop
 by the same teacher. A position's source is stamped on its record, so a run can weight or filter
 sources.
 
+### 6.1 The app's player in the arena (the money gate; built 2026-10-25)
+
+Step 4's SPRT needs the players as the app fields them, not a search bot. `search::bot::AppPlay`
+plays as fivefingers' engine bots do (`docs/WASM-API.md`): at tricks 1 and 2 with all eight seats
+in play the trick's student (S1, S2) values every candidate from the seat's own view (the robber's
+joint burn-then-play candidates as the app lists them, `app_candidates`) and the best for its team
+is played, no deal drawn; at tricks 3-5 exact PIMC at a fixed deal count by trick and place in the
+trick (the app's own table `APP_DEALS3` = 192/224/512/640/1024/1024/1024/1024 for the leader to
+the last seat at trick 3, `APP_DEALS45` = 1024 after). What the students do not play (the
+dealer's burn before trick 1; any decision with a pair turned at tricks 1-2, which the app hands
+to its old bot or the hybrid) goes to the bot's `pimc-v0[:…]` configuration as before. The bot is
+`PimcBot::with_app`, so with the option off the bot is byte-identical to the plain PIMC bot
+(tested); `PimcFactory::app` / `app_factory` build it from the students' weights files and name
+it `app:s1=<12 hex>,s2=<12 hex>,deals3=…,deals45=…` (the names are what the arena records).
+
+In a manifest (`crates/runner/src/arena_bots.rs`) an `arena_blocks` side is a registry name or an
+app bot whose students are manifest inputs:
+
+```json
+"a": { "kind": "app", "student1": "s1new", "student2": "s2new",
+       "deals3": [64, 64, 128, 128, 256, 256, 256, 256], "deals45": 256, "base": "pimc-v0" }
+```
+
+`deals3`/`deals45` default to the app's table, `base` to `pimc-v0` (its `tt_mb`, 64 by default,
+sizes the exact solves' table); the equity table must be an input (`equity`). The gate is
+`docs/vast/arena-students.manifest.json`: new students against the shipped ones, both arms at the
+app's own deals (the students are what differs; the exact tricks cost the two arms alike), 14-way
+blocks, SPRT [0, 0.01] at α = β = 0.05, cap 3,000 blocks. A block of identical app players scores
+exactly 0 (the canary, `a_block_of_identical_app_players_scores_exactly_zero`; also checked end to
+end through the release runner with the real S1, S2 and the equity table: score 0, 14 matches).
+Measured on one thread of the build VM: one 14-way block at the cheaper table 64/64/128/128/256×4
+and 256 took **164 s**; the app's table is about four times the deals, so about 10 minutes a block
+and 3,000 blocks about 500 core-hours (a few hours on a 256-thread machine).
+
 ## 7. The fixed test set and the measure
 
 - **Test set:** decisions from the reserved seed `STUDENT_TEST_SEED` (`crates/student`), trick 1
@@ -408,8 +442,9 @@ the earlier curve point's exact data and settings), 126,000 × 320, 315,000 × 1
    measure them on the test set with `search student-check --baseline rules --baseline random`:
    launch `student-t2-curve-mech`, then `student-t2-curve` (the runner's `student_train`, §11
    Stage 4).
-3. A student bot for the arena (`search::bot`), so promotion is by SPRT in duplicate tournaments
-   (PLAN §9), and the DAgger source (`--source student`: positions from the student's own games).
+3. ~~A student bot for the arena (`search::bot`)~~ built (§6.1, 2026-10-25): promotion is by SPRT in
+   duplicate tournaments (PLAN §9) with the app's own player. Still to do: the DAgger source
+   (`--source student`: positions from the student's own games).
 4. Trick 1 once O_2 exists: price it with the real O_2 first (§8: its width sets the cost).
 
 ## 13. How many deals per decision (measured 2026-10-18, run `student-t2-dealtest-1`, $0.67)

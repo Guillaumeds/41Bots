@@ -11,11 +11,19 @@ use bot::{Bot, BotFactory};
 use engine::cards::Card;
 use engine::game::{Action, Event, Phase, Rules};
 use engine::rng::Rng;
+use engine::team_of;
 use engine::view::SeatView;
 use equity::EquityTable;
 
+use equity::MoneyChance;
+use student::encode::{encode_cand, encode_view};
+use student::net::{StudentNet, choose};
+
 use crate::labels;
-use crate::pimc::{Ctx, DecisionValues, Early, SearchConfig, SharedLeaf, evaluate};
+use crate::pimc::{
+    BeliefMode, Ctx, DecisionValues, Early, Method, SearchConfig, SharedLeaf, evaluate,
+};
+use crate::student_teacher::app_candidates;
 use crate::worlds::{BeliefSource, WorldSource};
 
 /// The sha256 of the production equity table the bots must use.
@@ -149,6 +157,129 @@ pub fn decision_seed(bot_seed: u64, view: &SeatView) -> u64 {
 /// A shared log of (view, values) for every decision of some bots.
 pub type DecisionLog = Arc<Mutex<Vec<(SeatView, DecisionValues)>>>;
 
+/// The app's player (fivefingers' engine bots; `docs/WASM-API.md`, `docs/STUDENT.md`): at tricks
+/// 1 and 2 with all eight seats in play the students S1 and S2 value every candidate from the
+/// seat's own view and the best is played (no deal is drawn; the robber's joint burn-then-play
+/// candidates as the app lists them, `app_candidates`); at tricks 3-5 exact PIMC at a fixed deal
+/// count by trick and place in the trick. The dealer's burn before trick 1 and a decision with a
+/// pair turned at tricks 1-2 are played as the bot's `SearchConfig` says (the app hands those to
+/// its old bot or the hybrid).
+#[derive(Clone)]
+pub struct AppPlay {
+    /// The trick-1 student.
+    pub s1: Arc<StudentNet>,
+    /// The trick-2 student.
+    pub s2: Arc<StudentNet>,
+    /// Exact deals at trick 3 by place in the trick (0 = the leader).
+    pub deals3: [u32; 8],
+    /// Exact deals at tricks 4 and 5, any place.
+    pub deals45: u32,
+}
+
+impl AppPlay {
+    /// The app's trick-3 deals by place (`ENGINE41_BOTS` in fivefingers' `config.ts`).
+    pub const APP_DEALS3: [u32; 8] = [192, 224, 512, 640, 1024, 1024, 1024, 1024];
+    /// The app's deals at tricks 4 and 5.
+    pub const APP_DEALS45: u32 = 1024;
+
+    /// The students from their weights files (checked as the app checks them), with the deals.
+    pub fn from_bytes(
+        s1: &[u8],
+        s2: &[u8],
+        deals3: [u32; 8],
+        deals45: u32,
+    ) -> Result<AppPlay, String> {
+        if deals3.contains(&0) || deals45 == 0 {
+            return Err("every deal count of the app's player is at least 1".to_string());
+        }
+        let s1 = StudentNet::from_bytes(s1).map_err(|e| format!("student1: {e}"))?;
+        let s2 = StudentNet::from_bytes(s2).map_err(|e| format!("student2: {e}"))?;
+        Ok(AppPlay {
+            s1: Arc::new(s1),
+            s2: Arc::new(s2),
+            deals3,
+            deals45,
+        })
+    }
+
+    /// The student that plays `trick` (1 or 2).
+    pub fn student_for(&self, trick: u8) -> Option<&StudentNet> {
+        match trick {
+            1 => Some(&self.s1),
+            2 => Some(&self.s2),
+            _ => None,
+        }
+    }
+
+    /// The exact deals of a decision at `trick` (3 to 5) in `place` (cards already in the trick).
+    pub fn deals_for(&self, trick: u8, place: usize) -> u32 {
+        if trick == 3 {
+            self.deals3[place.min(7)]
+        } else {
+            self.deals45
+        }
+    }
+
+    /// The name's part that says which students and deals play: the students by the first 12
+    /// hex digits of their SHA-256.
+    pub fn name(&self) -> String {
+        let d3: Vec<String> = self.deals3.iter().map(u32::to_string).collect();
+        format!(
+            "app:s1={},s2={},deals3={},deals45={}",
+            &self.s1.sha256[..12.min(self.s1.sha256.len())],
+            &self.s2.sha256[..12.min(self.s2.sha256.len())],
+            d3.join("/"),
+            self.deals45
+        )
+    }
+
+    /// Whether the students play this decision: trick 1 or 2, all eight seats in play.
+    fn plays(&self, view: &SeatView) -> bool {
+        let p = &view.public;
+        (1..=2).contains(&p.trick_no) && p.turned_teams.iter().all(|&t| !t)
+    }
+
+    /// The students' decision from the seat's view: every candidate valued by the trick's
+    /// student, the best for the seat's team chosen (`choose`, the app's rule).
+    fn decide(
+        &self,
+        view: &SeatView,
+        legal: &[Action],
+        leaf: &SharedLeaf,
+    ) -> Result<DecisionValues, String> {
+        let (kind, cands) = app_candidates(view, legal);
+        let net = self
+            .student_for(view.public.trick_no)
+            .ok_or_else(|| format!("no student for trick {}", view.public.trick_no))?;
+        let values = if cands.len() <= 1 {
+            vec![MoneyChance::even(); cands.len()]
+        } else {
+            let f = encode_view(view, leaf)?;
+            let cf: Vec<Vec<u16>> = cands.iter().map(|&c| encode_cand(view, c)).collect();
+            net.evaluate(&f, &cf)
+        };
+        let chosen = choose(&values, team_of(view.seat));
+        Ok(DecisionValues {
+            kind,
+            method: if cands.len() <= 1 {
+                Method::Forced
+            } else {
+                Method::Student
+            },
+            n_worlds: 0,
+            world_count: None,
+            belief: BeliefMode::Uniform,
+            candidates: cands
+                .iter()
+                .zip(&values)
+                .map(|(&(a, p), &v)| (a, p, v))
+                .collect(),
+            chosen,
+            own_sd: vec![0; cands.len()],
+        })
+    }
+}
+
 /// The PIMC bot.
 pub struct PimcBot {
     name: String,
@@ -157,6 +288,8 @@ pub struct PimcBot {
     source: Arc<dyn WorldSource>,
     rules: Rules,
     seed: u64,
+    /// The app's player, when this bot plays as the app does.
+    app: Option<Arc<AppPlay>>,
     /// The play stored by a joint (burn, first card) decision: (hand index, card).
     pending_play: Option<(u32, Card)>,
     /// The last decision's values (for teacher records).
@@ -180,10 +313,46 @@ impl PimcBot {
             source,
             rules: Rules::HOUSE,
             seed: 0,
+            app: None,
             pending_play: None,
             last: None,
             log: None,
         }
+    }
+
+    /// The same bot playing as the app does ([`AppPlay`]); `cfg` plays what the students do not.
+    pub fn with_app(mut self, app: Arc<AppPlay>) -> PimcBot {
+        self.app = Some(app);
+        self
+    }
+
+    /// The values of this decision: the students' at tricks 1-2 with eight seats in play when
+    /// the bot plays as the app does, else the search at the configured budget (the app's exact
+    /// deals by trick and place at tricks 3-5).
+    fn decide(&self, view: &SeatView, legal: &[Action]) -> DecisionValues {
+        let dseed = decision_seed(self.seed, view);
+        let ctx = Ctx {
+            leaf: &*self.leaf,
+            source: &*self.source,
+            rules: self.rules,
+        };
+        let Some(app) = &self.app else {
+            return evaluate(view, legal, dseed, &ctx, &self.cfg);
+        };
+        if app.plays(view) {
+            return app
+                .decide(view, legal, &*self.leaf)
+                .expect("a table's view is consistent and all eight seats are in play");
+        }
+        let p = &view.public;
+        if p.trick_no >= 3 {
+            let cfg = SearchConfig {
+                w34: app.deals_for(p.trick_no, p.trick_cards.len()),
+                ..self.cfg
+            };
+            return evaluate(view, legal, dseed, &ctx, &cfg);
+        }
+        evaluate(view, legal, dseed, &ctx, &self.cfg)
     }
 }
 
@@ -211,13 +380,7 @@ impl Bot for PimcBot {
                 return Action::Play(c);
             }
         }
-        let dseed = decision_seed(self.seed, view);
-        let ctx = Ctx {
-            leaf: &*self.leaf,
-            source: &*self.source,
-            rules: self.rules,
-        };
-        let dv = evaluate(view, legal, dseed, &ctx, &self.cfg);
+        let dv = self.decide(view, legal);
         let (a, p, _) = dv.candidates[dv.chosen];
         if let Some(c) = p {
             self.pending_play = Some((view.public.hand_index, c));
@@ -238,6 +401,7 @@ pub struct PimcFactory {
     cfg: SearchConfig,
     leaf: Arc<SharedLeaf>,
     source: Arc<dyn WorldSource>,
+    app: Option<Arc<AppPlay>>,
 }
 
 impl PimcFactory {
@@ -248,18 +412,64 @@ impl PimcFactory {
             cfg: spec.cfg,
             leaf,
             source,
+            app: None,
+        }
+    }
+
+    /// A factory of bots that play as the app does ([`AppPlay`]); `spec` plays what the students
+    /// do not (the dealer's burn, a turned pair at tricks 1-2) and sets the threads and table
+    /// size of the exact solves. Named `app:…` after the students and deals, with the spec's
+    /// canonical name after a `|` unless it is the plain `pimc-v0`.
+    pub fn app(
+        spec: &PimcSpec,
+        app: AppPlay,
+        leaf: Arc<SharedLeaf>,
+        source: Arc<dyn WorldSource>,
+    ) -> Self {
+        let base = spec.canonical();
+        let name = if base == "pimc-v0" {
+            app.name()
+        } else {
+            format!("{}|{base}", app.name())
+        };
+        PimcFactory {
+            name,
+            cfg: spec.cfg,
+            leaf,
+            source,
+            app: Some(Arc::new(app)),
         }
     }
 
     /// Build a concrete bot (for callers that need the decision log).
     pub fn build_pimc(&self) -> PimcBot {
-        PimcBot::new(
+        let bot = PimcBot::new(
             self.name.clone(),
             self.cfg,
             self.leaf.clone(),
             self.source.clone(),
-        )
+        );
+        match &self.app {
+            Some(app) => bot.with_app(app.clone()),
+            None => bot,
+        }
     }
+}
+
+/// A factory of the app's player with the production equity table: the students' weights files
+/// and the deals, over `base` (a `pimc-v0[:…]` name for what the students do not play).
+pub fn app_factory(
+    base: &str,
+    s1: &[u8],
+    s2: &[u8],
+    deals3: [u32; 8],
+    deals45: u32,
+) -> Result<PimcFactory, String> {
+    let spec = PimcSpec::parse(base)?;
+    let app = AppPlay::from_bytes(s1, s2, deals3, deals45)?;
+    let table = equity()?;
+    let leaf: Arc<SharedLeaf> = table;
+    Ok(PimcFactory::app(&spec, app, leaf, default_source()))
 }
 
 impl BotFactory for PimcFactory {
@@ -386,5 +596,204 @@ mod tests {
         assert_eq!(factory("rules-v1").expect("known").name(), "rules-v1");
         assert_eq!(factory("random").expect("known").build().name(), "random");
         assert!(factory("nobody").is_none());
+    }
+
+    use std::collections::BTreeMap;
+
+    use engine::game::Match;
+    use nn::synthetic::SyntheticLeaf;
+    use student::net::{random_net, write_net};
+
+    fn leaf() -> Arc<SharedLeaf> {
+        Arc::new(SyntheticLeaf)
+    }
+
+    fn students() -> (StudentNet, StudentNet) {
+        (random_net(4, &[16, 8], 12), random_net(5, &[16, 8], 12))
+    }
+
+    fn tiny_app() -> AppPlay {
+        let (s1, s2) = students();
+        AppPlay {
+            s1: Arc::new(s1),
+            s2: Arc::new(s2),
+            deals3: [1, 1, 2, 1, 1, 1, 1, 2],
+            deals45: 1,
+        }
+    }
+
+    fn tiny_cfg() -> SearchConfig {
+        SearchConfig {
+            w12: 1,
+            w34: 1,
+            t1w: 1,
+            t2w: 1,
+            tt_mb: 1,
+            ..SearchConfig::default()
+        }
+    }
+
+    /// Plays whole matches with one bot per seat from `make`, checking every action is legal;
+    /// returns every decision's values by seat (the bots' `last`), in order.
+    fn play_matches(
+        make: &dyn Fn() -> PimcBot,
+        seeds: std::ops::Range<u64>,
+    ) -> Vec<(u8, DecisionValues)> {
+        let mut out = Vec::new();
+        for seed in seeds {
+            let mut m = Match::new(seed, Rules::HOUSE);
+            let mut bots: Vec<PimcBot> = (0..8).map(|_| make()).collect();
+            for (s, b) in (0u8..).zip(bots.iter_mut()) {
+                b.start_match(
+                    s,
+                    Rules::HOUSE,
+                    Rng::derive(seed, &[0xB07, u64::from(s)]).next_u64(),
+                );
+            }
+            let mut guard = 0;
+            while let Some(seat) = m.to_act() {
+                let view = m.view(seat);
+                let legal = m.legal_actions();
+                let a = bots[usize::from(seat)].act(&view, &legal);
+                assert!(
+                    legal.contains(&a),
+                    "seat {seat} chose {a:?}, not among {legal:?}"
+                );
+                m.apply(a).expect("legal");
+                if let Some(dv) = bots[usize::from(seat)].last.take() {
+                    out.push((seat, dv));
+                }
+                guard += 1;
+                assert!(guard < 10_000, "a match ends");
+            }
+            assert_eq!(m.phase(), Phase::MatchOver);
+        }
+        out
+    }
+
+    /// The app's player: legal over whole matches; tricks 1-2 with eight seats in play are the
+    /// students' (`Method::Student`, no world, every candidate valued, the chosen one its team's
+    /// best); tricks 3-5 are exact at the deals of the trick and place; a forced card is forced.
+    #[test]
+    fn the_app_player_plays_legal_whole_matches_the_students_deciding_tricks_one_and_two() {
+        let app = Arc::new(tiny_app());
+        let l = leaf();
+        let source = default_source();
+        let make = || {
+            PimcBot::new("app".into(), tiny_cfg(), l.clone(), source.clone()).with_app(app.clone())
+        };
+        let decisions = play_matches(&make, 1..7);
+        let (mut students, mut exact, mut forced, mut joint) = (0, 0, 0, 0);
+        for (seat, dv) in &decisions {
+            match dv.method {
+                Method::Student => {
+                    students += 1;
+                    assert_eq!(dv.n_worlds, 0);
+                    assert!(dv.candidates.len() > 1);
+                    let team = team_of(*seat);
+                    let best = dv
+                        .candidates
+                        .iter()
+                        .map(|c| c.2.get(team))
+                        .max()
+                        .expect("some");
+                    assert_eq!(dv.candidates[dv.chosen].2.get(team), best);
+                    joint += usize::from(dv.kind == crate::pimc::DecisionKind::JointBurnPlay);
+                }
+                Method::ExactPimc => exact += 1,
+                Method::Forced => forced += 1,
+                Method::RolloutPimc => {} // the dealer's burn, or a turned pair at tricks 1-2
+            }
+        }
+        assert!(students > 100, "{students} student decisions");
+        assert!(joint > 0, "a robber's joint decision went to the student");
+        assert!(exact > 50, "{exact} exact decisions");
+        assert!(forced > 0);
+    }
+
+    /// With the app off the bot is byte-identical to the plain PIMC bot: the same actions and
+    /// values over whole matches.
+    #[test]
+    fn without_the_app_the_bot_is_the_pimc_bot_of_before() {
+        let l = leaf();
+        let source = default_source();
+        let plain = || PimcBot::new("p".into(), tiny_cfg(), l.clone(), source.clone());
+        let spec = PimcSpec::parse("pimc-v0:w12=1,w34=1,t1w=1,t2w=1,tt_mb=1").expect("ok");
+        let via_factory = PimcFactory::new(&spec, l.clone(), source.clone());
+        let a = play_matches(&plain, 11..14);
+        let b = play_matches(&|| via_factory.build_pimc(), 11..14);
+        assert_eq!(a, b);
+        assert!(a.iter().all(|(_, dv)| dv.method != Method::Student));
+    }
+
+    /// The deals of the app's trick-3 table are the place's; tricks 4-5 take the one count.
+    #[test]
+    fn the_exact_deals_follow_the_trick_and_the_place() {
+        let app = tiny_app();
+        assert_eq!(app.deals_for(3, 0), 1);
+        assert_eq!(app.deals_for(3, 2), 2);
+        assert_eq!(app.deals_for(3, 7), 2);
+        assert_eq!(app.deals_for(4, 7), 1);
+        assert_eq!(app.deals_for(5, 0), 1);
+        assert_eq!(
+            AppPlay::APP_DEALS3,
+            [192, 224, 512, 640, 1024, 1024, 1024, 1024]
+        );
+        assert_eq!(AppPlay::APP_DEALS45, 1024);
+        let decisions = {
+            let app = Arc::new(AppPlay {
+                deals3: [3, 3, 3, 3, 3, 3, 3, 3],
+                deals45: 2,
+                ..tiny_app()
+            });
+            let l = leaf();
+            let source = default_source();
+            play_matches(
+                &|| {
+                    PimcBot::new("app".into(), tiny_cfg(), l.clone(), source.clone())
+                        .with_app(app.clone())
+                },
+                21..23,
+            )
+        };
+        // Exact decisions carry the deals they searched: 3 at trick 3, 2 at tricks 4-5 (the
+        // plain cfg's w34 of 1 never shows).
+        let worlds: std::collections::BTreeSet<u32> = decisions
+            .iter()
+            .filter(|(_, dv)| dv.method == Method::ExactPimc)
+            .map(|(_, dv)| dv.n_worlds)
+            .collect();
+        assert_eq!(worlds, [2u32, 3].into_iter().collect());
+    }
+
+    /// The factory builds from the weights files, names the students and deals, and refuses a
+    /// file that is not a student network or a zero deal count.
+    #[test]
+    fn the_app_factory_builds_from_bytes_and_refuses_bad_ones() {
+        let (s1, s2) = students();
+        let b1 = write_net(s1.layers(), &BTreeMap::new());
+        let b2 = write_net(s2.layers(), &BTreeMap::new());
+        let app = AppPlay::from_bytes(&b1, &b2, AppPlay::APP_DEALS3, 1024).expect("builds");
+        assert_eq!(app.s1.sha256, s1.sha256);
+        assert_eq!(app.s2.sha256, s2.sha256);
+        assert_eq!(
+            app.name(),
+            format!(
+                "app:s1={},s2={},deals3=192/224/512/640/1024/1024/1024/1024,deals45=1024",
+                &s1.sha256[..12],
+                &s2.sha256[..12]
+            )
+        );
+        assert!(AppPlay::from_bytes(&b1[..100], &b2, AppPlay::APP_DEALS3, 1024).is_err());
+        assert!(AppPlay::from_bytes(&b1, b"not a net", AppPlay::APP_DEALS3, 1024).is_err());
+        assert!(AppPlay::from_bytes(&b1, &b2, [0; 8], 1024).is_err());
+        assert!(AppPlay::from_bytes(&b1, &b2, AppPlay::APP_DEALS3, 0).is_err());
+        let spec = PimcSpec::parse("pimc-v0").expect("ok");
+        let f = PimcFactory::app(&spec, app.clone(), leaf(), default_source());
+        assert_eq!(f.name(), app.name());
+        assert_eq!(f.build().name(), app.name());
+        let spec = PimcSpec::parse("pimc-v0:w12=8,threads=3").expect("ok");
+        let f = PimcFactory::app(&spec, app.clone(), leaf(), default_source());
+        assert_eq!(f.name(), format!("{}|pimc-v0:w12=8", app.name()));
     }
 }

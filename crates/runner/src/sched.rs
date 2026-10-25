@@ -479,10 +479,33 @@ pub fn parse_v2(v: &Value) -> Result<Manifest2, String> {
                 }
             }
         }
+        // An arena stream's two bots are names or app bots whose students are among the inputs;
+        // PIMC bots (and the app's player) need the equity table among them too.
         if kind == "arena_blocks" {
-            for k in ["a", "b"] {
-                if params.get(k).and_then(Value::as_str).is_none() {
-                    return Err(format!("stream `{name}`: arena_blocks needs params.{k}"));
+            let (a, b) = crate::arena_bots::parse_bots(&params)
+                .map_err(|e| format!("stream `{name}`: {e}"))?;
+            let pimc = |s: &crate::arena_bots::BotSpec| match s {
+                crate::arena_bots::BotSpec::Name(n) => n.starts_with("pimc-"),
+                crate::arena_bots::BotSpec::App { .. } => true,
+            };
+            let eq = params
+                .get("equity_input")
+                .and_then(Value::as_str)
+                .unwrap_or("equity");
+            if (pimc(&a) || pimc(&b)) && !inputs.iter().any(|(i, _)| i == eq) {
+                return Err(format!(
+                    "stream `{name}`: arena_blocks with a PIMC or app bot needs the equity table \
+                     as input `{eq}`"
+                ));
+            }
+            for n in crate::arena_bots::input_names(&params)
+                .map_err(|e| format!("stream `{name}`: {e}"))?
+            {
+                if !inputs.iter().any(|(i, _)| *i == n) {
+                    return Err(format!(
+                        "stream `{name}`: arena_blocks names input `{n}`, which the manifest's \
+                         inputs do not list"
+                    ));
                 }
             }
         }

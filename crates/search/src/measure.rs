@@ -657,6 +657,7 @@ pub fn method_name(m: Method) -> &'static str {
         Method::ExactPimc => "exact",
         Method::RolloutPimc => "rollout",
         Method::Forced => "forced",
+        Method::Student => "student",
     }
 }
 

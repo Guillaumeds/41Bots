@@ -65,6 +65,7 @@ pub fn encode_row(d: &TeacherDecision, out: &mut Vec<u8>) {
         Method::RolloutPimc => 0,
         Method::ExactPimc => 1,
         Method::Forced => 2,
+        Method::Student => 4,
     });
     out.push(match dv.belief {
         BeliefMode::Uniform => 0,

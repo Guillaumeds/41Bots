@@ -66,6 +66,9 @@ pub enum Method {
     ExactPimc,
     /// A single legal action; nothing computed.
     Forced,
+    /// The student network's values from the seat's own view, no deal drawn (the app's player at
+    /// tricks 1-2, `crate::bot::AppPlay`).
+    Student,
 }
 
 /// Which worlds are believed (docs/M3-SPEC.md §5.2).
@@ -546,6 +549,7 @@ pub fn world_row(
         )
         .expect("nothing stops a solve here"),
         Method::Forced => vec![MoneyChance::even(); cands.len()],
+        Method::Student => panic!("a student values a decision from its view, not a world"),
     }
 }
 
