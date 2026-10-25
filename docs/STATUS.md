@@ -2,6 +2,53 @@
 
 **Current checkpoint: M3 (in progress)** (PLAN §13, as revised on 2026-10-13): PIMC bots, the exact early-trick yardstick and its N-curves, the trick-1 runs on rented machines, the gate against rules-v1. M0 (engine, reference, RNG, CI), M1 (equity table, arena, launcher) and M2 (solver spike) are done; see `docs/history/STATUS-history.md`.
 
+## Where we are (2026-10-25, the review session: the playout teacher and the money gate)
+
+- **The finding (EXPERIMENTS I1-I2, `docs/RESEARCH.md` §15).** The live trick-1 student leads the J of trumps without the 5 in about 30% of such
+  positions expecting +0.6% of the money, and the lead earns -0.45% against players who cash the 5. The lean is in the **reference**, not in any
+  copy of it: every teacher so far values a deal with the cards face up, so the 5-holder is never surprised. The Jack lead is one example of a
+  family (wasting trumps in one's own or the opponents' hands, not trumping the partner, when to give a trick up for the money): the fix is a
+  teacher that values hidden-card play, not rules per pattern.
+- **Built and merged to `main` on 2026-10-25 (the owner: "merge everything, you own this repo"):**
+  - **#7 playout teacher** (`docs/STUDENT.md` §3.1): each deal is valued by playing it out with the students at every seat from its own view
+    (S1 at trick 1, S2 at trick 2), exact from trick 3; `teacher: "playout"` in a `student_teacher` stream; the source `student` (DAgger,
+    §4); fixed-thread teacher chunks share the machine (the memory planner). Manifests: `playout-labels` (run 1b), `playout-labels-2`
+    (round 2), `student-playout-train` (S1'/S2').
+  - **#8/#9 the app's player as an arena bot** (`search::bot::AppPlay`, STUDENT.md §6.1) with the money gate `arena-students.manifest.json`,
+    and **deal weighting by the other seats' plays** (`search::inference`, §6.2, integer throughout) with its gate
+    `arena-inference.manifest.json`. One 14-way block at a quarter of the app's deals took 164 s on one build-VM thread.
+  - **#6 launcher safety:** a machine the owner stops from the console is never destroyed or replaced (A11 destroyed the kept labels box);
+    a kept run that ends after the launcher's 330-minute handover keeps its machine (the cleanup writes the record, reading the stored
+    manifest for runs launched before); offers both searches miss are read from vast's public market list; `machine.machine_id`.
+  - **I3 (EXPERIMENTS):** against run 1's playout test sets the shipped S1 loses 0.17% a trick-1 decision and S2 0.10% a trick-2 decision
+    (about three times their face-up loss; 0.12% / 0.075% above the sets' noise): the room run 2 is set to measure.
+- **Machines (2026-10-25 07:30 UTC):** the labels box 57517251 is gone (A11, with the third S1 batch `o2-s1more3-3`; whatever parts it uploaded
+  before 05:08 UTC are under `runs/o2-s1more3-3/out/`). The owner re-rented the same machine by hand: **instance 57615744** (AMD EPYC 7B12 server
+  chip, 256 threads, 129 GB RAM, RTX 3060, $0.328/h), unlabelled, idle, for the runs below; `keep: true` on every manifest that uses it.
+
+### Handoff (2026-10-25): the runs, in order
+1. **Run 1b, playout labels: RUNNING** (`docs/vast/playout-labels.manifest.json`, run id `playout-labels-1b`; vast-run 40180442984 from
+   `main` with `bin_sha` eef2d56b, launched 09:23 UTC 2026-10-25 by takeover of 57615744; label `41bots-playout-labels-1b`, not relabelled: no vast
+   key on the VM). 250k trick-1 and 300k trick-2 decisions at 256 deals with the shipped S1/S2 as the inner players, plus 2,000-decision test
+   sets at 512 deals; **16 threads a chunk, about fifteen chunks at once** (the owner, 09:01: the box must run full). The first launch
+   (`playout-labels-1`, 07:28-09:21 UTC, one chunk at a time on 245 threads) kept the box 55% busy at about 96 s a chunk (27 hours in all) and
+   was stopped with `keep` (its 8 test parts and 42 t1rules parts are stored under its own run id; I3 used its test sets); the planner now lets
+   fixed-thread teacher chunks share the machine, so the tails overlap and freed threads take the next chunk at once. Expected: about 15-22 h at
+   near-full use (`vast-status.yml` with `run_id` playout-labels-1b shows the queue and `cpu_util_pct`). The run keeps the box (`keep_hours` 8)
+   and #6 is on `main`, so the cleanup keeps it at DONE too; **within 8 hours of DONE launch step 2 or the cleanup destroys it at `keep_until_utc`.**
+2. **Training S1'/S2'**: `docs/vast/student-playout-train.manifest.json` (on `playout-teacher`; run id `student-playout-1`, two `student_train`
+   streams, decision-aware loss, seeds 1-3, judged on run 1's `t1test`/`t2test`; takeover of the same box with `keep`). Check the stored parts
+   count first (`parts` 300/200/400/200). Judge **never on copper or the golden sets** (face-up labels): on the playout test sets and in run 2.
+3. **Run 2, the money gate** (`arena-students.manifest.json`, run id `arena-students-1`): fill `s1new`/`s2new` with the stored keys
+   (`store-input.yml`), then the app's player with the new students against the shipped ones, SPRT [0, 0.01], cap 3,000 blocks (about 500
+   core-hours at the app's deals, a few hours on the box). Accept = ship (the owner's word), then **round 2**: replay run 1 with the new students
+   as the inner players (the lean they carry is what round 1 removes) and a third of the positions from the students' own games
+   (`docs/vast/playout-labels-2.manifest.json`, source `student`: DAgger, built on `playout-teacher`).
+4. **Run 3, the inference gate** (`arena-inference.manifest.json`, built: #9) with whichever students run 2 settles on; then the
+   equity-table refresh.
+5. All four PRs are merged (#6, #7, #9 carrying #8; this docs branch last). Record every result in EXPERIMENTS Part I, this page and
+   `docs/README.md`; binaries of `main` eef2d56b (release-binaries run 40179892378) carry everything run 1b and the training need.
+
 ## Where we are (2026-10-23, end of the O_2 and S2 sessions)
 
 - **O_2 (trick 2) adopted:** round 1 of the audit loop, 39.6M plain hybrid labels, 2048-1024-256, integer network `13152c24bc27...`
