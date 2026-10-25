@@ -9,17 +9,17 @@
   copy of it: every teacher so far values a deal with the cards face up, so the 5-holder is never surprised. The Jack lead is one example of a
   family (wasting trumps in one's own or the opponents' hands, not trumping the partner, when to give a trick up for the money): the fix is a
   teacher that values hidden-card play, not rules per pattern.
-- **Built, in three PRs (none merged yet):**
-  - **#7 `playout-teacher`:** the playout teacher (`docs/STUDENT.md` §3.1): each deal is valued by playing it out with the students at every seat
-    from its own view (S1 at trick 1, S2 at trick 2), exact from trick 3; `teacher: "playout"` in a `student_teacher` stream. 884 workspace tests.
-  - **#8 `arena-app-bot`:** the app's player as an arena bot (`search::bot::AppPlay`, STUDENT.md §6.1: students at tricks 1-2 with eight seats in play,
-    exact at 3-5 at the app's deals by place) and the money gate `docs/vast/arena-students.manifest.json`. One 14-way block at a quarter of the
-    app's deals took 164 s on one build-VM thread (the canary scored 0 with the real S1, S2 and equity table through the release runner).
-  - **#6 `launcher-keep-fixes`:** a machine the owner stops from the console is never destroyed or replaced (A11: that destroyed the kept labels
-    box); offers both searches miss are read from vast's public market list; `machine.machine_id`; a kept run that ends after the launcher's
-    handover keeps its machine (the cleanup writes the record). 218 launcher tests.
-  - **#9 `inference-weighting`** (stacked on #7 and #8): the exact searches' deals weighted by how likely the other seats' tricks 1-2 plays
-    were under the students (STUDENT.md §6.2, integer throughout) and the gate `docs/vast/arena-inference.manifest.json` (run 3). 899 tests.
+- **Built and merged to `main` on 2026-10-25 (the owner: "merge everything, you own this repo"):**
+  - **#7 playout teacher** (`docs/STUDENT.md` §3.1): each deal is valued by playing it out with the students at every seat from its own view
+    (S1 at trick 1, S2 at trick 2), exact from trick 3; `teacher: "playout"` in a `student_teacher` stream; the source `student` (DAgger,
+    §4); fixed-thread teacher chunks share the machine (the memory planner). Manifests: `playout-labels` (run 1b), `playout-labels-2`
+    (round 2), `student-playout-train` (S1'/S2').
+  - **#8/#9 the app's player as an arena bot** (`search::bot::AppPlay`, STUDENT.md §6.1) with the money gate `arena-students.manifest.json`,
+    and **deal weighting by the other seats' plays** (`search::inference`, §6.2, integer throughout) with its gate
+    `arena-inference.manifest.json`. One 14-way block at a quarter of the app's deals took 164 s on one build-VM thread.
+  - **#6 launcher safety:** a machine the owner stops from the console is never destroyed or replaced (A11 destroyed the kept labels box);
+    a kept run that ends after the launcher's 330-minute handover keeps its machine (the cleanup writes the record, reading the stored
+    manifest for runs launched before); offers both searches miss are read from vast's public market list; `machine.machine_id`.
   - **I3 (EXPERIMENTS):** against run 1's playout test sets the shipped S1 loses 0.17% a trick-1 decision and S2 0.10% a trick-2 decision
     (about three times their face-up loss; 0.12% / 0.075% above the sets' noise): the room run 2 is set to measure.
 - **Machines (2026-10-25 07:30 UTC):** the labels box 57517251 is gone (A11, with the third S1 batch `o2-s1more3-3`; whatever parts it uploaded
@@ -27,17 +27,15 @@
   chip, 256 threads, 129 GB RAM, RTX 3060, $0.328/h), unlabelled, idle, for the runs below; `keep: true` on every manifest that uses it.
 
 ### Handoff (2026-10-25): the runs, in order
-1. **Run 1, playout labels: RUNNING** (`docs/vast/playout-labels.manifest.json`, run id `playout-labels-1`; vast-run 40172870722 from the
-   `launcher-keep-fixes` ref with `bin_sha` ac3e1636 = the `playout-teacher` binaries, launched 07:28 UTC 2026-10-25, the takeover of
-   57615744 done by 07:30, label `41bots-playout-labels-1`, not relabelled: no vast key on the VM). 250k trick-1 and 300k trick-2 decisions at
-   256 deals with the shipped S1/S2 as the inner players, plus 2,000-decision test sets at 512 deals. First heartbeats: 245 usable threads, a
-   512-deal test chunk of 500 decisions in about 133 s, so a 256-deal chunk about 60-70 s and the 1,100 chunks **about 18-20 hours**, done around
-   03:00 UTC 2026-10-26, about $6-7 (`vast-status.yml` with `run_id` playout-labels-1 shows the queue). The run keeps the box (`keep_hours` 8):
-   **within 8 hours of DONE something must take it over (step 2) or vast-cleanup destroys it at `keep_until_utc`**; the owner may also stop it from
-   the console, which the fixed launcher and cleanup now leave alone. Read the first stored parts' sidecars (stamp `playout:<S1>:<S2>:cut3`)
-   before trusting the rest; `runs/playout-labels-1/out/<stream>/`. **The run is longer than the launcher's 330-minute handover:** without
-   PR #6 on `main` the cleanup's marker rule destroys the box 10 minutes after DONE; #6 makes the cleanup keep it (reading run 1's
-   stored manifest), so **merge #6 before about 03:00 UTC 2026-10-26**, or relabel the instance without the `41bots-` prefix.
+1. **Run 1b, playout labels: RUNNING** (`docs/vast/playout-labels.manifest.json`, run id `playout-labels-1b`; vast-run 40180442984 from
+   `main` with `bin_sha` eef2d56b, launched 09:23 UTC 2026-10-25 by takeover of 57615744; label `41bots-playout-labels-1b`, not relabelled: no vast
+   key on the VM). 250k trick-1 and 300k trick-2 decisions at 256 deals with the shipped S1/S2 as the inner players, plus 2,000-decision test
+   sets at 512 deals; **16 threads a chunk, about fifteen chunks at once** (the owner, 09:01: the box must run full). The first launch
+   (`playout-labels-1`, 07:28-09:21 UTC, one chunk at a time on 245 threads) kept the box 55% busy at about 96 s a chunk (27 hours in all) and
+   was stopped with `keep` (its 8 test parts and 42 t1rules parts are stored under its own run id; I3 used its test sets); the planner now lets
+   fixed-thread teacher chunks share the machine, so the tails overlap and freed threads take the next chunk at once. Expected: about 15-22 h at
+   near-full use (`vast-status.yml` with `run_id` playout-labels-1b shows the queue and `cpu_util_pct`). The run keeps the box (`keep_hours` 8)
+   and #6 is on `main`, so the cleanup keeps it at DONE too; **within 8 hours of DONE launch step 2 or the cleanup destroys it at `keep_until_utc`.**
 2. **Training S1'/S2'**: `docs/vast/student-playout-train.manifest.json` (on `playout-teacher`; run id `student-playout-1`, two `student_train`
    streams, decision-aware loss, seeds 1-3, judged on run 1's `t1test`/`t2test`; takeover of the same box with `keep`). Check the stored parts
    count first (`parts` 300/200/400/200). Judge **never on copper or the golden sets** (face-up labels): on the playout test sets and in run 2.
@@ -48,8 +46,8 @@
    (`docs/vast/playout-labels-2.manifest.json`, source `student`: DAgger, built on `playout-teacher`).
 4. **Run 3, the inference gate** (`arena-inference.manifest.json`, built: #9) with whichever students run 2 settles on; then the
    equity-table refresh.
-5. Merge order: #6 first (the cleanup runs from main; before run 1 ends), #7, then #8 `arena-app-bot` (it touches `Method` in `search::pimc` like #7: a two-line merge),
-   then #9, then this docs branch (`review-docs`); record every result in EXPERIMENTS Part I, this page and `docs/README.md`.
+5. All four PRs are merged (#6, #7, #9 carrying #8; this docs branch last). Record every result in EXPERIMENTS Part I, this page and
+   `docs/README.md`; binaries of `main` eef2d56b (release-binaries run 40179892378) carry everything run 1b and the training need.
 
 ## Where we are (2026-10-23, end of the O_2 and S2 sessions)
 
@@ -258,6 +256,24 @@ The owner wants the teachers and their deal counts decided last.
     changed):** another run's machine that heartbeated in the last 15 minutes and has no DONE/FAILED (cancel it with
     `keep` first, or wait), a machine another run started under an hour ago, a label that is not `41bots-...`; allowed:
     a kept machine, the machine of an ended run, an unlabelled one rented by hand.
+  - `"machine_id": M` (or `--machine-id M`): rent the cheapest rentable, unrented on-demand offer on vast machine M,
+    read from the **public market list** (`POST console.vast.ai/api/v0/bundles/`, no key, no 512-offer cap), then
+    checked exactly like a named offer. A named `offer_id` that both `vastai search offers id=N` and the launcher's
+    market listing miss is looked up there too before it is called gone (2026-10-25, EXPERIMENTS A11: offer 36863856
+    was live and rentable there while both searches said it was gone, and the owner had to rent the box by hand).
+  - **A machine the owner stops from vast's console is never destroyed or replaced** (2026-10-25, EXPERIMENTS A11:
+    the launcher read the stopped Thailand box as "died before DONE" and destroyed it). vast's `intended_status`
+    tells a stop ("stopped") from a crash or an exit ("running"): the watch ends the run with the reason
+    `stopped by the owner (vast intended_status stopped)`, records the machine as kept (`keep/<instance>.json`,
+    `KEPT.json`, the banner) whether or not the manifest said `keep`, and rents no replacement; `vast-cleanup`
+    leaves a stopped instance alone too (kept record or not, past its keep time or not; only its `all` option
+    destroys it). Restart it with `instance_id` as before (update, then start).
+  - **A kept run longer than the launcher's handover (330 min) keeps its machine too** (2026-10-25): the launcher is gone when such
+    a run writes DONE, so no keep record existed and the cleanup's marker rule destroyed the machine 10 minutes after DONE (the
+    playout labels run, about 20 hours, would have ended that way). Now `watch.json` carries `keep` and `keep_hours` (and the
+    stored `runs/<run>/manifest.json`'s `machine.keep` counts for runs launched before), and at DONE/FAILED the cleanup keeps the
+    machine, writes `keep/<instance>.json` and `KEPT.json` from the marker's time (action `kept`, a `::warning::` banner) and the
+    keep time then runs as for any kept machine. **The cleanup workflow runs from `main`: this must be merged before such a run ends.**
   - **After a run with `keep`, the session must act** (deploy the next job with `instance_id`, or destroy it with
     `vast-stop.yml`): `monitor_run.py RUN` prints a banner when `runs/RUN/KEPT.json` exists and `monitor_run.py x --kept`
     lists every kept machine. Arm a `send_later` for the run's end when launching with `keep`.

@@ -381,15 +381,21 @@ fn arena_blocks(
     if let Some(e) = &equity {
         search::bot::set_equity_path(e);
     }
-    let name = |k: &str| {
-        params
-            .get(k)
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("arena_blocks needs params.{k}"))
-    };
-    let (an, bn) = (name("a")?, name("b")?);
-    let a = search::factory(an).ok_or_else(|| search::bot::factory_error(an))?;
-    let b = search::factory(bn).ok_or_else(|| search::bot::factory_error(bn))?;
+    let inputs: BTreeMap<String, String> = spec
+        .get("inputs")
+        .and_then(Value::as_object)
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    let (sa, sb) = crate::arena_bots::parse_bots(params)?;
+    let a = crate::arena_bots::build(&sa, &inputs).map_err(|e| format!("params.a: {e}"))?;
+    let b = crate::arena_bots::build(&sb, &inputs).map_err(|e| format!("params.b: {e}"))?;
+    // The recorded names: the registry name, or the app factory's (students and deals).
+    let (an, bn) = (a.name().to_string(), b.name().to_string());
+    let (an, bn) = (an.as_str(), bn.as_str());
     let kind = if params
         .get("block14")
         .and_then(Value::as_bool)
@@ -1609,6 +1615,10 @@ mod tests {
             ("specialist-s1.manifest.json", 1),
             ("golden-routed-s2.manifest.json", 1),
             ("net-error-o3-val.manifest.json", 1),
+            ("arena-students.manifest.json", 1),
+            ("arena-inference.manifest.json", 1),
+            ("playout-labels.manifest.json", 6),
+            ("playout-labels-2.manifest.json", 10),
         ] {
             let v: Value = serde_json::from_str(&fs::read_to_string(root.join(file)).expect(file))
                 .expect(file);
@@ -1632,11 +1642,13 @@ mod tests {
                         if let Some(l) = leaves {
                             assert!(l.starts_with("learned:/in/"), "{what}: {l}");
                         }
+                        let nets = crate::student::nets_of(&p, &q)
+                            .unwrap_or_else(|e| panic!("{what}: {e}"));
                         let c = crate::student::command(
                             Path::new("search"),
                             &q,
                             0,
-                            p["net"].as_str().expect("net"),
+                            nets,
                             leaves.map(|l| (l, p.get("defer_expert_path").and_then(Value::as_str))),
                             Path::new("/in/equity"),
                             Path::new("o.npy"),
@@ -1672,6 +1684,64 @@ mod tests {
                     }
                     "net_error" => {
                         crate::net_error::parse(&p).unwrap_or_else(|e| panic!("{what}: {e}"));
+                    }
+                    "arena_blocks" => {
+                        let (a, b) = crate::arena_bots::parse_bots(&p)
+                            .unwrap_or_else(|e| panic!("{what}: {e}"));
+                        for n in crate::arena_bots::input_names(&p).expect("names") {
+                            assert!(inputs.contains_key(&n), "{what}: input {n}");
+                        }
+                        // The inference gate: the same students and deals, the weighting on one arm.
+                        if file.starts_with("arena-inference") {
+                            let (
+                                crate::arena_bots::BotSpec::App {
+                                    inference: ia,
+                                    student1: s1a,
+                                    deals3: d3a,
+                                    ..
+                                },
+                                crate::arena_bots::BotSpec::App {
+                                    inference: ib,
+                                    student1: s1b,
+                                    deals3: d3b,
+                                    ..
+                                },
+                            ) = (&a, &b)
+                            else {
+                                panic!("{what}: both arms are app bots");
+                            };
+                            assert!(
+                                ia.is_some() && ib.is_none(),
+                                "{what}: the weighting on arm a only"
+                            );
+                            assert_eq!(
+                                (s1a, d3a),
+                                (s1b, d3b),
+                                "{what}: the same students and deals"
+                            );
+                        }
+                        // The gate's two arms: the same deals, the new students against the old.
+                        if file.starts_with("arena-students") {
+                            let (
+                                crate::arena_bots::BotSpec::App {
+                                    deals3: d3a,
+                                    deals45: d45a,
+                                    student1: s1a,
+                                    ..
+                                },
+                                crate::arena_bots::BotSpec::App {
+                                    deals3: d3b,
+                                    deals45: d45b,
+                                    student1: s1b,
+                                    ..
+                                },
+                            ) = (&a, &b)
+                            else {
+                                panic!("{what}: both arms are app bots");
+                            };
+                            assert_eq!((d3a, d45a), (d3b, d45b), "{what}: the same deals");
+                            assert_ne!(s1a, s1b, "{what}: different students");
+                        }
                     }
                     k => panic!("{what}: kind {k} not covered"),
                 }

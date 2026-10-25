@@ -470,6 +470,7 @@ name = "runner"
 version = "0.2.0"
 dependencies = [
  "arena",
+ "bot",
  "engine",
  "nn",
  "search",

@@ -149,11 +149,56 @@ What the record makes possible without a new solve:
 Data is selected by filters on the stamps (trick, source, teacher, equity, rules); a shard whose
 stamps differ from the run's is refused unless explicitly allowed (`--allow-stamp KEY`).
 
+### 3.1 The playout teacher (2026-10-25; PLAN §6.8, a recursive rollout at depth one)
+
+The search teachers above value each deal with every card face up (exact search, then a network
+that copies the exact solver). The review of 2026-10-25 (EXPERIMENTS I1-I2) measured what that
+costs on one decision class: the live S1 leads the J of trumps without the 5 expecting +0.6% of
+the money and loses 0.45% against players who cash the 5, because in a face-up deal the
+5-holder is never surprised. The **playout teacher** values each deal by playing it with
+hidden-card players instead:
+
+1. the candidate is played (a robber's joint burn-then-play as one candidate, as always);
+2. then every seat to act, the decider included, chooses from **its own `SeatView`** with the
+   student network of its trick: S1 at trick 1, S2 at trick 2 (`search::pimc::student_candidate`:
+   the app's candidates, `net.evaluate`, the team's best, ties to the first candidate; exactly the
+   app's `method: "student"` decision); a seat with one legal action plays it without the
+   network;
+3. at the start of trick `cut` (default 3) the deal, now fully known, is solved exactly to the end
+   of the hand (`search::pimc::exact_value`: the root mover's best under the solver's tie rule); a
+   hand that ended first is valued by the leaf rule. `cut` 6 plays every trick out; `cut` at the
+   decision's own trick plays nothing out and equals the exact teacher byte for byte (tested).
+
+The values are averaged over the same deals for every candidate, in deal order, with
+`MoneyChance::mix`, so a shard is byte-identical for any thread count (tested). Furtak and Buro
+(2013) and Bouzy, Rimbaud and Ventos (2020) are the precedents (RESEARCH §7, §15); the inner
+players are today's students, lean included, so a second round replays the deals with the
+retrained ones.
+
+- Rust: `search::pimc::{Students, student_candidate, playout_value, playout_world}`,
+  `search::student_teacher::Teacher::Playout { students, cut, sha1, sha2 }`, stamp
+  `playout:<S1 sha256>:<S2 sha256>:cut<k>` in the sidecar (`Method::PlayoutPimc` in records).
+- CLI: `search teacher --trick 1|2 ... --playout --student1 S1 --student2 S2 [--playout-cut 3]`
+  (no `--net`).
+- Runner (`student_teacher` streams): `"teacher": "playout"`, `"student1"`, `"student2"` (manifest
+  input names of the student files), `"playout_cut"` (3); no `net_input`. Shards are named
+  `t<trick>-<role>-<source>-s<seed>-d<deals>-pl<cut>-p<part>.npy`. The first run is
+  `docs/vast/playout-labels.manifest.json` (launched 2026-10-25 07:28 UTC on the owner's Thailand
+  box, run id `playout-labels-1`); the students' retraining on its labels is
+  `docs/vast/student-playout-train.manifest.json` (S1' and S2', decision-aware loss, three seeds,
+  judged on run 1's own playout test sets), and the money gate `docs/vast/arena-students.manifest.json`
+  (§6.1, branch `arena-app-bot`).
+- Cost per deal (estimate, to be measured in that run): up to 16 student calls and one exact solve
+  from trick 3, tens of milliseconds, against 0.2-0.6 s for an H_2 deal natively; so 256-512 deals
+  a decision instead of 64.
+- Judge: never copper or the exact golden sets (they are labelled face up); the paired playout
+  yardstick (EXPERIMENTS I1) and the arena in money.
+
 ## 4. The generator (`search teacher --trick 1|2`)
 
 ```text
 search teacher --trick 1|2 --count N --deals D --seed S --net WEIGHTS|exact --equity TABLE
-               --out SHARD.npy [--source rules|mixed|random] [--first I] [--deal-from W]
+               --out SHARD.npy [--source rules|mixed|random|student] [--first I] [--deal-from W]
                [--role train|test] [--threads T] [--tt-mb 64] [--start-hands 20000]
                [--progress FILE]
 ```
@@ -164,8 +209,13 @@ search teacher --trick 1|2 --count N --deals D --seed S --net WEIGHTS|exact --eq
   decision `i` from stratum `i mod 4 + 1` at place `(i div 4) mod 8`, so strata and places are
   equally represented. `mixed`: the same with every action before the decision a uniformly random
   legal one with probability 1/4 (exploration: positions the rules bot would not reach). `random`:
-  every action random. Later rounds add the student's own games (DAgger) and the app's recorded
-  hands (§6).
+  every action random. `student` (2026-10-25, with the playout teacher only): the students play
+  every action before the decision from their own view (S1 at trick 1, S2 at trick 2, a robber's
+  burn and first card as one choice; the dealer's burn by `rules-v1`), so the positions are the
+  ones the students themselves reach (DAgger, §6 step 1; `student_teacher::Inner`); the decision's
+  own seed sequence is unchanged, so a `student` set and a `rules` set at the same seed share
+  their start states and decks and differ only where the students play otherwise. Later: the app's
+  recorded hands (§6).
 - **Values:** D deals per decision, every candidate in every deal by H_k; deals in index order.
 - **Determinism:** decision `i` depends only on (seed, source, trick, `i`); decisions are made on
   any number of threads and written in order (`search::ordered`), so a shard is byte-identical for
@@ -208,7 +258,9 @@ Round 0: one big base run of teacher records from the self-play sources (§4). T
 Round r ≥ 1 (DAgger, Ross, Gordon & Bagnell 2011; Expert Iteration's loop):
 1. Play games with the student at tricks 1–2 (exact search from trick 3) from stratified start
    states, and record the decisions it meets (the positions the student itself causes: the
-   reason DAgger converges where plain copying drifts).
+   reason DAgger converges where plain copying drifts). Built 2026-10-25 as the generator's
+   source `student` (§4), for the playout teacher: round 2's labels take `"source": "student"`
+   beside `rules` and `mixed`.
 2. Label a sample of them with the teacher (new shards only).
 3. Train on **all** shards selected so far (the old ones included: training on new data alone
    makes a network forget), warm-started from the previous student with shrink-and-perturb.
@@ -217,6 +269,63 @@ Round r ≥ 1 (DAgger, Ross, Gordon & Bagnell 2011; Expert Iteration's loop):
 Later sources: the app's recorded real hands (`hand_records`, the positions people meet), labelled
 by the same teacher. A position's source is stamped on its record, so a run can weight or filter
 sources.
+
+### 6.1 The app's player in the arena (the money gate; built 2026-10-25)
+
+Step 4's SPRT needs the players as the app fields them, not a search bot. `search::bot::AppPlay`
+plays as fivefingers' engine bots do (`docs/WASM-API.md`): at tricks 1 and 2 with all eight seats
+in play the trick's student (S1, S2) values every candidate from the seat's own view (the robber's
+joint burn-then-play candidates as the app lists them, `app_candidates`) and the best for its team
+is played, no deal drawn; at tricks 3-5 exact PIMC at a fixed deal count by trick and place in the
+trick (the app's own table `APP_DEALS3` = 192/224/512/640/1024/1024/1024/1024 for the leader to
+the last seat at trick 3, `APP_DEALS45` = 1024 after). What the students do not play (the
+dealer's burn before trick 1; any decision with a pair turned at tricks 1-2, which the app hands
+to its old bot or the hybrid) goes to the bot's `pimc-v0[:…]` configuration as before. The bot is
+`PimcBot::with_app`, so with the option off the bot is byte-identical to the plain PIMC bot
+(tested); `PimcFactory::app` / `app_factory` build it from the students' weights files and name
+it `app:s1=<12 hex>,s2=<12 hex>,deals3=…,deals45=…` (the names are what the arena records).
+
+In a manifest (`crates/runner/src/arena_bots.rs`) an `arena_blocks` side is a registry name or an
+app bot whose students are manifest inputs:
+
+```json
+"a": { "kind": "app", "student1": "s1new", "student2": "s2new",
+       "deals3": [64, 64, 128, 128, 256, 256, 256, 256], "deals45": 256, "base": "pimc-v0" }
+```
+
+`deals3`/`deals45` default to the app's table, `base` to `pimc-v0` (its `tt_mb`, 64 by default,
+sizes the exact solves' table); the equity table must be an input (`equity`). The gate is
+`docs/vast/arena-students.manifest.json`: new students against the shipped ones, both arms at the
+app's own deals (the students are what differs; the exact tricks cost the two arms alike), 14-way
+blocks, SPRT [0, 0.01] at α = β = 0.05, cap 3,000 blocks. A block of identical app players scores
+exactly 0 (the canary, `a_block_of_identical_app_players_scores_exactly_zero`; also checked end to
+end through the release runner with the real S1, S2 and the equity table: score 0, 14 matches).
+Measured on one thread of the build VM: one 14-way block at the cheaper table 64/64/128/128/256×4
+and 256 took **164 s**; the app's table is about four times the deals, so about 10 minutes a block
+and 3,000 blocks about 500 core-hours (a few hours on a 256-thread machine).
+
+### 6.2 Deal weighting by the other seats' plays (inference; built 2026-10-25)
+
+PLAN §6.4 point 3 in its first form (`crates/search/src/inference.rs`): at an exact decision
+(tricks 3-5) each sampled deal is weighted by how likely the other seats' tricks 1-2 plays were,
+had the deal been true, under the students: the seat's student values every candidate from the
+view it would have had in that deal, the probability of the play it made is a softmax over its
+own team's values at a temperature `tau` (1% of the money) with a floor (5% spread evenly), the
+deal's weight is the product over those plays, and the candidates' means are the weighted mixes
+(`MoneyChance::mix`, `BeliefMode::Policy`). The dealer's burn and every decision from trick 3 on
+carry no model (weight 1); a robber's burn and first card are one choice; a play outside the app's
+candidates (a robber burning the card it took) gets the floor's share. Even a flat model weighs a
+deal by how many cards each seat could choose from (1/n a play). Everything is integer (the oracle
+head's `exp_weight` rule, a mantissa-and-exponent product, the likeliest deal scaled to 2^60), so
+the same bytes on any machine; one student call per modelled play per deal (at most about 16).
+Precedents and the caution: RESEARCH §6 and §15 (Skat +2 to +9 points a game from inference;
+Jass nothing). In the arena: `"inference": {"tau": 10, "floor": 50}` (permille) on an app bot
+(`AppPlay::with_inference`, name part `inf=tau10/floor50`); the gate is
+`docs/vast/arena-inference.manifest.json` (run 3: the same students, the weighting on one arm).
+Tests: the floored softmax, the exact product and scaling, a hand played by a ranked student
+whose true deal weighs at least the median sample in two thirds of the hands, legal play with the
+weighting on, the manifest. Not yet: the weighting inside the playout teacher's deals (one trick
+of history at trick 2) and a model for the trick 3-5 plays (the exact bots have no cheap policy).
 
 ## 7. The fixed test set and the measure
 
@@ -408,8 +517,9 @@ the earlier curve point's exact data and settings), 126,000 × 320, 315,000 × 1
    measure them on the test set with `search student-check --baseline rules --baseline random`:
    launch `student-t2-curve-mech`, then `student-t2-curve` (the runner's `student_train`, §11
    Stage 4).
-3. A student bot for the arena (`search::bot`), so promotion is by SPRT in duplicate tournaments
-   (PLAN §9), and the DAgger source (`--source student`: positions from the student's own games).
+3. ~~A student bot for the arena (`search::bot`)~~ built (§6.1, 2026-10-25): promotion is by SPRT in
+   duplicate tournaments (PLAN §9) with the app's own player; the DAgger source (`--source student`,
+   §4) is built for the playout teacher (2026-10-25).
 4. Trick 1 once O_2 exists: price it with the real O_2 first (§8: its width sets the cost).
 
 ## 13. How many deals per decision (measured 2026-10-18, run `student-t2-dealtest-1`, $0.67)

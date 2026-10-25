@@ -394,8 +394,27 @@ pub(crate) fn chunk_need(
                 _ => whole,
             }
         }
+        // Teacher records on a fixed thread count run several chunks at once (each decision's
+        // deals on one thread, a table a thread): the chunks' tails then overlap instead of idling
+        // the machine (2026-10-25: one chunk at a time on 245 threads kept the box 55% busy).
+        // `"threads": "all"` keeps the whole machine, as before.
+        "student_teacher" if params.get("threads").and_then(Value::as_u64).is_some() => {
+            let tt = Requested::from_param(params, "tt_mb")
+                .ok()
+                .and_then(|r| match r {
+                    Requested::Mb(mb) => Some(mb),
+                    _ => None,
+                })
+                .unwrap_or(64);
+            let students = 2 * 16 * MIB;
+            (threads * (tt * MIB + STACK_PER_THREAD) + equity_bytes + students + 256 * MIB)
+                .min(whole)
+        }
         "solver_spike" | "t1bench" | "hybrid_rung" | "hybrid_t1check" | "hybrid_checks"
         | "student_teacher" | "student_train" | "leafrisk" | "specialist" | "net_error" => whole,
+        // The app's player in a block: its students and the exact solves' table (0 for the
+        // registry's bots, as before).
+        "arena_blocks" => crate::arena_bots::chunk_bytes(params, equity_bytes).min(whole),
         _ => 0,
     }
 }
@@ -587,6 +606,38 @@ mod tests {
         let a = plan(Requested::Auto, Tables::Own { count: 4 }, other, &l).tt_mb;
         let b = plan(Requested::Auto, Tables::Own { count: 16 }, other, &l).tt_mb;
         assert!(a > b);
+    }
+
+    /// Teacher records on a fixed thread count share the machine (a table a thread plus the
+    /// equity table, two students and a small process), so a 129 GB box runs fifteen 16-thread
+    /// chunks at once; `"threads": "all"` still takes the whole budget.
+    #[test]
+    fn fixed_thread_teacher_chunks_share_the_machine() {
+        let l = limit(129 * GIB);
+        let whole = budget(0, &l).0;
+        let all = json!({ "threads": "all", "tt_mb": 64 });
+        assert_eq!(
+            chunk_need("student_teacher", &all, 245, 26 * MIB, &l),
+            whole
+        );
+        let sixteen = json!({ "threads": 16, "tt_mb": 64 });
+        let need = chunk_need("student_teacher", &sixteen, 16, 26 * MIB, &l);
+        assert_eq!(
+            need,
+            16 * (64 * MIB + STACK_PER_THREAD) + 26 * MIB + 32 * MIB + 256 * MIB
+        );
+        assert!(
+            need * 15 < whole,
+            "{} MB each, {} MB budget",
+            need >> 20,
+            whole >> 20
+        );
+        // The table size follows the params; a huge one is capped at the budget.
+        let big = json!({ "threads": 200, "tt_mb": 4096 });
+        assert_eq!(
+            chunk_need("student_teacher", &big, 200, 26 * MIB, &l),
+            whole
+        );
     }
 
     #[test]
