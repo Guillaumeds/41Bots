@@ -2,6 +2,42 @@
 
 **Current checkpoint: M3 (in progress)** (PLAN §13, as revised on 2026-10-13): PIMC bots, the exact early-trick yardstick and its N-curves, the trick-1 runs on rented machines, the gate against rules-v1. M0 (engine, reference, RNG, CI), M1 (equity table, arena, launcher) and M2 (solver spike) are done; see `docs/history/STATUS-history.md`.
 
+## Where we are (2026-10-25, the review session: the playout teacher and the money gate)
+
+- **The finding (EXPERIMENTS I1-I2, `docs/RESEARCH.md` §15).** The live trick-1 student leads the J of trumps without the 5 in about 30% of such
+  positions expecting +0.6% of the money, and the lead earns -0.45% against players who cash the 5. The lean is in the **reference**, not in any
+  copy of it: every teacher so far values a deal with the cards face up, so the 5-holder is never surprised. The Jack lead is one example of a
+  family (wasting trumps in one's own or the opponents' hands, not trumping the partner, when to give a trick up for the money): the fix is a
+  teacher that values hidden-card play, not rules per pattern.
+- **Built, in three PRs (none merged yet):**
+  - **#7 `playout-teacher`:** the playout teacher (`docs/STUDENT.md` §3.1): each deal is valued by playing it out with the students at every seat
+    from its own view (S1 at trick 1, S2 at trick 2), exact from trick 3; `teacher: "playout"` in a `student_teacher` stream. 884 workspace tests.
+  - **`arena-app-bot`:** the app's player as an arena bot (`search::bot::AppPlay`, STUDENT.md §6.1: students at tricks 1-2 with eight seats in play,
+    exact at 3-5 at the app's deals by place) and the money gate `docs/vast/arena-students.manifest.json`. One 14-way block at a quarter of the
+    app's deals took 164 s on one build-VM thread (the canary scored 0 with the real S1, S2 and equity table through the release runner).
+  - **#6 `launcher-keep-fixes`:** a machine the owner stops from the console is never destroyed or replaced (A11: that destroyed the kept labels
+    box); offers both searches miss are read from vast's public market list; `machine.machine_id`. 216 launcher tests.
+- **Machines (2026-10-25 07:30 UTC):** the labels box 57517251 is gone (A11, with the third S1 batch `o2-s1more3-3`; whatever parts it uploaded
+  before 05:08 UTC are under `runs/o2-s1more3-3/out/`). The owner re-rented the same machine by hand: **instance 57615744** (AMD EPYC 7B12 server
+  chip, 256 threads, 129 GB RAM, RTX 3060, $0.328/h), unlabelled, idle, for the runs below; `keep: true` on every manifest that uses it.
+
+### Handoff (2026-10-25): the runs, in order
+1. **Run 1, playout labels** (`docs/vast/playout-labels.manifest.json`, run id `playout-labels-1`): 250k trick-1 and 300k trick-2 decisions at
+   256 deals with the shipped S1/S2 as the inner players, plus 2,000-decision test sets at 512 deals (seed 32343, role test). Launch with
+   `vast-run.yml` **from the `launcher-keep-fixes` ref** (the owner-stop safety) with `bin_sha` = the `playout-teacher` binaries
+   (`release-binaries.yml --ref playout-teacher`, run 40172479893 dispatched 07:21 UTC) and the manifest inline; relabel the box
+   `41bots - Review (playout labels) - ETA HH:MM`. Cost: unmeasured; the estimate is tens of ms a deal (STUDENT.md §3.1), so hours, a few dollars.
+   Read the first finished parts' sidecars (stamp `playout:<S1>:<S2>:cut3`) before trusting the rest.
+2. **Training S1'/S2'** on the playout labels (copy `student-t1-250k.manifest.json`'s shape: decision-aware loss, seeds 1-3, the test sets from
+   `t1test`/`t2test`; a GPU box or this one). Judge **never on copper or the golden sets** (face-up labels): on the playout test sets and in run 3.
+3. **Run 2, the money gate** (`arena-students.manifest.json`, run id `arena-students-1`): fill `s1new`/`s2new` with the stored keys
+   (`store-input.yml`), then the app's player with the new students against the shipped ones, SPRT [0, 0.01], cap 3,000 blocks (about 500
+   core-hours at the app's deals, a few hours on the box). Accept = ship (the owner's word), then **round 2**: replay run 1 with the new students
+   as the inner players (the lean they carry is what round 1 removes; DAgger).
+4. **Then the inference weighting** (policy-likelihood world weighting with a floor, RESEARCH §15) behind the same gate; and the equity-table refresh.
+5. Merge order: #6 first (the workflow runs from main), #7, then `arena-app-bot` (it touches `Method` in `search::pimc` like #7: a two-line merge),
+   then this docs branch (`review-docs`); record every result in EXPERIMENTS Part I, this page and `docs/README.md`.
+
 ## Where we are (2026-10-23, end of the O_2 and S2 sessions)
 
 - **O_2 (trick 2) adopted:** round 1 of the audit loop, 39.6M plain hybrid labels, 2048-1024-256, integer network `13152c24bc27...`
