@@ -71,6 +71,9 @@ pub enum Method {
     PlayoutPimc,
     /// A single legal action; nothing computed.
     Forced,
+    /// The student network's values from the seat's own view, no deal drawn (the app's player at
+    /// tricks 1-2, `crate::bot::AppPlay`).
+    Student,
 }
 
 /// Which worlds are believed (docs/M3-SPEC.md §5.2).
@@ -78,6 +81,9 @@ pub enum Method {
 pub enum BeliefMode {
     /// Uniform over the worlds consistent with the hard facts.
     Uniform,
+    /// Uniform worlds weighted by how likely the other seats' plays were in each
+    /// (`crate::inference`: the students' policy with a floor).
+    Policy,
 }
 
 /// One candidate: an action, the card played straight after it (joint decisions only).
@@ -678,6 +684,7 @@ pub fn world_row(
         )
         .expect("nothing stops a solve here"),
         Method::Forced => vec![MoneyChance::even(); cands.len()],
+        Method::Student => panic!("a student values a decision from its view, not a world"),
         Method::PlayoutPimc => {
             panic!("playout worlds are valued by the teacher (`student_teacher::deal_values`)")
         }
@@ -844,6 +851,26 @@ pub fn aggregate(
     (means.clone(), best_index(&means, team), sds)
 }
 
+/// [`aggregate`] with a weight per world (`crate::inference::world_weights`): the means are the
+/// weighted mixes (`MoneyChance::mix`), the choice the team's best weighted mean; the own-team
+/// standard deviation stays the plain one over the worlds (a spread of the sample, for records).
+pub fn aggregate_weighted(
+    rows: &[Vec<MoneyChance>],
+    weights: &[u64],
+    n_cands: usize,
+    team: u8,
+) -> (Vec<MoneyChance>, usize, Vec<u64>) {
+    assert_eq!(rows.len(), weights.len(), "a weight per world");
+    let (_, _, sds) = aggregate(rows, n_cands, team);
+    let mut means = Vec::with_capacity(n_cands);
+    for j in 0..n_cands {
+        let terms: Vec<(u64, MoneyChance)> =
+            rows.iter().zip(weights).map(|(r, &w)| (w, r[j])).collect();
+        means.push(MoneyChance::mix(&terms));
+    }
+    (means.clone(), best_index(&means, team), sds)
+}
+
 /// The candidate with the largest entry for `team`; ties to the first.
 pub fn best_index(values: &[MoneyChance], team: u8) -> usize {
     let mut best = 0;
@@ -892,6 +919,56 @@ pub fn evaluate(
         n_worlds: n,
         world_count,
         belief: BeliefMode::Uniform,
+        candidates: cands
+            .iter()
+            .zip(means)
+            .map(|(&(a, p), v)| (a, p, v))
+            .collect(),
+        chosen,
+        own_sd,
+    }
+}
+
+/// [`evaluate`] with the worlds weighted by the other seats' plays (`crate::inference`): the same
+/// deals and per-world values as [`evaluate`] for the same seed, mixed by their weights
+/// (`BeliefMode::Policy`). With the floor at 100% the weights are all equal and the result is
+/// [`evaluate`]'s to the byte.
+pub fn evaluate_weighted(
+    view: &SeatView,
+    legal: &[Action],
+    dseed: u64,
+    ctx: &Ctx,
+    cfg: &SearchConfig,
+    inf: &crate::inference::Inference,
+) -> DecisionValues {
+    let (kind, cands) = candidates(view, legal);
+    let (method, n) = method_for(view, cands.len(), cfg);
+    // Nothing to weigh for a single candidate; and a hand with a pair turned is replayed as the
+    // table saw it (`crate::worlds::rebuild`), which the model's replay does not follow: plain.
+    if method == Method::Forced || view.public.turned_teams.iter().any(|&t| t) {
+        return evaluate(view, legal, dseed, ctx, cfg);
+    }
+    let worlds = ctx.source.prepare(view, ctx.rules);
+    let world_count = worlds.count();
+    let rows = world_values(view, &cands, method, 0, u64::from(n), dseed, ctx, cfg);
+    let weights = crate::inference::world_weights(
+        view,
+        &*worlds,
+        0,
+        u64::from(n),
+        dseed,
+        ctx.rules,
+        inf,
+        ctx.leaf,
+    );
+    let (means, chosen, own_sd) =
+        aggregate_weighted(&rows, &weights, cands.len(), team_of(view.seat));
+    DecisionValues {
+        kind,
+        method,
+        n_worlds: n,
+        world_count,
+        belief: BeliefMode::Policy,
         candidates: cands
             .iter()
             .zip(means)

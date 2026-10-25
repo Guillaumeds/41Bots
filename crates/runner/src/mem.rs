@@ -412,6 +412,9 @@ pub(crate) fn chunk_need(
         }
         "solver_spike" | "t1bench" | "hybrid_rung" | "hybrid_t1check" | "hybrid_checks"
         | "student_teacher" | "student_train" | "leafrisk" | "specialist" | "net_error" => whole,
+        // The app's player in a block: its students and the exact solves' table (0 for the
+        // registry's bots, as before).
+        "arena_blocks" => crate::arena_bots::chunk_bytes(params, equity_bytes).min(whole),
         _ => 0,
     }
 }

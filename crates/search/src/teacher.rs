@@ -65,10 +65,12 @@ pub fn encode_row(d: &TeacherDecision, out: &mut Vec<u8>) {
         Method::RolloutPimc => 0,
         Method::ExactPimc => 1,
         Method::Forced => 2,
+        Method::Student => 4,
         Method::PlayoutPimc => 3,
     });
     out.push(match dv.belief {
         BeliefMode::Uniform => 0,
+        BeliefMode::Policy => 1,
     });
     out.extend_from_slice(&dv.n_worlds.to_le_bytes());
     // ⌊256·log2 N⌋ in integers (0 when not counted).

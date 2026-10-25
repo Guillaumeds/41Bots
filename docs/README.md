@@ -89,6 +89,8 @@ Old branches are tags (`git tag -l 'archive/*'`; `git checkout archive/<name>` r
 | `STUDENT.md` §11 | trick-2 student, learning curve | **done**: 0.057% alone at 1M decisions (E2) |
 | `STUDENT.md` §13 | deals per decision | **adopted**: 64 deals (E3) |
 | `STUDENT.md` §14 | split-half ruler, top-k shortlist | **done**: top-3 shortlist about 0.005-0.012% (E4-E5) |
+| `STUDENT.md` §6.1 | the app's player as an arena bot; the money gate `docs/vast/arena-students.manifest.json` | **built** 2026-10-25, run 2 pending run 1's students |
+| `STUDENT.md` §6.2 | deal weighting by the other seats' plays under the students (inference); `docs/vast/arena-inference.manifest.json` | **built** 2026-10-25, run 3 after run 2 |
 | run `student-t1-cost-2` | trick-1 teacher cost | **done**: about 12,500 decisions an hour on 256 threads (E6) |
 | `m3-hybrid/path-forward.md` | **proposed path** from the O3G2 rounds to shipped students: free reads, S2 A/B, O_2 label test, trick-1 yardsticks (copper, playout), S1, then improvements | **open**: path approved in outline (2026-10-22); steps 0-2 done by 2026-10-23 (free reads, S2, O_2); steps 3-5 (yardsticks, S1, ship) open; section 0 records what was done and the lessons; section 6 holds a brief for each session |
 | run `student-check --sub-deals` | shortlist + search at the app's deal counts (25-100) on the exact golden set | **done** (session 0a, E9): top-3 + search beats S2 alone from about 25 deals (0.0733% to 0.0596 / 0.0402 / 0.0293 at 25 / 50 / 100), loses at 10; top-3 is hard to tell from search-all because trick-2 decisions have only 2-4 candidates; top-2 is the real shortlist |

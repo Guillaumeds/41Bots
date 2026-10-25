@@ -51,6 +51,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
+mod arena_bots;
 mod bundle;
 mod checks;
 mod hybrid;

@@ -658,6 +658,7 @@ pub fn method_name(m: Method) -> &'static str {
         Method::RolloutPimc => "rollout",
         Method::PlayoutPimc => "playout",
         Method::Forced => "forced",
+        Method::Student => "student",
     }
 }
 
