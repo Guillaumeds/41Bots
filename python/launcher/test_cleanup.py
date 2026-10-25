@@ -312,6 +312,24 @@ class KeptTest(SweepTest):
         self.assertEqual(cleanup.decide_kept(inst(300), {"run_id": "r1"}, NOW)[0], "destroy")
         self.assertEqual(cleanup.decide_kept(inst(300), rec, NOW, everything=True)[0], "destroy")
 
+    def test_a_machine_the_owner_stopped_is_left_alone(self):
+        # 2026-10-25 (EXPERIMENTS A11): a console stop (vast intended_status "stopped") is the owner's doing; the
+        # cleanup never destroys it, kept record or not, past its keep time or not. The 'all' option still does.
+        stopped = {**inst(300, "exited"), "intended_status": "stopped"}
+        rec = json.loads(self.record(60))
+        old = json.loads(self.record(-10))
+        for r in (rec, old, {"run_id": "r1"}):
+            self.assertEqual(cleanup.decide_kept(stopped, r, NOW)[0], "keep")
+        self.assertEqual(cleanup.decide_kept(stopped, old, NOW, everything=True)[0], "destroy")
+        d = lambda i, s, everything=False: cleanup.decide(i, s, NOW, everything)[0]  # noqa: E731
+        self.assertEqual(d(stopped, state(21)), "keep")
+        self.assertEqual(d(stopped, state(1, markers={"DONE": 30})), "keep")
+        self.assertEqual(d(stopped, state(21), everything=True), "destroy")
+        # A crash (intended_status "running") is dead as before.
+        crashed = {**inst(300, "exited"), "intended_status": "running"}
+        self.assertEqual(cleanup.decide_kept(crashed, rec, NOW)[0], "destroy")
+        self.assertEqual(d(crashed, state(21)), "destroy")
+
     def test_a_kept_machine_of_a_finished_run_is_not_destroyed(self):
         # Without the record the run's DONE marker, 30 minutes old, would have it destroyed.
         r2 = FakeR2()

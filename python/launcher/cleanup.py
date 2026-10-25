@@ -105,6 +105,10 @@ def decide_kept(inst: dict, rec: dict, now: float, everything: bool = False) -> 
     if everything:
         return "destroy", "the 'all' option"
     status = inst.get("actual_status")
+    if str(inst.get("intended_status")) == "stopped":
+        # Stopped on purpose (the owner's console stop): the rental and its disk are the owner's to keep at the
+        # storage rate; the cleanup never destroys it (EXPERIMENTS A11, 2026-10-25).
+        return "keep", "stopped by the owner (intended_status stopped): left as it is"
     if status in DEAD_STATES:
         return "destroy", f"kept machine, but vast shows it {status}"
     until = parse_time(rec.get("keep_until_utc"))
@@ -137,6 +141,9 @@ def decide(inst: dict, state: dict, now: float, everything: bool = False) -> tup
     # working (review E, 2026-10-16: destroying it lost the work since its last upload). It goes
     # through the other rules (silence, markers, cap) like a running machine.
     working_offline = status == "offline" and bool(beats) and now - max(beats) <= SILENT_S
+    if str(inst.get("intended_status")) == "stopped":
+        # The owner stopped it from the console: theirs to keep or destroy (EXPERIMENTS A11).
+        return "keep", "stopped by the owner (intended_status stopped): left as it is"
     if status in DEAD_STATES and not working_offline:
         return "destroy", f"vast shows it {status}"
     for marker, t in sorted((state.get("markers") or {}).items()):

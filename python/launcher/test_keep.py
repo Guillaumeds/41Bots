@@ -55,7 +55,7 @@ class KWorld(tl.World):
             if self.preset[int(args[2])].get("actual_status") == "exited":
                 return dict(self.preset[int(args[2])])  # stopped by its owner: the record keeps its details
             if not inst["alive"]:
-                return {"actual_status": "exited", "intended_status": "stopped"}
+                return {"actual_status": "exited", "intended_status": "stopped" if inst.get("stopped") else "running"}
             return dict(self.preset[int(args[2])])
         if cmd == ("update", "instance"):
             self.calls.append(("update", int(args[2]), args[args.index("--env") + 1], args[args.index("--image") + 1]))
@@ -130,9 +130,17 @@ class SettingsTest(unittest.TestCase):
     def test_bad_values_are_refused(self):
         for machine in ({"keep": "yes"}, {"keep": 1}, {"instance_id": 0}, {"instance_id": -3}, {"instance_id": "57"},
                         {"instance_id": True}, {"instance_id": 1.5}, {"keep_hours": 0}, {"keep_hours": -1},
-                        {"keep_hours": launch.KEEP_HOURS_MAX + 1}, {"keep_hours": "6"}, {"keep_hourz": 6}):
+                        {"keep_hours": launch.KEEP_HOURS_MAX + 1}, {"keep_hours": "6"}, {"keep_hourz": 6},
+                        {"machine_id": 0}, {"machine_id": "68507"}, {"machine_id": True}, {"machine_id": 1.5}):
             with self.assertRaises(SystemExit, msg=str(machine)):
                 self.apply(machine)
+
+    def test_a_machine_id_is_set_from_the_manifest_and_the_command_line_wins(self):
+        a = self.apply({"machine_id": 68507})
+        self.assertEqual(a.machine_id, 68507)
+        b = self.apply({"machine_id": 68507}, machine_id=5)
+        self.assertEqual(b.machine_id, 5)
+        self.assertIsNone(getattr(self.apply({"min_cores": 1}), "machine_id", None))
 
     def test_the_runner_is_told_to_park_only_when_the_run_keeps_its_machine(self):
         with tl.mock_env():
@@ -198,6 +206,79 @@ class KeepRunTest(KeepTestBase):
         code, report = self.run_launch(w, self.manifest(), "--keep", "--keep-hours", "2")
         self.assertEqual(report["destroy"], "kept")
         self.assertEqual(json.loads(w.store["keep/100.json"])["hours"], 2.0)
+
+    def test_a_machine_the_owner_stopped_from_the_console_is_never_destroyed_or_replaced(self):
+        # 2026-10-25 (EXPERIMENTS A11): the owner stopped the Thailand box from vast's console to free it for other
+        # work; the launcher read the stopped instance as "died before DONE", destroyed it and lost the rental. A
+        # stopped instance (intended_status "stopped") is the owner's doing: left as it is, recorded as kept, no
+        # replacement rented, keep or no keep.
+        for machine in (self.manifest(keep=True), self.manifest()):
+            w = KWorld([tl.offer(1, 11, 1.0), tl.offer(2, 12, 1.5)], ["stop:2", "done:1"])
+            code, report = self.run_launch(w, {**machine, "format": 2, "run_seed": 1, "streams": []})
+            self.assertNotEqual(code, 0)
+            self.assertEqual(w.destroy_calls, 0)
+            self.assertEqual(w.created_on, [1])  # no replacement
+            self.assertFalse(w.instances[100].get("destroyed"))
+            self.assertTrue(report["reason"].startswith(launch.STOPPED_BY_OWNER), report["reason"])
+            self.assertIn("actual_status exited, intended_status stopped: reading 3 of 3", report["reason"])
+            self.assertEqual(report["destroy"], "kept")
+            rec = json.loads(w.store["keep/100.json"])
+            self.assertIn("stopped by the owner from the console", rec["why"])
+            self.assertEqual(rec["instance_id"], 100)
+            self.assertIn("MACHINE KEPT RUNNING", self.log)
+            self.assertNotIn("died before DONE", report["reason"])
+
+    def test_a_machine_that_died_by_itself_is_still_destroyed_and_replaced(self):
+        # The counterpart: a crash or an exit leaves intended_status "running"; that is a dead machine as before.
+        w = KWorld([tl.offer(1, 11, 1.0), tl.offer(2, 12, 1.5)], ["die:2", "done:1"])
+        code, report = self.run_launch(w, {**self.manifest(keep=True), "format": 2, "run_seed": 1, "streams": []})
+        self.assertEqual((code, report["replacements"], w.created_on), (0, 1, [1, 2]))
+        self.assertTrue(w.instances[100].get("destroyed"))
+        self.assertNotIn("keep/100.json", w.store)
+        self.assertIn("died before DONE", report["attempts"][0]["ended"])
+
+    def test_a_silent_machine_the_owner_stopped_is_kept_too(self):
+        # Stopped while its heartbeats were already missing (the silence path of the watch, where a gone machine
+        # was replaced): the same rule. Heartbeats for two polls, none after (an upload problem), the owner's stop
+        # at poll 8 (well past HEARTBEAT_STALE_S at 60 s a poll).
+        w = KWorld([tl.offer(1, 11, 1.0)], ["silentbusy:2"])  # heartbeats for two polls, then busy and silent
+        orig = w.step
+
+        def step(inst):
+            orig(inst)
+            if inst["polls"] >= 8:
+                inst["alive"] = False
+                inst["stopped"] = True
+
+        w.step = step
+        code, report = self.run_launch(w, self.manifest(keep=True))
+        self.assertEqual(w.destroy_calls, 0)
+        self.assertIn("no new heartbeat for", self.log)
+        self.assertTrue(report["reason"].startswith(launch.STOPPED_BY_OWNER), report["reason"])
+        self.assertEqual(report["destroy"], "kept")
+        self.assertIn("keep/100.json", w.store)
+
+    def test_the_pure_parts_of_the_owner_stop(self):
+        self.assertTrue(launch.owner_stopped({"actual_status": "exited", "intended_status": "stopped"}))
+        self.assertFalse(launch.owner_stopped({"actual_status": "exited", "intended_status": "running"}))
+        self.assertFalse(launch.owner_stopped(None))
+        self.assertFalse(launch.owner_stopped({}))
+        a = argparse.Namespace(instance_id=None, keep=False)
+        self.assertTrue(launch.keep_applies(a, "", f"{launch.STOPPED_BY_OWNER} (x)"))
+        self.assertFalse(launch.keep_applies(a, "", "instance died before DONE (x)"))
+        w = KWorld([tl.offer(1, 11, 1.0)], ["stop:0"])
+        w.instances[100] = {"alive": True, "polls": 0, "script": "stop:0", "offer": 1, "created": 0, "label": "x"}
+        with self.patched(w):
+            live = launch.Liveness(100)
+            self.assertEqual(live.check()[0], "alive")
+            self.assertFalse(live.owner_stopped)
+            w.instances[100].update(alive=False, stopped=True)
+            self.assertEqual(live.check()[0], "dying")
+            self.assertTrue(live.owner_stopped)
+            self.assertIn("intended_status stopped", live.detail)
+            w.instances[100]["stopped"] = False
+            self.assertEqual(live.check()[0], "dying")
+            self.assertFalse(live.owner_stopped)
 
     def test_the_state_files_are_removed_so_the_workflow_safety_net_cannot_destroy_it(self):
         w = KWorld([tl.offer(1, 11, 1.0)], ["done:2"])

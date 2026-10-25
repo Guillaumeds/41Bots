@@ -209,6 +209,18 @@ The owner wants the teachers and their deal counts decided last.
     changed):** another run's machine that heartbeated in the last 15 minutes and has no DONE/FAILED (cancel it with
     `keep` first, or wait), a machine another run started under an hour ago, a label that is not `41bots-...`; allowed:
     a kept machine, the machine of an ended run, an unlabelled one rented by hand.
+  - `"machine_id": M` (or `--machine-id M`): rent the cheapest rentable, unrented on-demand offer on vast machine M,
+    read from the **public market list** (`POST console.vast.ai/api/v0/bundles/`, no key, no 512-offer cap), then
+    checked exactly like a named offer. A named `offer_id` that both `vastai search offers id=N` and the launcher's
+    market listing miss is looked up there too before it is called gone (2026-10-25, EXPERIMENTS A11: offer 36863856
+    was live and rentable there while both searches said it was gone, and the owner had to rent the box by hand).
+  - **A machine the owner stops from vast's console is never destroyed or replaced** (2026-10-25, EXPERIMENTS A11:
+    the launcher read the stopped Thailand box as "died before DONE" and destroyed it). vast's `intended_status`
+    tells a stop ("stopped") from a crash or an exit ("running"): the watch ends the run with the reason
+    `stopped by the owner (vast intended_status stopped)`, records the machine as kept (`keep/<instance>.json`,
+    `KEPT.json`, the banner) whether or not the manifest said `keep`, and rents no replacement; `vast-cleanup`
+    leaves a stopped instance alone too (kept record or not, past its keep time or not; only its `all` option
+    destroys it). Restart it with `instance_id` as before (update, then start).
   - **After a run with `keep`, the session must act** (deploy the next job with `instance_id`, or destroy it with
     `vast-stop.yml`): `monitor_run.py RUN` prints a banner when `runs/RUN/KEPT.json` exists and `monitor_run.py x --kept`
     lists every kept machine. Arm a `send_later` for the run's end when launching with `keep`.
