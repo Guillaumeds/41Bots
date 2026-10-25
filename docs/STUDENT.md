@@ -198,7 +198,7 @@ retrained ones.
 
 ```text
 search teacher --trick 1|2 --count N --deals D --seed S --net WEIGHTS|exact --equity TABLE
-               --out SHARD.npy [--source rules|mixed|random] [--first I] [--deal-from W]
+               --out SHARD.npy [--source rules|mixed|random|student] [--first I] [--deal-from W]
                [--role train|test] [--threads T] [--tt-mb 64] [--start-hands 20000]
                [--progress FILE]
 ```
@@ -209,8 +209,13 @@ search teacher --trick 1|2 --count N --deals D --seed S --net WEIGHTS|exact --eq
   decision `i` from stratum `i mod 4 + 1` at place `(i div 4) mod 8`, so strata and places are
   equally represented. `mixed`: the same with every action before the decision a uniformly random
   legal one with probability 1/4 (exploration: positions the rules bot would not reach). `random`:
-  every action random. Later rounds add the student's own games (DAgger) and the app's recorded
-  hands (§6).
+  every action random. `student` (2026-10-25, with the playout teacher only): the students play
+  every action before the decision from their own view (S1 at trick 1, S2 at trick 2, a robber's
+  burn and first card as one choice; the dealer's burn by `rules-v1`), so the positions are the
+  ones the students themselves reach (DAgger, §6 step 1; `student_teacher::Inner`); the decision's
+  own seed sequence is unchanged, so a `student` set and a `rules` set at the same seed share
+  their start states and decks and differ only where the students play otherwise. Later: the app's
+  recorded hands (§6).
 - **Values:** D deals per decision, every candidate in every deal by H_k; deals in index order.
 - **Determinism:** decision `i` depends only on (seed, source, trick, `i`); decisions are made on
   any number of threads and written in order (`search::ordered`), so a shard is byte-identical for
@@ -253,7 +258,9 @@ Round 0: one big base run of teacher records from the self-play sources (§4). T
 Round r ≥ 1 (DAgger, Ross, Gordon & Bagnell 2011; Expert Iteration's loop):
 1. Play games with the student at tricks 1–2 (exact search from trick 3) from stratified start
    states, and record the decisions it meets (the positions the student itself causes: the
-   reason DAgger converges where plain copying drifts).
+   reason DAgger converges where plain copying drifts). Built 2026-10-25 as the generator's
+   source `student` (§4), for the playout teacher: round 2's labels take `"source": "student"`
+   beside `rules` and `mixed`.
 2. Label a sample of them with the teacher (new shards only).
 3. Train on **all** shards selected so far (the old ones included: training on new data alone
    makes a network forget), warm-started from the previous student with shrink-and-perturb.

@@ -33,7 +33,7 @@
 //!                  [--boot 1000] [--seed 1] [--allow-silver]
 //! search teacher   --hands N --out DIR --equity TABLE [--seed S] [--config NAME] [--start-hands H]
 //! search teacher   --trick 1|2 --count N --deals D --seed S --net WEIGHTS|exact --equity TABLE
-//!                  --out SHARD.npy [--source rules|mixed|random] [--first I] [--deal-from W]
+//!                  --out SHARD.npy [--source rules|mixed|random|student] [--first I] [--deal-from W]
 //!                  [--role train|test] [--threads T] [--tt-mb 64] [--start-hands 20000]
 //!                  [--progress FILE]
 //! search labels    --trick K --count N --seed S --source random|rules|harvest --out FILE.npy

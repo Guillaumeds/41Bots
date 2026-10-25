@@ -34,15 +34,15 @@ use solver::frontier::Frontier;
 use solver::{FrontierCut, SolveMem};
 use student::position::{Cand, RawPosition};
 use student::record::{
-    KIND_JOINT, KIND_PLAY, SOURCE_MIXED, SOURCE_RANDOM, SOURCE_RULES, ShardInfo, ShardWriter,
-    TeacherRecord, source_name,
+    KIND_JOINT, KIND_PLAY, SOURCE_MIXED, SOURCE_RANDOM, SOURCE_RULES, SOURCE_STUDENT, ShardInfo,
+    ShardWriter, TeacherRecord, source_name,
 };
 
 use crate::measure::{VALUES_VERSION, play_after_own_rob, stratum_of};
 use crate::ordered::{ordered, window_for};
 use crate::pimc::{
-    Candidate, Ctx, DecisionKind, SearchConfig, Students, WorldSolve, candidates, exact_world,
-    playout_world, world_match,
+    Candidate, Ctx, DecisionKind, SearchConfig, SharedLeaf, Students, WorldSolve, apply_candidate,
+    candidates, exact_world, playout_world, student_candidate, world_match,
 };
 use crate::worlds::WorldSource;
 
@@ -77,13 +77,43 @@ pub fn app_candidates(view: &SeatView, legal: &[Action]) -> (DecisionKind, Vec<C
     (kind, cands)
 }
 
-/// How the players before the decision play.
+/// How often (per mille) an action before the decision is a uniformly random legal one.
 fn policy_eps(source: u8) -> u64 {
     match source {
-        SOURCE_RULES => 0,
+        SOURCE_RULES | SOURCE_STUDENT => 0,
         SOURCE_MIXED => 250,
         SOURCE_RANDOM => 1000,
         _ => panic!("source {source} is not generated here"),
+    }
+}
+
+/// Who plays the actions before a decision: `rules-v1` (the sources `rules`, `mixed` and
+/// `random`, the last two with their random share), or the students of the playout teacher at
+/// tricks 1-2 with `rules-v1` for the dealer's burn (the source `student`: the positions the
+/// students themselves reach, the DAgger step of docs/STUDENT.md §6).
+#[derive(Clone, Copy)]
+pub enum Inner<'a> {
+    /// `rules-v1` throughout.
+    Rules,
+    /// The students at tricks 1-2 from each seat's own view.
+    Students(Students<'a>, &'a SharedLeaf),
+}
+
+impl Inner<'_> {
+    /// The players of `source` under `teacher`: the students for the source `student` (the playout
+    /// teacher has them), `rules-v1` otherwise.
+    pub fn of<'a>(source: u8, teacher: &Teacher<'a>, ctx: &Ctx<'a>) -> Result<Inner<'a>, String> {
+        if source != SOURCE_STUDENT {
+            return Ok(Inner::Rules);
+        }
+        match teacher {
+            Teacher::Playout { students, .. } => Ok(Inner::Students(*students, ctx.leaf)),
+            _ => Err(
+                "the source `student` plays the positions with the playout teacher's \
+                      students: it needs that teacher"
+                    .to_string(),
+            ),
+        }
     }
 }
 
@@ -180,11 +210,13 @@ pub fn decision_seed(job: &TeacherJob, i: u64) -> u64 {
     .next_u64()
 }
 
-/// Decision `i`'s position, its stratum (1–4) and place in the trick (0–7).
+/// Decision `i`'s position, its stratum (1–4) and place in the trick (0–7); `inner` plays the
+/// actions before it.
 pub fn decision_position(
     job: &TeacherJob,
     i: u64,
     starts: &[Vec<HandStartState>; 4],
+    inner: Inner<'_>,
 ) -> (RawPosition, u8, u8) {
     let st = (i % 4) as usize;
     let place = ((i / 4) % 8) as usize;
@@ -215,12 +247,30 @@ pub fn decision_position(
             {
                 nodes.push((m.actions().to_vec(), seat));
             }
-            let a = if eps > 0 && rng.bounded(1000) < eps {
-                legal[rng.bounded(legal.len() as u64) as usize]
-            } else {
-                bots::decide(&v, &Rules::HOUSE, &legal).0
+            if eps > 0 && rng.bounded(1000) < eps {
+                let a = legal[rng.bounded(legal.len() as u64) as usize];
+                m.apply(a).expect("legal");
+                continue;
+            }
+            let student = match inner {
+                Inner::Students(students, leaf) => {
+                    students.for_trick(v.public.trick_no).map(|net| (net, leaf))
+                }
+                Inner::Rules => None,
             };
-            m.apply(a).expect("legal");
+            match student {
+                Some((net, leaf)) => {
+                    // A robber's burn and first card are one choice of the student's, as the
+                    // app's (the play after its own rob is then never a node, as above).
+                    let cand = student_candidate(&v, &legal, net, leaf)
+                        .expect("a generated position is consistent with eight seats in play");
+                    apply_candidate(&mut m, cand);
+                }
+                None => {
+                    let a = bots::decide(&v, &Rules::HOUSE, &legal).0;
+                    m.apply(a).expect("legal");
+                }
+            }
         }
         if nodes.is_empty() {
             continue;
@@ -326,7 +376,8 @@ pub fn make_record_part(
     teacher: Teacher,
     mem: &mut SolveMem,
 ) -> TeacherRecord {
-    let (pos, stratum, place) = decision_position(job, i, starts);
+    let inner = Inner::of(job.source, &teacher, ctx).expect("check_job allowed the source");
+    let (pos, stratum, place) = decision_position(job, i, starts, inner);
     let r = pos.replay().expect("a generated position replays");
     let (kind, cands) = app_candidates(&r.view, &r.legal);
     let dseed = decision_seed(job, i);
@@ -514,6 +565,13 @@ pub fn check_job(job: &TeacherJob, teacher: &Teacher, test_role: bool) -> Result
         return Err("--deals and --count must be at least 1".into());
     }
     policy_eps_checked(job.source)?;
+    if job.source == SOURCE_STUDENT && !matches!(teacher, Teacher::Playout { .. }) {
+        return Err(
+            "the source `student` plays the positions with the playout teacher's \
+                    students: it needs --playout"
+                .to_string(),
+        );
+    }
     if let Teacher::Hybrid { cut, .. } = teacher
         && (*cut <= job.trick || *cut > 5)
     {
@@ -543,7 +601,7 @@ pub fn check_job(job: &TeacherJob, teacher: &Teacher, test_role: bool) -> Result
 
 fn policy_eps_checked(source: u8) -> Result<u64, String> {
     match source {
-        SOURCE_RULES | SOURCE_MIXED | SOURCE_RANDOM => Ok(policy_eps(source)),
+        SOURCE_RULES | SOURCE_MIXED | SOURCE_RANDOM | SOURCE_STUDENT => Ok(policy_eps(source)),
         s => Err(format!(
             "source {} is not generated by this command",
             source_name(s)
@@ -1089,6 +1147,69 @@ mod tests {
             sha2: "b",
         };
         assert!(check_job(&job(1, 1, 1, SOURCE_RULES, 1), &bad, false).is_err());
+    }
+
+    /// The source `student`: the students play the actions before the decision (the positions
+    /// they reach themselves), the dealer's burn by `rules-v1`; the positions differ from the
+    /// rules source's at the same seed (the students choose otherwise somewhere), every action of
+    /// a position replays, a robber's play after its own rob is never a node, and the source needs
+    /// the playout teacher (the hybrid has no students to play with).
+    #[test]
+    fn the_student_source_plays_the_positions_with_the_students() {
+        let starts = collect_starts(400, 7);
+        let l = leaf();
+        let source = BeliefSource::new();
+        let ctx = belief_ctx(&*l, &source);
+        let (s1, s2) = students();
+        let teacher = Teacher::Playout {
+            students: Students { s1: &s1, s2: &s2 },
+            cut: 3,
+            sha1: "a",
+            sha2: "b",
+        };
+        let mut differ = 0;
+        for trick in [1u8, 2] {
+            let st = job(trick, 16, 1, SOURCE_STUDENT, 1);
+            check_job(&st, &teacher, false).expect("a valid job");
+            let ru = job(trick, 16, 1, SOURCE_RULES, 1);
+            let inner = Inner::of(SOURCE_STUDENT, &teacher, &ctx).expect("students");
+            for i in 0..st.count {
+                let (a, stratum, place) = decision_position(&st, i, &starts, inner);
+                let (b, _, _) = decision_position(&ru, i, &starts, Inner::Rules);
+                assert_eq!((stratum, place), ((i % 4) as u8 + 1, ((i / 4) % 8) as u8));
+                let r = a.replay().expect("replays");
+                assert_eq!(r.view.public.trick_no, trick);
+                assert_eq!(r.view.public.trick_cards.len(), usize::from(place));
+                assert!(app_candidates(&r.view, &r.legal).1.len() >= 2);
+                assert!(!play_after_own_rob(&r.view));
+                differ += u32::from(a.actions != b.actions || a.deck != b.deck);
+            }
+        }
+        assert!(
+            differ > 0,
+            "the students never played otherwise than rules-v1"
+        );
+        // A record of the student source is one record like any other.
+        let mut mem = SolveMem::new();
+        let st = job(2, 2, 2, SOURCE_STUDENT, 1);
+        for i in 0..st.count {
+            let r = make_record(&st, i, &starts, &ctx, teacher, &mut mem);
+            assert_eq!(r.source, SOURCE_STUDENT);
+            assert_eq!(r.values.len(), 2);
+        }
+        let o = oracle(3);
+        let hybrid = Teacher::Hybrid {
+            net: &o,
+            cut: 3,
+            sha256: &o.sha256,
+            leaves: None,
+        };
+        assert!(check_job(&st, &hybrid, false).is_err());
+        assert!(Inner::of(SOURCE_STUDENT, &hybrid, &ctx).is_err());
+        assert!(matches!(
+            Inner::of(SOURCE_MIXED, &hybrid, &ctx).expect("rules"),
+            Inner::Rules
+        ));
     }
 
     #[test]

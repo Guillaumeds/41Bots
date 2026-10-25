@@ -175,9 +175,9 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         ));
     }
     let source = s("source", Some("rules"))?;
-    if !["rules", "mixed", "random"].contains(&source.as_str()) {
+    if !["rules", "mixed", "random", "student"].contains(&source.as_str()) {
         return Err(format!(
-            "student_teacher: source {source}: rules, mixed or random"
+            "student_teacher: source {source}: rules, mixed, random or student"
         ));
     }
     let skip_parts = match p.get("skip_parts") {
@@ -244,6 +244,15 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
             ));
         }
     };
+    // The source `student` plays the positions with the playout teacher's students (the
+    // positions the students themselves reach, docs/STUDENT.md 6: DAgger).
+    if source == "student" && playout.is_none() {
+        return Err(
+            "student_teacher: source student plays the positions with the playout teacher's \
+             students: it needs \"teacher\": \"playout\""
+                .into(),
+        );
+    }
     // The search teacher needs its network; the playout teacher none (`net_input` is left out
     // or empty there).
     let net_input = match (&playout, p.get("net_input")) {
@@ -672,6 +681,19 @@ mod tests {
         let mut s = base();
         s["student1"] = json!("s1");
         assert!(parse(&s).is_err());
+        // The source `student` (the students' own positions) needs the playout teacher, and names
+        // its shards by it.
+        p["net_input"] = Value::Null;
+        p["source"] = json!("student");
+        let q = parse(&p).expect("parses");
+        assert_eq!(
+            shard_name(&q, 0),
+            "t2-train-student-s401-d320-pl3-p00000.npy"
+        );
+        let mut s = base();
+        s["source"] = json!("student");
+        let e = parse(&s).expect_err("no students to play with");
+        assert!(e.contains("source student"), "{e}");
     }
 
     #[test]

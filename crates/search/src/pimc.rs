@@ -247,7 +247,7 @@ pub fn rollout(m: &mut Match, leaf: &SharedLeaf, rules: Rules) -> MoneyChance {
     leaf_now(m, leaf)
 }
 
-fn apply_candidate(m: &mut Match, cand: Candidate) {
+pub(crate) fn apply_candidate(m: &mut Match, cand: Candidate) {
     m.apply(cand.0).expect("candidate is legal");
     if let Some(c) = cand.1 {
         m.apply(Action::Play(c)).expect("joint play is legal");
