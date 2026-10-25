@@ -252,6 +252,20 @@ load (§A8).
     marks a machine "bad" for 24 hours after a start failure, and a named offer on such a machine is still rented ("because the owner named it");
     `offer_id` fails with "not on offer any more" when the offer was rented in the meantime; the cancelled generic search had already rented a UK
     box before the cancel reached it.
+  - **A takeover's settings reach the container one recycle late (found 2026-10-24/25, instance 57517251).** `vast update instance` stores the new image,
+    environment and start command; the `recycle instance` the launcher sends right after builds the container from the settings stored by the PREVIOUS
+    update: on 57517251 the stored `RUN_ID` was `o2-s1more-4` while the container ran `o2-s1more-3` (read from `GET /api/v0/instances/<id>/`, field
+    `extra_env`, and the runs' heartbeat names). Each takeover therefore started the previous takeover's run: the launcher watched a run name that never
+    heartbeated, gave up after 15 minutes ("no heartbeat ... takeover did not start") and kept the machine, while the work went on under another run name
+    (here 7 chunks were redone). The first takeover on a fresh machine shows the vast.ai base image. To start run B on a machine: take it over with B (the
+    container runs the previous settings), then take it over once more under a new run name C (the launcher refuses a name that exists in R2:
+    `runs/C/ already exists`); that recycle builds the container from B's stored settings, B's manifest is read from R2 and B heartbeats. Done at
+    01:47-01:56 UTC on 2026-10-25 (`python/tools/chain_next_batch.py` waits for the running batch's `merged.json`; its second step used the same run name and
+    was refused, so the correcting takeover `o2-s1more3-2` was sent by hand). The stored settings now name `o2-s1more3-2`: never recycle that machine
+    again while a run is going.
+  - **A directly rented instance (PUT `/api/v0/asks/<offer>/`, `grab_machines.direct_rent`) took two takeovers** (the first left vast's base image),
+    where the console-rented 57404109 took one. The cleanup job destroys any instance labelled `41bots-<run>` whose run never heartbeats within 60 minutes
+    of the run's manifest upload; a label with a space after `41bots` (`41bots - ...`) is never touched by it.
 - **Cost.** About $3 of rentals went to failed or abandoned launches of `o2-audit-4` to `-9`; the Xeon Phi box billed $1.14/h until it was destroyed.
   The nine S1 launches cost under $1 in rentals; the owner re-rented the Thailand box three times.
 - **Limits.** Counts are from one session; the causes of the two takeover failures of 2026-10-22/23 are read from vast's status records and the launcher
@@ -1009,6 +1023,12 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   (`setup: table v0`, the equity table is rebuilt in every chunk): 16,800-17,100 decisions an hour, **$19.5 per million decisions** on this machine.
   The earlier measurement (E6) was 12,489 decisions an hour at 64 deals on an EPYC 7B13 ($1.05/h, about $84 per million). The test set took 20.6
   minutes and $0.36 (the first attempt, `o2-s1test-1`, was stopped by the low-CPU watchdog after one chunk, 15.5 minutes, $0.27).
+- **Second batch (2026-10-24/25, `docs/vast/o2-s1more.manifest.json`, run name `o2-s1more-3`).** 250,000 more trick-1 decisions at 64 deals (seeds 7821
+  and 7822, 150 + 100 chunks of 1,000 decisions, same teacher), on the Thailand AMD EPYC 7B12 (245 usable threads, RTX 3060, $0.350/h as billed, rented
+  directly through the API): 250 chunks, median 158.6 s a chunk (22,700 decisions an hour with the larger chunk), 40,035 s on the run's own clock, about
+  $3.89, **$15.6 per million decisions**; chunks under R2 `runs/o2-s1more-3/out/{s1rules2,s1mixed2}/`, merged report `runs/o2-s1more-3/merged.json`.
+  With the first batch S1 now has 500,000 labelled decisions. A third batch (seeds 7831 / 7832, run name `o2-s1more3-1`) started on the same machine
+  at 01:56 UTC on 2026-10-25.
 - **Limits.** One machine type; the rate holds for rules-v1 and mixed positions at 64 deals without racing or the restricted solve; the cost per
   million decisions assumes the same machine is available.
 - **Sources.** R2 `runs/o2-copper-s1-1/out/{copper,s1rules,s1mixed}/`, `runs/o2-s1test-2/out/test/`; E6.
