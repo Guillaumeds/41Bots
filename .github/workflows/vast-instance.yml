@@ -37,11 +37,13 @@ jobs:
         run: |
           set -euo pipefail
           case "$INSTANCE_ID" in ''|*[!0-9]*) echo "bad instance id"; exit 1;; esac
-          show() { vastai show instance "$INSTANCE_ID" --raw --api-key "$VAST_API_KEY" | python3 -c '
+          cat > show.py <<'PY'
           import json, sys
           i = json.load(sys.stdin)
-          print(f"instance {i.get(\"id\")} label={i.get(\"label\")!r} {i.get(\"actual_status\")}/{i.get(\"intended_status\")} "
-                f"cpu={i.get(\"cpu_util\")} dph=${i.get(\"dph_total\")} msg={str(i.get(\"status_msg\"))[:120]!r}")'; }
+          print("instance", i.get("id"), "label", repr(i.get("label")), str(i.get("actual_status")) + "/" + str(i.get("intended_status")),
+                "cpu", i.get("cpu_util"), "dph", i.get("dph_total"), "msg", repr(str(i.get("status_msg"))[:120]))
+          PY
+          show() { vastai show instance "$INSTANCE_ID" --raw --api-key "$VAST_API_KEY" | python3 show.py; }
           echo "before:"; show
           case "$ACTION" in
             show) ;;
