@@ -79,12 +79,14 @@ Done and documented: O_2 adopted; S1 teacher labels (250,000 decisions) and test
    `engine.loadStudent(s2Bytes, s2Sha, 2)` (S2 `3d1189e3...`); `method: "student"` then serves both tricks. Export check passed with both loaded (D14). The
    app side (merge of the fivefingers branch `engine41-bots`, student switched on for tricks 1-2, a real-browser check with `?bots=engine41`) is the owner's;
    the app's student config today points at S2 for trick 2 only. A network trained on more labels (item 3) replaces S1 by its hash.
-3. **More data for S1:** 500,000 decisions are labelled (batches `o2-copper-s1-1` 250,000 and `o2-s1more-3` 250,000, 64 deals; D13) and a third batch of 250,000
-   (run name `o2-s1more3-3`, seeds 7831/7832; labels in `runs/o2-s1more3-3/out/{s1rules3,s1mixed3}/`; the names `-1` and `-2` did not start it) runs on the Thailand machine, instance 57517251 (kept, label "41bots - S1 (Thailand ... DO NOT DESTROY)"): started 02:01 UTC
-   2026-10-25, about 11 hours, finishing around 13:30 UTC, about $4. **Never recycle or take over that machine while it runs** (see A10). When it has
-   finished the runner parks and the machine bills $0.35/h until it is stopped by hand (owner). Then retrain S1 with `student-t1-250k.manifest.json` copied: train
-   inputs `o2-copper-s1-1` (`s1rules` 300, `s1mixed` 200), `o2-s1more-3` (`s1rules2` 150, `s1mixed2` 100) and `o2-s1more3-3` (`s1rules3` 150, `s1mixed3` 100) with
-   `group` 0 / 1 / 2, points at 500,000 and 750,000 decisions (decision-aware loss, seeds 1-3), `fetch_jobs` 32, binaries newer than `f08888c` (the inputs step reads in
+3. **More data for S1:** 500,000 decisions are labelled and complete (`o2-copper-s1-1` 250,000 and `o2-s1more-3` 250,000, 64 deals; D13). A third batch (run name
+   `o2-s1more3-3`, seeds 7831/7832) was started on the Thailand box at 02:01 UTC 2026-10-25 and ended at about 05:08 UTC when the owner stopped that
+   instance from the console to free the box for the review's playout labels (A11): **67 chunks of `s1rules3` (67,000 rules-v1 decisions at 64 deals) are stored**
+   under `runs/o2-s1more3-3/out/s1rules3/`, with no merged report (to train on them list the bundles with `bundles`, as the S2 manifests do; the run's
+   other chunks were not made). Another 250,000 take about 11 hours and $4 on a 245-thread 7B12 box (22,700 decisions an hour, D13); do not take that
+   box over while another run is on it. To retrain S1 on more data: `student-t1-250k.manifest.json` copied: train
+   inputs `o2-copper-s1-1` (`s1rules` 300, `s1mixed` 200), `o2-s1more-3` (`s1rules2` 150, `s1mixed2` 100) and optionally the 67 partial chunks (`group` 0 / 1 / 2),
+   points at 500,000 (and 567,000) decisions (decision-aware loss, seeds 1-3), `fetch_jobs` 32, binaries newer than `f08888c` (the inputs step reads in
    parallel; dispatch `release-binaries.yml`), a machine with one good GPU and 32-64 threads; judge on copper (`docs/m3-hybrid/s1-copper-check.json` shows how:
    `search student-check` on the copper shards, 0.7 s a network) and on the test set of `o2-s1test-2`. 32-deal labels would halve the teacher cost (D14, 0.0472 against 0.0404 on copper at 250,000).
 4. **Rentals:** launch with `vast-run.yml` and `bin_sha` dd19e4d66cef. Taking over a hand-rented instance works (the S1 failures were the old binaries,

@@ -1046,7 +1046,8 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   directly through the API): 250 chunks, median 158.6 s a chunk (22,700 decisions an hour with the larger chunk), 40,035 s on the run's own clock, about
   $3.89, **$15.6 per million decisions**; chunks under R2 `runs/o2-s1more-3/out/{s1rules2,s1mixed2}/`, merged report `runs/o2-s1more-3/merged.json`.
   With the first batch S1 now has 500,000 labelled decisions. A third batch (seeds 7831 / 7832, run name `o2-s1more3-3`) started on the same machine
-  at 02:01 UTC on 2026-10-25 (the names `o2-s1more3-1` and `-2` did not run it: see A10).
+  at 02:01 UTC on 2026-10-25 (the names `o2-s1more3-1` and `-2` did not run it: see A10) and ended at about 05:08 UTC when the owner stopped the instance
+  (A11): 67 of its 150 `s1rules3` chunks (67,000 decisions, median 161 s a chunk) are stored, no merged report, none of the `s1mixed3` chunks.
 - **Limits.** One machine type; the rate holds for rules-v1 and mixed positions at 64 deals without racing or the restricted solve; the cost per
   million decisions assumes the same machine is available.
 - **Sources.** R2 `runs/o2-copper-s1-1/out/{copper,s1rules,s1mixed}/`, `runs/o2-s1test-2/out/test/`; E6.
