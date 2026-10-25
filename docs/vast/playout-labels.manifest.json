@@ -1,12 +1,12 @@
 {
  "format": 2,
- "run_id": "playout-labels-1",
+ "run_id": "playout-labels-1b",
  "run_seed": 1,
  "threads": null,
  "benchmark_seconds": 0,
  "upload_every_s": 300,
  "heartbeat_every_s": 30,
- "note": "Review session 2026-10-25 (owner: 'go'; EXPERIMENTS I1-I2, docs/STUDENT.md 'The playout teacher'). The first teacher that values each sampled deal by playing it out with hidden-card players: the candidate, then S1/S2 at every seat from its own view for tricks 1-2, exact from trick 3 (PLAN 6.8, a recursive rollout at depth one; Bouzy 2020, Furtak and Buro 2013). Trick-1 labels: 250,000 decisions at 256 deals (150,000 rules-v1 positions, 100,000 mixed) and a 2,000-decision test set (role test, 512 deals); trick-2 labels: 300,000 decisions at 256 deals (200,000 rules, 100,000 mixed) and a 2,000-decision test set at 512 deals. New seeds 9101-9106. Teacher inputs: the shipped students S1 97df2a54 and S2 3d1189e3 (the lean they carry is what the retrain is meant to remove; a second round replays with the new students). Runs on the owner's hand-rented Thailand box (instance 57615744, AMD EPYC 7B12, 256 threads, 129 GB, RTX 3060, $0.33/h) by takeover; kept afterwards for the training run.",
+ "note": "Review session 2026-10-25 (owner: 'go'; EXPERIMENTS I1-I2, docs/STUDENT.md 'The playout teacher'). The first teacher that values each sampled deal by playing it out with hidden-card players: the candidate, then S1/S2 at every seat from its own view for tricks 1-2, exact from trick 3 (PLAN 6.8, a recursive rollout at depth one; Bouzy 2020, Furtak and Buro 2013). Trick-1 labels: 250,000 decisions at 256 deals (150,000 rules-v1 positions, 100,000 mixed) and a 2,000-decision test set (role test, 512 deals); trick-2 labels: 300,000 decisions at 256 deals (200,000 rules, 100,000 mixed) and a 2,000-decision test set at 512 deals. New seeds 9101-9106. Teacher inputs: the shipped students S1 97df2a54 and S2 3d1189e3 (the lean they carry is what the retrain is meant to remove; a second round replays with the new students). Second launch (1b, 2026-10-25 09:xx UTC): 16 threads a chunk so about fifteen chunks run at once and their tails overlap (the first launch, playout-labels-1, ran one chunk at a time on all 245 threads and kept the box 55% busy at about 96 s a chunk; its 8 test parts and first t1rules parts are stored under its own run id and are not reused). Runs on the owner's hand-rented Thailand box (instance 57615744, AMD EPYC 7B12, 256 threads, 129 GB, RTX 3060, $0.33/h) by takeover; kept afterwards for the training run.",
  "machine": {
   "instance_id": 57615744,
   "min_cores": 190,
@@ -27,7 +27,7 @@
    "kind": "student_teacher",
    "chunks": 4,
    "params": {
-    "threads": "all",
+    "threads": 16,
     "trick": 1,
     "count": 500,
     "deals": 512,
@@ -51,7 +51,7 @@
    "kind": "student_teacher",
    "chunks": 4,
    "params": {
-    "threads": "all",
+    "threads": 16,
     "trick": 2,
     "count": 500,
     "deals": 512,
@@ -75,7 +75,7 @@
    "kind": "student_teacher",
    "chunks": 300,
    "params": {
-    "threads": "all",
+    "threads": 16,
     "trick": 1,
     "count": 500,
     "deals": 256,
@@ -98,7 +98,7 @@
    "kind": "student_teacher",
    "chunks": 200,
    "params": {
-    "threads": "all",
+    "threads": 16,
     "trick": 1,
     "count": 500,
     "deals": 256,
@@ -121,7 +121,7 @@
    "kind": "student_teacher",
    "chunks": 400,
    "params": {
-    "threads": "all",
+    "threads": 16,
     "trick": 2,
     "count": 500,
     "deals": 256,
@@ -144,7 +144,7 @@
    "kind": "student_teacher",
    "chunks": 200,
    "params": {
-    "threads": "all",
+    "threads": 16,
     "trick": 2,
     "count": 500,
     "deals": 256,
