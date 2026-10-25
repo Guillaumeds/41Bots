@@ -1610,6 +1610,7 @@ mod tests {
             ("golden-routed-s2.manifest.json", 1),
             ("net-error-o3-val.manifest.json", 1),
             ("playout-labels.manifest.json", 6),
+            ("playout-labels-2.manifest.json", 10),
         ] {
             let v: Value = serde_json::from_str(&fs::read_to_string(root.join(file)).expect(file))
                 .expect(file);
