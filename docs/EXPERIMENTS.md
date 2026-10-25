@@ -1683,3 +1683,34 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 - **Reading.** The other side of the same open-hand lean: in a face-up deal the 5 wins 11 whenever it is played and the Jack can be caught
   later, so the hidden-card value of taking the trick now is not priced. Whether holding is ever right is for the playout yardstick or the
   arena, not for the solver.
+
+### I3. The shipped students against the playout teacher's test sets (2026-10-25, build VM; run `playout-labels-1`'s first parts)
+- **Question.** How much do the live students lose when a decision is valued by hidden-card play (the playout teacher, STUDENT.md §3.1)
+  rather than face up, and what is the room for the retrained ones?
+- **Method.** The run's 2,000-decision test sets at 512 deals (seed 32343, role test, `rules` positions, the shipped S1 97df2a54 and S2 3d1189e3
+  as the inner players, exact from trick 3), fetched as they were stored (`r2-fetch.yml`, `input-fetch.yml` for the values files);
+  `search student-check` (release binary of main at 05:21 UTC) with `--baseline rules --baseline random --split-half`. Decision loss in % of
+  the money, the deciding pair.
+- **Result.**
+
+  | | S1 on the trick-1 set | S2 on the trick-2 set |
+  |---|---|---|
+  | loss against the playout teacher (upper 95%) | **0.173% (0.191)** | **0.099% (0.116)** |
+  | unbiased loss (split-half, 256 deals a half) | 0.117% (0.098-0.136) | 0.075% (0.058-0.092) |
+  | the set's noise floor (the other half's best) | 0.077% | 0.033% |
+  | agreement with the teacher's best | 50.6% | 62.8% |
+  | the student's value error (MAE) | 1.60% | 1.56% |
+  | rules-v1 | 0.420% | 0.438% |
+  | a random legal card | 0.806% (expected 0.799) | 0.576% (expected 0.616) |
+  | the same student on its own face-up test set (D14, E2) | 0.047% (copper 0.039%) | 0.039% |
+
+  Trick 1 by place (S1, unbiased): the leader 0.037%, places 2-4 0.05-0.10%, places 5-6 **0.23-0.26%**, 7-8 0.06-0.12%; by stratum S1-S4
+  0.14 / 0.20 / 0.15 / 0.25% (plain).
+- **Reading.** Valued by hidden-card play, the students lose about three times what they lose against their own face-up teacher: about
+  0.12% a trick-1 decision and 0.075% a trick-2 decision above the sets' noise, or roughly 0.2% of the money a hand for one seat's two
+  early decisions, 1-2% over a match. That is the room run 2's retraining can take, and the size the money gate is set for (SPRT [0, 1%]).
+  The leader's decisions (the Jack lead among them) show the smallest gap at trick 1 and the largest floor: the lead's value is the noisiest
+  to measure; the middle of the trick (places 5-6) is where the open-hand copy loses most.
+- **Limits.** One test set each; the inner players are the students themselves (round 1); 512 deals; the value error mixes the lean with the
+  teachers' different scales. Not a money measure: the arena (run 2) is.
+- **Cost.** None beyond run 1 (the sets were its first 8 chunks, about 12 minutes of the box).
