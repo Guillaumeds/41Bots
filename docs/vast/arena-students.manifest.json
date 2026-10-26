@@ -1,79 +1,76 @@
 {
- "format": 2,
- "run_id": "arena-students-1",
- "run_seed": 2,
- "threads": null,
- "benchmark_seconds": 0,
- "upload_every_s": 300,
- "heartbeat_every_s": 30,
- "note": "Review session 2026-10-25: the money gate (run 2). The app's player with the students retrained on the playout teacher's labels (s1new, s2new: the keys 00…01 and 00…02 are placeholders: fill them from store-input.yml once run 1's training lands; the launcher refuses a run whose input is not stored) against the app's player with the shipped students S1 97df2a54 and S2 3d1189e3, both arms exact at tricks 3-5 at the app's own deals (192/224/512/640/1024/1024/1024/1024 at trick 3 by place, 1024 at tricks 4-5: the real thing; a cheaper table of 64/64/128/128/256x4 and 256 played one 14-way block in 164 s on one thread of the build VM, so the app's table is about 10 minutes a block and 3,000 blocks about 500 core-hours, a few hours on 256 threads). 14-way duplicate blocks (every assignment of the two bots to the four partnerships, the same deals), scored by the money. SPRT [0, 0.01] at alpha = beta = 0.05 (accept = the new students take at least 1% more of the money; with sigma_b about 0.146 the worst case is about 1,850 blocks), hard cap 3,000 blocks (about 0.5% resolution), 4 blocks a chunk. Runs on the owner's hand-rented Thailand box (instance 57615744, AMD EPYC 7B12, 256 threads, 129 GB, RTX 3060, $0.33/h) by takeover after run 1; kept afterwards. Deciding only; nothing deploys to players without the owner's word.",
- "machine": {
-  "instance_id": 57615744,
-  "min_cores": 190,
-  "min_ram_gb": 96,
-  "disk_gb": 100,
-  "keep": true,
-  "keep_hours": 8,
-  "force_take": true
- },
- "inputs": {
-  "equity": "sha256:64740dab7845f0502c93ce195d721e1ffb8aa6ab141739ef43f754690de16808",
-  "s1new": "sha256:0000000000000000000000000000000000000000000000000000000000000001",
-  "s2new": "sha256:0000000000000000000000000000000000000000000000000000000000000002",
-  "s1": "sha256:97df2a54e1c368a13d69ffd887de62f45c6c3f244605450579b803f31f00e134",
-  "s2": "sha256:3d1189e3042dfc9537b1f575f87e42b15e91628541e2ff90678ba319959c6e03"
- },
- "streams": [
-  {
-   "name": "gate",
-   "priority": 1,
-   "kind": "arena_blocks",
-   "chunks": "until_decided",
-   "params": {
-    "a": {
-     "kind": "app",
-     "student1": "s1new",
-     "student2": "s2new",
-     "deals3": [
-      192,
-      224,
-      512,
-      640,
-      1024,
-      1024,
-      1024,
-      1024
-     ],
-     "deals45": 1024,
-     "base": "pimc-v0"
-    },
-    "b": {
-     "kind": "app",
-     "student1": "s1",
-     "student2": "s2",
-     "deals3": [
-      192,
-      224,
-      512,
-      640,
-      1024,
-      1024,
-      1024,
-      1024
-     ],
-     "deals45": 1024,
-     "base": "pimc-v0"
-    },
-    "block14": true,
-    "blocks_per_chunk": 4,
-    "sprt": {
-     "s0": 0.0,
-     "s1": 0.01,
-     "alpha": 0.05,
-     "beta": 0.05,
-     "max_blocks": 3000
+  "format": 2,
+  "run_id": "arena-students-2",
+  "run_seed": 2,
+  "threads": null,
+  "benchmark_seconds": 0,
+  "upload_every_s": 300,
+  "heartbeat_every_s": 30,
+  "note": "Review session 2026-10-25: the money gate (run 2). The app's player with the students retrained on the playout teacher's labels (s1new, s2new: the keys 00…01 and 00…02 are placeholders: fill them from store-input.yml once run 1's training lands; the launcher refuses a run whose input is not stored) against the app's player with the shipped students S1 97df2a54 and S2 3d1189e3, both arms exact at tricks 3-5 at the app's own deals (192/224/512/640/1024/1024/1024/1024 at trick 3 by place, 1024 at tricks 4-5: the real thing; a cheaper table of 64/64/128/128/256x4 and 256 played one 14-way block in 164 s on one thread of the build VM, so the app's table is about 10 minutes a block and 3,000 blocks about 500 core-hours, a few hours on 256 threads). 14-way duplicate blocks (every assignment of the two bots to the four partnerships, the same deals), scored by the money. SPRT [0, 0.01] at alpha = beta = 0.05 (accept = the new students take at least 1% more of the money; with sigma_b about 0.146 the worst case is about 1,850 blocks), hard cap 3,000 blocks (about 0.5% resolution), 4 blocks a chunk. Runs on the owner's hand-rented Thailand box (instance 57615744, AMD EPYC 7B12, 256 threads, 129 GB, RTX 3060, $0.33/h) by takeover after run 1; kept afterwards. Deciding only; nothing deploys to players without the owner's word. Launched 2026-10-26 00:50 UTC on a fresh cheapest big-CPU rental (the Thailand box was destroyed by vast-cleanup at 23:21 UTC 2026-10-25). s1new = S1p (student-playout-2 s1 seed 1, playout test loss 0.0897% against the shipped S1 0.17%); s2new = S2p (s2 seed 2, 0.0974% against the shipped S2 0.10%: no clear gain).",
+  "machine": {
+    "min_cores": 190,
+    "min_ram_gb": 64,
+    "disk_gb": 60,
+    "keep": false
+  },
+  "inputs": {
+    "equity": "sha256:64740dab7845f0502c93ce195d721e1ffb8aa6ab141739ef43f754690de16808",
+    "s1new": "sha256:3d511c54440b135e94728ef131e8957dd5fb019ed35ac02b1b85943e22144e18",
+    "s2new": "sha256:dc5f8ad0055d663d2b140ad6f4c08f43baddac479181935c56922661d6dd5ef1",
+    "s1": "sha256:97df2a54e1c368a13d69ffd887de62f45c6c3f244605450579b803f31f00e134",
+    "s2": "sha256:3d1189e3042dfc9537b1f575f87e42b15e91628541e2ff90678ba319959c6e03"
+  },
+  "streams": [
+    {
+      "name": "gate",
+      "priority": 1,
+      "kind": "arena_blocks",
+      "chunks": "until_decided",
+      "params": {
+        "a": {
+          "kind": "app",
+          "student1": "s1new",
+          "student2": "s2new",
+          "deals3": [
+            192,
+            224,
+            512,
+            640,
+            1024,
+            1024,
+            1024,
+            1024
+          ],
+          "deals45": 1024,
+          "base": "pimc-v0"
+        },
+        "b": {
+          "kind": "app",
+          "student1": "s1",
+          "student2": "s2",
+          "deals3": [
+            192,
+            224,
+            512,
+            640,
+            1024,
+            1024,
+            1024,
+            1024
+          ],
+          "deals45": 1024,
+          "base": "pimc-v0"
+        },
+        "block14": true,
+        "blocks_per_chunk": 4,
+        "sprt": {
+          "s0": 0.0,
+          "s1": 0.01,
+          "alpha": 0.05,
+          "beta": 0.05,
+          "max_blocks": 3000
+        }
+      }
     }
-   }
-  }
- ]
+  ]
 }
