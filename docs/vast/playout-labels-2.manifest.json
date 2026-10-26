@@ -1,259 +1,266 @@
 {
- "format": 2,
- "run_id": "playout-labels-2",
- "run_seed": 1,
- "threads": null,
- "benchmark_seconds": 0,
- "upload_every_s": 300,
- "heartbeat_every_s": 30,
- "note": "Round 2 of the playout teacher (STUDENT.md 3.1 and 6; after run 2 accepts S1'/S2'): the same labels replayed with the new students as the inner players (the lean the shipped students carry is what round 1 removes), and a third of the positions from the students' own games (source student, DAgger: the positions the bots actually reach). Inputs s1new/s2new: the placeholders 00…01/00…02 are filled from store-input.yml once run 2 has accepted them. Trick-1: 100k rules, 50k mixed, 100k student decisions at 256 deals; trick-2: 150k rules, 50k mixed, 100k student; test sets at 512 deals from all three sources (role test, seed 32343). On the owner's Thailand box by takeover, kept.",
- "machine": {
-  "instance_id": 57615744,
-  "min_cores": 190,
-  "min_ram_gb": 96,
-  "disk_gb": 100,
-  "keep": true,
-  "keep_hours": 8,
-  "force_take": true
- },
- "inputs": {
-  "s1new": "sha256:0000000000000000000000000000000000000000000000000000000000000001",
-  "s2new": "sha256:0000000000000000000000000000000000000000000000000000000000000002"
- },
- "streams": [
-  {
-   "name": "t1test",
-   "priority": 1,
-   "kind": "student_teacher",
-   "chunks": 4,
-   "params": {
-    "threads": "all",
-    "trick": 1,
-    "count": 500,
-    "deals": 512,
-    "seed": 32343,
-    "source": "rules",
-    "role": "test",
-    "teacher": "playout",
-    "student1": "s1new",
-    "student2": "s2new",
-    "playout_cut": 3,
-    "tt_mb": 64,
-    "table": {
-     "hands": 1000000,
-     "seed": 1
-    }
-   }
+  "format": 2,
+  "run_id": "playout-labels-2",
+  "run_seed": 1,
+  "threads": null,
+  "benchmark_seconds": 0,
+  "upload_every_s": 300,
+  "heartbeat_every_s": 30,
+  "note": "Round 2 of the playout teacher (STUDENT.md 3.1 and 6; after run 2 accepts S1'/S2'): the same labels replayed with the new students as the inner players (the lean the shipped students carry is what round 1 removes), and a third of the positions from the students' own games (source student, DAgger: the positions the bots actually reach). Inputs s1new/s2new: the placeholders 00…01/00…02 are filled from store-input.yml once run 2 has accepted them. Trick-1: 100k rules, 50k mixed, 100k student decisions at 256 deals; trick-2: 150k rules, 50k mixed, 100k student; test sets at 512 deals from all three sources (role test, seed 32343). On the owner's Thailand box by takeover, kept. Launched 2026-10-26 night on a fresh cheap rental (waiting ladder), not the Thailand box (destroyed).",
+  "machine": {
+    "min_cores": 180,
+    "min_ram_gb": 96,
+    "disk_gb": 100,
+    "keep": false,
+    "max_dph": 0.75,
+    "wait_for_offer_min": 320,
+    "offer_poll_s": 60,
+    "price_steps": [
+      0.35,
+      0.45,
+      0.65,
+      0.75
+    ],
+    "tries_per_step": 5
   },
-  {
-   "name": "t1stest",
-   "priority": 2,
-   "kind": "student_teacher",
-   "chunks": 4,
-   "params": {
-    "threads": "all",
-    "trick": 1,
-    "count": 500,
-    "deals": 512,
-    "seed": 32343,
-    "source": "student",
-    "role": "test",
-    "teacher": "playout",
-    "student1": "s1new",
-    "student2": "s2new",
-    "playout_cut": 3,
-    "tt_mb": 64,
-    "table": {
-     "hands": 1000000,
-     "seed": 1
-    }
-   }
+  "inputs": {
+    "s1new": "sha256:3d511c54440b135e94728ef131e8957dd5fb019ed35ac02b1b85943e22144e18",
+    "s2new": "sha256:dc5f8ad0055d663d2b140ad6f4c08f43baddac479181935c56922661d6dd5ef1"
   },
-  {
-   "name": "t2test",
-   "priority": 3,
-   "kind": "student_teacher",
-   "chunks": 4,
-   "params": {
-    "threads": "all",
-    "trick": 2,
-    "count": 500,
-    "deals": 512,
-    "seed": 32343,
-    "source": "rules",
-    "role": "test",
-    "teacher": "playout",
-    "student1": "s1new",
-    "student2": "s2new",
-    "playout_cut": 3,
-    "tt_mb": 64,
-    "table": {
-     "hands": 1000000,
-     "seed": 1
+  "streams": [
+    {
+      "name": "t1test",
+      "priority": 1,
+      "kind": "student_teacher",
+      "chunks": 4,
+      "params": {
+        "threads": "all",
+        "trick": 1,
+        "count": 500,
+        "deals": 512,
+        "seed": 32343,
+        "source": "rules",
+        "role": "test",
+        "teacher": "playout",
+        "student1": "s1new",
+        "student2": "s2new",
+        "playout_cut": 3,
+        "tt_mb": 64,
+        "table": {
+          "hands": 1000000,
+          "seed": 1
+        }
+      }
+    },
+    {
+      "name": "t1stest",
+      "priority": 2,
+      "kind": "student_teacher",
+      "chunks": 4,
+      "params": {
+        "threads": "all",
+        "trick": 1,
+        "count": 500,
+        "deals": 512,
+        "seed": 32343,
+        "source": "student",
+        "role": "test",
+        "teacher": "playout",
+        "student1": "s1new",
+        "student2": "s2new",
+        "playout_cut": 3,
+        "tt_mb": 64,
+        "table": {
+          "hands": 1000000,
+          "seed": 1
+        }
+      }
+    },
+    {
+      "name": "t2test",
+      "priority": 3,
+      "kind": "student_teacher",
+      "chunks": 4,
+      "params": {
+        "threads": "all",
+        "trick": 2,
+        "count": 500,
+        "deals": 512,
+        "seed": 32343,
+        "source": "rules",
+        "role": "test",
+        "teacher": "playout",
+        "student1": "s1new",
+        "student2": "s2new",
+        "playout_cut": 3,
+        "tt_mb": 64,
+        "table": {
+          "hands": 1000000,
+          "seed": 1
+        }
+      }
+    },
+    {
+      "name": "t2stest",
+      "priority": 4,
+      "kind": "student_teacher",
+      "chunks": 4,
+      "params": {
+        "threads": "all",
+        "trick": 2,
+        "count": 500,
+        "deals": 512,
+        "seed": 32343,
+        "source": "student",
+        "role": "test",
+        "teacher": "playout",
+        "student1": "s1new",
+        "student2": "s2new",
+        "playout_cut": 3,
+        "tt_mb": 64,
+        "table": {
+          "hands": 1000000,
+          "seed": 1
+        }
+      }
+    },
+    {
+      "name": "t1rules",
+      "priority": 5,
+      "kind": "student_teacher",
+      "chunks": 200,
+      "params": {
+        "threads": "all",
+        "trick": 1,
+        "count": 500,
+        "deals": 256,
+        "seed": 9203,
+        "source": "rules",
+        "teacher": "playout",
+        "student1": "s1new",
+        "student2": "s2new",
+        "playout_cut": 3,
+        "tt_mb": 64,
+        "table": {
+          "hands": 1000000,
+          "seed": 1
+        }
+      }
+    },
+    {
+      "name": "t1mixed",
+      "priority": 6,
+      "kind": "student_teacher",
+      "chunks": 100,
+      "params": {
+        "threads": "all",
+        "trick": 1,
+        "count": 500,
+        "deals": 256,
+        "seed": 9204,
+        "source": "mixed",
+        "teacher": "playout",
+        "student1": "s1new",
+        "student2": "s2new",
+        "playout_cut": 3,
+        "tt_mb": 64,
+        "table": {
+          "hands": 1000000,
+          "seed": 1
+        }
+      }
+    },
+    {
+      "name": "t1student",
+      "priority": 7,
+      "kind": "student_teacher",
+      "chunks": 200,
+      "params": {
+        "threads": "all",
+        "trick": 1,
+        "count": 500,
+        "deals": 256,
+        "seed": 9207,
+        "source": "student",
+        "teacher": "playout",
+        "student1": "s1new",
+        "student2": "s2new",
+        "playout_cut": 3,
+        "tt_mb": 64,
+        "table": {
+          "hands": 1000000,
+          "seed": 1
+        }
+      }
+    },
+    {
+      "name": "t2rules",
+      "priority": 8,
+      "kind": "student_teacher",
+      "chunks": 300,
+      "params": {
+        "threads": "all",
+        "trick": 2,
+        "count": 500,
+        "deals": 256,
+        "seed": 9205,
+        "source": "rules",
+        "teacher": "playout",
+        "student1": "s1new",
+        "student2": "s2new",
+        "playout_cut": 3,
+        "tt_mb": 64,
+        "table": {
+          "hands": 1000000,
+          "seed": 1
+        }
+      }
+    },
+    {
+      "name": "t2mixed",
+      "priority": 9,
+      "kind": "student_teacher",
+      "chunks": 100,
+      "params": {
+        "threads": "all",
+        "trick": 2,
+        "count": 500,
+        "deals": 256,
+        "seed": 9206,
+        "source": "mixed",
+        "teacher": "playout",
+        "student1": "s1new",
+        "student2": "s2new",
+        "playout_cut": 3,
+        "tt_mb": 64,
+        "table": {
+          "hands": 1000000,
+          "seed": 1
+        }
+      }
+    },
+    {
+      "name": "t2student",
+      "priority": 10,
+      "kind": "student_teacher",
+      "chunks": 200,
+      "params": {
+        "threads": "all",
+        "trick": 2,
+        "count": 500,
+        "deals": 256,
+        "seed": 9208,
+        "source": "student",
+        "teacher": "playout",
+        "student1": "s1new",
+        "student2": "s2new",
+        "playout_cut": 3,
+        "tt_mb": 64,
+        "table": {
+          "hands": 1000000,
+          "seed": 1
+        }
+      }
     }
-   }
-  },
-  {
-   "name": "t2stest",
-   "priority": 4,
-   "kind": "student_teacher",
-   "chunks": 4,
-   "params": {
-    "threads": "all",
-    "trick": 2,
-    "count": 500,
-    "deals": 512,
-    "seed": 32343,
-    "source": "student",
-    "role": "test",
-    "teacher": "playout",
-    "student1": "s1new",
-    "student2": "s2new",
-    "playout_cut": 3,
-    "tt_mb": 64,
-    "table": {
-     "hands": 1000000,
-     "seed": 1
-    }
-   }
-  },
-  {
-   "name": "t1rules",
-   "priority": 5,
-   "kind": "student_teacher",
-   "chunks": 200,
-   "params": {
-    "threads": "all",
-    "trick": 1,
-    "count": 500,
-    "deals": 256,
-    "seed": 9203,
-    "source": "rules",
-    "teacher": "playout",
-    "student1": "s1new",
-    "student2": "s2new",
-    "playout_cut": 3,
-    "tt_mb": 64,
-    "table": {
-     "hands": 1000000,
-     "seed": 1
-    }
-   }
-  },
-  {
-   "name": "t1mixed",
-   "priority": 6,
-   "kind": "student_teacher",
-   "chunks": 100,
-   "params": {
-    "threads": "all",
-    "trick": 1,
-    "count": 500,
-    "deals": 256,
-    "seed": 9204,
-    "source": "mixed",
-    "teacher": "playout",
-    "student1": "s1new",
-    "student2": "s2new",
-    "playout_cut": 3,
-    "tt_mb": 64,
-    "table": {
-     "hands": 1000000,
-     "seed": 1
-    }
-   }
-  },
-  {
-   "name": "t1student",
-   "priority": 7,
-   "kind": "student_teacher",
-   "chunks": 200,
-   "params": {
-    "threads": "all",
-    "trick": 1,
-    "count": 500,
-    "deals": 256,
-    "seed": 9207,
-    "source": "student",
-    "teacher": "playout",
-    "student1": "s1new",
-    "student2": "s2new",
-    "playout_cut": 3,
-    "tt_mb": 64,
-    "table": {
-     "hands": 1000000,
-     "seed": 1
-    }
-   }
-  },
-  {
-   "name": "t2rules",
-   "priority": 8,
-   "kind": "student_teacher",
-   "chunks": 300,
-   "params": {
-    "threads": "all",
-    "trick": 2,
-    "count": 500,
-    "deals": 256,
-    "seed": 9205,
-    "source": "rules",
-    "teacher": "playout",
-    "student1": "s1new",
-    "student2": "s2new",
-    "playout_cut": 3,
-    "tt_mb": 64,
-    "table": {
-     "hands": 1000000,
-     "seed": 1
-    }
-   }
-  },
-  {
-   "name": "t2mixed",
-   "priority": 9,
-   "kind": "student_teacher",
-   "chunks": 100,
-   "params": {
-    "threads": "all",
-    "trick": 2,
-    "count": 500,
-    "deals": 256,
-    "seed": 9206,
-    "source": "mixed",
-    "teacher": "playout",
-    "student1": "s1new",
-    "student2": "s2new",
-    "playout_cut": 3,
-    "tt_mb": 64,
-    "table": {
-     "hands": 1000000,
-     "seed": 1
-    }
-   }
-  },
-  {
-   "name": "t2student",
-   "priority": 10,
-   "kind": "student_teacher",
-   "chunks": 200,
-   "params": {
-    "threads": "all",
-    "trick": 2,
-    "count": 500,
-    "deals": 256,
-    "seed": 9208,
-    "source": "student",
-    "teacher": "playout",
-    "student1": "s1new",
-    "student2": "s2new",
-    "playout_cut": 3,
-    "tt_mb": 64,
-    "table": {
-     "hands": 1000000,
-     "seed": 1
-    }
-   }
-  }
- ]
+  ]
 }
