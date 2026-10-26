@@ -26,6 +26,27 @@
   before 05:08 UTC are under `runs/o2-s1more3-3/out/`). The owner re-rented the same machine by hand: **instance 57615744** (AMD EPYC 7B12 server
   chip, 256 threads, 129 GB RAM, RTX 3060, $0.328/h), unlabelled, idle, for the runs below; `keep: true` on every manifest that uses it.
 
+### State at 2026-10-26 06:45 UTC (read this first; the handoff below is older)
+- **Run 1c done** (11.0 h, $3.62; labels 300/200/400/200 + tests 4/4 under `runs/playout-labels-1c/out/`). **Training `student-playout-2`
+  done** (54 min, $0.07, a $0.10/h France box, destroyed by its launcher): on run 1c's playout test sets **S1p** (`3d511c54...`, seed 1)
+  loses **0.0897%** a decision against the shipped S1's 0.17% (I3), **S2p** (`dc5f8ad0...`, seed 2) **0.0974%** against 0.10% (no clear
+  gain). Only 2 of the 3 seeds per stream came out (the curve has seeds 1 and 2). Both load in the shipped WASM engine.
+- **Shipped to players on the owner's word (2026-10-26 06:30 and 06:45 UTC), before the money arena judged them:** fivefingers
+  `src/ai/engine41/config.ts` students[1] = S1p, students[2] = S2p (commits 65df9f0, 0d7728b). Rollback = the old keys `97df2a54...` (S1)
+  and `3d1189e3...` (S2), still in R2; change them back in that file.
+- **Arena `arena-students-2` (new pair against the shipped pair, SPRT [0,0.01], cap 3,000 blocks) is NOT decided**: 325 of 750 chunks done
+  (outputs under `runs/arena-students-2/out/`, no verdict read) when the rented Nevada box (57743935, EPYC 7K62, $1.37/h) stopped itself at
+  03:24 UTC; it also stopped at 00:47 UTC after run -2's first heartbeat, and vast would not start it again. **Cause: the vast account ran
+  out of credit** (every new rental since 04:55 UTC answers 400 "Your account lacks credit"; -3 to -6 failed on it; the owner will top up in a
+  day or two). The launcher read both stops as "stopped by the owner" and gave up, leaving the box to boot the old run late (-2 booted
+  after the -3 takeover failed). The stopped Nevada box 57743935 still exists (storage billing only, not destroyed; the owner decides).
+- **Next, when the owner says the credit is back:** relaunch the arena (next unused id after -6, `docs/vast/arena-students.manifest.json` on
+  main, `bin_sha` e2a2c3a5, `vast-run.yml`, cpu_only, max_dollars 8; about 4-5 h, $6-7 on a 190+-thread box) then, if the pair is accepted,
+  round 2 (`playout-labels-2.manifest.json`, fill its s1new/s2new with `3d511c54...` / `dc5f8ad0...`; the third seed of each stream was not run).
+  If the arena rejects the pair, roll back in fivefingers and record it. Spend so far $3.8 of the owner's $30.
+- Fixed meanwhile: `cleanup.py` no longer destroys a just-taken-over stopped instance before its first heartbeat (e2a2c3a; the owner's Thailand
+  box 57615744 was destroyed that way at 23:21 UTC 2026-10-25 between his stop and the takeover's boot).
+
 ### Handoff (2026-10-25): the runs, in order
 1. **Run 1c, playout labels: DONE** (`docs/vast/playout-labels.manifest.json`, run id **`playout-labels-1c`**; `bin_sha` eef2d56b, on
    57615744 from about 10:44 to **21:46 UTC 2026-10-25, 11.0 h, $3.62**, no error, no partial chunk, no warning; the stored parts match the
