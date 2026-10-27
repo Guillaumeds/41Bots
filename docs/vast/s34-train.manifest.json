@@ -1,0 +1,198 @@
+{
+ "format": 2,
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "run_id": "s34-train-1",
+ "note": "S3 and S4 trained on one GPU box (docs/STUDENT.md §6.3): the trick-3 student on s3-labels-1 and the trick-4 student on s4-labels-1, 250k decisions each at 256 deals, 512,256, the decision-aware loss, three seeds each, each judged on its trick's two 2,000-decision test sets. From scratch.",
+ "machine": {
+  "gpus": 1,
+  "min_gpu_ram_gb": 8,
+  "min_cores": 120,
+  "min_ram_gb": 64,
+  "disk_gb": 100,
+  "keep": false,
+  "max_dph": 0.75,
+  "wait_for_offer_min": 240,
+  "offer_poll_s": 60,
+  "price_steps": [
+   0.12,
+   0.35,
+   0.65,
+   0.75
+  ],
+  "tries_per_step": 5
+ },
+ "streams": [
+  {
+   "name": "s3",
+   "priority": 1,
+   "kind": "student_train",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "train_inputs": [
+     {
+      "run": "s3-labels-1",
+      "stream": "t3rules",
+      "parts": 200
+     },
+     {
+      "run": "s3-labels-1",
+      "stream": "t3mixed",
+      "parts": 100
+     },
+     {
+      "run": "s3-labels-1",
+      "stream": "t3student",
+      "parts": 200
+     }
+    ],
+    "test_inputs": [
+     {
+      "run": "s3-labels-1",
+      "stream": "t3test",
+      "parts": 4
+     },
+     {
+      "run": "s3-labels-1",
+      "stream": "t3stest",
+      "parts": 4
+     }
+    ],
+    "order": "spread",
+    "epochs": 40,
+    "batch": 256,
+    "lr": 0.001,
+    "patience": 4,
+    "seed": 1,
+    "val_permille": 50,
+    "device": "cuda",
+    "baselines": [
+     "rules",
+     "random"
+    ],
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    },
+    "points": [
+     {
+      "size": 250000,
+      "widths": "512,256",
+      "deals": 256,
+      "seed": 1,
+      "rank_weight": 1,
+      "rank_temperature": 0.01,
+      "stop_on": "decision"
+     },
+     {
+      "size": 250000,
+      "widths": "512,256",
+      "deals": 256,
+      "seed": 2,
+      "rank_weight": 1,
+      "rank_temperature": 0.01,
+      "stop_on": "decision"
+     },
+     {
+      "size": 250000,
+      "widths": "512,256",
+      "deals": 256,
+      "seed": 3,
+      "rank_weight": 1,
+      "rank_temperature": 0.01,
+      "stop_on": "decision"
+     }
+    ],
+    "fetch_jobs": 32
+   }
+  },
+  {
+   "name": "s4",
+   "priority": 2,
+   "kind": "student_train",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "train_inputs": [
+     {
+      "run": "s4-labels-1",
+      "stream": "t4rules",
+      "parts": 200
+     },
+     {
+      "run": "s4-labels-1",
+      "stream": "t4mixed",
+      "parts": 100
+     },
+     {
+      "run": "s4-labels-1",
+      "stream": "t4student",
+      "parts": 200
+     }
+    ],
+    "test_inputs": [
+     {
+      "run": "s4-labels-1",
+      "stream": "t4test",
+      "parts": 4
+     },
+     {
+      "run": "s4-labels-1",
+      "stream": "t4stest",
+      "parts": 4
+     }
+    ],
+    "order": "spread",
+    "epochs": 40,
+    "batch": 256,
+    "lr": 0.001,
+    "patience": 4,
+    "seed": 1,
+    "val_permille": 50,
+    "device": "cuda",
+    "baselines": [
+     "rules",
+     "random"
+    ],
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    },
+    "points": [
+     {
+      "size": 250000,
+      "widths": "512,256",
+      "deals": 256,
+      "seed": 1,
+      "rank_weight": 1,
+      "rank_temperature": 0.01,
+      "stop_on": "decision"
+     },
+     {
+      "size": 250000,
+      "widths": "512,256",
+      "deals": 256,
+      "seed": 2,
+      "rank_weight": 1,
+      "rank_temperature": 0.01,
+      "stop_on": "decision"
+     },
+     {
+      "size": 250000,
+      "widths": "512,256",
+      "deals": 256,
+      "seed": 3,
+      "rank_weight": 1,
+      "rank_temperature": 0.01,
+      "stop_on": "decision"
+     }
+    ],
+    "fetch_jobs": 32
+   }
+  }
+ ]
+}
