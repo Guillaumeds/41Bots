@@ -1715,3 +1715,48 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 - **Limits.** One test set each; the inner players are the students themselves (round 1); 512 deals; the value error mixes the lean with the
   teachers' different scales. Not a money measure: the arena (run 2) is.
 - **Cost.** None beyond run 1 (the sets were its first 8 chunks, about 12 minutes of the box).
+
+### I4. Students retrained on the playout teacher, round 1 (runs `playout-labels-1c` and `student-playout-2`, 2026-10-25/26)
+- **Question.** How much of the room I3 measured does retraining on hidden-card labels take?
+- **Method.** Run 1c (`docs/vast/playout-labels.manifest.json`, the owner's 7B12 box 57615744, 11.0 h, $3.62): 250k trick-1 and 300k
+  trick-2 decisions at 256 deals, the playout teacher with the shipped S1 `97df2a54` and S2 `3d1189e3` as the inner players, exact from
+  trick 3; 2,000-decision test sets at 512 deals. Training (`student-playout-2`, an AMD EPYC 7551 box with an RTX 3060, 128 threads,
+  $0.07/h, 64 min, $0.08): the same 512x256 students, decision-aware loss (r1000 t10000), two seeds a stream came out (the third did not run).
+- **Result.** Decision loss on run 1c's playout test sets, % of the deciding pair's money (upper 95% bound), agreement with the teacher's best:
+
+  | | trick 1 | trick 2 |
+  |---|---|---|
+  | shipped student (I3) | 0.173% (0.191) · 50.6% | 0.099% (0.116) · 62.8% |
+  | retrained, seed 1 | **0.0897% (0.109) · 59.2%** (`3d511c54…`) | 0.1035% (0.126) · 63.4% |
+  | retrained, seed 2 | 0.0919% (0.107) · 56.5% | **0.0974% (0.116) · 63.0%** (`dc5f8ad0…`) |
+  | the set's noise floor (I3) | 0.077% | 0.033% |
+  | rules-v1 / random | 0.42% / 0.81% | 0.44% / 0.58% |
+
+  Trick 1 by place, seed 1: the leader 0.110%, places 2-3 0.06%, 4-8 0.08-0.11%; by score class 0.048 / 0.071 / 0.059 / 0.181%. Trick 2, seed 2:
+  places 2, 4 and 5 the weakest (0.12-0.15%), place 3 0.035%.
+- **Reading.** Trick 1 takes about two thirds of the room (0.17% to 0.09%, against a floor of 0.077%); trick 2 takes none (0.099% to
+  0.097%, floor 0.033%): the trick-2 labels at 256 deals, or the old S2 as the inner trick-2 player, limit it, not the student. Round 2
+  (the retrained pair as the inner players, positions from their own games) is the next lever for both.
+- **Shipped** to fivefingers on the owner's word on 2026-10-26 (06:30 and 06:45 UTC, before the money gate): `config.ts` students[1] =
+  `3d511c54…`, students[2] = `dc5f8ad0…`; the previous keys stay in R2.
+- **Limits.** One test set each, the same inner players in the labels and the tests (round 1's own yardstick); two seeds.
+- **Cost.** $3.62 + $0.08.
+
+### I5. The money gate: the retrained pair against the shipped-before pair (run `arena-students-8`, 2026-10-27)
+- **Question.** Does the retrained pair (S1 `3d511c54…`, S2 `dc5f8ad0…`) win more of the money than the pair it replaced (S1 `97df2a54…`,
+  S2 `3d1189e3…`), both playing as the app plays (`AppPlay`, STUDENT.md 6.1: the students at tricks 1-2, exact search at the app's deal
+  counts from trick 3)?
+- **Method.** `docs/vast/arena-students.manifest.json`: 14-way duplicate blocks of matches to 2 games, the new pair A against the shipped-before
+  pair B, SPRT on the block score (A's money less B's) with H0 = 0 and H1 = +0.01 of the money, alpha = beta = 0.05, cap 3,000 blocks;
+  chunks of 4 blocks, run until decided. The France box (AMD EPYC 7551 server chip, 122 usable threads, $0.09/h), 5.4 h, **$0.40**.
+  Two earlier launches: `arena-students-2` (a $1.37/h box, 325 of 750 chunks, lost to the vast credit running out, I/STATUS 2026-10-26)
+  and `-7` (no 180-thread box under $0.75 in 5h20m).
+- **Result.** **Accept** after 929 blocks (233 chunks): LLR 2.99 against the bound ln 19 = 2.94; mean block score **+0.0096 of the money**
+  (sd 0.119; standard error 0.0039, so about +0.2% to +1.7% at two standard errors). The retrained pair takes about one percent more of
+  the money per match than the pair the app played until 2026-10-26, which is the size I3 predicted for the whole room (1-2% a match).
+- **Reading.** The playout teacher's gain is real money at the app's own budgets, not only a test-set number; most of it is trick 1 (I4).
+  The shipping of 2026-10-26 stands. The gate says nothing about the owner's examples of 2026-10-26 (early top-trump leads, waiting
+  with a lone Joker): those are judged by the playout yardstick on the pros' scold positions as they come.
+- **Limits.** Bots against bots on duplicate deals; both pairs share the same exact search from trick 3; one SPRT at [0, 1%]; 929 blocks
+  (the cap would have allowed 3,000).
+- **Cost.** $0.40 (plus the $3 of the lost run -2).

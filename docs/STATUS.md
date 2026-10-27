@@ -26,7 +26,16 @@
   before 05:08 UTC are under `runs/o2-s1more3-3/out/`). The owner re-rented the same machine by hand: **instance 57615744** (AMD EPYC 7B12 server
   chip, 256 threads, 129 GB RAM, RTX 3060, $0.328/h), unlabelled, idle, for the runs below; `keep: true` on every manifest that uses it.
 
-### State at 2026-10-27 04:55 UTC (read this first; the blocks below are older)
+### State at 2026-10-27 10:40 UTC (read this first; the blocks below are older)
+- **The money gate accepted the retrained students (EXPERIMENTS I5):** `arena-students-8` on the France box ($0.40, 5.4 h) decided
+  **Accept** after 929 blocks: the pair the app plays since 2026-10-26 (S1 `3d511c54…`, S2 `dc5f8ad0…`) takes about **+1% of the money
+  a match** (mean block score +0.0096, standard error 0.0039) off the pair before it. The shipping stands; nothing to roll back.
+- **Round 2 labels `playout-labels-2b`** run since 04:55 on 57918931 (AMD EPYC 7B12, 245 usable threads, $0.32/h; handed over to the
+  cleanup at 10:24, $1.63 so far): the 16 test chunks and the trick-1 streams well under way; ETA about 16:30 UTC, about $3.90. Then
+  training (`student-playout-3`, the round-2 labels, the France-class GPU box) and the gate again, then `arena-inference`.
+- Spend this round so far: $2.10 (the killed labels run) + $0.40 + the labels in progress; about $11 of the owner's $30 since 2026-10-25.
+
+### State at 2026-10-27 04:55 UTC
 - The owner topped up vast on the evening of 2026-10-26 and approved an unattended night: "set a watch ... take a machine to do the next
   pieces", within the $30 ceiling of 2026-10-25. Launched 23:14 UTC with a 5h20m waiting price ladder ($0.35 / 0.45 / 0.65 / 0.75 per h,
   5 tries a rung, manifests' `machine` blocks): **`arena-students-7`** never found a 180-thread box under $0.75 (closest: 128 threads at

@@ -8,7 +8,7 @@ running, what is next) → this page. Then, as needed:
 | `RULES.md`, `TRANSCRIPTS.md` | the authoritative rules and the owner's house rules (H); owner-approved transcripts |
 | `PLAN.md` (amendments at the top), `REVIEW-2026-10-13.md` | the approved design and the review that amended it |
 | **`RESEARCH.md`** | the outside research: papers, other programs and the game family, with their numbers and where each is used |
-| **`EXPERIMENTS.md`** | every experiment we ran: question, method, result, cost, limits, files (parts A-H, cited below) |
+| **`EXPERIMENTS.md`** | every experiment we ran: question, method, result, cost, limits, files (parts A-I, cited below) |
 | this page | one line per document and experiment, with its outcome |
 
 Status words: **adopted** (in use), **done** (a finished build or measurement), **rejected** (tested,
@@ -31,7 +31,7 @@ Old branches are tags (`git tag -l 'archive/*'`; `git checkout archive/<name>` r
 | `m3-hybrid/vast.md`, `VAST-MACHINES.md`, `vast/` | running on rented machines; **measured cost per unit of work of every machine we rented** (`VAST-MACHINES.md`, first section); run manifests | **adopted** (A8). `vast/*.manifest.json` are the runs' inputs and are checked by the runner's tests |
 | `APP-ENGINE-CONTRACT.md`, `WASM-API.md` | the engine API for the app | **done** |
 | `STUDENT.md` | the student pipeline | **done** (E1) |
-| `STUDENT.md` §3.1, `docs/vast/playout-labels.manifest.json` | the playout teacher: deals played out by S1/S2 from each seat's own view, exact from trick 3 (PLAN §6.8) | **built** 2026-10-25 (review session, EXPERIMENTS I1-I2); first labels run pending |
+| `STUDENT.md` §3.1, `docs/vast/playout-labels.manifest.json` | the playout teacher: deals played out by S1/S2 from each seat's own view, exact from trick 3 (PLAN §6.8) | **adopted**: round 1 (`playout-labels-1c`) retrained S1 to 0.09% from 0.17% a decision, S2 unchanged (I4); **the money gate accepted the pair, +1% of the money a match** (I5, 2026-10-27); shipped in the app since 2026-10-26; round 2 (`playout-labels-2b`) running |
 
 ## Measurements of the game and the solver
 | document | what | outcome |
