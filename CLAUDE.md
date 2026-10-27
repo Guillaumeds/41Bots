@@ -64,6 +64,9 @@ You are building the strongest possible bots for the 8-player card game **41** (
   - Run long jobs (such as 10M differential games) as `--release` binaries with a size argument, or leave them for vast.ai or CI. Unit tests stay fast.
 - **Secrets:** never commit secrets or tokens. R2 and vast.ai keys come in at checkpoint M1 via environment variables or GitHub secrets.
 - Work on a branch per checkpoint (e.g. `m0-engine`) and open a PR. CI must be green.
+- **Merges (owner, 2026-10-25 and 2026-10-27): the session owns this repo with full autonomy over PRs and merges.** Merge your own
+  PR once CI is green (`gh api -X PUT repos/Guillaumeds/41Bots/pulls/<n>/merge -f merge_method=merge`; GraphQL is not available
+  from these sessions, use the REST API), then build `release-binaries.yml` on the merge commit before any run needs it.
 
 ## Talking to the owner
 - The owner knows the game deeply but not AI jargon. Write in plain English.
