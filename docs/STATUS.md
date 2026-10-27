@@ -39,6 +39,11 @@
   the owner on 2026-10-25, "keep this france box for everything, no rush"; low_cpu_pct 20, low_cpu_s 900 for the wave tails; max_dollars
   6) and **`playout-labels-2`** again (resumes; 180 threads, 96 GB, ladder to $0.75; low_cpu_pct 40, low_cpu_s 900; max_dollars 10). At
   $0.78/h the labels cost about $11-12 for 14-15 h; the owner was told at 01:20 and can stop the box (nothing done is lost).
+- 05:05 UTC: **`arena-students-8` runs on the France box** (57918536, AMD EPYC 7551 server chip, 122 usable threads, $0.09/h; it starts
+  from chunk 0: a format-2 run resumes only its own run id, so arena-2's 325 chunks are not reused; about 13 h, $1.2, SPRT may stop it
+  sooner). The `playout-labels-2` relaunch was refused ("runs/playout-labels-2/ already exists in R2"): **a launch can never reuse a run
+  id**; the done-list resume serves only the launcher's own replacement machine. Relaunched as **`playout-labels-2b`** (the -2 chunks
+  redone; max_dollars 14 so the cap cannot cut a $0.78/h run short, which would lose everything again).
 - Lesson: **always pass `low_cpu_pct` / `low_cpu_s`** to vast-run.yml for teacher and arena runs (the default 85% / 300 s kills chunk
   turnover and wave tails), and **never `threads: "all"` on a label stream**.
 
