@@ -1721,7 +1721,9 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 - **Method.** Run 1c (`docs/vast/playout-labels.manifest.json`, the owner's 7B12 box 57615744, 11.0 h, $3.62): 250k trick-1 and 300k
   trick-2 decisions at 256 deals, the playout teacher with the shipped S1 `97df2a54` and S2 `3d1189e3` as the inner players, exact from
   trick 3; 2,000-decision test sets at 512 deals. Training (`student-playout-2`, an AMD EPYC 7551 box with an RTX 3060, 128 threads,
-  $0.07/h, 64 min, $0.08): the same 512x256 students, decision-aware loss (r1000 t10000), two seeds a stream came out (the third did not run).
+  $0.07/h, 64 min, $0.08): the same 512x256 students, decision-aware loss (r1000 t10000), three seeds a stream. (Corrected 2026-10-27:
+  the numbers first read on 2026-10-26 came from the run's partial snapshot, uploaded before seed 3 finished; the final bundle
+  `runs/student-playout-2/out/s*/000000-*.tar.zst` has all three.)
 - **Result.** Decision loss on run 1c's playout test sets, % of the deciding pair's money (upper 95% bound), agreement with the teacher's best:
 
   | | trick 1 | trick 2 |
@@ -1729,17 +1731,21 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   | shipped student (I3) | 0.173% (0.191) · 50.6% | 0.099% (0.116) · 62.8% |
   | retrained, seed 1 | **0.0897% (0.109) · 59.2%** (`3d511c54…`) | 0.1035% (0.126) · 63.4% |
   | retrained, seed 2 | 0.0919% (0.107) · 56.5% | **0.0974% (0.116) · 63.0%** (`dc5f8ad0…`) |
+  | retrained, seed 3 | 0.0717% (0.080) · 58.5% (`b5850c38…`) | 0.0926% (0.108) · 61.6% (`c21f2e8c…`) |
   | the set's noise floor (I3) | 0.077% | 0.033% |
   | rules-v1 / random | 0.42% / 0.81% | 0.44% / 0.58% |
 
   Trick 1 by place, seed 1: the leader 0.110%, places 2-3 0.06%, 4-8 0.08-0.11%; by score class 0.048 / 0.071 / 0.059 / 0.181%. Trick 2, seed 2:
-  places 2, 4 and 5 the weakest (0.12-0.15%), place 3 0.035%.
+  places 2, 4 and 5 the weakest (0.12-0.15%), place 3 0.035%. Seed 3: trick 1 0.10 / 0.07 / 0.05 / 0.06 / 0.09 / 0.08 / 0.07 / 0.05% by place,
+  score class S4 0.117% (seed 1: 0.181%); trick 2 places 2 and 4 0.075 / 0.060% (seed 2: 0.120 / 0.129%), places 5-6 0.16 / 0.14%
+  (worse). Seed-to-seed spread (0.072-0.092% at trick 1) is as large as the gains being measured: one 2,000-decision set cannot rank
+  seeds finely, and the shipped seeds were picked from the partial snapshot, not as the best of three.
 - **Reading.** Trick 1 takes about two thirds of the room (0.17% to 0.09%, against a floor of 0.077%); trick 2 takes none (0.099% to
   0.097%, floor 0.033%): the trick-2 labels at 256 deals, or the old S2 as the inner trick-2 player, limit it, not the student. Round 2
   (the retrained pair as the inner players, positions from their own games) is the next lever for both.
 - **Shipped** to fivefingers on the owner's word on 2026-10-26 (06:30 and 06:45 UTC, before the money gate): `config.ts` students[1] =
   `3d511c54…`, students[2] = `dc5f8ad0…`; the previous keys stay in R2.
-- **Limits.** One test set each, the same inner players in the labels and the tests (round 1's own yardstick); two seeds.
+- **Limits.** One test set each, the same inner players in the labels and the tests (round 1's own yardstick); three seeds.
 - **Cost.** $3.62 + $0.08.
 
 ### I5. The money gate: the retrained pair against the shipped-before pair (run `arena-students-8`, 2026-10-27)

@@ -1,0 +1,398 @@
+{
+ "format": 2,
+ "run_id": "student-playout-3",
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "Round 2 training (STUDENT.md §6 steps 3-4, the owner's two-arm rule of 2026-10-27): for each trick, arm (a) the round-2 labels alone (playout-labels-2b) and arm (b) round 1 (playout-labels-1c) and round 2 together, every arm warm-started from the shipped student's float file (S1 3d511c54's float 7c6a4205, S2 dc5f8ad0's float 3f5d39be) with shrink and perturb 0.6, three seeds each, all judged on round 2's test sets (rules and the students' own games, 4,000 decisions a trick). The arm and seed with the lowest decision loss, if no worse than the shipped student on the same sets, goes to the money arena.",
+ "machine": {
+  "gpus": 1,
+  "min_gpu_ram_gb": 8,
+  "min_cores": 120,
+  "min_ram_gb": 64,
+  "disk_gb": 150,
+  "keep": false,
+  "max_dph": 0.75,
+  "wait_for_offer_min": 240,
+  "offer_poll_s": 60,
+  "price_steps": [
+   0.12,
+   0.35,
+   0.65,
+   0.75
+  ],
+  "tries_per_step": 5
+ },
+ "inputs": {
+  "s1prev": "sha256:7c6a420585fb820813db7b375f3e7e2348875b6ec65be7746a4896ba42445c75",
+  "s2prev": "sha256:3f5d39bebb1094f3a6df5d4996b792825567ef954dde9d92cf77ae6ce5e9f576"
+ },
+ "streams": [
+  {
+   "name": "s1a",
+   "priority": 1,
+   "kind": "student_train",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "train_inputs": [
+     {
+      "run": "playout-labels-2b",
+      "stream": "t1rules",
+      "parts": 200
+     },
+     {
+      "run": "playout-labels-2b",
+      "stream": "t1mixed",
+      "parts": 100
+     },
+     {
+      "run": "playout-labels-2b",
+      "stream": "t1student",
+      "parts": 200
+     }
+    ],
+    "test_inputs": [
+     {
+      "run": "playout-labels-2b",
+      "stream": "t1test",
+      "parts": 4
+     },
+     {
+      "run": "playout-labels-2b",
+      "stream": "t1stest",
+      "parts": 4
+     }
+    ],
+    "order": "spread",
+    "epochs": 40,
+    "batch": 256,
+    "lr": 0.001,
+    "patience": 4,
+    "seed": 1,
+    "val_permille": 50,
+    "device": "cuda",
+    "baselines": [
+     "rules",
+     "random"
+    ],
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    },
+    "points": [
+     {
+      "size": 250000,
+      "widths": "512,256",
+      "deals": 256,
+      "seed": 1,
+      "rank_weight": 1,
+      "rank_temperature": 0.01,
+      "stop_on": "decision"
+     },
+     {
+      "size": 250000,
+      "widths": "512,256",
+      "deals": 256,
+      "seed": 2,
+      "rank_weight": 1,
+      "rank_temperature": 0.01,
+      "stop_on": "decision"
+     },
+     {
+      "size": 250000,
+      "widths": "512,256",
+      "deals": 256,
+      "seed": 3,
+      "rank_weight": 1,
+      "rank_temperature": 0.01,
+      "stop_on": "decision"
+     }
+    ],
+    "fetch_jobs": 32,
+    "init": "s1prev",
+    "shrink_perturb": 0.6
+   }
+  },
+  {
+   "name": "s2a",
+   "priority": 2,
+   "kind": "student_train",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "train_inputs": [
+     {
+      "run": "playout-labels-2b",
+      "stream": "t2rules",
+      "parts": 300
+     },
+     {
+      "run": "playout-labels-2b",
+      "stream": "t2mixed",
+      "parts": 100
+     },
+     {
+      "run": "playout-labels-2b",
+      "stream": "t2student",
+      "parts": 200
+     }
+    ],
+    "test_inputs": [
+     {
+      "run": "playout-labels-2b",
+      "stream": "t2test",
+      "parts": 4
+     },
+     {
+      "run": "playout-labels-2b",
+      "stream": "t2stest",
+      "parts": 4
+     }
+    ],
+    "order": "spread",
+    "epochs": 40,
+    "batch": 256,
+    "lr": 0.001,
+    "patience": 4,
+    "seed": 1,
+    "val_permille": 50,
+    "device": "cuda",
+    "baselines": [
+     "rules",
+     "random"
+    ],
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    },
+    "points": [
+     {
+      "size": 300000,
+      "widths": "512,256",
+      "deals": 256,
+      "seed": 1,
+      "rank_weight": 1,
+      "rank_temperature": 0.01,
+      "stop_on": "decision"
+     },
+     {
+      "size": 300000,
+      "widths": "512,256",
+      "deals": 256,
+      "seed": 2,
+      "rank_weight": 1,
+      "rank_temperature": 0.01,
+      "stop_on": "decision"
+     },
+     {
+      "size": 300000,
+      "widths": "512,256",
+      "deals": 256,
+      "seed": 3,
+      "rank_weight": 1,
+      "rank_temperature": 0.01,
+      "stop_on": "decision"
+     }
+    ],
+    "fetch_jobs": 32,
+    "init": "s2prev",
+    "shrink_perturb": 0.6
+   }
+  },
+  {
+   "name": "s1b",
+   "priority": 3,
+   "kind": "student_train",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "train_inputs": [
+     {
+      "run": "playout-labels-2b",
+      "stream": "t1rules",
+      "parts": 200
+     },
+     {
+      "run": "playout-labels-2b",
+      "stream": "t1mixed",
+      "parts": 100
+     },
+     {
+      "run": "playout-labels-2b",
+      "stream": "t1student",
+      "parts": 200
+     },
+     {
+      "run": "playout-labels-1c",
+      "stream": "t1rules",
+      "parts": 300
+     },
+     {
+      "run": "playout-labels-1c",
+      "stream": "t1mixed",
+      "parts": 200
+     }
+    ],
+    "test_inputs": [
+     {
+      "run": "playout-labels-2b",
+      "stream": "t1test",
+      "parts": 4
+     },
+     {
+      "run": "playout-labels-2b",
+      "stream": "t1stest",
+      "parts": 4
+     }
+    ],
+    "order": "spread",
+    "epochs": 40,
+    "batch": 256,
+    "lr": 0.001,
+    "patience": 4,
+    "seed": 1,
+    "val_permille": 50,
+    "device": "cuda",
+    "baselines": [
+     "rules",
+     "random"
+    ],
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    },
+    "points": [
+     {
+      "size": 500000,
+      "widths": "512,256",
+      "deals": 256,
+      "seed": 1,
+      "rank_weight": 1,
+      "rank_temperature": 0.01,
+      "stop_on": "decision"
+     },
+     {
+      "size": 500000,
+      "widths": "512,256",
+      "deals": 256,
+      "seed": 2,
+      "rank_weight": 1,
+      "rank_temperature": 0.01,
+      "stop_on": "decision"
+     },
+     {
+      "size": 500000,
+      "widths": "512,256",
+      "deals": 256,
+      "seed": 3,
+      "rank_weight": 1,
+      "rank_temperature": 0.01,
+      "stop_on": "decision"
+     }
+    ],
+    "fetch_jobs": 32,
+    "init": "s1prev",
+    "shrink_perturb": 0.6
+   }
+  },
+  {
+   "name": "s2b",
+   "priority": 4,
+   "kind": "student_train",
+   "chunks": 1,
+   "params": {
+    "threads": "all",
+    "train_inputs": [
+     {
+      "run": "playout-labels-2b",
+      "stream": "t2rules",
+      "parts": 300
+     },
+     {
+      "run": "playout-labels-2b",
+      "stream": "t2mixed",
+      "parts": 100
+     },
+     {
+      "run": "playout-labels-2b",
+      "stream": "t2student",
+      "parts": 200
+     },
+     {
+      "run": "playout-labels-1c",
+      "stream": "t2rules",
+      "parts": 400
+     },
+     {
+      "run": "playout-labels-1c",
+      "stream": "t2mixed",
+      "parts": 200
+     }
+    ],
+    "test_inputs": [
+     {
+      "run": "playout-labels-2b",
+      "stream": "t2test",
+      "parts": 4
+     },
+     {
+      "run": "playout-labels-2b",
+      "stream": "t2stest",
+      "parts": 4
+     }
+    ],
+    "order": "spread",
+    "epochs": 40,
+    "batch": 256,
+    "lr": 0.001,
+    "patience": 4,
+    "seed": 1,
+    "val_permille": 50,
+    "device": "cuda",
+    "baselines": [
+     "rules",
+     "random"
+    ],
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    },
+    "points": [
+     {
+      "size": 600000,
+      "widths": "512,256",
+      "deals": 256,
+      "seed": 1,
+      "rank_weight": 1,
+      "rank_temperature": 0.01,
+      "stop_on": "decision"
+     },
+     {
+      "size": 600000,
+      "widths": "512,256",
+      "deals": 256,
+      "seed": 2,
+      "rank_weight": 1,
+      "rank_temperature": 0.01,
+      "stop_on": "decision"
+     },
+     {
+      "size": 600000,
+      "widths": "512,256",
+      "deals": 256,
+      "seed": 3,
+      "rank_weight": 1,
+      "rank_temperature": 0.01,
+      "stop_on": "decision"
+     }
+    ],
+    "fetch_jobs": 32,
+    "init": "s2prev",
+    "shrink_perturb": 0.6
+   }
+  }
+ ]
+}

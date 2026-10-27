@@ -87,6 +87,12 @@
 //! the larger of this and 3 epochs); `baselines` (`["rules", "random"]`), `boot` (1000);
 //! `keep_raw` (false), `fetch_jobs` (4), `upload` (true), `allow_stamps` ([]); `table` and
 //! `equity_input` as other kinds; any other key is refused ([`KEYS`]). One chunk a stream.
+//!
+//! **Warm start** (STUDENT.md §5 and §6 step 3): `init` names a manifest input, the previous
+//! student's float file (`float.safetensors`, the same widths and trick), which the worker
+//! resolves to `init_path`; every point then starts from it (`--init`), shrunk and perturbed by
+//! `shrink_perturb` (λ in (0, 1], `--shrink-perturb`; absent: the plain warm start), the
+//! perturbation seeded by the point's own seed. The trainer records the start in its report.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -104,7 +110,7 @@ use crate::spike::build_table_from;
 use crate::{Ctx, sibling};
 
 /// The settings a `student_train` chunk takes; any other key is refused.
-pub(crate) const KEYS: [&str; 27] = [
+pub(crate) const KEYS: [&str; 30] = [
     "train_inputs",
     "test_inputs",
     "order",
@@ -132,6 +138,9 @@ pub(crate) const KEYS: [&str; 27] = [
     "threads",
     "est_seconds",
     "chunk_sizes",
+    "init",
+    "init_path",
+    "shrink_perturb",
 ];
 
 /// The keys of a run entry and of a stored shard's entry.
@@ -301,6 +310,32 @@ pub(crate) struct Params {
     pub fetch_jobs: u64,
     pub upload: bool,
     pub allow_stamps: Vec<String>,
+    /// The warm start's input name (`init`), as the manifest gives it.
+    pub init_input: Option<String>,
+    /// Its local float file (`init_path`), once the worker has resolved it.
+    pub init: Option<String>,
+    /// Shrink and perturb λ for the warm start (`--shrink-perturb`).
+    pub shrink_perturb: Option<f64>,
+}
+
+/// Resolves a warm start's `init` (a manifest input's name) to its local file as `init_path`,
+/// from the worker's inputs (name → path). Nothing to do without `init`.
+pub(crate) fn resolve_init(p: &mut Value, inputs: &BTreeMap<String, String>) -> Result<(), String> {
+    let Some(name) = p.get("init").filter(|v| !v.is_null()) else {
+        return Ok(());
+    };
+    let name = name
+        .as_str()
+        .ok_or_else(|| err("init must be the name of a manifest input"))?
+        .to_string();
+    let path = inputs
+        .get(&name)
+        .cloned()
+        .ok_or_else(|| err(format!("init: no input `{name}` in the manifest's inputs")))?;
+    if let Some(o) = p.as_object_mut() {
+        o.insert("init_path".into(), json!(path));
+    }
+    Ok(())
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -782,6 +817,33 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
     if !(1..1000).contains(&val_permille) {
         return Err(err("val_permille must be 1 to 999"));
     }
+    let init_input = match p.get("init") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(n)) if !n.is_empty() => Some(n.clone()),
+        Some(_) => return Err(err("init must be the name of a manifest input")),
+    };
+    let init = match p.get("init_path") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(path)) if !path.is_empty() && init_input.is_some() => Some(path.clone()),
+        Some(_) => {
+            return Err(err(
+                "init_path is set by the worker from init, never by hand",
+            ));
+        }
+    };
+    let shrink_perturb = match p.get("shrink_perturb") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let x = v
+                .as_f64()
+                .filter(|x| x.is_finite() && *x > 0.0 && *x <= 1.0)
+                .ok_or_else(|| err("shrink_perturb must be a number above 0 and at most 1"))?;
+            if init_input.is_none() {
+                return Err(err("shrink_perturb needs init (a warm start)"));
+            }
+            Some(x)
+        }
+    };
     let train_threads = match p.get("train_threads") {
         None | Some(Value::Null) => None,
         Some(v) => Some(
@@ -812,6 +874,9 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         fetch_jobs: u("fetch_jobs", 4)?.clamp(1, 32),
         upload: b("upload", true)?,
         allow_stamps: strings("allow_stamps", &[])?,
+        init_input,
+        init,
+        shrink_perturb,
     })
 }
 
@@ -933,6 +998,11 @@ pub(crate) fn chunk_with(
     table_rec: Value,
 ) -> Result<Value, String> {
     let q = parse(p)?;
+    if q.init_input.is_some() && q.init.is_none() {
+        return Err(err(
+            "init names an input the worker did not resolve (init_path missing)",
+        ));
+    }
     let remote = progs.tools.remote.clone().ok_or_else(|| {
         err("the teacher shards come from the remote store (R2, or RUNNER_REMOTE_DIR), and there is none")
     })?;
@@ -1627,6 +1697,12 @@ impl Train<'_> {
         }
         if point.stop_decision {
             c.args(["--stop-on", "decision"]);
+        }
+        if let Some(init) = &self.q.init {
+            c.arg("--init").arg(init);
+            if let Some(l) = self.q.shrink_perturb {
+                c.args(["--shrink-perturb", &l.to_string()]);
+            }
         }
         let base = self.progress(
             "train",
