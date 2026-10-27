@@ -295,7 +295,10 @@
     ],
     "fetch_jobs": 32,
     "init": "s1prev",
-    "shrink_perturb": 0.6
+    "shrink_perturb": 0.6,
+    "allow_stamps": [
+     "teacher"
+    ]
    }
   },
   {
@@ -391,7 +394,10 @@
     ],
     "fetch_jobs": 32,
     "init": "s2prev",
-    "shrink_perturb": 0.6
+    "shrink_perturb": 0.6,
+    "allow_stamps": [
+     "teacher"
+    ]
    }
   }
  ]
