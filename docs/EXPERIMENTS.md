@@ -1766,3 +1766,32 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 - **Limits.** Bots against bots on duplicate deals; both pairs share the same exact search from trick 3; one SPRT at [0, 1%]; 929 blocks
   (the cap would have allowed 3,000).
 - **Cost.** $0.40 (plus the $3 of the lost run -2).
+
+### I6. Every candidate student on round 2's test sets (2026-10-27, build VM; run `playout-labels-2b`'s test parts)
+- **Question.** Before round 2's training: how do the students so far score when decisions are valued with round 2's inner players
+  (the retrained pair) and on positions from the students' own games?
+- **Method.** Round 2's four test streams (`t1test`, `t1stest`, `t2test`, `t2stest`: 2,000 decisions each at 512 deals, seed 32343; `rules` and
+  `student` positions), fetched with `r2-fetch.yml` (prefixes, fixed for runs of more than 100 files) and `input-fetch.yml`;
+  `search student-check --baseline rules --baseline random --boot 1000 --split-half` (release build of main at 2e328dd), loss in % of the money.
+  Candidates per trick: the pair before 2026-10-26 ("old": S1 `97df2a54`, S2 `3d1189e3`), the shipped pair (S1 `3d511c54`, S2 `dc5f8ad0`),
+  and round 1's third seeds (S1 `b5850c38`, S2 `c21f2e8c`, I4).
+- **Result.** Both sets together (4,000 decisions a trick): loss (upper 95%), agreement, unbiased split-half loss; the floor is the sets' own noise.
+
+  | | trick 1 | trick 2 |
+  |---|---|---|
+  | old | 0.183% (0.196) · 47.1% · 0.114% | **0.119% (0.130) · 57.0% · 0.090%** |
+  | shipped | 0.164% (0.187) · 49.6% · 0.098% | 0.135% (0.152) · 56.3% · 0.108% |
+  | round 1 seed 3 | **0.160% (0.173) · 48.9% · 0.093%** | 0.123% (0.138) · 57.7% · 0.097% |
+  | floor / rules-v1 / random | 0.090% / 0.333% / 0.760% | 0.036% / 0.402% / 0.589% |
+
+  By set: trick 1 the same order on both (rules: 0.187 / 0.159 / 0.153; students' own games: 0.179 / 0.170 / 0.167). Trick 2: rules 0.124 /
+  0.128 / 0.118, students' own games **0.115 / 0.142 / 0.128**. Trick 2 by place (both sets): place 2 0.230 / 0.212 / 0.163, place 4
+  0.102 / 0.149 / 0.112, place 5 0.138 / 0.206 / 0.180.
+- **Reading.** The yardstick moved with the inner players: every student loses more on round 2's sets than on round 1's (the shipped S1:
+  0.090% there, 0.164% here), so numbers compare only within a round's sets. Trick 1: the retraining helped (old 0.183% → 0.164%) and
+  seed 3 is a hair better again, both near the floor (unbiased 0.093-0.098% against 0.090%). **Trick 2: the shipped S2 is worse than the
+  old one on round 2's sets** (0.135% against 0.119%; on the students' own positions 0.142% against 0.115%), worst at places 4-5; the
+  money gate's +1% (I5) came from the pair, most likely from trick 1. Round 2's training therefore compares at trick 2 against the old S2
+  as well as the shipped one, and a pair of the best S1 with the old S2 is a candidate for the gate.
+- **Limits.** One set of 4,000 decisions a trick; the split-half numbers are themselves noisy (256 deals a half); bots' positions.
+- **Cost.** None (build VM, seconds a candidate).

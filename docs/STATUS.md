@@ -35,6 +35,11 @@
   training (`student-playout-3`, the round-2 labels, the France-class GPU box) and the gate again, then `arena-inference`.
 - Spend this round so far: $2.10 (the killed labels run) + $0.40 + the labels in progress; about $11 of the owner's $30 since 2026-10-25.
 
+- 14:20 UTC (EXPERIMENTS I6): on round 2's test sets the shipped S1 beats the old one (0.164% against 0.183%), round 1's seed 3
+  `b5850c38` a little more (0.160%); **at trick 2 the old S2 `3d1189e3` beats the shipped `dc5f8ad0`** (0.119% against 0.135%). Round 2's
+  training is judged against all three per trick. PR #11 (warm start, round-2 manifest `student-playout-3`) merged at ca6bed6, release
+  binaries built for it; the 17:05 UTC check launches the training once `playout-labels-2b` is DONE.
+
 ### State at 2026-10-27 04:55 UTC
 - The owner topped up vast on the evening of 2026-10-26 and approved an unattended night: "set a watch ... take a machine to do the next
   pieces", within the $30 ceiling of 2026-10-25. Launched 23:14 UTC with a 5h20m waiting price ladder ($0.35 / 0.45 / 0.65 / 0.75 per h,
