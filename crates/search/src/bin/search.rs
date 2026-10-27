@@ -113,7 +113,7 @@
 //! mean decision loss and own-team bias, overall, by band, seat 1 and seat 2, for A and B, B − A
 //! and its bootstrap 95% interval (decisions resampled within each group, the same for both).
 //! `teacher --trick` writes the student's teacher records (docs/STUDENT.md §3–§4,
-//! `search::student_teacher`): decisions `--first`..`--first + --count` at trick 1 or 2 from
+//! `search::student_teacher`): decisions `--first`..`--first + --count` at trick 1, 2 or 3 from
 //! `--source` (stratum `i mod 4 + 1`, place `(i div 4) mod 8`), each valued by PIMC over deals
 //! `--deal-from`..`--deal-from + --deals` with the hybrid H_k (`--net`, an O_k with k after the
 //! trick; `exact` for exact search, tests and small runs), every candidate in every deal stored:
@@ -1748,8 +1748,9 @@ fn student_teacher(a: &Args) -> Result<(), String> {
     };
     let (table, equity_sha) = load_equity_sha(a.req("--equity")?)?;
     let leaf: Arc<SharedLeaf> = Arc::new(table);
-    // The playout teacher (`--playout --student1 S1 --student2 S2 [--playout-cut 3]`): the
-    // students play every seat from its own view to the start of the cut trick, exact from there.
+    // The playout teacher (`--playout --student1 S1 --student2 S2 [--student3 S3]
+    // [--playout-cut 3]`): the students play every seat from its own view to the start of the
+    // cut trick, exact from there.
     let playout = a.has("--playout");
     let students_files = if playout {
         if a.has("--net") {
@@ -1761,9 +1762,15 @@ fn student_teacher(a: &Args) -> Result<(), String> {
             let net = student::net::StudentNet::from_bytes(&bytes)?;
             Ok((net, equity::sha256::sha256_hex(&bytes)))
         };
-        Some((load("--student1")?, load("--student2")?))
+        // `--student3 S3` plays trick 3 when the cut is 4 or later (docs/STUDENT.md §6.3).
+        let s3 = if a.has("--student3") {
+            Some(load("--student3")?)
+        } else {
+            None
+        };
+        Some((load("--student1")?, load("--student2")?, s3))
     } else {
-        for k in ["--student1", "--student2", "--playout-cut"] {
+        for k in ["--student1", "--student2", "--student3", "--playout-cut"] {
             if a.has(k) {
                 return Err(format!("{k} is for the playout teacher (--playout)"));
             }
@@ -1796,11 +1803,16 @@ fn student_teacher(a: &Args) -> Result<(), String> {
         return Err(format!("--exact-leaves: {m}"));
     }
     let teacher = match (&oracle, &students_files) {
-        (_, Some(((s1, sha1), (s2, sha2)))) => Teacher::Playout {
-            students: search::pimc::Students { s1, s2 },
+        (_, Some(((s1, sha1), (s2, sha2), s3))) => Teacher::Playout {
+            students: search::pimc::Students {
+                s1,
+                s2,
+                s3: s3.as_ref().map(|(n, _)| n),
+            },
             cut: playout_cut,
             sha1,
             sha2,
+            sha3: s3.as_ref().map(|(_, h)| h.as_str()),
         },
         (None, None) => Teacher::Exact,
         (Some(o), None) => Teacher::Hybrid {

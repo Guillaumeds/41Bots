@@ -15,8 +15,11 @@
 //! (the dealer's burn, a turned pair at tricks 1-2) and sets the exact solves' table size (`tt_mb`,
 //! 64 by default). `"inference": {"tau": 10, "floor": 50}` (permille of the money) weights the
 //! exact searches' deals by the other seats' plays under the students (`search::inference`; absent:
-//! uniform deals, as the app plays today). The recorded bot name is the factory's
-//! (`app:s1=…,s2=…,deals3=…,deals45=…[,inf=tau…/floor…]`).
+//! uniform deals, as the app plays today). `student3` (an input name; docs/STUDENT.md §6.3) values
+//! each trick-3 deal by a playout in which the other seats answer with the trick-3 student from
+//! their own view, exact search from trick 4 (absent: the open-hand solve, as the app plays today).
+//! The recorded bot name is the factory's (`app:s1=…,s2=…,deals3=…,deals45=…[,inf=tau…/floor…]
+//! [,s3=…]`).
 
 use std::collections::BTreeMap;
 
@@ -42,14 +45,17 @@ pub(crate) enum BotSpec {
         base: String,
         /// The deal weighting, if any.
         inference: Option<InferenceCfg>,
+        /// The trick-3 student's input name, if any.
+        student3: Option<String>,
     },
 }
 
 /// The keys an app bot object may carry.
-const APP_KEYS: [&str; 7] = [
+const APP_KEYS: [&str; 8] = [
     "kind",
     "student1",
     "student2",
+    "student3",
     "deals3",
     "deals45",
     "base",
@@ -93,6 +99,10 @@ pub(crate) fn parse_bot(params: &Value, side: &str) -> Result<BotSpec, String> {
     };
     let student1 = input("student1")?;
     let student2 = input("student2")?;
+    let student3 = match o.get("student3") {
+        None | Some(Value::Null) => None,
+        Some(_) => Some(input("student3")?),
+    };
     let deals45 = match o.get("deals45") {
         None => AppPlay::APP_DEALS45,
         Some(d) => deal_count(d, &format!("params.{side}.deals45"))?,
@@ -163,6 +173,7 @@ pub(crate) fn parse_bot(params: &Value, side: &str) -> Result<BotSpec, String> {
         deals45,
         base,
         inference,
+        student3,
     })
 }
 
@@ -184,10 +195,16 @@ pub(crate) fn input_names(params: &Value) -> Result<Vec<String>, String> {
     let mut out: Vec<String> = Vec::new();
     for spec in [a, b] {
         if let BotSpec::App {
-            student1, student2, ..
+            student1,
+            student2,
+            student3,
+            ..
         } = spec
         {
-            for n in [student1, student2] {
+            for n in [Some(student1), Some(student2), student3]
+                .into_iter()
+                .flatten()
+            {
                 if !out.contains(&n) {
                     out.push(n);
                 }
@@ -214,6 +231,7 @@ pub(crate) fn build(
             deals45,
             base,
             inference,
+            student3,
         } => {
             let read = |name: &str| -> Result<Vec<u8>, String> {
                 let path = inputs
@@ -222,8 +240,17 @@ pub(crate) fn build(
                 std::fs::read(path).map_err(|e| format!("app bot: input `{name}` ({path}): {e}"))
             };
             let (s1, s2) = (read(student1)?, read(student2)?);
-            let f = search::bot::app_factory(base, &s1, &s2, *deals3, *deals45, *inference)
-                .map_err(|e| format!("app bot ({student1}, {student2}): {e}"))?;
+            let s3 = student3.as_deref().map(read).transpose()?;
+            let f = search::bot::app_factory(
+                base,
+                &s1,
+                &s2,
+                s3.as_deref(),
+                *deals3,
+                *deals45,
+                *inference,
+            )
+            .map_err(|e| format!("app bot ({student1}, {student2}): {e}"))?;
             Ok(Box::new(f))
         }
     }
@@ -284,6 +311,7 @@ mod tests {
                 deals45: AppPlay::APP_DEALS45,
                 base: "pimc-v0".into(),
                 inference: None,
+                student3: None,
             }
         );
         let p = json!({ "a": app(json!({ "deals3": [64, 64, 128, 128, 256, 256, 256, 256],
@@ -299,6 +327,7 @@ mod tests {
                 deals45: 256,
                 base: "pimc-v0:tt_mb=32".into(),
                 inference: None,
+                student3: None,
             }
         );
         assert!(matches!(b, BotSpec::App { ref student1, .. } if student1 == "old1"));
@@ -325,6 +354,15 @@ mod tests {
             panic!("inference")
         };
         assert_eq!(ib, InferenceCfg::from_permille(20, 100).expect("ok"));
+        // A trick-3 student is an input of its side, listed after the other two.
+        let p = json!({ "a": app(json!({ "student3": "s3" })), "b": app(json!({})) });
+        let (a, _) = parse_bots(&p).expect("parses");
+        assert!(matches!(a, BotSpec::App { student3: Some(ref n), .. } if n == "s3"));
+        assert_eq!(input_names(&p).expect("names"), ["s1", "s2", "s3"]);
+        for bad in [json!(""), json!(3)] {
+            let p = json!({ "a": app(json!({ "student3": bad })), "b": "pimc-v0" });
+            assert!(parse_bots(&p).is_err());
+        }
         let same = json!({ "a": app(json!({})), "b": app(json!({})) });
         assert_eq!(input_names(&same).expect("names"), ["s1", "s2"]);
         assert!(
@@ -485,6 +523,7 @@ mod tests {
             deals45: 1024,
             base: "pimc-v0".into(),
             inference: None,
+            student3: None,
         };
         let e = build(&spec, &BTreeMap::new()).err().expect("no inputs");
         assert!(e.contains("input `s1` is not among the inputs"), "{e}");

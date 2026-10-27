@@ -173,6 +173,8 @@ pub enum Teacher<'a> {
         sha1: &'a str,
         /// S2's file SHA-256.
         sha2: &'a str,
+        /// S3's file SHA-256, when trick 3 is played out by S3 (a cut at 4 or later).
+        sha3: Option<&'a str>,
     },
 }
 
@@ -194,9 +196,21 @@ impl Teacher<'_> {
                 }
                 s
             }
+            // Without S3 the stamp is the one of before (shards made then keep their stamp).
             Teacher::Playout {
-                cut, sha1, sha2, ..
+                cut,
+                sha1,
+                sha2,
+                sha3: None,
+                ..
             } => format!("playout:{sha1}:{sha2}:cut{cut}"),
+            Teacher::Playout {
+                cut,
+                sha1,
+                sha2,
+                sha3: Some(sha3),
+                ..
+            } => format!("playout:{sha1}:{sha2}:{sha3}:cut{cut}"),
         }
     }
 }
@@ -587,6 +601,11 @@ pub fn check_job(job: &TeacherJob, teacher: &Teacher, test_role: bool) -> Result
     } = teacher
     {
         p.check_for(*cut)?;
+    }
+    if let Teacher::Playout { students, sha3, .. } = teacher
+        && students.s3.is_some() != sha3.is_some()
+    {
+        return Err("a playout teacher's S3 and its SHA-256 come together".into());
     }
     if let Teacher::Playout { cut, .. } = teacher
         && !(1..=6).contains(cut)
@@ -1013,10 +1032,11 @@ mod tests {
         let (s1, s2) = students();
         for (trick, cut) in [(3, 3), (4, 4), (4, 2)] {
             let teacher = Teacher::Playout {
-                students: Students { s1: &s1, s2: &s2 },
+                students: Students::two(&s1, &s2),
                 cut,
                 sha1: "a",
                 sha2: "b",
+                sha3: None,
             };
             let j = job(trick, 5, 4, SOURCE_RULES, 1);
             let mut mem = SolveMem::new();
@@ -1028,14 +1048,47 @@ mod tests {
         }
         assert_eq!(
             Teacher::Playout {
-                students: Students { s1: &s1, s2: &s2 },
+                students: Students::two(&s1, &s2),
                 cut: 3,
                 sha1: "a",
-                sha2: "b"
+                sha2: "b",
+                sha3: None,
             }
             .stamp(),
             "playout:a:b:cut3"
         );
+        // With S3 the stamp names it; S3 and its SHA-256 come together.
+        let s3 = student::net::random_net(6, &[16, 8], 12);
+        let with3 = Students {
+            s3: Some(&s3),
+            ..Students::two(&s1, &s2)
+        };
+        assert_eq!(
+            Teacher::Playout {
+                students: with3,
+                cut: 4,
+                sha1: "a",
+                sha2: "b",
+                sha3: Some("c"),
+            }
+            .stamp(),
+            "playout:a:b:c:cut4"
+        );
+        let j = job(3, 5, 4, SOURCE_RULES, 1);
+        for (st, sha3) in [(with3, None), (Students::two(&s1, &s2), Some("c"))] {
+            let t = Teacher::Playout {
+                students: st,
+                cut: 4,
+                sha1: "a",
+                sha2: "b",
+                sha3,
+            };
+            assert!(
+                check_job(&j, &t, false)
+                    .unwrap_err()
+                    .contains("come together")
+            );
+        }
     }
 
     /// Trick-2 decisions played out by the students to the start of trick 3 and solved exactly
@@ -1052,10 +1105,11 @@ mod tests {
         let ctx = belief_ctx(&*l, &source);
         let (s1, s2) = students();
         let teacher = Teacher::Playout {
-            students: Students { s1: &s1, s2: &s2 },
+            students: Students::two(&s1, &s2),
             cut: 3,
             sha1: "a",
             sha2: "b",
+            sha3: None,
         };
         let mut keys = Vec::new();
         for threads in [1, 3] {
@@ -1124,10 +1178,11 @@ mod tests {
         let mut mem = SolveMem::new();
         for cut in [3u8, 6] {
             let teacher = Teacher::Playout {
-                students: Students { s1: &s1, s2: &s2 },
+                students: Students::two(&s1, &s2),
                 cut,
                 sha1: "a",
                 sha2: "b",
+                sha3: None,
             };
             let j = job(1, 12, 2, SOURCE_RULES, 1);
             check_job(&j, &teacher, false).expect("a valid job");
@@ -1141,10 +1196,11 @@ mod tests {
             assert!(robs > 0, "no joint rob decision in 12 trick-1 decisions");
         }
         let bad = Teacher::Playout {
-            students: Students { s1: &s1, s2: &s2 },
+            students: Students::two(&s1, &s2),
             cut: 7,
             sha1: "a",
             sha2: "b",
+            sha3: None,
         };
         assert!(check_job(&job(1, 1, 1, SOURCE_RULES, 1), &bad, false).is_err());
     }
@@ -1162,10 +1218,11 @@ mod tests {
         let ctx = belief_ctx(&*l, &source);
         let (s1, s2) = students();
         let teacher = Teacher::Playout {
-            students: Students { s1: &s1, s2: &s2 },
+            students: Students::two(&s1, &s2),
             cut: 3,
             sha1: "a",
             sha2: "b",
+            sha3: None,
         };
         let mut differ = 0;
         for trick in [1u8, 2] {

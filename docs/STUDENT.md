@@ -343,6 +343,32 @@ whose true deal weighs at least the median sample in two thirds of the hands, le
 weighting on, the manifest. Not yet: the weighting inside the playout teacher's deals (one trick
 of history at trick 2) and a model for the trick 3-5 plays (the exact bots have no cheap policy).
 
+### 6.3 The trick-3 student S3: hidden-card play at trick 3 (built 2026-10-27)
+
+The owner's finding (2026-10-26): the bots throw a lone high trump (the Joker, the A♥) early where a
+player waits until the play falls to them; being late in a trick is worth most because the late seat
+sees the cards before it. Both the playout teacher (§3.1, exact from trick 3) and the app at tricks
+3-5 (exact PIMC) value every deal with all cards face up from trick 3, where seeing the cards first
+is worth nothing. PLAN §6.8 already names the fix: rollouts in which every seat plays from its own
+view (one level of recursion), with a network player where search is too dear (T0/T1, the phone).
+
+- **S3** is a student for trick 3 like S1 and S2 (`student-v1` encoder, which covers tricks 1-5; the
+  same trainer), labelled by the playout teacher at a cut of 3 on trick-3 decisions, which is exact
+  PIMC from the seat's view (the app's own trick-3 play today, at 256 deals). Its positions come from
+  `rules`, `mixed` and `student` games (the last: S1/S2 play tricks 1-2). Runner: `student_teacher`
+  with `"trick": 3`.
+- **Inside the playout teacher** (`student3`, `--student3`, with `playout_cut` 4 or later; the stamp
+  becomes `playout:<S1>:<S2>:<S3>:cutK`, shards without S3 keep theirs): S3 plays trick 3 from every
+  seat's own view, exact from trick 4. Round 3's S1/S2 labels use it.
+- **In the app's player** (`AppPlay::s3`, arena `"student3"`; `pimc::evaluate_playout`): a trick-3
+  decision draws the same deals as today, and in each deal every candidate is played, then the other
+  seats answer with S3 from their own view, exact search from trick 4 (`Method::PlayoutPimc`;
+  optionally weighted by §6.2). Tricks 1-2 and 4-5 are unchanged. The money arena (`arena-s3`)
+  decides it against today's player with the same students; the WASM API and fivefingers follow only
+  if it passes.
+- Later, if trick 4 shows the same pull: S4 the same way (a cut of 5), and S3 retrained on playout
+  labels with itself inside (DAgger, §6).
+
 ## 7. The fixed test set and the measure
 
 - **Test set:** decisions from the reserved seed `STUDENT_TEST_SEED` (`crates/student`), trick 1
