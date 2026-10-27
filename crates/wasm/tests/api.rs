@@ -923,7 +923,7 @@ fn student_bytes(seed: u64) -> Vec<u8> {
 
 /// Per-trick students (S1 for trick 1, S2 for trick 2; docs/WASM-API.md section 7): a student loaded
 /// for a trick serves that trick only, ahead of the default one; a trick with neither is refused
-/// `no_student`; `info` lists them; only tricks 1 to 3 are accepted (trick 3's serves `playout`).
+/// `no_student`; `info` lists them; only tricks 1 to 4 are accepted (3 and 4 serve `playout`).
 #[test]
 fn per_trick_students_serve_their_trick() {
     let req_of = |m: &Match| {
@@ -942,7 +942,7 @@ fn per_trick_students_serve_their_trick() {
         Err("bad_file")
     );
     assert_eq!(
-        e.load_student_for(&student_bytes(5), 4).map_err(|r| r.code),
+        e.load_student_for(&student_bytes(5), 5).map_err(|r| r.code),
         Err("bad_request")
     );
     // Only trick 2 has a student: trick 1 is refused, trick 2 is valued by it.
@@ -1207,6 +1207,7 @@ fn the_playout_method_plays_trick_3_out_with_s3() {
         s1: &nets[0],
         s2: &nets[1],
         s3: Some(&nets[2]),
+        s4: None,
     };
     let seat = t3.to_act().expect("a decision");
     let view = t3.view(seat);
@@ -1254,4 +1255,38 @@ fn the_playout_method_plays_trick_3_out_with_s3() {
     let mut r = req_of(&t3, 6);
     r["method"] = json!("rollout");
     assert_eq!(code(&e.evaluate(&r.to_string())), "bad_request");
+    // With S4 loaded: trick 3 plays out through trick 4 (cut 5) and trick 4 is played out too; the
+    // values are the native evaluator's with S4, and the engine names both students.
+    let sha4 = e.load_student_for(&student_bytes(9), 4).expect("loads");
+    let net4 = student::net::StudentNet::from_bytes(&student_bytes(9)).expect("loads");
+    let with4 = search::pimc::Students {
+        s4: Some(&net4),
+        ..students
+    };
+    for (m, cut) in [(&t3, 5u8), (&t4, 5)] {
+        let out = e.evaluate(&req_of(m, 6).to_string());
+        let v = parse(&out);
+        assert_eq!(v["method"], "playout", "{out}");
+        assert!(
+            v["engine"]
+                .as_str()
+                .expect("a string")
+                .contains(&format!("playout:{sha3}+{sha4}"))
+        );
+        let seat = m.to_act().expect("a decision");
+        let view = m.view(seat);
+        let dv = search::pimc::evaluate_playout(
+            &view,
+            &m.legal_actions(),
+            77,
+            &ctx,
+            &cfg,
+            &with4,
+            cut,
+            None,
+        );
+        let mut native: Vec<_> = dv.candidates.clone();
+        native.sort_by_key(|x| (x.0, x.1));
+        assert_eq!(api_means(&v), native);
+    }
 }

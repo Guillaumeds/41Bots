@@ -72,8 +72,8 @@ pub struct Engine {
     /// The default student network (`"method": "student"`): serves every trick that has no student
     /// of its own.
     student: Option<StudentNet>,
-    /// Student networks by the trick (1, 2 or 3) they were trained for; tricks 1-2 take precedence
-    /// over the default one; the trick-3 student (S3) serves `"method": "playout"` only.
+    /// Student networks by the trick (1 to 4) they were trained for; tricks 1-2 take precedence
+    /// over the default one; the trick-3 and trick-4 students (S3, S4) serve `"method": "playout"`.
     students: BTreeMap<u8, StudentNet>,
 }
 
@@ -95,8 +95,8 @@ pub enum Method {
     /// The student network (tricks 1–2, all eight seats in play, `"method": "student"`).
     Student,
     /// Each deal played out with the students from every seat's own view to the start of trick
-    /// `cut`, exact search from there (trick 3, all eight seats in play, `"method": "playout"`:
-    /// the trick-3 student answers for the other seats; docs/STUDENT.md §6.3).
+    /// `cut`, exact search from there (tricks 3-4, all eight seats in play, `"method": "playout"`:
+    /// S3 answers for the other seats at trick 3, S4 at trick 4 when loaded; docs/STUDENT.md §6.3).
     Playout(u8),
 }
 
@@ -388,10 +388,10 @@ impl Engine {
     /// answers for the other seats in `"method": "playout"` requests at trick 3. A second one for
     /// the same trick replaces the first. Refused like `load_student`, and for any other trick.
     pub fn load_student_for(&mut self, bytes: &[u8], trick: u8) -> Result<String, Refusal> {
-        if !(1..=3).contains(&trick) {
+        if !(1..=4).contains(&trick) {
             return Err(Refusal::new(
                 "bad_request",
-                format!("a student serves trick 1, 2 or 3, not trick {trick}"),
+                format!("a student serves trick 1 to 4, not trick {trick}"),
             ));
         }
         let n = StudentNet::from_bytes(bytes)
@@ -530,19 +530,36 @@ impl Engine {
                 ));
             }
             Method::Exact
-        } else if req.playout && p.trick_no == 3 {
-            // The trick-3 student answers for the other seats; the playout holds the S1 and S2
-            // of tricks 1-2 too (unused at trick 3, but the playout's players are one set).
-            if !self.students.contains_key(&3)
-                || self.student_for(1).is_none()
-                || self.student_for(2).is_none()
-            {
+        } else if req.playout
+            && (p.trick_no == 3 || (p.trick_no == 4 && self.students.contains_key(&4)))
+        {
+            // S3 answers for the other seats at trick 3, S4 at trick 4 (then trick 5 is forced: a
+            // cut of 5). The playout holds S1 and S2 too (unused from trick 3 on, but the
+            // playout's players are one set).
+            let (s3, s4) = (
+                self.students.contains_key(&3),
+                self.students.contains_key(&4),
+            );
+            let cut = match (p.trick_no, s3, s4) {
+                (3, true, false) => 4,
+                (3, true, true) | (4, true, true) => 5,
+                _ => {
+                    return Err(Refusal::new(
+                        "no_student",
+                        format!(
+                            "method playout at trick {} needs S3 (and S1, S2), not loaded",
+                            p.trick_no
+                        ),
+                    ));
+                }
+            };
+            if self.student_for(1).is_none() || self.student_for(2).is_none() {
                 return Err(Refusal::new(
                     "no_student",
-                    "method playout at trick 3 needs the trick-3 student (and S1, S2), not loaded",
+                    "method playout needs S1 and S2 loaded as well",
                 ));
             }
-            Method::Playout(4)
+            Method::Playout(cut)
         } else if p.trick_no >= 3 {
             Method::Exact
         } else {
@@ -561,10 +578,10 @@ impl Engine {
         let student_sha = self
             .student_for(p.trick_no)
             .map(|n| format!("student:{}", n.sha256));
-        let playout_sha = self
-            .students
-            .get(&3)
-            .map(|n| format!("playout:{}", n.sha256));
+        let playout_sha = self.students.get(&3).map(|n| match self.students.get(&4) {
+            Some(n4) => format!("playout:{}+{}", n.sha256, n4.sha256),
+            None => format!("playout:{}", n.sha256),
+        });
         let net_sha = match method {
             Method::Hybrid(cut) => Some(self.nets[&cut].sha256.as_str()),
             Method::Student => student_sha.as_deref(),
@@ -666,6 +683,7 @@ impl Engine {
                     s1: self.student_for(1).expect("checked above"),
                     s2: self.student_for(2).expect("checked above"),
                     s3: self.students.get(&3),
+                    s4: self.students.get(&4),
                 },
                 k,
             )),

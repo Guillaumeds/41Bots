@@ -54,7 +54,7 @@ use crate::{Ctx, sibling};
 
 /// The settings a `student_teacher` chunk takes (after `v2.rs` added the network's path,
 /// `net`); any other key is refused.
-pub(crate) const KEYS: [&str; 24] = [
+pub(crate) const KEYS: [&str; 25] = [
     "trick",
     "count",
     "deals",
@@ -78,18 +78,20 @@ pub(crate) const KEYS: [&str; 24] = [
     "student1",
     "student2",
     "student3",
+    "student4",
     "playout_cut",
 ];
 
 /// The keys [`resolve`] adds (local paths of the named inputs) before the chunk reads its
 /// settings again.
-const RESOLVED: [&str; 6] = [
+const RESOLVED: [&str; 7] = [
     "net",
     "exact_leaves_path",
     "defer_expert_path",
     "student1_path",
     "student2_path",
     "student3_path",
+    "student4_path",
 ];
 
 /// The checked settings.
@@ -122,6 +124,9 @@ pub(crate) struct Params {
     /// The trick-3 student's input name (`student3`; docs/STUDENT.md §6.3): with a playout cut at
     /// 4 or later it plays trick 3 from every seat's own view.
     pub student3: Option<String>,
+    /// The trick-4 student's input name (`student4`, with `student3` and a cut of 5): it plays
+    /// trick 4, so the playout is hidden-card to the end of the hand.
+    pub student4: Option<String>,
 }
 
 /// The test set's seed (`student::STUDENT_TEST_SEED`).
@@ -156,9 +161,9 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         }
     };
     let trick = n("trick", None)?;
-    if !(1..=3).contains(&trick) {
+    if !(1..=4).contains(&trick) {
         return Err(format!(
-            "student_teacher: trick {trick}: the students' decisions are at tricks 1 to 3"
+            "student_teacher: trick {trick}: the students' decisions are at tricks 1 to 4"
         ));
     }
     let count = n("count", None)?;
@@ -217,7 +222,13 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
     let teacher = s("teacher", Some("search"))?;
     let playout = match teacher.as_str() {
         "search" => {
-            for k in ["student1", "student2", "student3", "playout_cut"] {
+            for k in [
+                "student1",
+                "student2",
+                "student3",
+                "student4",
+                "playout_cut",
+            ] {
                 if p.get(k).is_some_and(|v| !v.is_null()) {
                     return Err(format!(
                         "student_teacher: {k} is for the playout teacher (\"teacher\": \"playout\")"
@@ -264,6 +275,23 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         }
         _ => return Err("student_teacher: student3 must be an input's name".into()),
     };
+    // The trick-4 student plays trick 4 after S3's trick 3: with student3 and a cut of 5.
+    let student4 = match (&playout, p.get("student4")) {
+        (_, None | Some(Value::Null)) => None,
+        (Some((_, _, cut)), Some(Value::String(x)))
+            if *cut >= 5 && student3.is_some() && !x.is_empty() =>
+        {
+            Some(x.clone())
+        }
+        (Some(_), Some(Value::String(_))) => {
+            return Err(
+                "student_teacher: student4 plays trick 4 after student3's trick 3: it needs \
+                 student3 and playout_cut 5 or later"
+                    .into(),
+            );
+        }
+        _ => return Err("student_teacher: student4 must be an input's name".into()),
+    };
     // The source `student` plays the positions with the playout teacher's students (the
     // positions the students themselves reach, docs/STUDENT.md 6: DAgger).
     if source == "student" && playout.is_none() {
@@ -305,6 +333,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         expert_nets,
         playout,
         student3,
+        student4,
     })
 }
 
@@ -315,6 +344,7 @@ pub(crate) fn input_names(p: &Value) -> Result<Vec<String>, String> {
         Some((s1, s2, _)) => {
             let mut v = vec![s1.clone(), s2.clone()];
             v.extend(q.student3.clone());
+            v.extend(q.student4.clone());
             v
         }
         None => vec![q.net_input],
@@ -367,6 +397,9 @@ pub(crate) fn resolve(
             if let Some(s3) = &q.student3 {
                 out["student3_path"] = json!(path_of(s3)?);
             }
+            if let Some(s4) = &q.student4 {
+                out["student4_path"] = json!(path_of(s4)?);
+            }
         }
         None => out["net"] = json!(path_of(&q.net_input)?),
     }
@@ -412,6 +445,7 @@ pub(crate) enum Nets<'a> {
         s1: &'a str,
         s2: &'a str,
         s3: Option<&'a str>,
+        s4: Option<&'a str>,
         cut: u64,
     },
 }
@@ -442,12 +476,21 @@ pub(crate) fn command(
         Nets::Net(net) => {
             c.args(["--net", net]);
         }
-        Nets::Playout { s1, s2, s3, cut } => {
+        Nets::Playout {
+            s1,
+            s2,
+            s3,
+            s4,
+            cut,
+        } => {
             c.arg("--playout")
                 .args(["--student1", s1])
                 .args(["--student2", s2]);
             if let Some(s3) = s3 {
                 c.args(["--student3", s3]);
+            }
+            if let Some(s4) = s4 {
+                c.args(["--student4", s4]);
             }
             c.args(["--playout-cut", &cut.to_string()]);
         }
@@ -483,6 +526,10 @@ pub(crate) fn nets_of<'a>(p: &'a Value, q: &Params) -> Result<Nets<'a>, String> 
             s2: path("student2_path")?,
             s3: match &q.student3 {
                 Some(_) => Some(path("student3_path")?),
+                None => None,
+            },
+            s4: match &q.student4 {
+                Some(_) => Some(path("student4_path")?),
                 None => None,
             },
             cut: *cut,
@@ -813,6 +860,48 @@ mod tests {
         let mut missing = paths.clone();
         missing.remove("s3");
         assert!(resolve(&p, &missing).is_err());
+        // S4 with S3 at a cut of 5: named, resolved and passed; refused without S3 or at a cut of 4.
+        let mut p4 = p.clone();
+        p4["student4"] = json!("s4");
+        p4["playout_cut"] = json!(5);
+        let q4 = parse(&p4).expect("parses");
+        assert_eq!(
+            input_names(&p4).expect("names"),
+            vec!["s1", "s2", "s3", "s4"]
+        );
+        let mut paths4 = paths.clone();
+        paths4.insert("s4".into(), "/x/s4".into());
+        let r4 = resolve(&p4, &paths4).expect("resolves");
+        let c4 = command(
+            Path::new("search"),
+            &q4,
+            0,
+            nets_of(&r4, &q4).expect("nets"),
+            None,
+            Path::new("equity.npy"),
+            Path::new("out.npy"),
+            8,
+            Path::new("p.json"),
+        );
+        let a4: Vec<String> = c4
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let at4 = |k: &str| a4[a4.iter().position(|a| a == k).expect(k) + 1].clone();
+        assert_eq!(
+            (at4("--student4"), at4("--playout-cut")),
+            ("/x/s4".into(), "5".into())
+        );
+        let mut bad = p4.clone();
+        bad["playout_cut"] = json!(4);
+        assert!(parse(&bad).expect_err("cut 4").contains("playout_cut 5"));
+        let mut bad = p4.clone();
+        bad.as_object_mut().expect("object").remove("student3");
+        assert!(parse(&bad).is_err());
+        let mut t4 = two.clone();
+        t4["trick"] = json!(4);
+        t4["playout_cut"] = json!(4);
+        assert_eq!(parse(&t4).expect("parses").trick, 4);
     }
 
     #[test]
@@ -822,7 +911,7 @@ mod tests {
         assert_eq!((q.role.as_str(), q.tt_mb, q.first_part), ("train", 64, 0));
         assert!(q.upload);
         for (k, v) in [
-            ("trick", json!(4)),
+            ("trick", json!(5)),
             ("trick", json!(0)),
             ("count", json!(0)),
             ("seed", json!(1)),

@@ -371,6 +371,7 @@ mod tests {
             deals45: 1,
             inference: None,
             s3: None,
+            s4: None,
         });
         let cfg = SearchConfig {
             w12: 1,

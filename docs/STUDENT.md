@@ -366,8 +366,15 @@ view (one level of recursion), with a network player where search is too dear (T
   optionally weighted by §6.2). Tricks 1-2 and 4-5 are unchanged. The money arena (`arena-s3`)
   decides it against today's player with the same students; the WASM API and fivefingers follow only
   if it passes.
-- Later, if trick 4 shows the same pull: S4 the same way (a cut of 5), and S3 retrained on playout
-  labels with itself inside (DAgger, §6).
+- **S4, the trick-4 student** (built 2026-10-27, the owner: "will we also need a trick 4 student?"): at
+  trick 4 each seat still holds two cards and many cards are unseen (some in the pack), so "the Joker
+  now or keep it for the last trick" is a hidden-card choice too. S4 is labelled the same way at trick 4
+  (cut 4, exact PIMC from the seat's view), plays trick 4 in playouts with a cut of 5 (`student4`,
+  `--student4`, only with S3; stamp `playout:<S1>:<S2>:<S3>:<S4>:cut5`), and in the app's player
+  (`AppPlay::s4`, arena `"student4"`, WASM `loadStudent(bytes, sha, 4)`): with S3 and S4 a trick-3 or
+  trick-4 deal is played out from every seat's own view to the end of the hand (trick 5 is forced).
+  One gate tests both (`arena-s34`); `arena-s3` (S3 alone) only if it fails.
+- Later: S3 and S4 retrained on playout labels with themselves inside (DAgger, §6).
 
 ## 7. The fixed test set and the measure
 
