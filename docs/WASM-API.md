@@ -24,6 +24,7 @@ the work (tested, §10).
 | After a pair was turned | exact among the seats still in play (networks never see these); trick 1 with six seats in play is refused (`too_slow`) | none |
 | One legal action | nothing searched (`method: "forced"`) | none |
 | Tricks 1–2, all 8 seats in play, with `method: "student"` | the student network of that trick (S1 at trick 1, S2 at trick 2; docs/STUDENT.md): every candidate valued from the seat's view in milliseconds, no deals | the student of the trick |
+| Trick 3, all 8 seats in play, with `method: "playout"` | exact PIMC's deals, each played out: the candidate, then the other seats answer with the trick-3 student S3 from their own view, exact search from trick 4 (docs/STUDENT.md §6.3) | S3 (and S1, S2) |
 
 The search is the engine's own PIMC [Perfect-Information Monte Carlo: value every candidate in many
 guessed deals as if the cards were face up, and average], exactly as the native search runs it:
@@ -106,7 +107,7 @@ const request = { v: 1, seat, deals: 64, seed: String(seed), match: maskMatch(m,
 | `shard`, `shards` | optional, default 0 and 1; `shards` ≤ `deals` | this call values shard `shard` of `shards` (§6) |
 | `ttMb` | optional, 1..1024, default 16 | the exact search's memory table in MB: only the speed, never a value (measured: 2 to 64 MB change the time by about 10%) |
 | `ownBurns` | optional, app card ids, oldest first | the cards this seat burned this hand, when `match.hand.discards` hides them |
-| `method` | optional: `"search"` (the default) or `"student"` | `"student"` values a decision at trick 1 or 2 with all eight seats in play by the student network (the bots' fast player, docs/STUDENT.md): no deals, `shards` must be 1, no `lines`; every other decision is valued as without it (exact at tricks 3–5, forced, a pair turned), byte for byte. Needs `loadStudent` (`no_student`). |
+| `method` | optional: `"search"` (the default), `"student"` or `"playout"` | `"student"` values a decision at trick 1 or 2 with all eight seats in play by the student network (the bots' fast player, docs/STUDENT.md): no deals, `shards` must be 1, no `lines`; every other decision is valued as without it (exact at tricks 3–5, forced, a pair turned), byte for byte. Needs `loadStudent` (`no_student`). `"playout"` values a trick-3 decision with all eight seats in play deal by deal like the exact search (shards, `lines` and a `shortlist` as usual; the lines are each deal's open-hand principal line after the candidate), but each deal's values come from a playout in which the other seats answer with S3 from their own view and the exact search takes over at trick 4; needs S1, S2 and S3 loaded for their tricks (`no_student`); every other decision is valued as without it, byte for byte. |
 | `shortlist` | optional, array of 2 or more app card ids | search only these plays: each must be one of the plays on offer (else `bad_request`; also refused for a rob or a steal, with `method: "student"`, and for fewer than 2 or repeated cards). The other cards are neither valued nor listed. Each listed card has **exactly** the sums the full search gives it (same deals, byte for byte; tested), and the search costs less: proportional to the cards kept: at trick 2, with 4 candidates, 2 cards cost about 0.5× and 3 cards about 0.8× of the full search (docs/EXPERIMENTS.md E11). The `key` includes the shortlist, so shards of different shortlists never merge; a request without one keeps its old key. |
 | `lines` | optional, default false | also the coach's fields from each deal's principal line (§4.1): every candidate then has its own row. Costs about 10% more at trick 2 and about 3× at tricks 3–5 (measured, §8); the bots leave it off. |
 | `match` | the app's `MatchState` | the seat's view: `maskMatch(m, seat)`. The unmasked match gives the same bytes (tested): the engine reads nothing a seat may not see. |
@@ -224,7 +225,7 @@ and the three other candidates shortened):
 | `key` | SHA-256 of what the engine read (its version string, the seat's view as the engine rebuilt it, the seat, `deals`, `seed`): equal for every shard of one search; `merge` refuses different keys |
 | `seat`, `pair` | the viewer and its pair (`seat % 4`, the app's `pairOf`) |
 | `trick` | 1..5 (1 also for the dealer's burn before trick 1) |
-| `method` | `"hybrid"` (H_k), `"exact"` (to the end of the hand), `"forced"`, or `"student"` (the student network: `worlds` 0, `worldCount` null, `meanHorizon` null; each candidate its own row with the student's `mean`/`mean_fp`/`value`, `se` null, `n` and `ess` 0, `sum_fp` the value, `sumsq_fp` null; the `engine` string names `student:<SHA-256>`) |
+| `method` | `"hybrid"` (H_k), `"exact"` (to the end of the hand), `"forced"`, `"playout"` (trick 3 played out with S3; as `"exact"` otherwise, the `engine` string names `playout:<S3's SHA-256>`), or `"student"` (the student network: `worlds` 0, `worldCount` null, `meanHorizon` null; each candidate its own row with the student's `mean`/`mean_fp`/`value`, `se` null, `n` and `ess` 0, `sum_fp` the value, `sumsq_fp` null; the `engine` string names `student:<SHA-256>`) |
 | `meanHorizon` | tricks searched exactly before the network takes over (`k − trick`: 1 at trick 2 with O_3), or `null` when exact to the end of the hand or forced |
 | `deals`, `shard`, `shards`, `dealsFrom`, `dealsTo` | the request's N and the deals this result covers (end excluded) |
 | `worlds` | `n` of the best candidate; **0 for a forced card** |
@@ -286,7 +287,7 @@ The app's own bot plays any refused decision.
 | `not_to_act` | `seat` is not the seat to act (a view from another seat: coming) |
 | `no_equity` | the equity table is not loaded |
 | `no_network_for_trick` | the decision needs a network not loaded: trick 1 needs O_2, trick 2 (all eight seats in play) needs O_3 |
-| `no_student` | `method: "student"` at trick 1 or 2 without a student for that trick (its own or the default one) loaded |
+| `no_student` | `method: "student"` at trick 1 or 2 without a student for that trick (its own or the default one) loaded; `method: "playout"` at trick 3 without S1, S2 and S3 |
 | `not_built` | the dealer's burn before trick 1 (`steal`, or robbing a turned ace at once) |
 | `too_slow` | after a turn, a trick-1 decision with six seats in play (an exact deal takes about 17 s natively) |
 | `led_trick_in_progress` | contract §7.1 Q1: the view needs a pair turned while the trick it led is being played (open rules question) |
