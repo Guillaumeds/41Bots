@@ -1811,3 +1811,33 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   every later gate's baseline; S3/S4's gate (`arena-s34`) runs without it on both sides, so the two are measured apart.
 - **Limits.** Bots on both sides; the weighting's tau and floor untuned (the first arm's settings); 451 blocks.
 - **Cost.** About $3.80.
+
+### I8. Round 2's training, arm (a): round 2's labels alone (run `student-playout-3`, 2026-10-27)
+- **Question.** STUDENT.md §6 steps 3-4 (the owner's two-arm rule): do the round-2 labels (the retrained pair as the inner players,
+  a third of the positions from the students' own games) give better students than the shipped ones, and does adding round 1's labels
+  (arm b) help or hurt?
+- **Method.** `docs/vast/student-playout-3.manifest.json` (bin ca6bed6): per trick, warm-started from the shipped student's float file
+  with shrink and perturb 0.6, 512,256, the decision-aware loss, three seeds; arm (a) on `playout-labels-2b` alone (250k trick-1, 300k
+  trick-2 decisions at 256 deals). Judged on round 2's two test sets per trick (rules and students' own games, 4,000 decisions), the
+  sets of I6. An AMD EPYC 7B12 box with a GPU, $0.47/h; arm (a) took about 80 min. **Arm (b) failed** at its first step: the trainer
+  refuses shards whose teacher stamps differ (round 1's inner players are the old pair) unless told; rerun as `student-playout-3b`
+  with `allow_stamps: ["teacher"]` (the mix is the arm's purpose).
+- **Result (arm a).** Loss on round 2's test sets (upper 95%), agreement, against I6's candidates on the same sets:
+
+  | | trick 1 | trick 2 |
+  |---|---|---|
+  | old pair (I6) | 0.183% | 0.119% |
+  | shipped (I6) | 0.164% | 0.135% |
+  | round 1 seed 3 (I6) | 0.160% | 0.123% |
+  | arm (a), seeds 1 / 2 / 3 | 0.106 / **0.0975 (0.107)** / 0.107% | 0.112 / 0.114 / **0.103 (0.121)**% |
+  | agreement, best seed | 57.8% | 60.4% |
+  | rules-v1 / random | 0.333 / 0.778% | 0.402 / 0.577% |
+
+  Best seeds: S1 seed 2 `df9004e57db1b10b947c79336a944f1085aad477f9a1597760a86c54276513ff`, S2 seed 3
+  `4a811106d5e6db463b802e4b643dfab9f77a3b8ae70535ae022c8b9220a7ade6`. Trick 2 by place (seed 3): places 1-8 0.132 / 0.129 / 0.074 / 0.145 /
+  0.166 / 0.078 / 0.055 / 0.045% (place 2: the old 0.230, the shipped 0.212). Trick 1 by place (seed 2): 0.122 / 0.129 / 0.086 / 0.084 /
+  0.104 / 0.094 / 0.100 / 0.060%.
+- **Reading.** On round 2's yardstick arm (a) loses about 40% less than the shipped S1 at trick 1 and beats both the shipped and the old
+  S2 at trick 2 (the place-2 weakness roughly halved). Part of the gap is that arm (a) learned from the same teacher the sets are valued
+  with; the money arena decides. Arm (b)'s numbers will be added here.
+- **Cost.** About $0.60 (arm a and the failed start of arm b).
