@@ -262,9 +262,25 @@ Round r ≥ 1 (DAgger, Ross, Gordon & Bagnell 2011; Expert Iteration's loop):
    source `student` (§4), for the playout teacher: round 2's labels take `"source": "student"`
    beside `rules` and `mixed`.
 2. Label a sample of them with the teacher (new shards only).
-3. Train on **all** shards selected so far (the old ones included: training on new data alone
-   makes a network forget), warm-started from the previous student with shrink-and-perturb.
-4. Measure on the fixed test set; keep the new student only if it is no worse; promote by SPRT.
+3. Train **two arms** on the same machine, each warm-started from the previous student with
+   shrink-and-perturb (owner, 2026-10-27, from round 2 on):
+   - **(a) this round's shards alone;**
+   - **(b) all shards selected so far** (the old ones included: training on new data alone can
+     make a network forget).
+   The two arms exist because the playout teacher's labels are not a fixed expert's: a round's
+   values are scored with that round's students playing the other seats, so an older round's
+   labels carry the older students' habits (round 1's carry the shipped-before pair that kept the
+   5 back on a Jack, EXPERIMENTS I2) and mixing them in can teach those habits back. Which wins is
+   measured every round, never assumed. Each round's training manifest names both arms; every
+   seed of each arm runs (a missing seed is rerun, not skipped).
+4. Measure both arms, and the student shipped now, on **this round's test sets** (scored with this
+   round's inner players; from the rules, mixed and students' own games). The arm with the lower
+   decision loss goes forward; if they are within the sets' noise, the one with less data (a)
+   goes forward. Keep it only if it is no worse than the shipped student on the same sets, then
+   promote by SPRT in the money arena (`arena-students`, H1 = +1% of the money a match).
+   Record both arms' numbers in EXPERIMENTS, so the pattern across rounds (does old data help or
+   hurt?) is visible; if (a) wins two rounds running, labels older than the previous round are
+   retired from (b) from then on.
 
 Later sources: the app's recorded real hands (`hand_records`, the positions people meet), labelled
 by the same teacher. A position's source is stamped on its record, so a run can weight or filter

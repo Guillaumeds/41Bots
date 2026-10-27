@@ -63,6 +63,12 @@ Plus ~20 simplifications and engineering savings with identical or tournament-ga
 - **The `bonus_later` switch is removed.** The flat-11 variant was considered and rejected by the owner; a partnership's first bonus in a game is 6, every later one 5, with no switch anywhere (engine, reference, difftest, equity, arena, table manager).
 - The engine's `RULES_VERSION` is now 2; records of version 1 are refused.
 
+### Owner decision of 2026-10-27 (STUDENT.md §6, the round loop)
+- **Every student retraining round trains two arms and measures which wins:** (a) the new round's labels alone, (b) all rounds'
+  labels together, both warm-started from the shipped student; judged on the new round's test sets against each other and the
+  shipped student, the better one to the money arena. Reason: the playout teacher's labels depend on the students inside the
+  playouts, so older rounds' labels carry older students' habits. Details and the retirement rule in STUDENT.md §6 steps 3-4.
+
 ### Amendments by theme (section numbers refer to the sections below; where an original sentence has not been rewritten, the amendment wins)
 
 #### A1. Objective and match equity (§5.3, §6.6, §6.5, §8, §15)
