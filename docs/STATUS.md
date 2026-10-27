@@ -26,7 +26,23 @@
   before 05:08 UTC are under `runs/o2-s1more3-3/out/`). The owner re-rented the same machine by hand: **instance 57615744** (AMD EPYC 7B12 server
   chip, 256 threads, 129 GB RAM, RTX 3060, $0.328/h), unlabelled, idle, for the runs below; `keep: true` on every manifest that uses it.
 
-### State at 2026-10-26 06:45 UTC (read this first; the handoff below is older)
+### State at 2026-10-27 04:55 UTC (read this first; the blocks below are older)
+- The owner topped up vast on the evening of 2026-10-26 and approved an unattended night: "set a watch ... take a machine to do the next
+  pieces", within the $30 ceiling of 2026-10-25. Launched 23:14 UTC with a 5h20m waiting price ladder ($0.35 / 0.45 / 0.65 / 0.75 per h,
+  5 tries a rung, manifests' `machine` blocks): **`arena-students-7`** never found a 180-thread box under $0.75 (closest: 128 threads at
+  $0.65, and the $0.07 France box 57515171 at 128 threads) and gave up at 04:35. **`playout-labels-2`** rented 57893573 (AMD EPYC 7K62,
+  184 threads, $0.78/h) at 00:45 and ran 168 min ($2.10): the 16 test chunks and t1rules 0-85 are in R2 (done-list under
+  `done/playout-labels-2/`), then the launcher's low-CPU watchdog stopped and destroyed it at 03:35 (CPU under 85% for 300 s): the
+  round-2 manifest had `threads: "all"` on every stream (one chunk at a time, a serial setup at 0% CPU between chunks), not run 1c's
+  16-thread chunks fifteen at once. Fixed in 107dc4e (threads 16 everywhere).
+- 04:50 UTC relaunched both: **`arena-students-8`** on any box of 120+ threads (ladder from $0.12; the France box at $0.07 is the target:
+  the owner on 2026-10-25, "keep this france box for everything, no rush"; low_cpu_pct 20, low_cpu_s 900 for the wave tails; max_dollars
+  6) and **`playout-labels-2`** again (resumes; 180 threads, 96 GB, ladder to $0.75; low_cpu_pct 40, low_cpu_s 900; max_dollars 10). At
+  $0.78/h the labels cost about $11-12 for 14-15 h; the owner was told at 01:20 and can stop the box (nothing done is lost).
+- Lesson: **always pass `low_cpu_pct` / `low_cpu_s`** to vast-run.yml for teacher and arena runs (the default 85% / 300 s kills chunk
+  turnover and wave tails), and **never `threads: "all"` on a label stream**.
+
+### State at 2026-10-26 06:45 UTC
 - **Run 1c done** (11.0 h, $3.62; labels 300/200/400/200 + tests 4/4 under `runs/playout-labels-1c/out/`). **Training `student-playout-2`
   done** (54 min, $0.07, a $0.10/h France box, destroyed by its launcher): on run 1c's playout test sets **S1p** (`3d511c54...`, seed 1)
   loses **0.0897%** a decision against the shipped S1's 0.17% (I3), **S2p** (`dc5f8ad0...`, seed 2) **0.0974%** against 0.10% (no clear
