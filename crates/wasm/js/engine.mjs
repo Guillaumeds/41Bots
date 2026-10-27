@@ -93,12 +93,13 @@ export class Engine {
   /**
    * Load a student network (.safetensors bytes) for `method: "student"`. With `trick` (1 or 2) it serves
    * that trick only (S1 for trick 1, S2 for trick 2), ahead of the default network; without it, it is
-   * the default network, which serves every trick that has none of its own. -> { sha256, bytes } (with
+   * the default network, which serves every trick that has none of its own. With `trick` 3 it is S3,
+   * which answers for the other seats in `method: "playout"` at trick 3. -> { sha256, bytes } (with
    * `trick` when given)
    */
   loadStudent(bytes, sha256, trick) {
     if (trick === undefined || trick === null) return this.#load("load_student", bytes, sha256);
-    if (trick !== 1 && trick !== 2) throw new Error("bad_request: a student serves trick 1 or 2");
+    if (trick !== 1 && trick !== 2 && trick !== 3) throw new Error("bad_request: a student serves trick 1, 2 or 3");
     return this.#load("load_student_trick", bytes, sha256, trick);
   }
 

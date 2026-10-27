@@ -206,9 +206,10 @@ pub extern "C" fn load_student(len: u32) -> u32 {
     status(r)
 }
 
-/// Load a student network for one trick (1 or 2) from the input buffer: 0 (the output holds
-/// `{"sha256":…,"trick":…,"bytes":…}`) or 1 (the output holds a refusal). It serves
-/// `"method": "student"` at that trick, ahead of the default network of `load_student`.
+/// Load a student network for one trick (1, 2 or 3) from the input buffer: 0 (the output holds
+/// `{"sha256":…,"trick":…,"bytes":…}`) or 1 (the output holds a refusal). S1 and S2 serve
+/// `"method": "student"` at their trick, ahead of the default network of `load_student`; S3 answers
+/// for the other seats in `"method": "playout"` at trick 3.
 #[allow(unsafe_code)] // An export needs the `no_mangle` attribute; nothing else here is unsafe.
 #[unsafe(no_mangle)]
 pub extern "C" fn load_student_trick(len: u32, trick: u32) -> u32 {

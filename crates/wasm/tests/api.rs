@@ -923,7 +923,7 @@ fn student_bytes(seed: u64) -> Vec<u8> {
 
 /// Per-trick students (S1 for trick 1, S2 for trick 2; docs/WASM-API.md section 7): a student loaded
 /// for a trick serves that trick only, ahead of the default one; a trick with neither is refused
-/// `no_student`; `info` lists them; only tricks 1 and 2 are accepted.
+/// `no_student`; `info` lists them; only tricks 1 to 3 are accepted (trick 3's serves `playout`).
 #[test]
 fn per_trick_students_serve_their_trick() {
     let req_of = |m: &Match| {
@@ -942,7 +942,7 @@ fn per_trick_students_serve_their_trick() {
         Err("bad_file")
     );
     assert_eq!(
-        e.load_student_for(&student_bytes(5), 3).map_err(|r| r.code),
+        e.load_student_for(&student_bytes(5), 4).map_err(|r| r.code),
         Err("bad_request")
     );
     // Only trick 2 has a student: trick 1 is refused, trick 2 is valued by it.
@@ -1165,4 +1165,93 @@ fn a_shortlist_values_its_cards_exactly_as_the_full_search_does() {
             .expect("a card not on offer");
         assert_eq!(bad(json!([card(&cs[0]), off])), "bad_request");
     }
+}
+
+/// `method: "playout"` (docs/STUDENT.md §6.3, docs/WASM-API.md §3): at trick 3 with all eight seats
+/// in play each deal is played out with the trick-3 student answering from every other seat's own
+/// view, exact search from trick 4: the values are the native `evaluate_playout`'s, the method and
+/// the engine name it; shards merge to the whole; without S3 (or S1, S2) it is refused; at trick 4
+/// the result is the search's, byte for byte.
+#[test]
+fn the_playout_method_plays_trick_3_out_with_s3() {
+    let req_of = |m: &Match, deals: u32| {
+        let mut r = app_request(m, deals, 77, Mask::SeatOwnBurns);
+        r["method"] = json!("playout");
+        r
+    };
+    let plain = |m: &Match| !any_turned(m) && m.reneges().is_empty();
+    let t3 = find(41, 0, &|m| plain(m) && playing(m, 3));
+    let t4 = find(42, 0, &|m| plain(m) && playing(m, 4));
+    let mut e = engine(false);
+    assert_eq!(code(&e.evaluate(&req_of(&t3, 6).to_string())), "no_student");
+    e.load_student_for(&student_bytes(5), 1).expect("loads");
+    e.load_student_for(&student_bytes(6), 2).expect("loads");
+    assert_eq!(code(&e.evaluate(&req_of(&t3, 6).to_string())), "no_student");
+    let sha3 = e.load_student_for(&student_bytes(8), 3).expect("loads");
+    let out = e.evaluate(&req_of(&t3, 6).to_string());
+    let v = parse(&out);
+    assert_eq!(v["status"], "ok", "{out}");
+    assert_eq!(v["method"], "playout");
+    assert!(
+        v["engine"]
+            .as_str()
+            .expect("a string")
+            .contains(&format!("playout:{sha3}"))
+    );
+    // The native evaluator on the same deals.
+    let nets: Vec<_> = [5, 6, 8]
+        .iter()
+        .map(|&k| student::net::StudentNet::from_bytes(&student_bytes(k)).expect("loads"))
+        .collect();
+    let students = search::pimc::Students {
+        s1: &nets[0],
+        s2: &nets[1],
+        s3: Some(&nets[2]),
+    };
+    let seat = t3.to_act().expect("a decision");
+    let view = t3.view(seat);
+    let leaf = leaf();
+    let source = BeliefSource::new();
+    let ctx = Ctx {
+        leaf: &*leaf,
+        source: &source,
+        rules: Rules::HOUSE,
+    };
+    let cfg = SearchConfig {
+        w34: 6,
+        ..SearchConfig::default()
+    };
+    let dv = search::pimc::evaluate_playout(
+        &view,
+        &t3.legal_actions(),
+        77,
+        &ctx,
+        &cfg,
+        &students,
+        4,
+        None,
+    );
+    assert_eq!(dv.method, search::pimc::Method::PlayoutPimc);
+    let mut native: Vec<_> = dv.candidates.clone();
+    native.sort_by_key(|x| (x.0, x.1));
+    assert_eq!(api_means(&v), native);
+    // Shards merge to the whole.
+    let mut parts = Vec::new();
+    for i in 0..3 {
+        let mut r = req_of(&t3, 6);
+        r["shard"] = json!(i);
+        r["shards"] = json!(3);
+        parts.push(e.evaluate(&r.to_string()));
+    }
+    assert_eq!(
+        merge(&format!("[{}]", parts.join(","))),
+        merge(&format!("[{out}]"))
+    );
+    // At trick 4 nothing is played out: the search's result.
+    let search = e.evaluate(&app_request(&t4, 6, 77, Mask::SeatOwnBurns).to_string());
+    assert_eq!(e.evaluate(&req_of(&t4, 6).to_string()), search);
+    // A bad method name is refused.
+    let mut r = req_of(&t3, 6);
+    r["method"] = json!("rollout");
+    assert_eq!(code(&e.evaluate(&r.to_string())), "bad_request");
 }
