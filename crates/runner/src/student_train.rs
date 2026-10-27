@@ -310,7 +310,9 @@ pub(crate) struct Params {
     pub fetch_jobs: u64,
     pub upload: bool,
     pub allow_stamps: Vec<String>,
-    /// The warm start's float file (`init_path`, resolved from the `init` input), if any.
+    /// The warm start's input name (`init`), as the manifest gives it.
+    pub init_input: Option<String>,
+    /// Its local float file (`init_path`), once the worker has resolved it.
     pub init: Option<String>,
     /// Shrink and perturb λ for the warm start (`--shrink-perturb`).
     pub shrink_perturb: Option<f64>,
@@ -815,15 +817,19 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
     if !(1..1000).contains(&val_permille) {
         return Err(err("val_permille must be 1 to 999"));
     }
-    let init = match (p.get("init"), p.get("init_path")) {
-        (None | Some(Value::Null), None | Some(Value::Null)) => None,
-        (_, Some(Value::String(path))) if !path.is_empty() => Some(path.clone()),
-        (Some(Value::String(_)), None | Some(Value::Null)) => {
+    let init_input = match p.get("init") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(n)) if !n.is_empty() => Some(n.clone()),
+        Some(_) => return Err(err("init must be the name of a manifest input")),
+    };
+    let init = match p.get("init_path") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(path)) if !path.is_empty() && init_input.is_some() => Some(path.clone()),
+        Some(_) => {
             return Err(err(
-                "init names an input the worker did not resolve (init_path missing)",
+                "init_path is set by the worker from init, never by hand",
             ));
         }
-        _ => return Err(err("init must be the name of a manifest input")),
     };
     let shrink_perturb = match p.get("shrink_perturb") {
         None | Some(Value::Null) => None,
@@ -832,7 +838,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
                 .as_f64()
                 .filter(|x| x.is_finite() && *x > 0.0 && *x <= 1.0)
                 .ok_or_else(|| err("shrink_perturb must be a number above 0 and at most 1"))?;
-            if init.is_none() {
+            if init_input.is_none() {
                 return Err(err("shrink_perturb needs init (a warm start)"));
             }
             Some(x)
@@ -868,6 +874,7 @@ pub(crate) fn parse(p: &Value) -> Result<Params, String> {
         fetch_jobs: u("fetch_jobs", 4)?.clamp(1, 32),
         upload: b("upload", true)?,
         allow_stamps: strings("allow_stamps", &[])?,
+        init_input,
         init,
         shrink_perturb,
     })
@@ -991,6 +998,11 @@ pub(crate) fn chunk_with(
     table_rec: Value,
 ) -> Result<Value, String> {
     let q = parse(p)?;
+    if q.init_input.is_some() && q.init.is_none() {
+        return Err(err(
+            "init names an input the worker did not resolve (init_path missing)",
+        ));
+    }
     let remote = progs.tools.remote.clone().ok_or_else(|| {
         err("the teacher shards come from the remote store (R2, or RUNNER_REMOTE_DIR), and there is none")
     })?;

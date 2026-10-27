@@ -374,6 +374,14 @@ pub fn parse_v2(v: &Value) -> Result<Manifest2, String> {
         // (size, width), from its live files).
         if kind == "student_train" {
             crate::student_train::parse(&params).map_err(|e| format!("stream `{name}`: {e}"))?;
+            // A warm start names its float file among the manifest's inputs.
+            if let Some(n) = params.get("init").and_then(Value::as_str)
+                && !inputs.iter().any(|(i, _)| i == n)
+            {
+                return Err(format!(
+                    "stream `{name}`: init `{n}` is not among the manifest's inputs"
+                ));
+            }
             if chunks != Chunks::Fixed(1) {
                 return Err(format!(
                     "stream `{name}`: student_train is one chunk (\"chunks\": 1): it trains every \

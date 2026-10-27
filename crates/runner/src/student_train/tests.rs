@@ -266,11 +266,16 @@ fn warm_start_settings_are_checked() {
     );
     let mut p = base();
     p["init"] = json!("s1prev");
-    assert!(
-        parse(&p)
-            .expect_err("unresolved")
-            .contains("init_path missing")
+    // Unresolved, the settings still parse (the scheduler checks a manifest before any worker);
+    // a chunk refuses to train from them (below, in the fake-program chunk).
+    let q = parse(&p).expect("parses unresolved");
+    assert_eq!(
+        (q.init_input.as_deref(), q.init.as_deref()),
+        (Some("s1prev"), None)
     );
+    let mut p = base();
+    p["init_path"] = json!("/x");
+    assert!(parse(&p).expect_err("by hand").contains("never by hand"));
     let mut p = base();
     p["shrink_perturb"] = json!(0.3);
     assert!(parse(&p).expect_err("no init").contains("needs init"));
@@ -401,15 +406,88 @@ fn the_manifests_parse() {
         "student-t2-g2arm-50k.manifest.json",
         "student-t2-plainarm-50k.manifest.json",
         "student-playout-train.manifest.json",
+        "student-playout-3.manifest.json",
     ] {
         let text = fs::read_to_string(root.join(name)).expect(name);
         let v: Value = serde_json::from_str(&text).expect(name);
         crate::sched::parse_v2(&v).unwrap_or_else(|e| panic!("{name}: {e}"));
+        // The worker's inputs: each manifest input's name, to a stand-in path.
+        let inputs: BTreeMap<String, String> = v["inputs"]
+            .as_object()
+            .map(|o| o.keys().map(|k| (k.clone(), format!("/in/{k}"))).collect())
+            .unwrap_or_default();
         for st in v["streams"].as_array().expect("streams") {
-            let q = parse(&st["params"]).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let mut params = st["params"].clone();
+            resolve_init(&mut params, &inputs).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let q = parse(&params).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert!(!q.train.is_empty() && !q.test.is_empty(), "{name}");
         }
     }
+    // Round 2 (STUDENT.md §6 steps 3-4): per trick, arm (a) round 2's labels alone and arm (b)
+    // rounds 1 and 2, both warm-started from the shipped student with shrink and perturb, three
+    // seeds each, judged on round 2's test sets.
+    let v: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("student-playout-3.manifest.json")).expect("read"),
+    )
+    .expect("JSON");
+    let inputs: BTreeMap<String, String> = [
+        ("s1prev".to_string(), "/in/s1".to_string()),
+        ("s2prev".to_string(), "/in/s2".to_string()),
+    ]
+    .into();
+    for (i, size, init, runs) in [
+        (0, 250_000, "/in/s1", vec!["playout-labels-2b"]),
+        (1, 300_000, "/in/s2", vec!["playout-labels-2b"]),
+        (
+            2,
+            500_000,
+            "/in/s1",
+            vec!["playout-labels-2b", "playout-labels-1c"],
+        ),
+        (
+            3,
+            600_000,
+            "/in/s2",
+            vec!["playout-labels-2b", "playout-labels-1c"],
+        ),
+    ] {
+        let mut params = v["streams"][i]["params"].clone();
+        resolve_init(&mut params, &inputs).expect("resolves");
+        let q = parse(&params).expect("parses");
+        assert_eq!(
+            (q.init.as_deref(), q.shrink_perturb),
+            (Some(init), Some(0.6))
+        );
+        assert_eq!(q.points.len(), 3);
+        assert!(
+            q.points
+                .iter()
+                .all(|p| p.size == size && p.deals == Some(256))
+        );
+        let mut used: Vec<&str> = params["train_inputs"]
+            .as_array()
+            .expect("inputs")
+            .iter()
+            .map(|e| e["run"].as_str().expect("run"))
+            .collect();
+        used.dedup();
+        assert_eq!(used, runs, "stream {i}");
+        let tests: Vec<&str> = params["test_inputs"]
+            .as_array()
+            .expect("tests")
+            .iter()
+            .map(|e| e["run"].as_str().expect("run"))
+            .collect();
+        assert_eq!(tests, ["playout-labels-2b", "playout-labels-2b"]);
+    }
+    // The scheduler refuses an init that is not among the manifest's inputs.
+    let mut bad = v.clone();
+    bad["streams"][0]["params"]["init"] = json!("nope");
+    let e = crate::sched::parse_v2(&bad).expect_err("unknown init");
+    assert!(
+        e.contains("init `nope` is not among the manifest's inputs"),
+        "{e}"
+    );
     // The playout students' training (STUDENT.md 3.1): two streams, S1' on run 1's trick-1 labels
     // and S2' on its trick-2 labels, each judged on that run's own playout test set, three seeds
     // of the decision-aware loss at the labels' 256 deals.
@@ -790,6 +868,13 @@ echo "group n loss"
         trainings[0].contains(&format!("--init {} --shrink-perturb 0.3", init.display())),
         "{log}"
     );
+
+    // An init the worker did not resolve is refused before anything is fetched.
+    let mut unresolved = small.clone();
+    unresolved["init"] = json!("s1prev");
+    let mut ctx5 = Ctx::local("student-train-test", &tmp.join("c-unresolved"), 4);
+    let e = chunk_with(&mut ctx5, &unresolved, &progs, &table, json!({})).expect_err("refused");
+    assert!(e.contains("init_path missing"), "{e}");
 
     // Refusals.
     let fails = |q: Value, word: &str| {
