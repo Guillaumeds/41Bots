@@ -47,15 +47,18 @@ pub(crate) enum BotSpec {
         inference: Option<InferenceCfg>,
         /// The trick-3 student's input name, if any.
         student3: Option<String>,
+        /// The trick-4 student's input name, if any (with `student3`).
+        student4: Option<String>,
     },
 }
 
 /// The keys an app bot object may carry.
-const APP_KEYS: [&str; 8] = [
+const APP_KEYS: [&str; 9] = [
     "kind",
     "student1",
     "student2",
     "student3",
+    "student4",
     "deals3",
     "deals45",
     "base",
@@ -102,6 +105,15 @@ pub(crate) fn parse_bot(params: &Value, side: &str) -> Result<BotSpec, String> {
     let student3 = match o.get("student3") {
         None | Some(Value::Null) => None,
         Some(_) => Some(input("student3")?),
+    };
+    let student4 = match o.get("student4") {
+        None | Some(Value::Null) => None,
+        Some(_) if student3.is_none() => {
+            return Err(format!(
+                "params.{side}.student4 plays trick 4 after the trick-3 student: give student3 too"
+            ));
+        }
+        Some(_) => Some(input("student4")?),
     };
     let deals45 = match o.get("deals45") {
         None => AppPlay::APP_DEALS45,
@@ -174,6 +186,7 @@ pub(crate) fn parse_bot(params: &Value, side: &str) -> Result<BotSpec, String> {
         base,
         inference,
         student3,
+        student4,
     })
 }
 
@@ -198,10 +211,11 @@ pub(crate) fn input_names(params: &Value) -> Result<Vec<String>, String> {
             student1,
             student2,
             student3,
+            student4,
             ..
         } = spec
         {
-            for n in [Some(student1), Some(student2), student3]
+            for n in [Some(student1), Some(student2), student3, student4]
                 .into_iter()
                 .flatten()
             {
@@ -232,6 +246,7 @@ pub(crate) fn build(
             base,
             inference,
             student3,
+            student4,
         } => {
             let read = |name: &str| -> Result<Vec<u8>, String> {
                 let path = inputs
@@ -241,11 +256,13 @@ pub(crate) fn build(
             };
             let (s1, s2) = (read(student1)?, read(student2)?);
             let s3 = student3.as_deref().map(read).transpose()?;
+            let s4 = student4.as_deref().map(read).transpose()?;
             let f = search::bot::app_factory(
                 base,
                 &s1,
                 &s2,
                 s3.as_deref(),
+                s4.as_deref(),
                 *deals3,
                 *deals45,
                 *inference,
@@ -312,6 +329,7 @@ mod tests {
                 base: "pimc-v0".into(),
                 inference: None,
                 student3: None,
+                student4: None,
             }
         );
         let p = json!({ "a": app(json!({ "deals3": [64, 64, 128, 128, 256, 256, 256, 256],
@@ -328,6 +346,7 @@ mod tests {
                 base: "pimc-v0:tt_mb=32".into(),
                 inference: None,
                 student3: None,
+                student4: None,
             }
         );
         assert!(matches!(b, BotSpec::App { ref student1, .. } if student1 == "old1"));
@@ -363,6 +382,12 @@ mod tests {
             let p = json!({ "a": app(json!({ "student3": bad })), "b": "pimc-v0" });
             assert!(parse_bots(&p).is_err());
         }
+        // A trick-4 student comes after the trick-3 one.
+        let p =
+            json!({ "a": app(json!({ "student3": "s3", "student4": "s4" })), "b": app(json!({})) });
+        assert_eq!(input_names(&p).expect("names"), ["s1", "s2", "s3", "s4"]);
+        let p = json!({ "a": app(json!({ "student4": "s4" })), "b": "pimc-v0" });
+        assert!(parse_bots(&p).expect_err("no s3").contains("student3 too"));
         let same = json!({ "a": app(json!({})), "b": app(json!({})) });
         assert_eq!(input_names(&same).expect("names"), ["s1", "s2"]);
         assert!(
@@ -524,6 +549,7 @@ mod tests {
             base: "pimc-v0".into(),
             inference: None,
             student3: None,
+            student4: None,
         };
         let e = build(&spec, &BTreeMap::new()).err().expect("no inputs");
         assert!(e.contains("input `s1` is not among the inputs"), "{e}");

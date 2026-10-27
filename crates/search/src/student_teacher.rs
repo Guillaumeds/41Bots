@@ -175,6 +175,8 @@ pub enum Teacher<'a> {
         sha2: &'a str,
         /// S3's file SHA-256, when trick 3 is played out by S3 (a cut at 4 or later).
         sha3: Option<&'a str>,
+        /// S4's file SHA-256, when trick 4 is played out by S4 too (a cut at 5 or later).
+        sha4: Option<&'a str>,
     },
 }
 
@@ -209,8 +211,12 @@ impl Teacher<'_> {
                 sha1,
                 sha2,
                 sha3: Some(sha3),
+                sha4,
                 ..
-            } => format!("playout:{sha1}:{sha2}:{sha3}:cut{cut}"),
+            } => match sha4 {
+                None => format!("playout:{sha1}:{sha2}:{sha3}:cut{cut}"),
+                Some(sha4) => format!("playout:{sha1}:{sha2}:{sha3}:{sha4}:cut{cut}"),
+            },
         }
     }
 }
@@ -606,6 +612,14 @@ pub fn check_job(job: &TeacherJob, teacher: &Teacher, test_role: bool) -> Result
         && students.s3.is_some() != sha3.is_some()
     {
         return Err("a playout teacher's S3 and its SHA-256 come together".into());
+    }
+    if let Teacher::Playout { students, sha4, .. } = teacher {
+        if students.s4.is_some() != sha4.is_some() {
+            return Err("a playout teacher's S4 and its SHA-256 come together".into());
+        }
+        if students.s4.is_some() && students.s3.is_none() {
+            return Err("S4 plays trick 4 after S3's trick 3: give S3 too".into());
+        }
     }
     if let Teacher::Playout { cut, .. } = teacher
         && !(1..=6).contains(cut)
@@ -1037,6 +1051,7 @@ mod tests {
                 sha1: "a",
                 sha2: "b",
                 sha3: None,
+                sha4: None,
             };
             let j = job(trick, 5, 4, SOURCE_RULES, 1);
             let mut mem = SolveMem::new();
@@ -1053,6 +1068,7 @@ mod tests {
                 sha1: "a",
                 sha2: "b",
                 sha3: None,
+                sha4: None,
             }
             .stamp(),
             "playout:a:b:cut3"
@@ -1070,10 +1086,51 @@ mod tests {
                 sha1: "a",
                 sha2: "b",
                 sha3: Some("c"),
+                sha4: None,
             }
             .stamp(),
             "playout:a:b:c:cut4"
         );
+        // S4 too: the stamp names both; S4 without S3, or without its SHA-256, is refused.
+        let s4 = student::net::random_net(9, &[16, 8], 12);
+        let with4 = Students {
+            s4: Some(&s4),
+            ..with3
+        };
+        assert_eq!(
+            Teacher::Playout {
+                students: with4,
+                cut: 5,
+                sha1: "a",
+                sha2: "b",
+                sha3: Some("c"),
+                sha4: Some("d"),
+            }
+            .stamp(),
+            "playout:a:b:c:d:cut5"
+        );
+        let j3 = job(3, 5, 4, SOURCE_RULES, 1);
+        let only4 = Students {
+            s4: Some(&s4),
+            ..Students::two(&s1, &s2)
+        };
+        for (st, sha3, sha4, word) in [
+            (only4, None, Some("d"), "give S3 too"),
+            (with4, Some("c"), None, "S4 and its SHA-256"),
+        ] {
+            let t = Teacher::Playout {
+                students: st,
+                cut: 5,
+                sha1: "a",
+                sha2: "b",
+                sha3,
+                sha4,
+            };
+            assert!(
+                check_job(&j3, &t, false).unwrap_err().contains(word),
+                "{word}"
+            );
+        }
         let j = job(3, 5, 4, SOURCE_RULES, 1);
         for (st, sha3) in [(with3, None), (Students::two(&s1, &s2), Some("c"))] {
             let t = Teacher::Playout {
@@ -1082,6 +1139,7 @@ mod tests {
                 sha1: "a",
                 sha2: "b",
                 sha3,
+                sha4: None,
             };
             assert!(
                 check_job(&j, &t, false)
@@ -1110,6 +1168,7 @@ mod tests {
             sha1: "a",
             sha2: "b",
             sha3: None,
+            sha4: None,
         };
         let mut keys = Vec::new();
         for threads in [1, 3] {
@@ -1183,6 +1242,7 @@ mod tests {
                 sha1: "a",
                 sha2: "b",
                 sha3: None,
+                sha4: None,
             };
             let j = job(1, 12, 2, SOURCE_RULES, 1);
             check_job(&j, &teacher, false).expect("a valid job");
@@ -1201,6 +1261,7 @@ mod tests {
             sha1: "a",
             sha2: "b",
             sha3: None,
+            sha4: None,
         };
         assert!(check_job(&job(1, 1, 1, SOURCE_RULES, 1), &bad, false).is_err());
     }
@@ -1223,6 +1284,7 @@ mod tests {
             sha1: "a",
             sha2: "b",
             sha3: None,
+            sha4: None,
         };
         let mut differ = 0;
         for trick in [1u8, 2] {

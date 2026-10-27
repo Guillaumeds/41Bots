@@ -184,6 +184,10 @@ pub struct AppPlay {
     /// search from trick 4 (`crate::pimc::evaluate_playout`, cut 4), instead of the open-hand
     /// solve. `None` plays as the app does today.
     pub s3: Option<Arc<StudentNet>>,
+    /// The trick-4 student (needs S3): trick-3 deals are played out through trick 4 too (cut 5,
+    /// trick 5 being forced: hidden-card to the end of the hand), and a trick-4 decision's deals are
+    /// valued by playouts in which the other seats answer with S4. `None`: trick 4 as today.
+    pub s4: Option<Arc<StudentNet>>,
 }
 
 /// The world weighting's settings in a bot: the temperature and the floor of
@@ -246,6 +250,7 @@ impl AppPlay {
             deals45,
             inference: None,
             s3: None,
+            s4: None,
         })
     }
 
@@ -257,12 +262,35 @@ impl AppPlay {
         Ok(self)
     }
 
+    /// The same player with the trick-4 student as well ([`AppPlay::s4`]; S3 must be set first).
+    pub fn with_student4(mut self, s4: &[u8]) -> Result<AppPlay, String> {
+        if self.s3.is_none() {
+            return Err(
+                "student4 plays trick 4 after the trick-3 student: give student3 too".into(),
+            );
+        }
+        let net = StudentNet::from_bytes(s4).map_err(|e| format!("student4: {e}"))?;
+        self.s4 = Some(Arc::new(net));
+        Ok(self)
+    }
+
+    /// The trick at whose start a playout from `trick` hands over to the exact search: after the
+    /// last trick with a student (trick 5 is forced), or `None` when `trick` has no student.
+    fn playout_cut(&self, trick: u8) -> Option<u8> {
+        match (trick, self.s3.is_some(), self.s4.is_some()) {
+            (3, true, false) => Some(4),
+            (3, true, true) | (4, _, true) => Some(5),
+            _ => None,
+        }
+    }
+
     /// The students as a playout plays them.
     fn students(&self) -> Students<'_> {
         Students {
             s1: &self.s1,
             s2: &self.s2,
             s3: self.s3.as_deref(),
+            s4: self.s4.as_deref(),
         }
     }
 
@@ -309,6 +337,10 @@ impl AppPlay {
         let s3 = self.s3.as_ref().map_or(String::new(), |n| {
             format!(",s3={}", &n.sha256[..12.min(n.sha256.len())])
         });
+        let s3 = match &self.s4 {
+            Some(n) => format!("{s3},s4={}", &n.sha256[..12.min(n.sha256.len())]),
+            None => s3,
+        };
         format!(
             "app:s1={},s2={},deals3={},deals45={}{inf}{s3}",
             &self.s1.sha256[..12.min(self.s1.sha256.len())],
@@ -435,7 +467,7 @@ impl PimcBot {
                 w34: app.deals_for(p.trick_no, p.trick_cards.len()),
                 ..self.cfg
             };
-            if p.trick_no == 3 && app.s3.is_some() {
+            if let Some(cut) = app.playout_cut(p.trick_no) {
                 let inf = app.inference();
                 return evaluate_playout(
                     view,
@@ -444,7 +476,7 @@ impl PimcBot {
                     &ctx,
                     &cfg,
                     &app.students(),
-                    4,
+                    cut,
                     inf.as_ref(),
                 );
             }
@@ -565,6 +597,7 @@ pub fn app_factory(
     s1: &[u8],
     s2: &[u8],
     s3: Option<&[u8]>,
+    s4: Option<&[u8]>,
     deals3: [u32; 8],
     deals45: u32,
     inference: Option<InferenceCfg>,
@@ -576,6 +609,9 @@ pub fn app_factory(
     }
     if let Some(s3) = s3 {
         app = app.with_student3(s3)?;
+    }
+    if let Some(s4) = s4 {
+        app = app.with_student4(s4)?;
     }
     let table = equity()?;
     let leaf: Arc<SharedLeaf> = table;
@@ -731,6 +767,7 @@ mod tests {
             deals45: 1,
             inference: None,
             s3: None,
+            s4: None,
         }
     }
 
@@ -925,6 +962,63 @@ mod tests {
             played_out
                 .iter()
                 .all(|(_, dv)| dv.belief == BeliefMode::Policy)
+        );
+    }
+
+    /// With S3 and S4 the decisions of tricks 3 and 4 are played out (hidden-card to the end of
+    /// the hand: trick 5 is forced), every action legal over whole matches; S4 alone is refused.
+    #[test]
+    fn the_app_player_with_trick_3_and_4_students_plays_both_out() {
+        let net = |k| Arc::new(student::net::random_net(k, &[16, 8], 12));
+        let app = Arc::new(AppPlay {
+            s3: Some(net(7)),
+            s4: Some(net(8)),
+            ..tiny_app()
+        });
+        assert!(
+            app.name().contains(",s3=") && app.name().contains(",s4="),
+            "{}",
+            app.name()
+        );
+        assert_eq!(
+            (app.playout_cut(3), app.playout_cut(4), app.playout_cut(5)),
+            (Some(5), Some(5), None)
+        );
+        let l = leaf();
+        let source = default_source();
+        let log: DecisionLog = Arc::new(Mutex::new(Vec::new()));
+        let make = || {
+            let mut b = PimcBot::new("app".into(), tiny_cfg(), l.clone(), source.clone())
+                .with_app(app.clone());
+            b.log = Some(log.clone());
+            b
+        };
+        play_matches(&make, 51..54);
+        let mut by_trick = [0u32; 6];
+        for (view, dv) in log.lock().expect("log").iter() {
+            let turned = view.public.turned_teams.iter().any(|&x| x);
+            if dv.method == Method::PlayoutPimc {
+                assert!(matches!(view.public.trick_no, 3 | 4) && !turned);
+                by_trick[usize::from(view.public.trick_no)] += 1;
+            } else if dv.method == Method::ExactPimc {
+                assert!(
+                    turned || view.public.trick_no == 5,
+                    "exact at trick {}",
+                    view.public.trick_no
+                );
+            }
+        }
+        assert!(by_trick[3] > 10 && by_trick[4] > 10, "{by_trick:?}");
+        // S4 alone is refused; with S3 only, trick 4 is exact (cut 4 from trick 3).
+        let bytes = student::net::write_net(net(8).layers(), &BTreeMap::new());
+        assert!(tiny_app().with_student4(&bytes).is_err());
+        let s3_only = AppPlay {
+            s3: Some(net(7)),
+            ..tiny_app()
+        };
+        assert_eq!(
+            (s3_only.playout_cut(3), s3_only.playout_cut(4)),
+            (Some(4), None)
         );
     }
 

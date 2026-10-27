@@ -284,12 +284,20 @@ pub struct Students<'a> {
     /// The trick-3 student (S3), when there is one (docs/STUDENT.md §6.3): a playout cut at 4 or
     /// later plays trick 3 with it from every seat's own view.
     pub s3: Option<&'a StudentNet>,
+    /// The trick-4 student (S4), when there is one (§6.3): a playout cut at 5 plays trick 4 with it,
+    /// and trick 5 is forced, so the playout is hidden-card to the end of the hand.
+    pub s4: Option<&'a StudentNet>,
 }
 
 impl<'a> Students<'a> {
     /// The trick-1 and trick-2 students alone.
     pub fn two(s1: &'a StudentNet, s2: &'a StudentNet) -> Students<'a> {
-        Students { s1, s2, s3: None }
+        Students {
+            s1,
+            s2,
+            s3: None,
+            s4: None,
+        }
     }
 
     /// The network that plays trick `t`; none for other tricks (the dealer's burn before trick 1
@@ -299,6 +307,7 @@ impl<'a> Students<'a> {
             1 => Some(self.s1),
             2 => Some(self.s2),
             3 => self.s3,
+            4 => self.s4,
             _ => None,
         }
     }
