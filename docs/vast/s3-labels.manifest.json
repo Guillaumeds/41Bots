@@ -1,0 +1,149 @@
+{
+ "format": 2,
+ "run_seed": 1,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "run_id": "s3-labels-1",
+ "note": "The trick-3 student S3's labels (docs/STUDENT.md §6.3): trick-3 decisions valued by the playout teacher at a cut of 3, which is exact PIMC from the seat's view (the app's trick-3 play today), at 256 deals (test sets 512). Positions from rules, mixed and the students' own games (S1 3d511c54 / S2 dc5f8ad0, the shipped pair, play tricks 1-2). 100k rules, 50k mixed, 100k student decisions; test sets of 2,000 from rules and from the students' games. 16-thread chunks.",
+ "machine": {
+  "min_cores": 120,
+  "min_ram_gb": 60,
+  "disk_gb": 60,
+  "keep": false,
+  "max_dph": 0.75,
+  "wait_for_offer_min": 240,
+  "offer_poll_s": 60,
+  "price_steps": [
+   0.12,
+   0.35,
+   0.65,
+   0.75
+  ],
+  "tries_per_step": 5
+ },
+ "inputs": {
+  "s1": "sha256:3d511c54440b135e94728ef131e8957dd5fb019ed35ac02b1b85943e22144e18",
+  "s2": "sha256:dc5f8ad0055d663d2b140ad6f4c08f43baddac479181935c56922661d6dd5ef1"
+ },
+ "streams": [
+  {
+   "name": "t3test",
+   "priority": 1,
+   "kind": "student_teacher",
+   "chunks": 4,
+   "params": {
+    "threads": 16,
+    "trick": 3,
+    "count": 500,
+    "deals": 512,
+    "seed": 32343,
+    "source": "rules",
+    "role": "test",
+    "teacher": "playout",
+    "student1": "s1",
+    "student2": "s2",
+    "playout_cut": 3,
+    "tt_mb": 64,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  },
+  {
+   "name": "t3stest",
+   "priority": 2,
+   "kind": "student_teacher",
+   "chunks": 4,
+   "params": {
+    "threads": 16,
+    "trick": 3,
+    "count": 500,
+    "deals": 512,
+    "seed": 32343,
+    "source": "student",
+    "role": "test",
+    "teacher": "playout",
+    "student1": "s1",
+    "student2": "s2",
+    "playout_cut": 3,
+    "tt_mb": 64,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  },
+  {
+   "name": "t3rules",
+   "priority": 3,
+   "kind": "student_teacher",
+   "chunks": 200,
+   "params": {
+    "threads": 16,
+    "trick": 3,
+    "count": 500,
+    "deals": 256,
+    "seed": 9203,
+    "source": "rules",
+    "teacher": "playout",
+    "student1": "s1",
+    "student2": "s2",
+    "playout_cut": 3,
+    "tt_mb": 64,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  },
+  {
+   "name": "t3mixed",
+   "priority": 4,
+   "kind": "student_teacher",
+   "chunks": 100,
+   "params": {
+    "threads": 16,
+    "trick": 3,
+    "count": 500,
+    "deals": 256,
+    "seed": 9204,
+    "source": "mixed",
+    "teacher": "playout",
+    "student1": "s1",
+    "student2": "s2",
+    "playout_cut": 3,
+    "tt_mb": 64,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  },
+  {
+   "name": "t3student",
+   "priority": 5,
+   "kind": "student_teacher",
+   "chunks": 200,
+   "params": {
+    "threads": 16,
+    "trick": 3,
+    "count": 500,
+    "deals": 256,
+    "seed": 9207,
+    "source": "student",
+    "teacher": "playout",
+    "student1": "s1",
+    "student2": "s2",
+    "playout_cut": 3,
+    "tt_mb": 64,
+    "table": {
+     "hands": 1000000,
+     "seed": 1
+    }
+   }
+  }
+ ]
+}
