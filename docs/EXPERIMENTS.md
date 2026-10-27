@@ -1795,3 +1795,19 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   as well as the shipped one, and a pair of the best S1 with the old S2 is a candidate for the gate.
 - **Limits.** One set of 4,000 decisions a trick; the split-half numbers are themselves noisy (256 deals a half); bots' positions.
 - **Cost.** None (build VM, seconds a candidate).
+
+### I7. The inference gate: deals weighted by the other seats' plays (run `arena-inference-1`, 2026-10-27)
+- **Question.** Does weighting the exact searches' deals at tricks 3-5 by how likely the other seats' tricks 1-2 plays were under the
+  students (STUDENT.md §6.2, PLAN §6.4 point 3) win money for the app's player?
+- **Method.** `docs/vast/arena-inference.manifest.json`: the app's player (`AppPlay`, the shipped S1 `3d511c54` / S2 `dc5f8ad0`, the
+  app's deal counts) with `"inference": {"tau": 10, "floor": 50}` against the same player with uniform deals; 14-way duplicate blocks,
+  SPRT [0, 0.01] at alpha = beta = 0.05, cap 3,000. AMD Threadripper 3990X workstation chip (128 threads, $0.67/h), 15:00-20:37 UTC,
+  about $3.80 (handed over to the cleanup at 330 min, closed at 20:48).
+- **Result.** **Accept** after 451 blocks (113 chunks): LLR 2.95 against ln 19 = 2.94; mean block score **+0.0133 of the money**
+  (sd 0.112, standard error 0.0053: about +0.3% to +2.4% at two standard errors).
+- **Reading.** Reading the cards from how the others played wins about 1.3% of the money a match at tricks 3-5, more than the retrained
+  students did (I5, +1.0%), in line with Skat's +2 to +9 points a game from inference rather than Jass's nothing. Next: the app (the WASM
+  request needs the weighting: the hidden-card replay of tricks 1-2 with the students per deal, `search::inference`), then it is in
+  every later gate's baseline; S3/S4's gate (`arena-s34`) runs without it on both sides, so the two are measured apart.
+- **Limits.** Bots on both sides; the weighting's tau and floor untuned (the first arm's settings); 451 blocks.
+- **Cost.** About $3.80.

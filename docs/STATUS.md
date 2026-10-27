@@ -26,7 +26,14 @@
   before 05:08 UTC are under `runs/o2-s1more3-3/out/`). The owner re-rented the same machine by hand: **instance 57615744** (AMD EPYC 7B12 server
   chip, 256 threads, 129 GB RAM, RTX 3060, $0.328/h), unlabelled, idle, for the runs below; `keep: true` on every manifest that uses it.
 
-### State at 2026-10-27 17:45 UTC (read this first; the blocks below are older)
+### State at 2026-10-27 21:05 UTC (read this first; the blocks below are older)
+- **The inference gate accepted** (EXPERIMENTS I7): deals weighted by the other seats' plays win about +1.3% of the money a match
+  (451 blocks, $3.80). Next for it: the WASM API and the app (not built yet).
+- S3/S4 labels DONE (`s3-labels-1` 18:15, $1.3; `s4-labels-1` 19:32, $0.9); `s34-train-1` running since about 21:00 (EPYC 7B12 GPU box,
+  $0.46/h). `student-playout-3` (round-2 training): its first box disappeared without heartbeats; see the run log.
+- Spend since 2026-10-25 about $22 of the owner's $30.
+
+### State at 2026-10-27 17:45 UTC
 - **S4, the trick-4 student, built and merged** (PR #14, 72c6221; release binaries built): with S3 and S4 a trick-3 or trick-4
   decision is played out from every seat's own view to the end of the hand. One gate for both: `arena-s34.manifest.json` (fill s3/s4).
 - **Runs:** `playout-labels-2b` DONE (1,116 of 1,116, 16:56 UTC); `student-playout-3` (round-2 two-arm training, vast-run 40549557888,
