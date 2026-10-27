@@ -1,5 +1,6 @@
 # Download a run's results from R2 (runs/<run_id>/, excluding heartbeats) and publish them as a GitHub artifact,
-# so sessions without R2 access can read them.
+# so sessions without R2 access can read them. `prefixes` limits the download to some folders of the run
+# (e.g. "out/t1test/ out/t2test/ merged.json"), for runs whose whole output is too big to carry.
 name: r2-fetch
 on:
   workflow_dispatch:
@@ -7,6 +8,9 @@ on:
       run_id:
         description: "Run id under runs/ in the bucket"
         required: true
+      prefixes:
+        description: "Optional: space-separated paths under runs/<run_id>/ to fetch (folders end in /); empty = the whole run"
+        default: ""
 permissions:
   contents: read
 jobs:
@@ -22,11 +26,25 @@ jobs:
           ENDPOINT: ${{ vars.R2_S3_ENDPOINT }}
           BUCKET: ${{ vars.R2_BUCKET }}
           RUN_ID: ${{ inputs.run_id }}
+          PREFIXES: ${{ inputs.prefixes }}
         run: |
           set -euo pipefail
           case "$RUN_ID" in *[!A-Za-z0-9._-]*|'') echo "bad run_id"; exit 1;; esac
-          aws --endpoint-url "$ENDPOINT" s3 cp "s3://$BUCKET/runs/$RUN_ID/" "out/$RUN_ID/" --recursive --exclude "heartbeat/*" --only-show-errors
-          find out -type f | sort | head -100
+          if [ -z "$PREFIXES" ]; then
+            aws --endpoint-url "$ENDPOINT" s3 cp "s3://$BUCKET/runs/$RUN_ID/" "out/$RUN_ID/" --recursive --exclude "heartbeat/*" --only-show-errors
+          else
+            for p in $PREFIXES; do
+              case "$p" in *..*|/*|*[!A-Za-z0-9._/-]*) echo "bad prefix $p"; exit 1;; esac
+              case "$p" in
+                */) aws --endpoint-url "$ENDPOINT" s3 cp "s3://$BUCKET/runs/$RUN_ID/$p" "out/$RUN_ID/$p" --recursive --only-show-errors ;;
+                *)  aws --endpoint-url "$ENDPOINT" s3 cp "s3://$BUCKET/runs/$RUN_ID/$p" "out/$RUN_ID/$p" --only-show-errors ;;
+              esac
+            done
+          fi
+          # The listing is for the log only; a long one must not fail the job (head closes the pipe).
+          n=$(find out -type f | wc -l)
+          echo "$n files"
+          find out -type f | sort | awk 'NR <= 100'
       - uses: actions/upload-artifact@v4
         with:
           name: run-${{ inputs.run_id }}
