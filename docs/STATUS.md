@@ -26,7 +26,19 @@
   before 05:08 UTC are under `runs/o2-s1more3-3/out/`). The owner re-rented the same machine by hand: **instance 57615744** (AMD EPYC 7B12 server
   chip, 256 threads, 129 GB RAM, RTX 3060, $0.328/h), unlabelled, idle, for the runs below; `keep: true` on every manifest that uses it.
 
-### State at 2026-10-27 10:40 UTC (read this first; the blocks below are older)
+### State at 2026-10-27 15:45 UTC (read this first; the blocks below are older)
+- **S3, the trick-3 student (docs/STUDENT.md §6.3), built and merged** on the owner's word (2026-10-27: the bots throw lone high
+  trumps early; being late in a trick is worth nothing when every deal is played face up from trick 3): PR #12 (536bda1: S3 in the
+  playout teacher with a cut of 4, the runner's trick-3 streams, `pimc::evaluate_playout`, the arena's `student3`) and PR #13
+  (80b15f3: WASM `method: "playout"`, `loadStudent(bytes, sha, 3)`). Release binaries for 536bda1 are built.
+- **Running / waiting:** `playout-labels-2b` (round 2 labels, 7B12 box 57918931, $0.32/h, nearly done; the 17:05 UTC check launches
+  `student-playout-3`, the two-arm round-2 training, binaries ca6bed6); **`s3-labels-1`** (vast-run 40531862216, waiting for a 120+-thread
+  box ≤ $0.75; then `s3-train.manifest.json` on a GPU box, then `arena-s3.manifest.json` with the chosen S3 filled in, then round 3 of
+  S1/S2 labels with `student3` and cut 4); **`arena-inference-1`** (the deal weighting, shipped students in both arms; AMD Threadripper
+  3990X, 128 threads, $0.67/h, started 15:00 UTC, about 5 h).
+- Spend since 2026-10-25 about $14 of the owner's $30 (with the runs above about $20-22 when they finish).
+
+### State at 2026-10-27 10:40 UTC
 - **The money gate accepted the retrained students (EXPERIMENTS I5):** `arena-students-8` on the France box ($0.40, 5.4 h) decided
   **Accept** after 929 blocks: the pair the app plays since 2026-10-26 (S1 `3d511c54…`, S2 `dc5f8ad0…`) takes about **+1% of the money
   a match** (mean block score +0.0096, standard error 0.0039) off the pair before it. The shipping stands; nothing to roll back.
