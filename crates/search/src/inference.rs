@@ -284,7 +284,7 @@ mod tests {
     fn probabilities_are_a_floored_softmax_over_the_teams_values() {
         let (s1, s2) = students();
         let inf = Inference {
-            students: Students { s1: &s1, s2: &s2 },
+            students: Students::two(&s1, &s2),
             tau_q32: Inference::TAU_DEFAULT_Q32,
             floor_q32: Inference::FLOOR_DEFAULT_Q32,
         };
@@ -370,6 +370,7 @@ mod tests {
             deals3: [1; 8],
             deals45: 1,
             inference: None,
+            s3: None,
         });
         let cfg = SearchConfig {
             w12: 1,
@@ -380,7 +381,7 @@ mod tests {
             ..SearchConfig::default()
         };
         let inf = Inference {
-            students: Students { s1: &s1, s2: &s2 },
+            students: Students::two(&s1, &s2),
             tau_q32: Inference::TAU_DEFAULT_Q32,
             floor_q32: Inference::FLOOR_DEFAULT_Q32,
         };

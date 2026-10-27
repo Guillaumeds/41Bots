@@ -281,15 +281,24 @@ pub struct Students<'a> {
     pub s1: &'a StudentNet,
     /// The trick-2 student (S2).
     pub s2: &'a StudentNet,
+    /// The trick-3 student (S3), when there is one (docs/STUDENT.md §6.3): a playout cut at 4 or
+    /// later plays trick 3 with it from every seat's own view.
+    pub s3: Option<&'a StudentNet>,
 }
 
 impl<'a> Students<'a> {
+    /// The trick-1 and trick-2 students alone.
+    pub fn two(s1: &'a StudentNet, s2: &'a StudentNet) -> Students<'a> {
+        Students { s1, s2, s3: None }
+    }
+
     /// The network that plays trick `t`; none for other tricks (the dealer's burn before trick 1
-    /// is played by `rules-v1`, as nothing else exists for it).
+    /// is played by `rules-v1`, as nothing else exists for it, and so are tricks without a student).
     pub fn for_trick(&self, t: u8) -> Option<&'a StudentNet> {
         match t {
             1 => Some(self.s1),
             2 => Some(self.s2),
+            3 => self.s3,
             _ => None,
         }
     }
@@ -919,6 +928,123 @@ pub fn evaluate(
         n_worlds: n,
         world_count,
         belief: BeliefMode::Uniform,
+        candidates: cands
+            .iter()
+            .zip(means)
+            .map(|(&(a, p), v)| (a, p, v))
+            .collect(),
+        chosen,
+        own_sd,
+    }
+}
+
+/// The playout values of `cands` in deals `0..n` of the decision seen in `view` (`[deal][candidate]`):
+/// deal `w` is exactly the one [`evaluate`] draws for the same seed, and each candidate is played,
+/// then the students play on from every seat's own view until the start of trick `cut`, exact
+/// search from there ([`playout_world`]). Byte-identical for any `cfg.threads`.
+#[allow(clippy::too_many_arguments)]
+pub fn playout_values(
+    view: &SeatView,
+    cands: &[Candidate],
+    n: u64,
+    dseed: u64,
+    students: &Students,
+    cut: u8,
+    ctx: &Ctx,
+    cfg: &SearchConfig,
+) -> Vec<Vec<MoneyChance>> {
+    let worlds = ctx.source.prepare(view, ctx.rules);
+    let n = n as usize;
+    let slots: Mutex<Vec<Option<Vec<MoneyChance>>>> = Mutex::new(vec![None; n]);
+    let next = AtomicUsize::new(0);
+    let work = || {
+        let mut mem = SolveMem::new();
+        loop {
+            let i = next.fetch_add(1, Ordering::Relaxed);
+            if i >= n {
+                break;
+            }
+            let m = world_match(view, &*worlds, i as u64, dseed, ctx.rules);
+            let mut run = WorldSolve::default();
+            let v = playout_world(&m, cands, students, cut, ctx, cfg, &mut mem, &mut run);
+            slots.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(v);
+        }
+    };
+    let threads = cfg.threads.max(1).min(n.max(1));
+    if threads == 1 {
+        work();
+    } else {
+        std::thread::scope(|s| {
+            for _ in 0..threads {
+                s.spawn(work);
+            }
+        });
+    }
+    slots
+        .into_inner()
+        .unwrap_or_else(|e| e.into_inner())
+        .into_iter()
+        .map(|v| v.expect("every world valued"))
+        .collect()
+}
+
+/// [`evaluate`] with every deal valued by a playout instead of the open-hand solve
+/// (docs/STUDENT.md §6.3, PLAN §6.8: a recursive rollout at depth one): each candidate is played,
+/// the students play the rest of the trick-`cut - 1` tricks from every seat's own view, exact
+/// search from the start of trick `cut`. At trick 3 with S3 and `cut` 4, no seat sees another's
+/// cards in trick 3, so a late seat's sight of the cards before it is worth what it is at the
+/// table. The same deals as [`evaluate`] (`n` from `cfg`), optionally weighted by the other seats'
+/// plays (`inf`, as [`evaluate_weighted`]). A single candidate, a decision with a pair turned, or a
+/// decision at or after the cut is [`evaluate`]'s (or [`evaluate_weighted`]'s).
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_playout(
+    view: &SeatView,
+    legal: &[Action],
+    dseed: u64,
+    ctx: &Ctx,
+    cfg: &SearchConfig,
+    students: &Students,
+    cut: u8,
+    inf: Option<&crate::inference::Inference>,
+) -> DecisionValues {
+    let (kind, cands) = candidates(view, legal);
+    let (method, n) = method_for(view, cands.len(), cfg);
+    let turned = view.public.turned_teams.iter().any(|&t| t);
+    if method != Method::ExactPimc || turned || view.public.trick_no >= cut {
+        return match inf {
+            Some(inf) => evaluate_weighted(view, legal, dseed, ctx, cfg, inf),
+            None => evaluate(view, legal, dseed, ctx, cfg),
+        };
+    }
+    let world_count = ctx.source.prepare(view, ctx.rules).count();
+    let rows = playout_values(view, &cands, u64::from(n), dseed, students, cut, ctx, cfg);
+    let (means, chosen, own_sd, belief) = match inf {
+        Some(inf) => {
+            let worlds = ctx.source.prepare(view, ctx.rules);
+            let weights = crate::inference::world_weights(
+                view,
+                &*worlds,
+                0,
+                u64::from(n),
+                dseed,
+                ctx.rules,
+                inf,
+                ctx.leaf,
+            );
+            let (m, c, sd) = aggregate_weighted(&rows, &weights, cands.len(), team_of(view.seat));
+            (m, c, sd, BeliefMode::Policy)
+        }
+        None => {
+            let (m, c, sd) = aggregate(&rows, cands.len(), team_of(view.seat));
+            (m, c, sd, BeliefMode::Uniform)
+        }
+    };
+    DecisionValues {
+        kind,
+        method: Method::PlayoutPimc,
+        n_worlds: n,
+        world_count,
+        belief,
         candidates: cands
             .iter()
             .zip(means)

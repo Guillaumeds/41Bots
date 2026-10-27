@@ -23,7 +23,7 @@ use crate::inference::Inference;
 use crate::labels;
 use crate::pimc::{
     BeliefMode, Ctx, DecisionValues, Early, Method, SearchConfig, SharedLeaf, Students, evaluate,
-    evaluate_weighted,
+    evaluate_playout, evaluate_weighted,
 };
 use crate::student_teacher::app_candidates;
 use crate::worlds::{BeliefSource, WorldSource};
@@ -179,6 +179,11 @@ pub struct AppPlay {
     /// Weight the exact searches' deals by the other seats' plays under the students
     /// (`crate::inference`; PLAN §6.4 point 3): `None` plays as the app does today.
     pub inference: Option<InferenceCfg>,
+    /// The trick-3 student (docs/STUDENT.md §6.3): with it, a trick-3 decision's deals are each
+    /// valued by a playout in which the other seats answer with S3 from their own view, exact
+    /// search from trick 4 (`crate::pimc::evaluate_playout`, cut 4), instead of the open-hand
+    /// solve. `None` plays as the app does today.
+    pub s3: Option<Arc<StudentNet>>,
 }
 
 /// The world weighting's settings in a bot: the temperature and the floor of
@@ -240,7 +245,25 @@ impl AppPlay {
             deals3,
             deals45,
             inference: None,
+            s3: None,
         })
+    }
+
+    /// The same player with trick 3's deals valued by playouts with the trick-3 student
+    /// ([`AppPlay::s3`]), from its weights file.
+    pub fn with_student3(mut self, s3: &[u8]) -> Result<AppPlay, String> {
+        let net = StudentNet::from_bytes(s3).map_err(|e| format!("student3: {e}"))?;
+        self.s3 = Some(Arc::new(net));
+        Ok(self)
+    }
+
+    /// The students as a playout plays them.
+    fn students(&self) -> Students<'_> {
+        Students {
+            s1: &self.s1,
+            s2: &self.s2,
+            s3: self.s3.as_deref(),
+        }
     }
 
     /// The same player with its exact searches' deals weighted by the other seats' plays.
@@ -252,10 +275,7 @@ impl AppPlay {
     /// The weighting, with the students as the play model.
     fn inference(&self) -> Option<Inference<'_>> {
         self.inference.map(|c| Inference {
-            students: Students {
-                s1: &self.s1,
-                s2: &self.s2,
-            },
+            students: self.students(),
             tau_q32: c.tau_q32,
             floor_q32: c.floor_q32,
         })
@@ -286,8 +306,11 @@ impl AppPlay {
         let inf = self
             .inference()
             .map_or(String::new(), |i| format!(",{}", i.name()));
+        let s3 = self.s3.as_ref().map_or(String::new(), |n| {
+            format!(",s3={}", &n.sha256[..12.min(n.sha256.len())])
+        });
         format!(
-            "app:s1={},s2={},deals3={},deals45={}{inf}",
+            "app:s1={},s2={},deals3={},deals45={}{inf}{s3}",
             &self.s1.sha256[..12.min(self.s1.sha256.len())],
             &self.s2.sha256[..12.min(self.s2.sha256.len())],
             d3.join("/"),
@@ -412,6 +435,19 @@ impl PimcBot {
                 w34: app.deals_for(p.trick_no, p.trick_cards.len()),
                 ..self.cfg
             };
+            if p.trick_no == 3 && app.s3.is_some() {
+                let inf = app.inference();
+                return evaluate_playout(
+                    view,
+                    legal,
+                    dseed,
+                    &ctx,
+                    &cfg,
+                    &app.students(),
+                    4,
+                    inf.as_ref(),
+                );
+            }
             return match app.inference() {
                 Some(inf) => evaluate_weighted(view, legal, dseed, &ctx, &cfg, &inf),
                 None => evaluate(view, legal, dseed, &ctx, &cfg),
@@ -523,10 +559,12 @@ impl PimcFactory {
 
 /// A factory of the app's player with the production equity table: the students' weights files
 /// and the deals, over `base` (a `pimc-v0[:…]` name for what the students do not play).
+#[allow(clippy::too_many_arguments)]
 pub fn app_factory(
     base: &str,
     s1: &[u8],
     s2: &[u8],
+    s3: Option<&[u8]>,
     deals3: [u32; 8],
     deals45: u32,
     inference: Option<InferenceCfg>,
@@ -535,6 +573,9 @@ pub fn app_factory(
     let mut app = AppPlay::from_bytes(s1, s2, deals3, deals45)?;
     if let Some(c) = inference {
         app = app.with_inference(c);
+    }
+    if let Some(s3) = s3 {
+        app = app.with_student3(s3)?;
     }
     let table = equity()?;
     let leaf: Arc<SharedLeaf> = table;
@@ -689,6 +730,7 @@ mod tests {
             deals3: [1, 1, 2, 1, 1, 1, 1, 2],
             deals45: 1,
             inference: None,
+            s3: None,
         }
     }
 
@@ -773,7 +815,7 @@ mod tests {
                 Method::ExactPimc => exact += 1,
                 Method::Forced => forced += 1,
                 Method::RolloutPimc => {} // the dealer's burn, or a turned pair at tricks 1-2
-                Method::PlayoutPimc => panic!("a bot never values by the playout teacher"),
+                Method::PlayoutPimc => panic!("without a trick-3 student nothing is played out"),
             }
         }
         assert!(students > 100, "{students} student decisions");
@@ -819,6 +861,71 @@ mod tests {
         );
         assert!(InferenceCfg::from_permille(0, 50).is_err());
         assert!(InferenceCfg::from_permille(10, 1001).is_err());
+    }
+
+    /// With a trick-3 student the trick-3 decisions are valued by playouts (S3 answers from every
+    /// other seat's own view, exact from trick 4), every action is legal over whole matches,
+    /// tricks 1-2 and 4-5 are as before, and the name says so; with the weighting too, the
+    /// playouts' deals are weighted.
+    #[test]
+    fn the_app_player_with_a_trick_3_student_plays_trick_3_out() {
+        let s3 = student::net::random_net(7, &[16, 8], 12);
+        let app = Arc::new(AppPlay {
+            s3: Some(Arc::new(s3)),
+            ..tiny_app()
+        });
+        assert!(app.name().contains(",s3="), "{}", app.name());
+        let l = leaf();
+        let source = default_source();
+        let log: DecisionLog = Arc::new(Mutex::new(Vec::new()));
+        let make = || {
+            let mut b = PimcBot::new("app".into(), tiny_cfg(), l.clone(), source.clone())
+                .with_app(app.clone());
+            b.log = Some(log.clone());
+            b
+        };
+        play_matches(&make, 41..44);
+        let (mut playout, mut exact, mut students) = (0, 0, 0);
+        for (view, dv) in log.lock().expect("log").iter() {
+            let t = view.public.trick_no;
+            let turned = view.public.turned_teams.iter().any(|&x| x);
+            match dv.method {
+                Method::PlayoutPimc => {
+                    assert_eq!(t, 3, "only trick 3 is played out");
+                    assert!(!turned);
+                    playout += 1;
+                }
+                Method::ExactPimc => {
+                    assert!(t != 3 || turned, "an exact trick-3 decision with S3");
+                    exact += 1;
+                }
+                Method::Student => students += 1,
+                _ => {}
+            }
+        }
+        assert!(
+            playout > 10 && exact > 10 && students > 50,
+            "{playout} playout, {exact} exact, {students} student decisions"
+        );
+        // With the weighting as well, the playouts' deals are weighted.
+        let both = Arc::new(AppPlay {
+            s3: app.s3.clone(),
+            ..tiny_app().with_inference(InferenceCfg::DEFAULT)
+        });
+        let make_both = || {
+            PimcBot::new("app".into(), tiny_cfg(), l.clone(), source.clone()).with_app(both.clone())
+        };
+        let d = play_matches(&make_both, 41..42);
+        let played_out: Vec<_> = d
+            .iter()
+            .filter(|(_, dv)| dv.method == Method::PlayoutPimc)
+            .collect();
+        assert!(!played_out.is_empty());
+        assert!(
+            played_out
+                .iter()
+                .all(|(_, dv)| dv.belief == BeliefMode::Policy)
+        );
     }
 
     /// With the app off the bot is byte-identical to the plain PIMC bot: the same actions and
