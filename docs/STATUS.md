@@ -26,7 +26,15 @@
   before 05:08 UTC are under `runs/o2-s1more3-3/out/`). The owner re-rented the same machine by hand: **instance 57615744** (AMD EPYC 7B12 server
   chip, 256 threads, 129 GB RAM, RTX 3060, $0.328/h), unlabelled, idle, for the runs below; `keep: true` on every manifest that uses it.
 
-### State at 2026-10-27 15:45 UTC (read this first; the blocks below are older)
+### State at 2026-10-27 17:45 UTC (read this first; the blocks below are older)
+- **S4, the trick-4 student, built and merged** (PR #14, 72c6221; release binaries built): with S3 and S4 a trick-3 or trick-4
+  decision is played out from every seat's own view to the end of the hand. One gate for both: `arena-s34.manifest.json` (fill s3/s4).
+- **Runs:** `playout-labels-2b` DONE (1,116 of 1,116, 16:56 UTC); `student-playout-3` (round-2 two-arm training, vast-run 40549557888,
+  bin ca6bed6) launched 17:20; `s3-labels-1` running (AMD EPYC 7742, 128 threads, $0.71/h); `s4-labels-1` launched 17:45 (vast-run
+  40552575020, bin 72c6221); `arena-inference-1` running (Threadripper 3990X, $0.67/h). Next: `s3-train` / `s4-train` (bin 72c6221 for
+  both: it has S3 and S4), then `arena-s34`. The 19:51 UTC check (send_later) carries the steps.
+
+### State at 2026-10-27 15:45 UTC
 - **S3, the trick-3 student (docs/STUDENT.md §6.3), built and merged** on the owner's word (2026-10-27: the bots throw lone high
   trumps early; being late in a trick is worth nothing when every deal is played face up from trick 3): PR #12 (536bda1: S3 in the
   playout teacher with a cut of 4, the runner's trick-3 streams, `pimc::evaluate_playout`, the arena's `student3`) and PR #13
