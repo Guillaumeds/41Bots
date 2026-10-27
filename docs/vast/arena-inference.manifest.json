@@ -1,81 +1,88 @@
 {
- "format": 2,
- "run_id": "arena-inference-1",
- "run_seed": 2,
- "threads": null,
- "benchmark_seconds": 0,
- "upload_every_s": 300,
- "heartbeat_every_s": 30,
- "note": "Review session 2026-10-25: run 3, the inference gate (PLAN 6.4 point 3, RESEARCH 6 and 15, search::inference). The app's player with its exact searches' deals (tricks 3-5) weighted by how likely the other seats' tricks 1-2 plays were under the students (softmax at tau 1% of the money with a 5% floor) against the same player with uniform deals, the same students in both arms (fill s1/s2 with whichever students run 2 settled on: the shipped 97df2a54/3d1189e3 below, or S1'/S2' by their stored keys). 14-way duplicate blocks, SPRT [0, 0.01] at alpha = beta = 0.05, cap 3,000 blocks, 4 a chunk; the app's own deals in both arms. The weighting is integer and deterministic (the oracle head's exp rule), one student call per modelled play per deal (about 16 a deal at most). Skat gained 2-9 points a game from inference, Jass nothing: the arena decides. On the owner's Thailand box by takeover, kept. Deciding only; nothing deploys without the owner's word.",
- "machine": {
-  "instance_id": 57615744,
-  "min_cores": 190,
-  "min_ram_gb": 96,
-  "disk_gb": 100,
-  "keep": true,
-  "keep_hours": 8,
-  "force_take": true
- },
- "inputs": {
-  "equity": "sha256:64740dab7845f0502c93ce195d721e1ffb8aa6ab141739ef43f754690de16808",
-  "s1": "sha256:97df2a54e1c368a13d69ffd887de62f45c6c3f244605450579b803f31f00e134",
-  "s2": "sha256:3d1189e3042dfc9537b1f575f87e42b15e91628541e2ff90678ba319959c6e03"
- },
- "streams": [
-  {
-   "name": "gate",
-   "priority": 1,
-   "kind": "arena_blocks",
-   "chunks": "until_decided",
-   "params": {
-    "a": {
-     "kind": "app",
-     "student1": "s1",
-     "student2": "s2",
-     "deals3": [
-      192,
-      224,
-      512,
-      640,
-      1024,
-      1024,
-      1024,
-      1024
-     ],
-     "deals45": 1024,
-     "base": "pimc-v0",
-     "inference": {
-      "tau": 10,
-      "floor": 50
-     }
-    },
-    "b": {
-     "kind": "app",
-     "student1": "s1",
-     "student2": "s2",
-     "deals3": [
-      192,
-      224,
-      512,
-      640,
-      1024,
-      1024,
-      1024,
-      1024
-     ],
-     "deals45": 1024,
-     "base": "pimc-v0"
-    },
-    "block14": true,
-    "blocks_per_chunk": 4,
-    "sprt": {
-     "s0": 0.0,
-     "s1": 0.01,
-     "alpha": 0.05,
-     "beta": 0.05,
-     "max_blocks": 3000
+  "format": 2,
+  "run_id": "arena-inference-1",
+  "run_seed": 2,
+  "threads": null,
+  "benchmark_seconds": 0,
+  "upload_every_s": 300,
+  "heartbeat_every_s": 30,
+  "note": "Review session 2026-10-25: run 3, the inference gate (PLAN 6.4 point 3, RESEARCH 6 and 15, search::inference). The app's player with its exact searches' deals (tricks 3-5) weighted by how likely the other seats' tricks 1-2 plays were under the students (softmax at tau 1% of the money with a 5% floor) against the same player with uniform deals, the same students in both arms (fill s1/s2 with whichever students run 2 settled on: the shipped 97df2a54/3d1189e3 below, or S1'/S2' by their stored keys). 14-way duplicate blocks, SPRT [0, 0.01] at alpha = beta = 0.05, cap 3,000 blocks, 4 a chunk; the app's own deals in both arms. The weighting is integer and deterministic (the oracle head's exp rule), one student call per modelled play per deal (about 16 a deal at most). Skat gained 2-9 points a game from inference, Jass nothing: the arena decides. On the owner's Thailand box by takeover, kept. Deciding only; nothing deploys without the owner's word. Launched 2026-10-27 with the shipped pair (S1 3d511c54, S2 dc5f8ad0, accepted by run 2, EXPERIMENTS I5) in both arms, on any 120+-thread box under $0.75 (the France box first).",
+  "machine": {
+    "min_cores": 120,
+    "min_ram_gb": 60,
+    "disk_gb": 60,
+    "keep": false,
+    "max_dph": 0.75,
+    "wait_for_offer_min": 320,
+    "offer_poll_s": 60,
+    "price_steps": [
+      0.12,
+      0.35,
+      0.65,
+      0.75
+    ],
+    "tries_per_step": 5
+  },
+  "inputs": {
+    "equity": "sha256:64740dab7845f0502c93ce195d721e1ffb8aa6ab141739ef43f754690de16808",
+    "s1": "sha256:3d511c54440b135e94728ef131e8957dd5fb019ed35ac02b1b85943e22144e18",
+    "s2": "sha256:dc5f8ad0055d663d2b140ad6f4c08f43baddac479181935c56922661d6dd5ef1"
+  },
+  "streams": [
+    {
+      "name": "gate",
+      "priority": 1,
+      "kind": "arena_blocks",
+      "chunks": "until_decided",
+      "params": {
+        "a": {
+          "kind": "app",
+          "student1": "s1",
+          "student2": "s2",
+          "deals3": [
+            192,
+            224,
+            512,
+            640,
+            1024,
+            1024,
+            1024,
+            1024
+          ],
+          "deals45": 1024,
+          "base": "pimc-v0",
+          "inference": {
+            "tau": 10,
+            "floor": 50
+          }
+        },
+        "b": {
+          "kind": "app",
+          "student1": "s1",
+          "student2": "s2",
+          "deals3": [
+            192,
+            224,
+            512,
+            640,
+            1024,
+            1024,
+            1024,
+            1024
+          ],
+          "deals45": 1024,
+          "base": "pimc-v0"
+        },
+        "block14": true,
+        "blocks_per_chunk": 4,
+        "sprt": {
+          "s0": 0.0,
+          "s1": 0.01,
+          "alpha": 0.05,
+          "beta": 0.05,
+          "max_blocks": 3000
+        }
+      }
     }
-   }
-  }
- ]
+  ]
 }
