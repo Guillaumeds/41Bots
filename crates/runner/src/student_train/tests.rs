@@ -224,6 +224,71 @@ fn settings_are_checked() {
 }
 
 #[test]
+fn warm_start_settings_are_checked() {
+    let q = parse(&base()).expect("parses");
+    assert_eq!((q.init.as_deref(), q.shrink_perturb), (None, None));
+    let inputs: BTreeMap<String, String> =
+        [("s1prev".to_string(), "/in/s1.safetensors".to_string())].into();
+    // `init` names an input; the worker resolves it to `init_path`.
+    let mut p = base();
+    p["init"] = json!("s1prev");
+    p["shrink_perturb"] = json!(0.3);
+    resolve_init(&mut p, &inputs).expect("resolves");
+    assert_eq!(p["init_path"], "/in/s1.safetensors");
+    let q = parse(&p).expect("parses");
+    assert_eq!(
+        (q.init.as_deref(), q.shrink_perturb),
+        (Some("/in/s1.safetensors"), Some(0.3))
+    );
+    // A plain warm start, without shrink and perturb.
+    let mut p = base();
+    p["init"] = json!("s1prev");
+    resolve_init(&mut p, &inputs).expect("resolves");
+    assert_eq!(parse(&p).expect("parses").shrink_perturb, None);
+    // Nothing to resolve without init.
+    let mut p = base();
+    resolve_init(&mut p, &inputs).expect("nothing to do");
+    assert!(p.get("init_path").is_none());
+    // Refusals.
+    let mut p = base();
+    p["init"] = json!("nope");
+    assert!(
+        resolve_init(&mut p, &inputs)
+            .expect_err("unknown")
+            .contains("no input `nope`")
+    );
+    let mut p = base();
+    p["init"] = json!(3);
+    assert!(
+        resolve_init(&mut p, &inputs)
+            .expect_err("not a name")
+            .contains("name of a manifest input")
+    );
+    let mut p = base();
+    p["init"] = json!("s1prev");
+    assert!(
+        parse(&p)
+            .expect_err("unresolved")
+            .contains("init_path missing")
+    );
+    let mut p = base();
+    p["shrink_perturb"] = json!(0.3);
+    assert!(parse(&p).expect_err("no init").contains("needs init"));
+    for bad in [json!(0), json!(1.5), json!(-0.1), json!("a")] {
+        let mut p = base();
+        p["init"] = json!("s1prev");
+        p["shrink_perturb"] = bad.clone();
+        resolve_init(&mut p, &inputs).expect("resolves");
+        assert!(
+            parse(&p)
+                .expect_err("range")
+                .contains("above 0 and at most 1"),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
 fn the_spread_order_interleaves_in_proportion_and_sizes_are_prefixes() {
     let s = |label: &str| Shard {
         records: label.into(),
@@ -665,6 +730,8 @@ echo "group n loss"
     assert_eq!(trainings.len(), 4, "{log}");
     assert!(trainings[0].contains("--limit 40 ") && trainings[0].contains("--widths 16,8 "));
     assert!(trainings[0].contains("--device cpu ") && trainings[0].contains("--test "));
+    // No warm start unless asked.
+    assert!(!trainings.iter().any(|t| t.contains("--init")), "{log}");
     assert_eq!(log.matches("search student-check").count(), 4, "{log}");
     assert!(log.contains("--baseline rules --baseline random"), "{log}");
     assert!(
@@ -700,6 +767,29 @@ echo "group n loss"
     chunk_with(&mut ctx2, &small, &progs, &table, json!({})).expect("runs");
     let log = fs::read_to_string(&calls).expect("calls");
     assert_eq!(log.matches("student encode").count(), 2, "{log}");
+
+    // A warm start: every training gets --init with the resolved file and --shrink-perturb.
+    fs::write(&calls, "").expect("clear");
+    let init = tmp.join("prev-float.safetensors");
+    fs::write(&init, "float").expect("write");
+    let mut warm = small.clone();
+    warm["init"] = json!("s1prev");
+    warm["shrink_perturb"] = json!(0.3);
+    let inputs: BTreeMap<String, String> =
+        [("s1prev".to_string(), init.display().to_string())].into();
+    resolve_init(&mut warm, &inputs).expect("resolves");
+    let mut ctx4 = Ctx::local("student-train-test", &tmp.join("c-warm"), 4);
+    chunk_with(&mut ctx4, &warm, &progs, &table, json!({})).expect("runs");
+    let log = fs::read_to_string(&calls).expect("calls");
+    let trainings: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains("fortyone_nn.student"))
+        .collect();
+    assert_eq!(trainings.len(), 1, "{log}");
+    assert!(
+        trainings[0].contains(&format!("--init {} --shrink-perturb 0.3", init.display())),
+        "{log}"
+    );
 
     // Refusals.
     let fails = |q: Value, word: &str| {

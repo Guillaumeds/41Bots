@@ -219,6 +219,8 @@ fn worker_inner(spec_path: &Path) -> Result<(), String> {
                     t.entry("path").or_insert(json!(path));
                 }
             }
+            // A warm start (`init`) names a manifest input, the previous student's float file.
+            crate::student_train::resolve_init(&mut p, &inputs)?;
             crate::student_train::chunk(&mut ctx, &p)?
         }
         "suitability" | "agree" | "belief_bench" => {
