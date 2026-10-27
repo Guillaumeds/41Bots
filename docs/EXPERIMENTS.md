@@ -1841,3 +1841,28 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   S2 at trick 2 (the place-2 weakness roughly halved). Part of the gap is that arm (a) learned from the same teacher the sets are valued
   with; the money arena decides. Arm (b)'s numbers will be added here.
 - **Cost.** About $0.60 (arm a and the failed start of arm b).
+
+### I9. The trick-3 and trick-4 students S3 and S4 (runs `s3-labels-1`, `s4-labels-1`, `s34-train-1`, 2026-10-27)
+- **Question.** Can small students copy the seat-view play at tricks 3 and 4 well enough to stand in for it inside playouts
+  (docs/STUDENT.md §6.3)?
+- **Method.** Labels: the playout teacher at a cut equal to the decision's trick (exact PIMC from the seat's view, the app's play at
+  tricks 3-4 today), 256 deals (test sets 512); 100k rules, 50k mixed, 100k students' own games (S1/S2 shipped at tricks 1-2; rules-v1 at
+  trick 3 for the trick-4 positions); test sets of 2,000 from rules and from the students' games per trick. `s3-labels-1`: AMD EPYC 7742
+  (128 threads, $0.71/h), 1.9 h, about $1.30. `s4-labels-1`: about 1.3 h, about $0.90. Training (`s34-train-1`, an EPYC 7B12 box with a
+  GPU, $0.46/h, about $0.50): 512,256, the decision-aware loss, three seeds each, from scratch.
+- **Result.** Loss on each trick's two test sets (upper 95%), agreement:
+
+  | | trick 3 (S3) | trick 4 (S4) |
+  |---|---|---|
+  | seed 1 | 0.0871% (0.104) · 74.7% | **0.0543% (0.070) · 85.3%** |
+  | seed 2 | **0.0837% (0.097) · 73.4%** | 0.0605% (0.079) · 85.4% |
+  | seed 3 | 0.0894% (0.105) · 74.0% | 0.0565% (0.073) · 84.1% |
+  | rules-v1 / random | 0.318% / 0.526% | 0.059% / 0.389% |
+
+  S3 by place (seed 2): 0.114 / 0.051 / 0.091 / 0.079 / 0.066 / 0.141 / 0.076 / 0.050%. Chosen: S3 seed 2
+  `cdeaf694284f0fee67c49671fb3f40286dc9f5eea3bf384172707abd233ad3a2`, S4 seed 1
+  `d3d964f694faf3220a1645ba4a135bf41843fa503030bd77314a54b358e999fa`.
+- **Reading.** S3 copies the seat-view play at trick 3 to 0.084% (rules-v1 0.32%): a good stand-in. At trick 4 with two cards each the
+  choice is easy: rules-v1 is already at 0.059% and S4 at 0.054%, so S4's value is as a hidden-card player inside playouts, not as a
+  better decision. The money arena `arena-s34` (S3 and S4 inside the app's trick 3-4 play, against today's face-up valuation) decides.
+- **Cost.** About $2.70.

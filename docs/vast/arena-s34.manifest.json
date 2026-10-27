@@ -6,7 +6,7 @@
  "benchmark_seconds": 0,
  "upload_every_s": 300,
  "heartbeat_every_s": 30,
- "note": "The tricks 3-4 play gate (docs/STUDENT.md §6.3): the app's player with its trick-3 and trick-4 deals valued by playouts in which the other seats answer with S3 and S4 from their own view (hidden-card to the end of the hand) against the same player valuing them face up, as the app plays today; both arms the shipped S1 3d511c54 / S2 dc5f8ad0 and the app's deals. 14-way duplicate blocks, SPRT [0, 0.01] at alpha = beta = 0.05, cap 3,000 blocks. Fill inputs s3 and s4 with s3-train-1's and s4-train-1's chosen networks before launching. If it fails, arena-s3 (S3 alone) tells which part did not work.",
+ "note": "The tricks 3-4 play gate (docs/STUDENT.md §6.3): the app's player with its trick-3 and trick-4 deals valued by playouts in which the other seats answer with S3 and S4 from their own view (hidden-card to the end of the hand) against the same player valuing them face up, as the app plays today; both arms the shipped S1 3d511c54 / S2 dc5f8ad0 and the app's deals. 14-way duplicate blocks, SPRT [0, 0.01] at alpha = beta = 0.05, cap 3,000 blocks. S3 = s34-train-1's trick-3 seed 2 (0.084% on its test sets), S4 = its trick-4 seed 1 (0.054%), EXPERIMENTS I9. If it fails, arena-s3 (S3 alone) tells which part did not work.",
  "machine": {
   "min_cores": 120,
   "min_ram_gb": 60,
@@ -27,8 +27,8 @@
   "equity": "sha256:64740dab7845f0502c93ce195d721e1ffb8aa6ab141739ef43f754690de16808",
   "s1": "sha256:3d511c54440b135e94728ef131e8957dd5fb019ed35ac02b1b85943e22144e18",
   "s2": "sha256:dc5f8ad0055d663d2b140ad6f4c08f43baddac479181935c56922661d6dd5ef1",
-  "s3": "sha256:0000000000000000000000000000000000000000000000000000000000000003",
-  "s4": "sha256:0000000000000000000000000000000000000000000000000000000000000004"
+  "s3": "sha256:cdeaf694284f0fee67c49671fb3f40286dc9f5eea3bf384172707abd233ad3a2",
+  "s4": "sha256:d3d964f694faf3220a1645ba4a135bf41843fa503030bd77314a54b358e999fa"
  },
  "streams": [
   {
