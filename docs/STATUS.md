@@ -26,7 +26,16 @@
   before 05:08 UTC are under `runs/o2-s1more3-3/out/`). The owner re-rented the same machine by hand: **instance 57615744** (AMD EPYC 7B12 server
   chip, 256 threads, 129 GB RAM, RTX 3060, $0.328/h), unlabelled, idle, for the runs below; `keep: true` on every manifest that uses it.
 
-### State at 2026-10-28 08:10 UTC (read this first; the blocks below are older)
+### State at 2026-10-28 10:15 UTC (read this first; the blocks below are older)
+- **Round 2's students accepted and shipped** (EXPERIMENTS I11): `arena-round2-1` accepted at 376 blocks (+1.7% on that prefix; over all
+  1,908 blocks played +0.57% +/- 0.27%). The app plays S1 `df9004e5…` and S2 `4a811106…` since fivefingers 87f2d40 (round 1's pair stays in
+  R2 for a rollback). The owner's box (instance 58062249) is kept after the run: he stops it.
+- **The deal weighting is live in the app** (fivefingers 2308b6c, engine 215aa42; see the block below).
+- **Next by STUDENT.md §6:** round 3 of labels with round 2's pair as the inner players (`playout-labels`, then the two-arm training, then
+  the money gate); one more round with arm (a) ahead retires the labels older than the previous round. Waits for the owner's word on
+  the budget. The pros' scolds (about two weeks) are the other source of evidence.
+
+### State at 2026-10-28 08:10 UTC
 - **The deal weighting is in the WASM API** (PR #15, merged 215aa42; `crates/wasm/dist` rebuilt from it): `"inference": true` at tricks 3-5
   weights the exact solves' deals as the gate did (I7), merged byte-exact across shards. The students' answers are memoised among a call's
   deals (`search::inference::WeightMemo`, no bit changes, tested against the plain path), which cuts the weighting's cost at trick 4 from
