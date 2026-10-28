@@ -106,6 +106,17 @@ impl LogWeight {
         exp: 0,
     };
 
+    /// The weight's mantissa and exponent (`mant · 2^(exp − 63)`), to carry it whole between
+    /// processes (the WASM API's shard results).
+    pub fn parts(self) -> (u64, i64) {
+        (self.mant, self.exp)
+    }
+
+    /// The weight from [`LogWeight::parts`]; `None` unless `mant` is in `[2^63, 2^64)`.
+    pub fn from_parts(mant: u64, exp: i64) -> Option<LogWeight> {
+        (mant >> 63 == 1).then_some(LogWeight { mant, exp })
+    }
+
     /// Multiplied by a probability in units of 2^-32.
     fn times_q32(self, p: u64) -> LogWeight {
         let p = p.max(1);
