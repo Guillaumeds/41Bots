@@ -26,7 +26,16 @@
   before 05:08 UTC are under `runs/o2-s1more3-3/out/`). The owner re-rented the same machine by hand: **instance 57615744** (AMD EPYC 7B12 server
   chip, 256 threads, 129 GB RAM, RTX 3060, $0.328/h), unlabelled, idle, for the runs below; `keep: true` on every manifest that uses it.
 
-### State at 2026-10-27 21:05 UTC (read this first; the blocks below are older)
+### State at 2026-10-28 05:40 UTC (read this first; the blocks below are older)
+- **Gates tonight:** the deal weighting **accepted** (I7, +1.3% of the money a match); S3/S4 playouts at tricks 3-4 **rejected** (I10,
+  -0.2% to -0.5%); round 2's students chosen (I8: arm (a), S1 `df9004e5…` 0.0975%, S2 `4a811106…` 0.103% on round 2's sets, arm (b) worse at
+  trick 1). Their money gate `arena-round2.manifest.json` is prepared and **waits for the owner's word on the budget** (spend about $28 of
+  his $30 since 2026-10-25).
+- **Next for the app:** the deal weighting (I7) in the WASM API and fivefingers (not built); then, if `arena-round2` accepts, ship round 2's
+  students. S3/S4 stay off.
+- Nothing is running or billing.
+
+### State at 2026-10-27 21:05 UTC
 - **The inference gate accepted** (EXPERIMENTS I7): deals weighted by the other seats' plays win about +1.3% of the money a match
   (451 blocks, $3.80). Next for it: the WASM API and the app (not built yet).
 - S3/S4 labels DONE (`s3-labels-1` 18:15, $1.3; `s4-labels-1` 19:32, $0.9); `s34-train-1` running since about 21:00 (EPYC 7B12 GPU box,

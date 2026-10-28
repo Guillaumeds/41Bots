@@ -1878,3 +1878,23 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   choice is easy: rules-v1 is already at 0.059% and S4 at 0.054%, so S4's value is as a hidden-card player inside playouts, not as a
   better decision. The money arena `arena-s34` (S3 and S4 inside the app's trick 3-4 play, against today's face-up valuation) decides.
 - **Cost.** About $2.70.
+
+### I10. The tricks 3-4 play gate: playouts with S3 and S4 inside (run `arena-s34-1`, 2026-10-27/28)
+- **Question.** Does valuing each trick-3 and trick-4 deal by a playout in which the other seats answer with the students S3 and S4 from
+  their own view (STUDENT.md §6.3; hidden-card to the end of the hand) win money against today's face-up valuation of the same deals?
+- **Method.** `docs/vast/arena-s34.manifest.json`: the app's player (`AppPlay`, shipped S1 `3d511c54` / S2 `dc5f8ad0`, the app's deal
+  counts, no deal weighting) with `student3` S3 seed 2 `cdeaf694…` and `student4` S4 seed 1 `d3d964f6…` (I9: a cut of 5 at tricks 3 and 4)
+  against the same player without them; 14-way duplicate blocks, SPRT [0, 0.01] at alpha = beta = 0.05. AMD Threadripper 3990X
+  workstation chip (128 threads, $0.67/h), 23:07-05:21 UTC, $4.05 (its cap).
+- **Result.** **Reject** on the ordered chunk prefix after 664 blocks (166 chunks): LLR -2.96 against -2.94, mean -0.0019 of the money
+  (sd 0.125). Every finished chunk (1,396 blocks, out of order, not the formal test): mean **-0.0049** of the money, standard error 0.0033
+  (about -1.2% to +0.2% at two standard errors).
+- **Reading.** Played-out deals with student players inside did not beat the face-up solve at tricks 3-4; if anything they lose a
+  little. The likely reason: in the playout the decider's own later cards (trick 4, and its partner's) are played by a student instead of
+  solved, so a good line of its own is undervalued about as much as face-up play overvalued waiting. A fix would play only the other side's
+  seats from their own view (the decider's side solved), or use deeper/better inner players; neither is cheap, and nothing in the record
+  says it would pay. The money at tricks 3-5 that the gates have found is the card reading (I7, +1.3%). S3, S4 and the playout code stay
+  in the engine (off by default) for that later experiment.
+- **Limits.** One configuration (S3 and S4 together, both trained on face-up teachers); bots on both sides; the arena stopped at its
+  dollar cap (the reject came first on the ordered prefix).
+- **Cost.** $4.05 (plus I9's $2.70).
