@@ -26,7 +26,16 @@
   before 05:08 UTC are under `runs/o2-s1more3-3/out/`). The owner re-rented the same machine by hand: **instance 57615744** (AMD EPYC 7B12 server
   chip, 256 threads, 129 GB RAM, RTX 3060, $0.328/h), unlabelled, idle, for the runs below; `keep: true` on every manifest that uses it.
 
-### State at 2026-10-28 05:40 UTC (read this first; the blocks below are older)
+### State at 2026-10-28 08:10 UTC (read this first; the blocks below are older)
+- **The deal weighting is in the WASM API** (PR #15, merged 215aa42; `crates/wasm/dist` rebuilt from it): `"inference": true` at tricks 3-5
+  weights the exact solves' deals as the gate did (I7), merged byte-exact across shards. The students' answers are memoised among a call's
+  deals (`search::inference::WeightMemo`, no bit changes, tested against the plain path), which cuts the weighting's cost at trick 4 from
+  about 1.5 to 0.1-0.8 ms a deal in WebAssembly (late trick 3: 1.7 to 0.9-1.5 ms). The app (fivefingers) sends it from its bots and coach at
+  tricks 3-5 with the gated deal counts; on a phone that is about 1-2 s more a bot at trick 3's later places.
+- **`arena-round2-1`** (round 2's students against the shipped pair) runs on the owner's Thailand box (instance 58062249, AMD EPYC 7B12, 256
+  threads, 129 GB RAM, $0.43/h, kept: the owner stops it). Check at 09:59 UTC.
+
+### State at 2026-10-28 05:40 UTC
 - **Gates tonight:** the deal weighting **accepted** (I7, +1.3% of the money a match); S3/S4 playouts at tricks 3-4 **rejected** (I10,
   -0.2% to -0.5%); round 2's students chosen (I8: arm (a), S1 `df9004e5…` 0.0975%, S2 `4a811106…` 0.103% on round 2's sets, arm (b) worse at
   trick 1). Their money gate `arena-round2.manifest.json` is prepared and **waits for the owner's word on the budget** (spend about $28 of
