@@ -15,6 +15,7 @@
 //! exponent, and the worlds' weights scaled so the likeliest is 2^60 ([`WEIGHT_TOP`]), ready for
 //! `MoneyChance::mix`. The same bytes on any machine and thread count.
 
+use engine::cards::Bits;
 use engine::game::{Action, Match, Phase};
 use engine::team_of;
 use engine::view::SeatView;
@@ -106,6 +107,17 @@ impl LogWeight {
         exp: 0,
     };
 
+    /// The weight's mantissa and exponent (`mant · 2^(exp − 63)`), to carry it whole between
+    /// processes (the WASM API's shard results).
+    pub fn parts(self) -> (u64, i64) {
+        (self.mant, self.exp)
+    }
+
+    /// The weight from [`LogWeight::parts`]; `None` unless `mant` is in `[2^63, 2^64)`.
+    pub fn from_parts(mant: u64, exp: i64) -> Option<LogWeight> {
+        (mant >> 63 == 1).then_some(LogWeight { mant, exp })
+    }
+
     /// Multiplied by a probability in units of 2^-32.
     fn times_q32(self, p: u64) -> LogWeight {
         let p = p.max(1);
@@ -141,6 +153,49 @@ pub fn world_weight(
     inf: &Inference,
     leaf: &SharedLeaf,
 ) -> Result<LogWeight, String> {
+    world_weight_memo(world, decider, inf, leaf, &mut WeightMemo::default())
+}
+
+/// The plays' probabilities already worked out among one decision's worlds. Every world of one
+/// decision replays the same public history (only hidden cards differ: the hands, the pack and
+/// the burns), so a play's probability is fixed by the action's place in the hand, the seat's
+/// hand and own burns at that moment (its view's private part) and the play made (a robber's
+/// burn and first card together): equal keys are equal views, the same student call and the
+/// same probability. The memo changes no bit of any weight, it only skips repeated student
+/// calls (a seat's two or three hidden cards repeat often among a thousand deals). One memo per
+/// decision: never share it between decisions, whose public histories differ.
+#[derive(Default)]
+pub struct WeightMemo {
+    probs: std::collections::BTreeMap<(u32, Bits, Bits, Candidate), Option<u64>>,
+    lookups: u64,
+}
+
+impl WeightMemo {
+    /// Entries held (tests and timing).
+    pub fn len(&self) -> usize {
+        self.probs.len()
+    }
+
+    /// No entry yet.
+    pub fn is_empty(&self) -> bool {
+        self.probs.is_empty()
+    }
+
+    /// Plays looked up (each a student call without the memo).
+    pub fn lookups(&self) -> u64 {
+        self.lookups
+    }
+}
+
+/// [`world_weight`] with a memo shared by the worlds of one decision ([`WeightMemo`]): the same
+/// weight, bit for bit.
+pub fn world_weight_memo(
+    world: &Match,
+    decider: u8,
+    inf: &Inference,
+    leaf: &SharedLeaf,
+    memo: &mut WeightMemo,
+) -> Result<LogWeight, String> {
     let start = world.current_hand_start();
     let deck = world.truth().deck;
     let mut m = Match::from_hand_start(start, deck, 0, world.rules()).map_err(|e| e.0)?;
@@ -152,11 +207,9 @@ pub fn world_weight(
         let Some(seat) = m.to_act() else {
             return Err("the world's history runs past the hand".into());
         };
-        let view = m.view(seat);
-        let p = &view.public;
+        let p = m.public();
         let modelled =
             seat != decider && (1..=2).contains(&p.trick_no) && p.turned_teams.iter().all(|&t| !t);
-        let legal = m.legal_actions();
         // A robber's burn and first card are one choice: read both actions.
         let joint = matches!(p.phase, Phase::AwaitBurn(_)) && p.trick_no == 1;
         let played: Candidate = if joint {
@@ -166,19 +219,41 @@ pub fn world_weight(
             (a, None)
         };
         if modelled && let Some(net) = inf.students.for_trick(p.trick_no) {
-            let (_, cands) = app_candidates(&view, &legal);
-            if cands.len() >= 2 {
-                let f = encode_view(&view, leaf)?;
-                let cf: Vec<Vec<u16>> = cands.iter().map(|&c| encode_cand(&view, c)).collect();
-                let values = net.evaluate(&f, &cf);
-                let probs = inf.probabilities(&values, team_of(seat));
-                let p_played = match cands.iter().position(|&c| c == played) {
-                    Some(i) => probs[i],
-                    // Not among the app's candidates (a robber burning the card it took): the
-                    // floor's share alone.
-                    None => (inf.floor_q32 / cands.len() as u64).max(1),
-                };
-                w = w.times_q32(p_played);
+            let truth = m.truth();
+            let key = (
+                k as u32,
+                truth.hands[usize::from(seat)],
+                truth.burns[usize::from(seat)],
+                played,
+            );
+            memo.lookups += 1;
+            let p_played = match memo.probs.get(&key) {
+                Some(&got) => got,
+                None => {
+                    let view = m.view(seat);
+                    let legal = m.legal_actions();
+                    let (_, cands) = app_candidates(&view, &legal);
+                    let got = (cands.len() >= 2)
+                        .then(|| -> Result<u64, String> {
+                            let f = encode_view(&view, leaf)?;
+                            let cf: Vec<Vec<u16>> =
+                                cands.iter().map(|&c| encode_cand(&view, c)).collect();
+                            let values = net.evaluate(&f, &cf);
+                            let probs = inf.probabilities(&values, team_of(seat));
+                            Ok(match cands.iter().position(|&c| c == played) {
+                                Some(i) => probs[i],
+                                // Not among the app's candidates (a robber burning the card it
+                                // took): the floor's share alone.
+                                None => (inf.floor_q32 / cands.len() as u64).max(1),
+                            })
+                        })
+                        .transpose()?;
+                    memo.probs.insert(key, got);
+                    got
+                }
+            };
+            if let Some(q) = p_played {
+                w = w.times_q32(q);
             }
         }
         m.apply(a).map_err(|e| format!("{e:?}"))?;
@@ -205,10 +280,11 @@ pub fn world_weights(
     inf: &Inference,
     leaf: &SharedLeaf,
 ) -> Vec<u64> {
+    let mut memo = WeightMemo::default();
     let logs: Vec<LogWeight> = (from..to)
         .map(|w| {
             let m = world_match(view, worlds, w, dseed, rules);
-            world_weight(&m, view.seat, inf, leaf)
+            world_weight_memo(&m, view.seat, inf, leaf, &mut memo)
                 .expect("a sampled world replays and its views are consistent")
         })
         .collect();
@@ -428,6 +504,18 @@ mod tests {
                     world_weight(&wm, seat, &inf, &*leaf).expect("a world")
                 })
                 .collect();
+            // One memo over many of the decision's worlds gives each world's weight bit for bit.
+            let mut memo = WeightMemo::default();
+            for w in 0..256u64 {
+                let wm = world_match(&view, &*worlds, w, 99, Rules::HOUSE);
+                let with = world_weight_memo(&wm, seat, &inf, &*leaf, &mut memo).expect("a world");
+                let plain = world_weight(&wm, seat, &inf, &*leaf).expect("a world");
+                assert_eq!(with, plain, "world {w}");
+                if let Some(&l) = logs.get(w as usize) {
+                    assert_eq!(with, l);
+                }
+            }
+            assert!(!memo.is_empty());
             let mut all = logs.clone();
             all.push(truth);
             let scaled = scale_weights(&all);
@@ -459,6 +547,113 @@ mod tests {
             at_least_median * 3 >= hands * 2,
             "the true world weighed at least the median sample in {at_least_median} of {hands}"
         );
+    }
+}
+
+#[cfg(test)]
+mod memo_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use crate::bot::{AppPlay, PimcBot};
+    use crate::pimc::SearchConfig;
+    use crate::worlds::{BeliefSource, WorldSource};
+    use bot::Bot;
+    use engine::game::Rules;
+    use engine::rng::Rng;
+    use nn::synthetic::SyntheticLeaf;
+
+    /// Late in trick 3 and in trick 4 (most seats down to two hidden cards, where the memo
+    /// saves most), a memo shared by a decision's worlds gives every world's weight exactly, and
+    /// it does repeat: fewer entries than student calls.
+    #[test]
+    fn the_memo_changes_no_weight_late_in_the_hand() {
+        let s1 = Arc::new(student::net::random_net(4, &[16, 8], 6));
+        let s2 = Arc::new(student::net::random_net(5, &[16, 8], 6));
+        let leaf: Arc<SharedLeaf> = Arc::new(SyntheticLeaf);
+        let source = crate::bot::default_source();
+        let app = Arc::new(AppPlay {
+            s1: s1.clone(),
+            s2: s2.clone(),
+            deals3: [1; 8],
+            deals45: 1,
+            inference: None,
+            s3: None,
+            s4: None,
+        });
+        let cfg = SearchConfig {
+            w12: 1,
+            w34: 1,
+            t1w: 1,
+            t2w: 1,
+            tt_mb: 1,
+            ..SearchConfig::default()
+        };
+        let inf = Inference {
+            students: Students::two(&s1, &s2),
+            tau_q32: Inference::TAU_DEFAULT_Q32,
+            floor_q32: Inference::FLOOR_DEFAULT_Q32,
+        };
+        let belief = BeliefSource::new();
+        let mut checked = 0;
+        for seed in 11..17u64 {
+            for (trick, place) in [(3u8, 6usize), (4, 3)] {
+                let mut m = Match::new(seed, Rules::HOUSE);
+                let mut bots: Vec<PimcBot> = (0..8)
+                    .map(|_| {
+                        PimcBot::new("app".into(), cfg, leaf.clone(), source.clone())
+                            .with_app(app.clone())
+                    })
+                    .collect();
+                for (s, b) in (0u8..).zip(bots.iter_mut()) {
+                    b.start_match(
+                        s,
+                        Rules::HOUSE,
+                        Rng::derive(seed, &[7, u64::from(s)]).next_u64(),
+                    );
+                }
+                let mut reached = false;
+                while let Some(seat) = m.to_act() {
+                    let view = m.view(seat);
+                    let p = &view.public;
+                    if p.turned_teams.iter().any(|&t| t) || p.trick_no > trick {
+                        break;
+                    }
+                    let down = p.trick_cards.len();
+                    if p.trick_no == trick && down == place {
+                        reached = true;
+                        break;
+                    }
+                    let legal = m.legal_actions();
+                    let a = bots[usize::from(seat)].act(&view, &legal);
+                    m.apply(a).expect("legal");
+                }
+                if !reached {
+                    continue;
+                }
+                let seat = m.to_act().expect("acts");
+                let view = m.view(seat);
+                let worlds = belief.prepare(&view, Rules::HOUSE);
+                let mut memo = WeightMemo::default();
+                let n = 300u64;
+                for w in 0..n {
+                    let wm = world_match(&view, &*worlds, w, 5, Rules::HOUSE);
+                    let with =
+                        world_weight_memo(&wm, seat, &inf, &*leaf, &mut memo).expect("a world");
+                    let plain = world_weight(&wm, seat, &inf, &*leaf).expect("a world");
+                    assert_eq!(with, plain, "seed {seed}, trick {trick}, world {w}");
+                }
+                // The plays repeat among the worlds.
+                assert!(
+                    (memo.len() as u64) < memo.lookups(),
+                    "{} entries for {} lookups",
+                    memo.len(),
+                    memo.lookups()
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 6, "{checked} decisions reached");
     }
 }
 

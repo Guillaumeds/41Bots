@@ -20,6 +20,7 @@ use engine::view::SeatView;
 use equity::sha256::sha256_hex;
 use equity::{EquityTable, MoneyChance, ONE};
 use nn::Oracle;
+use search::inference::{Inference, LogWeight, WeightMemo, scale_weights, world_weight_memo};
 use search::pimc::{
     Candidate, Ctx, SearchConfig, Students, WorldSolve, candidates, exact_world, isqrt,
     playout_world, world_match,
@@ -150,10 +151,31 @@ struct Totals {
     lines: bool,
     /// The acting seat's cards (its hand at the decision; the plan's rows).
     hand: Vec<Card>,
+    /// The deal weighting (`"inference"`, docs/STUDENT.md §6.2): every deal's weight and values,
+    /// kept whole so that shards merge to the same bytes; `None` without it (or where it does not
+    /// apply: tricks 1-2, a pair turned, a forced card).
+    weighted: Option<Weighted>,
     /// In the engine's candidate order.
     cands: Vec<CandTotals>,
     /// Per candidate: the first candidate whose value equalled its own in every deal.
     class: Vec<usize>,
+}
+
+/// The deal weighting of a result: its settings and each deal's weight and values, in deal order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Weighted {
+    /// The softmax temperature and the floor, permille of the money.
+    tau: u32,
+    floor: u32,
+    deals: Vec<WeightedDeal>,
+}
+
+/// One deal: its weight (`LogWeight::parts`) and every candidate's values, engine order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WeightedDeal {
+    mant: u64,
+    exp: i64,
+    values: Vec<[u64; 4]>,
 }
 
 /// A request, read.
@@ -169,6 +191,8 @@ struct Request {
     student: bool,
     /// `"method": "playout"`.
     playout: bool,
+    /// `"inference"`: weight the deals by the other seats' plays (tau, floor in permille).
+    inference: Option<(u32, u32)>,
     /// `"shortlist"`: the cards to search (engine cards, sorted, no repeats), when given.
     shortlist: Option<Vec<Card>>,
     table: AppTable,
@@ -270,6 +294,38 @@ fn read_request(text: &str) -> Result<Request, Refusal> {
             return Err(bad("method must be \"search\", \"student\" or \"playout\""));
         }
     };
+    let inference = match v.get("inference") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => None,
+        Some(Value::Bool(true)) => Some((10, 50)),
+        Some(o @ Value::Object(m)) => {
+            for k in m.keys() {
+                if k != "tau" && k != "floor" {
+                    return Err(bad(format!(
+                        "inference.{k}: the weighting takes tau and floor (permille of the money)"
+                    )));
+                }
+            }
+            let tau = match o.get("tau") {
+                None => 10,
+                Some(_) => int(o, "tau", "inference", 1, 1000)? as u32,
+            };
+            let floor = match o.get("floor") {
+                None => 50,
+                Some(_) => int(o, "floor", "inference", 0, 1000)? as u32,
+            };
+            Some((tau, floor))
+        }
+        Some(_) => {
+            return Err(bad(
+                "inference is true or {\"tau\": permille, \"floor\": permille}",
+            ));
+        }
+    };
+    if student && inference.is_some() {
+        return Err(bad(
+            "the deal weighting weighs a search's deals: not with method student",
+        ));
+    }
     if student && shards != 1 {
         return Err(bad(
             "a student request is one call: shards must be 1 (nothing to split)",
@@ -296,6 +352,7 @@ fn read_request(text: &str) -> Result<Request, Refusal> {
         lines,
         student,
         playout,
+        inference,
         shortlist,
         table,
     })
@@ -597,6 +654,7 @@ impl Engine {
             req.seed,
             req.lines,
             req.shortlist.as_deref(),
+            req.inference,
         );
         let (from, to) = shard_range(req.deals, req.shard, req.shards);
         let mut t = Totals {
@@ -624,6 +682,7 @@ impl Engine {
                 })
                 .collect(),
             class: (0..cands.len()).collect(),
+            weighted: None,
         };
         if method == Method::Forced {
             return Ok(t);
@@ -689,6 +748,36 @@ impl Engine {
             )),
             _ => None,
         };
+        // The deal weighting: at tricks 3-5 with all eight seats in play (what the arena gated,
+        // docs/EXPERIMENTS.md I7), each deal weighted by how likely the other seats' tricks 1-2
+        // plays were under S1 and S2. Elsewhere the request is valued as without it.
+        let weighting = match req.inference {
+            Some((tau, floor))
+                if view.public.trick_no >= 3 && view.public.turned_teams.iter().all(|&x| !x) =>
+            {
+                let (Some(s1), Some(s2)) = (self.student_for(1), self.student_for(2)) else {
+                    return Err(Refusal::new(
+                        "no_student",
+                        "the deal weighting reads the other seats' plays with S1 and S2: load them",
+                    ));
+                };
+                let q = |x: u32| (u64::from(x) << 32) / 1000;
+                t.weighted = Some(Weighted {
+                    tau,
+                    floor,
+                    deals: Vec::with_capacity((to - from) as usize),
+                });
+                Some(Inference {
+                    students: Students::two(s1, s2),
+                    tau_q32: q(tau),
+                    floor_q32: q(floor),
+                })
+            }
+            _ => None,
+        };
+        // The students' calls repeat among the deals (a seat's few hidden cards recur): one memo
+        // for the shard's deals, which changes no weight (`WeightMemo`).
+        let mut memo = WeightMemo::default();
         for w in from..to {
             let world = world_match(&view, &*worlds, u64::from(w), req.seed, Rules::HOUSE);
             let mut run = WorldSolve::default();
@@ -712,6 +801,16 @@ impl Engine {
                     }
                 }
             }
+            if let (Some(inf), Some(wt)) = (&weighting, t.weighted.as_mut()) {
+                let lw = world_weight_memo(&world, req.seat, inf, &**leaf, &mut memo)
+                    .map_err(|e| Refusal::new("inconsistent_view", e))?;
+                let (mant, exp) = lw.parts();
+                wt.deals.push(WeightedDeal {
+                    mant,
+                    exp,
+                    values: row.iter().map(|v| v.0).collect(),
+                });
+            }
             if req.lines {
                 for (j, &cand) in cands.iter().enumerate() {
                     let l = principal_line(&world, cand, &walker, &mut mem);
@@ -728,6 +827,7 @@ impl Engine {
 
 /// The fingerprint of a search: the engine version, the seat's view as the engine rebuilt it,
 /// the seat, the deals and the seed (equal for every shard of one search).
+#[allow(clippy::too_many_arguments)]
 fn request_key(
     engine: &str,
     view: &SeatView,
@@ -736,6 +836,7 @@ fn request_key(
     seed: u64,
     lines: bool,
     shortlist: Option<&[Card]>,
+    inference: Option<(u32, u32)>,
 ) -> String {
     let v = serde_json::to_string(view).expect("a view serialises");
     // A search without a shortlist keeps the key it always had.
@@ -748,7 +849,9 @@ fn request_key(
                 .join(",")
         )
     });
-    sha256_hex(format!("{engine}\n{seat}\n{deals}\n{seed}\n{lines}\n{v}{short}").as_bytes())
+    // A search without the weighting keeps the key it always had.
+    let inf = inference.map_or(String::new(), |(t, f)| format!("\ninference:{t}/{f}"));
+    sha256_hex(format!("{engine}\n{seat}\n{deals}\n{seed}\n{lines}\n{v}{short}{inf}").as_bytes())
 }
 
 // ----- writing -----
@@ -823,12 +926,32 @@ fn write(t: &Totals) -> String {
             g.1.push(j);
         }
     }
+    // With the deal weighting the means are the weighted ones, from the deals kept whole.
+    let weights: Option<Vec<u64>> = t.weighted.as_ref().map(|wt| {
+        let logs: Vec<LogWeight> = wt
+            .deals
+            .iter()
+            .map(|d| LogWeight::from_parts(d.mant, d.exp).expect("checked when made or read"))
+            .collect();
+        scale_weights(&logs)
+    });
     let means: Vec<Option<MoneyChance>> = t
         .cands
         .iter()
-        .map(|c| {
+        .enumerate()
+        .map(|(j, c)| {
             if student {
                 Some(MoneyChance(c.sums))
+            } else if let (Some(wt), Some(ws)) = (&t.weighted, &weights) {
+                (!forced && n > 0).then(|| {
+                    let terms: Vec<(u64, MoneyChance)> = wt
+                        .deals
+                        .iter()
+                        .zip(ws)
+                        .map(|(d, &w)| (w, MoneyChance(d.values[j])))
+                        .collect();
+                    MoneyChance::mix(&terms)
+                })
             } else {
                 (!forced && n > 0).then(|| MoneyChance::mean_of_totals(c.sums, n))
             }
@@ -852,6 +975,9 @@ fn write(t: &Totals) -> String {
             _ => "null".to_string(),
         }
     ));
+    if let Method::Playout(k) = t.method {
+        s.push_str(&format!(",\"playoutCut\":{k}"));
+    }
     s.push_str(&format!(
         ",\"deals\":{},\"shard\":{},\"shards\":{},\"dealsFrom\":{},\"dealsTo\":{},\"worlds\":{},\"worldCount\":{},\"best\":0,\"candidates\":[",
         t.deals,
@@ -900,10 +1026,17 @@ fn write(t: &Totals) -> String {
                 let mean = m.0.map(fp_number).join(",");
                 let mean_fp = m.0.map(|x| json_str(&x.to_string())).join(",");
                 let sums = c.sums.map(|x| json_str(&x.to_string())).join(",");
+                let (se, ess) = match (&t.weighted, &weights) {
+                    (Some(wt), Some(ws)) => {
+                        let own: Vec<u64> = wt.deals.iter().map(|d| d.values[*lead][team]).collect();
+                        weighted_se(&own, ws, m.0[team])
+                    }
+                    _ => (se_fp(c.sums[team], c.sumsq, n), n),
+                };
                 s.push_str(&format!(
-                    ",\"mean\":[{mean}],\"mean_fp\":[{mean_fp}],\"value\":{},\"se\":{},\"n\":{n},\"ess\":{n},\"sum_fp\":[{sums}],\"sumsq_fp\":{}",
+                    ",\"mean\":[{mean}],\"mean_fp\":[{mean_fp}],\"value\":{},\"se\":{},\"n\":{n},\"ess\":{ess},\"sum_fp\":[{sums}],\"sumsq_fp\":{}",
                     fp_number(m.0[team]),
-                    fp_number(se_fp(c.sums[team], c.sumsq, n)),
+                    fp_number(se),
                     json_str(&c.sumsq.to_string())
                 ));
                 if t.lines {
@@ -913,8 +1046,55 @@ fn write(t: &Totals) -> String {
         }
         s.push('}');
     }
-    s.push_str("]}");
+    s.push(']');
+    if let Some(wt) = &t.weighted {
+        // Every deal's weight and values, for `merge` (the weights are scaled to the largest of
+        // all the shards' deals, so only the deals themselves merge exactly).
+        s.push_str(&format!(
+            ",\"inference\":{{\"tau\":{},\"floor\":{},\"deals\":[",
+            wt.tau, wt.floor
+        ));
+        for (i, d) in wt.deals.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            let vals = d
+                .values
+                .iter()
+                .map(|v| format!("[{}]", v.map(|x| json_str(&x.to_string())).join(",")))
+                .collect::<Vec<_>>()
+                .join(",");
+            s.push_str(&format!(
+                "[{},{},[{vals}]]",
+                json_str(&d.mant.to_string()),
+                d.exp
+            ));
+        }
+        s.push_str("]}");
+    }
+    s.push('}');
     s
+}
+
+/// The standard error of a weighted mean and the deals' effective number (`(Σw)² / Σw²`, at least
+/// 1), in whole numbers: the weights brought down to 32 bits so that every sum fits.
+fn weighted_se(own: &[u64], weights: &[u64], mean: u64) -> (u64, u64) {
+    let ws: Vec<u128> = weights.iter().map(|&w| u128::from(w >> 28)).collect();
+    let sw: u128 = ws.iter().sum();
+    let sw2: u128 = ws.iter().map(|w| w * w).sum();
+    if sw == 0 || own.len() < 2 {
+        return (0, own.len() as u64);
+    }
+    let var_num: u128 = own
+        .iter()
+        .zip(&ws)
+        .map(|(&v, &w)| {
+            let d = u128::from(v.abs_diff(mean));
+            w * d * d
+        })
+        .sum();
+    let ess = (sw * sw / sw2.max(1)).max(1);
+    (isqrt(var_num / sw / ess) as u64, ess as u64)
 }
 
 /// A share of `n` deals as a JSON number (an exact quotient of whole numbers, correctly rounded).
@@ -1066,6 +1246,8 @@ fn merge_totals(results: &str) -> Result<Totals, Refusal> {
             || p.verb != first.verb
             || p.lines != first.lines
             || p.hand != first.hand
+            || p.weighted.as_ref().map(|w| (w.tau, w.floor))
+                != first.weighted.as_ref().map(|w| (w.tau, w.floor))
             || p.cands.len() != first.cands.len()
             || p.cands
                 .iter()
@@ -1109,6 +1291,12 @@ fn merge_totals(results: &str) -> Result<Totals, Refusal> {
                 .expect("itself")
         })
         .collect();
+    if let Some(wt) = out.weighted.as_mut() {
+        wt.deals = parts
+            .iter()
+            .flat_map(|p| p.weighted.as_ref().expect("checked above").deals.clone())
+            .collect();
+    }
     out.shard = 0;
     out.shards = 1;
     out.from = 0;
@@ -1161,6 +1349,11 @@ fn read_totals(r: &Value) -> Result<Totals, Refusal> {
         Some("hybrid") => {
             let h = int(r, "meanHorizon", "result", 1, 4)? as u8;
             Method::Hybrid(trick + h)
+        }
+        Some("playout") => {
+            // The playout's cut: after the last trick with a student (`playoutCut`).
+            let k = int(r, "playoutCut", "result", 4, 5)? as u8;
+            Method::Playout(k)
         }
         _ => return Err(bad("result.method is unknown")),
     };
@@ -1266,6 +1459,51 @@ fn read_totals(r: &Value) -> Result<Totals, Refusal> {
     for (j, row) in rows.iter().enumerate() {
         class.push(*lead.entry(row.3).or_insert(j));
     }
+    let weighted = match r.get("inference") {
+        None | Some(Value::Null) => None,
+        Some(inf) => {
+            let tau = int(inf, "tau", "result.inference", 1, 1000)? as u32;
+            let floor = int(inf, "floor", "result.inference", 0, 1000)? as u32;
+            let list = field(inf, "deals", "result.inference")?
+                .as_array()
+                .ok_or_else(|| bad("result.inference.deals must be an array"))?;
+            if list.len() != (to - from) as usize {
+                return Err(bad("result.inference.deals must hold one row per deal"));
+            }
+            let mut deals = Vec::with_capacity(list.len());
+            for (i, d) in list.iter().enumerate() {
+                let at = format!("result.inference.deals[{i}]");
+                let a = d
+                    .as_array()
+                    .filter(|a| a.len() == 3)
+                    .ok_or_else(|| bad(format!("{at} must be [mant, exp, values]")))?;
+                let mant: u64 = u_str(&a[0], &format!("{at}[0]"))?;
+                let exp = a[1]
+                    .as_i64()
+                    .ok_or_else(|| bad(format!("{at}[1] must be a whole number")))?;
+                LogWeight::from_parts(mant, exp)
+                    .ok_or_else(|| bad(format!("{at}: not a weight")))?;
+                let vals = a[2]
+                    .as_array()
+                    .filter(|v| v.len() == rows.len())
+                    .ok_or_else(|| bad(format!("{at}[2] must hold a value per candidate")))?;
+                let mut values = Vec::with_capacity(vals.len());
+                for (j, v) in vals.iter().enumerate() {
+                    let q = v
+                        .as_array()
+                        .filter(|q| q.len() == 4)
+                        .ok_or_else(|| bad(format!("{at}[2][{j}] must hold 4 values")))?;
+                    let mut x = [0u64; 4];
+                    for (k, y) in q.iter().enumerate() {
+                        x[k] = u_str(y, &format!("{at}[2][{j}][{k}]"))?;
+                    }
+                    values.push(x);
+                }
+                deals.push(WeightedDeal { mant, exp, values });
+            }
+            Some(Weighted { tau, floor, deals })
+        }
+    };
     Ok(Totals {
         engine: s("engine")?,
         key: s("key")?,
@@ -1291,6 +1529,7 @@ fn read_totals(r: &Value) -> Result<Totals, Refusal> {
             })
             .collect(),
         class,
+        weighted,
     })
 }
 

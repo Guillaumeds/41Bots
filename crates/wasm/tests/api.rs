@@ -1244,6 +1244,9 @@ fn the_playout_method_plays_trick_3_out_with_s3() {
         r["shards"] = json!(3);
         parts.push(e.evaluate(&r.to_string()));
     }
+    let whole = merge(&format!("[{out}]"));
+    assert_eq!(parse(&whole)["status"], "ok", "{whole}");
+    assert_eq!(whole, out, "one result merges to itself");
     assert_eq!(
         merge(&format!("[{}]", parts.join(","))),
         merge(&format!("[{out}]"))
@@ -1289,4 +1292,94 @@ fn the_playout_method_plays_trick_3_out_with_s3() {
         native.sort_by_key(|x| (x.0, x.1));
         assert_eq!(api_means(&v), native);
     }
+}
+
+/// `"inference"` (docs/STUDENT.md §6.2, EXPERIMENTS I7): at tricks 3-5 with all eight seats in play each
+/// deal is weighted by how likely the other seats' tricks 1-2 plays were under S1 and S2; the means are
+/// the native `evaluate_weighted`'s, byte for byte; shards merge to the whole; the key differs from
+/// the plain search's (so the two never merge); at trick 2 the values are the plain search's; the
+/// refusals.
+#[test]
+fn the_deal_weighting_is_the_native_one_and_merges() {
+    let plain = |m: &Match| !any_turned(m) && m.reneges().is_empty();
+    let t3 = find(41, 0, &|m| plain(m) && playing(m, 3));
+    let t4 = find(42, 0, &|m| plain(m) && playing(m, 4));
+    let t2 = find(41, 0, &|m| plain(m) && playing(m, 2));
+    let req_of = |m: &Match, deals: u32| {
+        let mut r = app_request(m, deals, 77, Mask::SeatOwnBurns);
+        r["inference"] = json!(true);
+        r
+    };
+    let mut e = engine(true);
+    assert_eq!(code(&e.evaluate(&req_of(&t3, 8).to_string())), "no_student");
+    e.load_student_for(&student_bytes(5), 1).expect("loads");
+    e.load_student_for(&student_bytes(6), 2).expect("loads");
+    let nets: Vec<_> = [5, 6]
+        .iter()
+        .map(|&k| student::net::StudentNet::from_bytes(&student_bytes(k)).expect("loads"))
+        .collect();
+    let inf = search::inference::Inference {
+        students: search::pimc::Students::two(&nets[0], &nets[1]),
+        tau_q32: (10u64 << 32) / 1000,
+        floor_q32: (50u64 << 32) / 1000,
+    };
+    let leaf = leaf();
+    let source = BeliefSource::new();
+    let ctx = Ctx {
+        leaf: &*leaf,
+        source: &source,
+        rules: Rules::HOUSE,
+    };
+    for m in [&t3, &t4] {
+        let out = e.evaluate(&req_of(m, 8).to_string());
+        let v = parse(&out);
+        assert_eq!(v["status"], "ok", "{out}");
+        assert_eq!(v["inference"]["deals"].as_array().map(Vec::len), Some(8));
+        let seat = m.to_act().expect("a decision");
+        let view = m.view(seat);
+        let cfg = SearchConfig {
+            w34: 8,
+            ..SearchConfig::default()
+        };
+        let dv = search::pimc::evaluate_weighted(&view, &m.legal_actions(), 77, &ctx, &cfg, &inf);
+        let mut native: Vec<_> = dv.candidates.clone();
+        native.sort_by_key(|x| (x.0, x.1));
+        assert_eq!(api_means(&v), native);
+        // The plain search's key differs.
+        let flat = e.evaluate(&app_request(m, 8, 77, Mask::SeatOwnBurns).to_string());
+        assert_ne!(parse(&flat)["key"], v["key"]);
+        // Shards merge to the same bytes as one call, and one call merges to itself.
+        let mut parts = Vec::new();
+        for i in 0..3 {
+            let mut r = req_of(m, 8);
+            r["shard"] = json!(i);
+            r["shards"] = json!(3);
+            parts.push(e.evaluate(&r.to_string()));
+        }
+        assert_eq!(merge(&format!("[{out}]")), out);
+        assert_eq!(merge(&format!("[{}]", parts.join(","))), out);
+        // A weighted shard never merges with a plain one.
+        let mut r = app_request(m, 8, 77, Mask::SeatOwnBurns);
+        r["shard"] = json!(0);
+        r["shards"] = json!(3);
+        let mixed = format!("[{},{},{}]", e.evaluate(&r.to_string()), parts[1], parts[2]);
+        assert_eq!(code(&merge(&mixed)), "merge_mismatch");
+    }
+    // At trick 2 nothing is weighted: the plain search's values.
+    let a = parse(&e.evaluate(&req_of(&t2, 4).to_string()));
+    let b = parse(&e.evaluate(&app_request(&t2, 4, 77, Mask::SeatOwnBurns).to_string()));
+    assert!(a.get("inference").is_none());
+    assert_eq!(api_means(&a), api_means(&b));
+    // Settings and refusals.
+    let mut r = req_of(&t3, 8);
+    r["inference"] = json!({ "tau": 20, "floor": 100 });
+    assert_eq!(parse(&e.evaluate(&r.to_string()))["inference"]["tau"], 20);
+    for bad in [json!({ "temp": 3 }), json!({ "tau": 0 }), json!(3)] {
+        let mut r = req_of(&t3, 8);
+        r["inference"] = bad;
+        assert_eq!(code(&e.evaluate(&r.to_string())), "bad_request");
+    }
+    let mut r = req_of(&t3, 8);
+    r["method"] = json!("student");
+    assert_eq!(code(&e.evaluate(&r.to_string())), "bad_request");
 }
