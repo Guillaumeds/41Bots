@@ -20,7 +20,7 @@ use engine::view::SeatView;
 use equity::sha256::sha256_hex;
 use equity::{EquityTable, MoneyChance, ONE};
 use nn::Oracle;
-use search::inference::{Inference, LogWeight, scale_weights, world_weight};
+use search::inference::{Inference, LogWeight, WeightMemo, scale_weights, world_weight_memo};
 use search::pimc::{
     Candidate, Ctx, SearchConfig, Students, WorldSolve, candidates, exact_world, isqrt,
     playout_world, world_match,
@@ -775,6 +775,9 @@ impl Engine {
             }
             _ => None,
         };
+        // The students' calls repeat among the deals (a seat's few hidden cards recur): one memo
+        // for the shard's deals, which changes no weight (`WeightMemo`).
+        let mut memo = WeightMemo::default();
         for w in from..to {
             let world = world_match(&view, &*worlds, u64::from(w), req.seed, Rules::HOUSE);
             let mut run = WorldSolve::default();
@@ -799,7 +802,7 @@ impl Engine {
                 }
             }
             if let (Some(inf), Some(wt)) = (&weighting, t.weighted.as_mut()) {
-                let lw = world_weight(&world, req.seat, inf, &**leaf)
+                let lw = world_weight_memo(&world, req.seat, inf, &**leaf, &mut memo)
                     .map_err(|e| Refusal::new("inconsistent_view", e))?;
                 let (mant, exp) = lw.parts();
                 wt.deals.push(WeightedDeal {
