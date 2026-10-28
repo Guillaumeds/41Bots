@@ -1839,8 +1839,20 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
   0.104 / 0.094 / 0.100 / 0.060%.
 - **Reading.** On round 2's yardstick arm (a) loses about 40% less than the shipped S1 at trick 1 and beats both the shipped and the old
   S2 at trick 2 (the place-2 weakness roughly halved). Part of the gap is that arm (a) learned from the same teacher the sets are valued
-  with; the money arena decides. Arm (b)'s numbers will be added here.
-- **Cost.** About $0.60 (arm a and the failed start of arm b).
+  with; the money arena decides.
+- **Arm (b): rounds 1 and 2 together** (`student-playout-3b`, `allow_stamps: ["teacher"]`, 500k trick-1 and 600k trick-2 decisions, the
+  same warm start, sets and seeds; an EPYC 7B12 GPU box, 3.0 h, $1.00):
+
+  | | trick 1, seeds 1 / 2 / 3 | trick 2, seeds 1 / 2 / 3 |
+  |---|---|---|
+  | arm (a), round 2 alone | 0.106 / **0.0975** / 0.107% | 0.112 / 0.114 / **0.103**% |
+  | arm (b), rounds 1 + 2 | 0.117 / 0.119 / 0.120% | 0.114 / 0.108 / 0.107% |
+
+  **Arm (a) wins:** at trick 1 every seed of (a) beats every seed of (b) (round 1's labels, valued with the old pair inside the playouts,
+  teach the old pair's habits back, as the two-arm rule feared); at trick 2 the arms are within noise, so (a) by the tie rule. By
+  STUDENT.md §6 step 4 the round's students are (a)'s S1 seed 2 and S2 seed 3; one more round with (a) ahead retires labels older than
+  the previous round. Their money gate: `arena-round2.manifest.json` (prepared, waits for the owner's word on the budget).
+- **Cost.** About $1.60 (both arms and the failed start of arm b).
 
 ### I9. The trick-3 and trick-4 students S3 and S4 (runs `s3-labels-1`, `s4-labels-1`, `s34-train-1`, 2026-10-27)
 - **Question.** Can small students copy the seat-view play at tricks 3 and 4 well enough to stand in for it inside playouts

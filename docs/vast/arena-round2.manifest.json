@@ -1,0 +1,86 @@
+{
+ "format": 2,
+ "run_id": "arena-round2-1",
+ "run_seed": 2,
+ "threads": null,
+ "benchmark_seconds": 0,
+ "upload_every_s": 300,
+ "heartbeat_every_s": 30,
+ "note": "The money gate of round 2 (STUDENT.md §6 step 4, EXPERIMENTS I8): the app's player with round 2's arm (a) students (S1 seed 2 df9004e5, S2 seed 3 4a811106) against the pair shipped on 2026-10-26 (S1 3d511c54, S2 dc5f8ad0); 14-way duplicate blocks, SPRT [0, 0.01] at alpha = beta = 0.05, cap 3,000 blocks; the app's deals in both arms, no deal weighting.",
+ "machine": {
+  "min_cores": 120,
+  "min_ram_gb": 60,
+  "disk_gb": 60,
+  "keep": false,
+  "max_dph": 0.75,
+  "wait_for_offer_min": 320,
+  "offer_poll_s": 60,
+  "price_steps": [
+   0.12,
+   0.35,
+   0.65,
+   0.75
+  ],
+  "tries_per_step": 5
+ },
+ "inputs": {
+  "equity": "sha256:64740dab7845f0502c93ce195d721e1ffb8aa6ab141739ef43f754690de16808",
+  "s1new": "sha256:df9004e57db1b10b947c79336a944f1085aad477f9a1597760a86c54276513ff",
+  "s2new": "sha256:4a811106d5e6db463b802e4b643dfab9f77a3b8ae70535ae022c8b9220a7ade6",
+  "s1": "sha256:3d511c54440b135e94728ef131e8957dd5fb019ed35ac02b1b85943e22144e18",
+  "s2": "sha256:dc5f8ad0055d663d2b140ad6f4c08f43baddac479181935c56922661d6dd5ef1"
+ },
+ "streams": [
+  {
+   "name": "gate",
+   "priority": 1,
+   "kind": "arena_blocks",
+   "chunks": "until_decided",
+   "params": {
+    "a": {
+     "kind": "app",
+     "student1": "s1new",
+     "student2": "s2new",
+     "deals3": [
+      192,
+      224,
+      512,
+      640,
+      1024,
+      1024,
+      1024,
+      1024
+     ],
+     "deals45": 1024,
+     "base": "pimc-v0"
+    },
+    "b": {
+     "kind": "app",
+     "student1": "s1",
+     "student2": "s2",
+     "deals3": [
+      192,
+      224,
+      512,
+      640,
+      1024,
+      1024,
+      1024,
+      1024
+     ],
+     "deals45": 1024,
+     "base": "pimc-v0"
+    },
+    "block14": true,
+    "blocks_per_chunk": 4,
+    "sprt": {
+     "s0": 0.0,
+     "s1": 0.01,
+     "alpha": 0.05,
+     "beta": 0.05,
+     "max_blocks": 3000
+    }
+   }
+  }
+ ]
+}
