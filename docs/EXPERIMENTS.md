@@ -1898,3 +1898,23 @@ The same figures were reproduced exactly by the incumbent's check in at least fi
 - **Limits.** One configuration (S3 and S4 together, both trained on face-up teachers); bots on both sides; the arena stopped at its
   dollar cap (the reject came first on the ordered prefix).
 - **Cost.** $4.05 (plus I9's $2.70).
+
+### I11. Round 2's students in the money arena (run `arena-round2-1`, 2026-10-28)
+- **Question.** STUDENT.md §6 step 5: do round 2's students (I8, arm (a): S1 seed 2 `df9004e5…`, S2 seed 3 `4a811106…`) win money
+  against the shipped round-1 pair (S1 `3d511c54…`, S2 `dc5f8ad0…`) when each plays the whole app player?
+- **Method.** `docs/vast/arena-round2.manifest.json` (bin 72c6221): the app's player (`AppPlay`, the app's deal counts at tricks 3-5,
+  no deal weighting in either arm) with the new pair against the same player with the shipped pair; 14-way duplicate blocks, SPRT
+  [0, 0.01] at alpha = beta = 0.05 on the ordered chunk prefix, cap 3,000 blocks, 4 a chunk. On the owner's hand-rented box by takeover
+  (instance 58062249: AMD EPYC 7B12 server chip, 256 threads, 129 GB RAM, $0.45/h), 07:11-09:52 UTC, about $1.20; kept for the owner
+  afterwards (`KEPT.json`, he stops it).
+- **Result.** **Accept** on the ordered prefix after 376 blocks (94 chunks): LLR 3.08 against 2.94, mean **+0.0166** of the money a
+  match (sd 0.118). Every finished chunk (1,908 blocks, the first wave of 477 chunks, not the formal test): mean **+0.0057**, standard
+  error 0.0027 (about +0.0003 to +0.011 at two standard errors).
+- **Reading.** Round 2 helps: the new pair wins money against round 1's. The prefix's +1.7% is the lucky start that let the test stop;
+  the whole sample puts the gain nearer +0.6% of the money a match. Smaller than round 1's step (I5, +0.96%), as the shrinking test-set
+  losses suggested. Shipped to the app the same day (fivefingers 87f2d40), where the pair is also the deal weighting's model of the
+  other seats at tricks 3-5 (I7 was measured with round 1's pair as the model; not gated separately).
+- **Limits.** Bots on both sides; without the deal weighting in either arm; the whole-sample figure comes from chunks finished out of
+  order.
+- **Cost.** About $1.20.
+
